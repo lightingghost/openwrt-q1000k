@@ -133,6 +133,9 @@
 };
 
 &spi_nand {
+	/* Conservative timing used by the community AN7581 builds. */
+	spi-max-frequency = <33000000>;
+
 	#address-cells = <1>;
 	#size-cells = <1>;
 
