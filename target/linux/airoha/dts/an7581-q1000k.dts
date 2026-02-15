@@ -271,3 +271,9 @@
 &cpu_thermal {
 	thermal-sensors = <&thermal>;
 };
+
+/* Vendor ATF may not implement the AVS CPU-frequency SMC. */
+&cpufreq {
+	reg = <0x0 0x1fa20000 0x0 0x2c0>, <0x0 0x1efbe000 0x0 0x800>;
+	reg-names = "chip-scu", "mcucfg";
+};
