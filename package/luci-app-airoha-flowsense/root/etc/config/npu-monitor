@@ -1,5 +1,5 @@
 config jitter 'jitter'
-	# Empty selects the current IPv4 default gateway.
+	# Empty selects the current IPv4 or IPv6 default gateway.
 	option target ''
 
 config settings 'settings'

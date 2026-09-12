@@ -357,7 +357,28 @@ get_token_info() {
 
 
 get_frame_engine() {
-	echo '{"available":false,"error":"Raw frame-engine counters are not sampled; use Ethernet and PPE statistics"}'
+	local snapshot
+	snapshot=$(cat /sys/kernel/debug/ppe/pse 2>/dev/null) || {
+		echo '{"available":false,"error":"PSE monitoring requires the updated Q1000K kernel"}'
+		return
+	}
+	# Reject incomplete or impossible snapshots instead of displaying healthy.
+	printf '%s\n' "$snapshot" | awk '
+		NF == 2 && $2 ~ /^[0-9]+$/ { v[$1]=$2; seen[$1]++ }
+		END {
+			if (seen["version"] != 1 || v["version"] != 1 ||
+			    seen["total"] != 1 || seen["reserved"] != 1 ||
+			    seen["used"] != 1 || seen["free"] != 1 || seen["high"] != 1 ||
+			    v["total"] <= 0 || v["total"] > 32767 ||
+			    v["reserved"] >= v["total"] || v["free"] > v["total"] ||
+			    v["used"] > v["total"] || v["high"] <= 0 ||
+			    v["high"] > v["total"] - v["reserved"]) {
+				print "{\"available\":false,\"error\":\"Invalid PSE buffer snapshot\"}"
+				exit
+			}
+			printf "{\"available\":true,\"source\":\"driver-pse\",\"pse_total\":%d,\"pse_reserved\":%d,\"pse_used\":%d,\"pse_free\":%d,\"pse_high\":%d}\n",
+				v["total"],v["reserved"],v["used"],v["free"],v["high"]
+		}'
 }
 
 get_tx_stats() {
@@ -581,11 +602,55 @@ get_wan_health() {
 
 get_jitter_result() {
 	local result_file="/tmp/npu-jitter.json"
-	if [ -f "$result_file" ]; then
-		cat "$result_file"
-	else
-		echo '{"jitter":0,"last_ping":0,"samples":0,"target":"1.1.1.1","reachable":false,"available":false}'
+	local result updated now state=stopped
+	result=$(cat "$result_file" 2>/dev/null)
+	updated=$(printf '%s' "$result" | jsonfilter -e '@.updated' 2>/dev/null)
+	now=$(cut -d. -f1 /proc/uptime)
+	case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
+	if [ "$updated" -gt 0 ] && [ "$now" -ge "$updated" ] && [ $((now - updated)) -le 15 ]; then
+		printf '%s\n' "$result"
+		return
 	fi
+	[ -n "$result" ] && state=stale
+	printf '{"state":"%s","jitter":0,"last_ping":null,"samples":0,"target":"","reachable":false,"available":false}\n' "$state"
+}
+
+get_latency_config() {
+	local target
+	target=$(uci -q get npu-monitor.jitter.target || uci -q get 'npu-monitor.@jitter[0].target')
+	. /usr/share/libubox/jshn.sh
+	json_init
+	json_add_string target "$target"
+	json_dump
+}
+
+set_latency_target() {
+	local target section kind
+	. /usr/share/libubox/jshn.sh
+	json_load "$1" 2>/dev/null && json_get_type kind target
+	[ "$kind" = string ] || { echo '{"error":"Target must be a string"}'; return; }
+	json_get_var target target
+	# Empty means automatic. Restrict names/addresses, including IPv6 scope IDs.
+	case "$target" in -*|*[!a-zA-Z0-9.:_%-]*)
+		echo '{"error":"Use an IP address or hostname, or leave empty for the gateway"}'; return ;;
+	esac
+	[ "${#target}" -le 253 ] || { echo '{"error":"Target is too long"}'; return; }
+	section=$(uci -q get npu-monitor.jitter)
+	if [ "$section" = jitter ]; then
+		section=jitter
+	elif uci -q get 'npu-monitor.@jitter[0]' >/dev/null; then
+		section='@jitter[0]'
+	else
+		uci set npu-monitor.jitter=jitter || { echo '{"error":"Cannot create latency configuration"}'; return; }
+		section=jitter
+	fi
+	uci set "npu-monitor.$section.target=$target" && uci commit npu-monitor || {
+		echo '{"error":"Cannot save latency target"}'; return;
+	}
+	/etc/init.d/npu-jitter enable && /etc/init.d/npu-jitter restart || {
+		echo '{"error":"Target saved, but the latency service could not start"}'; return;
+	}
+	echo '{"result":"ok"}'
 }
 
 get_wifi_stats() {
@@ -1163,33 +1228,37 @@ get_conflict_alerts() {
 }
 
 get_eth_stats() {
-	printf '{"ports":['
-	local first=1
+	. /usr/share/libubox/jshn.sh
+	json_init
+	json_add_array ports
+	local iface sys field val ready up speed
 	for iface in wan lan1 lan2 lan3 lan4; do
-		local sys="/sys/class/net/$iface"
+		sys="/sys/class/net/$iface"
 		[ -d "$sys" ] || continue
-		local operstate up=false
-		operstate=$(cat "$sys/operstate" 2>/dev/null || echo "unknown")
-		[ "$operstate" = "up" ] && up=true
-		local speed
-		speed=$(cat "$sys/speed" 2>/dev/null || echo "")
+		up=0
+		[ "$(cat "$sys/carrier" 2>/dev/null)" = 1 ] && up=1
+		speed=$(cat "$sys/speed" 2>/dev/null)
 		case "$speed" in ''|*[!0-9]*) speed=0 ;; esac
-		local tx_bytes rx_bytes tx_errors rx_errors
-		tx_bytes=$(cat "$sys/statistics/tx_bytes" 2>/dev/null || echo 0)
-		rx_bytes=$(cat "$sys/statistics/rx_bytes" 2>/dev/null || echo 0)
-		tx_errors=$(cat "$sys/statistics/tx_errors" 2>/dev/null || echo 0)
-		rx_errors=$(cat "$sys/statistics/rx_errors" 2>/dev/null || echo 0)
-		[ "$first" = "1" ] || printf ","
-		printf '{"iface":"%s","up":%s,"speed":%d,"tx_bytes":%d,"rx_bytes":%d,"tx_errors":%d,"rx_errors":%d}' \
-			"$iface" "$up" "$speed" "$tx_bytes" "$rx_bytes" "$tx_errors" "$rx_errors"
-		first=0
+		json_add_object
+		json_add_string iface "$iface"
+		json_add_boolean up "$up"
+		json_add_int speed "$speed"
+		ready=1
+		for field in tx_bytes rx_bytes tx_errors rx_errors rx_crc_errors rx_dropped tx_dropped; do
+			val=$(cat "$sys/statistics/$field" 2>/dev/null)
+			case "$val" in ''|*[!0-9]*) ready=0; val=0 ;; esac
+			json_add_int "$field" "$val"
+		done
+		json_add_boolean stats_available "$ready"
+		json_close_object
 	done
-	printf ']}'
+	json_close_array
+	json_dump
 }
 
 case "$1" in
 	list)
-		echo '{"getStatus":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"getTxStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getDeviceMode":{},"getWanHealth":{},"getJitterResult":{},"getWifiStats":{},"getBridgeStats":{},"getNpuBypass":{},"getConflictAlerts":{},"getEthStats":{}}'
+		echo '{"getStatus":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"getTxStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getDeviceMode":{},"getWanHealth":{},"getJitterResult":{},"getLatencyConfig":{},"setLatencyTarget":{"target":"string"},"getWifiStats":{},"getBridgeStats":{},"getNpuBypass":{},"getConflictAlerts":{},"getEthStats":{}}'
 		;;
 	call)
 		case "$2" in
@@ -1234,6 +1303,13 @@ case "$1" in
 				;;
 			getWanHealth)
 				get_wan_health
+				;;
+			getLatencyConfig)
+				get_latency_config
+				;;
+			setLatencyTarget)
+				read -r input
+				set_latency_target "$input"
 				;;
 			getJitterResult)
 				get_jitter_result

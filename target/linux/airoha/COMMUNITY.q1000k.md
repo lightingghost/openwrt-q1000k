@@ -62,15 +62,20 @@ in a separate commit rather than being folded into the imported apps.
   independently enable hardware acceleration. Include `kmod-br-netfilter`,
   validate values and retain the sysctl configuration across sysupgrade.
   The package's default bridge IP hooks remain disabled.
-- Remove direct PLL writes and raw frame-engine counter reads. The latter
-  are managed and periodically reset by the Ethernet driver, so they are
-  not reliable cumulative statistics for an independent polling app. CPU controls use advertised
-  kernel policies only. Missing raw counters show unavailable rather than
-  healthy. High RTT alone is not evidence of failed offload.
-- Declare missing command dependencies, ensure executable RPC/init scripts,
-  retain the latency config and use the standard LuCI installation hooks.
-  Latency monitoring discovers the current IPv4 gateway; with no gateway,
-  CPU sampling continues without sending probes to a hardcoded Internet host.
+- Remove direct PLL writes; CPU controls use advertised kernel policies only.
+  A follow-up adds PSE shared-buffer usage through a read-only AN7581 driver
+  interface. GDM/CDM raw MIB sampling remains excluded; the driver accumulates
+  and resets GDM statistics. See the FlowSense README for register sources,
+  limits, and the distinction between buffer occupancy and packet drops.
+- Integrity uses physical Ethernet error/drop counters in both modes, with
+  per-poll deltas and cumulative totals. Missing data does not display healthy.
+- Latency supports automatic IPv4/IPv6 gateways or a user-selected target,
+  RTT, rolling jitter/loss, explicit no-target/no-reply states and stale-data
+  detection. The target UI saves the config and enables/restarts monitoring.
+  The service includes an explicit iputils dependency and continues CPU
+  sampling without a route. High RTT alone is not evidence of failed offload.
+- Declare command dependencies, ensure executable RPC/init scripts, retain
+  the latency config and use the standard LuCI installation hooks.
 
 The separate `q1000k-build/user/q1000k/config.diff` enables both apps and
 EIP93. Full source builds can select the same packages alongside `luci-ssl`.

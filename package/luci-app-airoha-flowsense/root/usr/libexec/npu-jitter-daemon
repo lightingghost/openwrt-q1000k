@@ -1,81 +1,77 @@
 #!/bin/sh
-
-# NPU Jitter Daemon
-# Continuously pings a target and writes jitter stats to /tmp/npu-jitter.json
-# Started by /etc/init.d/npu-jitter at boot
-
+# Foreground procd service: rolling RTT, loss, mean absolute deviation and CPU.
+export LC_ALL=C
 CONFIGURED_TARGET="${1:-}"
-case "$CONFIGURED_TARGET" in -*|*[!a-zA-Z0-9.:_-]*) exit 1 ;; esac
+case "$CONFIGURED_TARGET" in -*|*[!a-zA-Z0-9.:_%-]*) exit 1 ;; esac
+[ "${#CONFIGURED_TARGET}" -le 253 ] || exit 1
 RESULT_FILE="/tmp/npu-jitter.json"
 WINDOW=10
-INTERVAL=2  # seconds between pings
-
-ping_values=""
-count=0
+INTERVAL=2
+values=""
+previous_target=""
 cpu_prev=""
+
+gateway() {
+	ip -4 route show default 2>/dev/null | awk '
+		{ for (i=1;i<NF;i++) if ($i=="via") { print $(i+1); exit } }'
+}
+gateway6() {
+	ip -6 route show default 2>/dev/null | awk '
+		{ via=""; dev=""; for(i=1;i<NF;i++) {
+			if ($i=="via") via=$(i+1); if ($i=="dev") dev=$(i+1)
+		} if (via!="") { print via (via ~ /^fe80:/ && dev!="" ? "%" dev : ""); exit } }'
+}
 
 while true; do
 	TARGET="$CONFIGURED_TARGET"
-	[ -n "$TARGET" ] || TARGET=$(ip -4 route show default 2>/dev/null | awk '/via/ {print $3; exit}')
-	# System CPU % over the loop window (delta vs the previous iteration).
-	# Sampled here in the background daemon (steady ~2s window, and the daemon
-	# itself is lightweight) rather than in the RPC on every page poll, so it
-	# reflects real background load instead of FlowSense's own polling burst -
-	# the old in-RPC /proc/stat delta measured its own overhead and read
-	# ~15-20% at idle vs ~0% in top.
-	cpu_now=$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8; exit}' /proc/stat 2>/dev/null)
+	[ -n "$TARGET" ] || TARGET=$(gateway)
+	[ -n "$TARGET" ] || TARGET=$(gateway6)
+	case "$TARGET" in -*|*[!a-zA-Z0-9.:_%-]*) TARGET="" ;; esac
+	if [ "$TARGET" != "$previous_target" ]; then
+		values=""
+		previous_target="$TARGET"
+	fi
+
+	cpu_now=$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9; exit}' /proc/stat 2>/dev/null)
 	cpu_pct=0
 	if [ -n "$cpu_prev" ] && [ -n "$cpu_now" ]; then
 		cpu_pct=$(awk -v a="$cpu_prev" -v b="$cpu_now" 'BEGIN {
-			split(a, p, " "); split(b, c, " ")
-			pt = p[1]+p[2]+p[3]+p[4]+p[5]+p[6]+p[7]
-			ct = c[1]+c[2]+c[3]+c[4]+c[5]+c[6]+c[7]
-			dt = ct - pt; di = c[4] - p[4]
-			if (dt > 0) printf "%d", int((dt - di) * 100 / dt)
-			else print 0
+			split(a,p," "); split(b,c," "); pt=0; ct=0
+			for(i=1;i<=8;i++) { pt+=p[i]; ct+=c[i] }
+			dt=ct-pt; di=(c[4]+c[5])-(p[4]+p[5])
+			print (dt>0 ? int(100*(dt-di)/dt) : 0)
 		}')
 	fi
 	cpu_prev="$cpu_now"
 
-	# Single ping, 1 second timeout.
-	# NB: on busybox ping the summary splits by '/' so $5 is the MAX rtt -
-	# identical to avg only because -c 1 sends a single probe. If the probe
-	# count ever changes, this field must be revisited.
-	rtt=$([ -n "$TARGET" ] && ping -c 1 -W 1 "$TARGET" 2>/dev/null | awk -F'/' '/min.*avg/{printf "%.2f", $5}')
-
-	if [ -n "$rtt" ]; then
-		ping_values="$ping_values $rtt"
-		count=$((count + 1))
-
-		# Trim to window size
-		if [ "$count" -gt "$WINDOW" ]; then
-			ping_values=$(echo "$ping_values" | awk '{
-				for (i = NF - '"$WINDOW"' + 1; i <= NF; i++) printf $i " "
+	rtt=""
+	if [ -n "$TARGET" ]; then
+		family=-4
+		case "$TARGET" in *:*) family=-6 ;; esac
+		# iputils supplies both address families and a bounded ICMP deadline.
+		# Parse a reply, not a summary field whose position varies by ping build.
+		rtt=$(/usr/bin/ping "$family" -n -c 1 -W 1 -w 2 "$TARGET" 2>/dev/null | awk '
+			/time[=<][0-9]/ {
+				sub(/.*time[=<]/, ""); sub(/[^0-9.].*/, "")
+				if ($0 ~ /^[0-9]+([.][0-9]+)?$/) { print $0; exit }
 			}')
-			count=$WINDOW
-		fi
-
-		# Calculate mean absolute deviation (jitter) and last ping
-		result=$(echo "$ping_values" | awk -v c="$count" -v cpu="$cpu_pct" -v target="$TARGET" '{
-			n = NF
-			sum = 0
-			for (i = 1; i <= n; i++) sum += $i
-			avg = sum / n
-			dev = 0
-			for (i = 1; i <= n; i++) dev += ($i > avg ? $i - avg : avg - $i)
-			jitter = dev / n
-			last = $n
-			printf "{\"jitter\":%.2f,\"last_ping\":%.2f,\"samples\":%d,\"target\":\"%s\",\"reachable\":true,\"available\":true,\"cpu_pct\":%d}", \
-				jitter, last, c, target, cpu
-		}')
-
-		# Write atomically so a reader never sees a half-written file
-		echo "$result" > "$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
-	else
-		# Unreachable — preserve sample count but mark unreachable
-		printf '{"jitter":0,"last_ping":0,"samples":%d,"target":"%s","reachable":false,"available":%s,"cpu_pct":%d}\n' \
-			"$count" "$TARGET" "$([ -n "$TARGET" ] && echo true || echo false)" "$cpu_pct" > "$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
+		values="$values ${rtt:-x}"
 	fi
-
+	updated=$(cut -d. -f1 /proc/uptime)
+	# Trim attempts (including losses), then derive stats only from replies.
+	values=$(printf '%s\n' "$values" | awk -v w="$WINDOW" '{
+		start=NF-w+1; if(start<1) start=1
+		for(i=start;i<=NF;i++) printf "%s%s", (i>start ? " " : ""), $i
+	}')
+	printf '%s\n' "$values" | awk -v target="$TARGET" -v cpu="$cpu_pct" -v updated="$updated" '{
+		n=0; sum=0; dev=0
+		for(i=1;i<=NF;i++) if($i!="x") { n++; sum+=$i }
+		avg=n ? sum/n : 0
+		for(i=1;i<=NF;i++) if($i!="x") dev+=($i>avg ? $i-avg : avg-$i)
+		reply=NF && $NF!="x"; state=target=="" ? "no_target" : reply ? "ok" : "unreachable"
+		printf "{\"state\":\"%s\",\"target\":\"%s\",\"available\":%s,\"reachable\":%s,\"last_ping\":%s,\"jitter\":%.3f,\"samples\":%d,\"attempts\":%d,\"loss\":%.1f,\"cpu_pct\":%d,\"updated\":%d}\n",
+			state,target,target!="" ? "true" : "false",reply ? "true" : "false",
+			reply ? $NF : "null", n ? dev/n : 0,n,NF,NF ? 100*(NF-n)/NF : 0,cpu,updated
+	}' > "$RESULT_FILE.tmp" && mv "$RESULT_FILE.tmp" "$RESULT_FILE"
 	sleep "$INTERVAL"
 done

@@ -116,35 +116,176 @@ class AppTests(unittest.TestCase):
         self.assertEqual(ppe['unb']['total'], 1)
         self.assertEqual(self.rpc('flowsense', 'getNpuBypass')['offload_bound'], 1)
 
-    def test_jitter_without_route_and_with_gateway(self):
-        source = REPO / 'package/luci-app-airoha-flowsense/root/usr/libexec/npu-jitter-daemon'
-        script = source.read_text().replace('while true; do', 'for iteration in 1; do').replace('sleep "$INTERVAL"', ':')
-        script = script.replace('/tmp/npu-jitter.json', str(self.root / 'jitter.json'))
-        # BusyBox standalone ash can prefer its own ip/ping applets over PATH.
-        script = script.replace('ip -4 route', 'fixture_ip -4 route').replace('ping -c', 'fixture_ping -c')
-        target = self.root / 'jitter.sh'
-        target.write_text(script)
+    def test_pse_buffer_snapshot(self):
+        data = self.write('/sys/kernel/debug/ppe/pse',
+                          'version 1\ntotal 2048\nreserved 512\nused 300\nfree 1200\nhigh 1504\n')
+        actual = self.rpc('flowsense', 'getFrameEngine')
+        self.assertTrue(actual['available'])
+        self.assertEqual(actual['source'], 'driver-pse')
+        self.assertEqual(actual['pse_used'], 300)
+        self.assertEqual(actual['pse_free'], 1200)
+        good = data.read_text()
+        for broken in (good.replace('version 1', 'version 2'), good.replace('free 1200', 'free -1'),
+                       good.replace('free 1200', 'free 999999'), good.replace('high 1504', 'high 0'),
+                       good.replace('total 2048', 'total broken'), good.replace('used 300\n', ''),
+                       good + 'used 300\n'):
+            data.write_text(broken)
+            self.assertFalse(self.rpc('flowsense', 'getFrameEngine')['available'], broken)
+        data.write_text(good.replace('free 1200', 'free 0'))
+        self.assertEqual(self.rpc('flowsense', 'getFrameEngine')['pse_free'], 0)
+
+    def test_ethernet_integrity_data(self):
+        for iface, carrier, speed in [('lan1', '1', '1000'), ('lan2', '0', '-1')]:
+            self.write(f'/sys/class/net/{iface}/carrier', carrier)
+            self.write(f'/sys/class/net/{iface}/speed', speed)
+            for field, value in [('rx_bytes', 1234), ('tx_bytes', 2345), ('rx_errors', 3),
+                                 ('tx_errors', 0), ('rx_crc_errors', 2), ('rx_dropped', 1), ('tx_dropped', 4)]:
+                self.write(f'/sys/class/net/{iface}/statistics/{field}', str(value))
+        ports = self.rpc('flowsense', 'getEthStats')['ports']
+        self.assertEqual([p['iface'] for p in ports], ['lan1', 'lan2'])
+        self.assertTrue(ports[0]['stats_available'])
+        self.assertTrue(ports[0]['up'])
+        self.assertFalse(ports[1]['up'])
+        self.assertEqual(ports[0]['rx_crc_errors'], 2)
+        self.write('/sys/class/net/lan1/statistics/rx_errors', 'unavailable')
+        self.assertFalse(self.rpc('flowsense', 'getEthStats')['ports'][0]['stats_available'])
+
+    def test_latency_result_freshness(self):
+        self.write('/proc/uptime', '100.00 20.00\n')
+        self.assertEqual(self.rpc('flowsense', 'getJitterResult')['state'], 'stopped')
+        sample = {'updated': 99, 'state': 'ok', 'available': True, 'reachable': True, 'last_ping': 0}
+        self.write('/tmp/npu-jitter.json', json.dumps(sample))
+        self.assertEqual(self.rpc('flowsense', 'getJitterResult'), sample)
+        for updated in (1, 101, 'broken'):
+            sample['updated'] = updated
+            self.write('/tmp/npu-jitter.json', json.dumps(sample))
+            self.assertEqual(self.rpc('flowsense', 'getJitterResult')['state'], 'stale')
+
+    def test_latency_target_configuration(self):
         commands = self.root / 'commands'
         commands.mkdir()
+        db = self.write('/uci.json', json.dumps({'npu-monitor.@jitter[0]': 'jitter',
+                                               'npu-monitor.@jitter[0].target': '192.0.2.1'}))
+        log = self.write('/uci-calls', '')
+        uci = commands / 'fixture_uci'
+        uci.write_text('#!/usr/bin/python3\n' + f'''import json, sys
+from pathlib import Path
+p=Path({str(db)!r}); d=json.loads(p.read_text()); args=[a for a in sys.argv[1:] if a!="-q"]
+with open({str(log)!r}, 'a') as f: f.write(json.dumps(args)+"\\n")
+if args[0]=='get':
+    if args[1] not in d: sys.exit(1)
+    print(d[args[1]])
+elif args[0]=='set':
+    k,v=args[1].split('=',1); d[k]=v; p.write_text(json.dumps(d))
+elif args[0]!='commit': sys.exit(1)
+''')
+        uci.chmod(0o755)
+        self.scripts['flowsense'].write_text(self.scripts['flowsense'].read_text().replace('uci ', 'fixture_uci '))
+        self.env['PATH'] = str(commands) + ':' + self.env['PATH']
+        service_log = self.root / 'service-calls'
+        service = self.write('/etc/init.d/npu-jitter', f'#!/bin/sh\necho "$1" >> "{service_log}"\n')
+        service.chmod(0o755)
+        self.assertEqual(self.rpc('flowsense', 'getLatencyConfig')['target'], '192.0.2.1')
+        for target in ('fe80::1%br-lan', '', 'example.net'):
+            self.assertEqual(self.rpc('flowsense', 'setLatencyTarget', {'target':target}), {'result':'ok'})
+            self.assertEqual(self.rpc('flowsense', 'getLatencyConfig')['target'], target)
+            self.assertNotIn('npu-monitor.jitter', json.loads(db.read_text()))
+        self.assertEqual(service_log.read_text().splitlines(), ['enable','restart'] * 3)
+        before = db.read_text()
+        for args in ({}, {'target':3}, {'target':'-f'}, {'target':'a;id'}, {'target':'a\nb'}, {'target':'host\n'}, {'target':'a'*254}):
+            self.assertIn('error', self.rpc('flowsense', 'setLatencyTarget', args))
+        self.assertEqual(db.read_text(), before)
+        service.write_text('#!/bin/sh\nexit 1\n')
+        self.assertIn('error', self.rpc('flowsense', 'setLatencyTarget', {'target':'192.0.2.9'}))
+        # An absent config gets a named section.
+        db.write_text('{}')
+        service.write_text('#!/bin/sh\nexit 0\n')
+        self.assertEqual(self.rpc('flowsense', 'setLatencyTarget', {'target':''}), {'result':'ok'})
+        self.assertEqual(json.loads(db.read_text())['npu-monitor.jitter'], 'jitter')
+
+    def daemon(self, route4='', route6='', target='', replies=('2.0',), next_route4=None):
+        source = REPO / 'package/luci-app-airoha-flowsense/root/usr/libexec/npu-jitter-daemon'
+        script = source.read_text().replace('while true; do', 'for iteration in ' + ' '.join(map(str, range(len(replies)))) + '; do')
+        script = re.sub(r'(?<![a-zA-Z0-9])/(proc|tmp)/', lambda m: f'{self.root}/{m[1]}/', script)
+        script = script.replace('ip -4 route', 'fixture_ip -4 route').replace('ip -6 route', 'fixture_ip -6 route')
+        script = script.replace('/usr/bin/ping', 'fixture_ping')
+        history = self.root / 'history'
+        tick = f'cat "$RESULT_FILE" >> "{history}"'
+        if next_route4:
+            self.write('/next-route4', next_route4)
+            tick += f'\ncp "{self.root}/next-route4" "{self.root}/route4"'
+        script = script.replace('sleep "$INTERVAL"', tick)
+        self.write('/proc/uptime', '100.00 20.00\n')
+        self.write('/proc/stat', 'cpu  10 0 5 100 2 0 0 0 0 0\n')
+        self.write('/tmp/placeholder', '')
+        self.write('/route4', route4)
+        self.write('/route6', route6)
+        self.write('/replies', '\n'.join(replies) + '\n')
+        self.write('/counter', '0')
+        self.write('/ping-calls', '')
+        history.write_text('')
+        commands = self.root / 'commands'
+        commands.mkdir(exist_ok=True)
         ip = commands / 'fixture_ip'
-        ip.write_text('#!/bin/sh\nexit 0\n')
+        ip.write_text(f'#!/bin/sh\ncase "$1" in -4) cat "{self.root}/route4";; -6) cat "{self.root}/route6";; esac\n')
         ip.chmod(0o755)
         ping = commands / 'fixture_ping'
-        ping.write_text('#!/bin/sh\necho called >> "' + str(self.root / 'ping-calls') + '"\necho "round-trip min/avg/max = 2.0/2.0/2.0 ms"\n')
+        ping.write_text(f'''#!/bin/sh
+printf '%s\\n' "$*" >> '{self.root}/ping-calls'
+n=$(cat '{self.root}/counter'); n=$((n+1)); echo "$n" > '{self.root}/counter'
+r=$(sed -n "${{n}}p" '{self.root}/replies')
+[ "$r" = x ] && exit 1
+printf '64 bytes from fixture: icmp_seq=1 ttl=64 time=%s ms\\n' "$r"
+''')
         ping.chmod(0o755)
+        daemon = self.root / 'daemon.sh'
+        daemon.write_text(script)
         env = dict(self.env, PATH=str(commands) + ':' + self.env['PATH'])
-        def run(*args):
-            return subprocess.run(['busybox', 'ash', str(target), *args], env=env, capture_output=True, text=True)
-        self.assertEqual(run().returncode, 0)
-        self.assertFalse(json.loads((self.root / 'jitter.json').read_text())['available'])
-        self.assertFalse((self.root / 'ping-calls').exists())
-        ip.write_text('#!/bin/sh\necho "default via 192.0.2.1 dev br-lan"\n')
-        self.assertEqual(run().returncode, 0)
-        result = json.loads((self.root / 'jitter.json').read_text())
-        self.assertEqual(result['target'], '192.0.2.1')
-        self.assertTrue(result['reachable'])
-        self.assertEqual(result['last_ping'], 2)
-        self.assertNotEqual(run("host'; exit 0").returncode, 0)
+        result = subprocess.run(['busybox', 'ash', str(daemon), target], env=env, capture_output=True, text=True)
+        return result, [json.loads(line) for line in history.read_text().splitlines()]
+
+    def test_latency_gateway_loss_and_jitter(self):
+        result, samples = self.daemon(route4='default via 192.0.2.1 dev br-lan', replies=('2', 'x', '4'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(samples[0]['target'], '192.0.2.1')
+        self.assertTrue(samples[0]['reachable'])
+        self.assertEqual(samples[1]['state'], 'unreachable')
+        self.assertIsNone(samples[1]['last_ping'])
+        self.assertEqual(samples[2]['samples'], 2)
+        self.assertEqual(samples[2]['attempts'], 3)
+        self.assertAlmostEqual(samples[2]['loss'], 33.3)
+        self.assertEqual(samples[2]['jitter'], 1)
+
+    def test_latency_ipv6_custom_and_no_route(self):
+        result, samples = self.daemon()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(samples[0]['state'], 'no_target')
+        self.assertEqual((self.root / 'ping-calls').read_text(), '')
+        result, samples = self.daemon(route6='default via fe80::1 dev br-lan proto ra', replies=('0',))
+        self.assertEqual(samples[0]['target'], 'fe80::1%br-lan')
+        self.assertEqual(samples[0]['last_ping'], 0)
+        self.assertIn('-6', (self.root / 'ping-calls').read_text())
+        result, samples = self.daemon(target='192.0.2.9', replies=('0.123',))
+        self.assertEqual(samples[0]['last_ping'], .123)
+        self.assertEqual(samples[0]['target'], '192.0.2.9')
+        result, samples = self.daemon(target="host'; exit 0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(samples)
+
+    def test_latency_gateway_change(self):
+        result, samples = self.daemon(route4='default via 192.0.2.1 dev br-lan',
+                                     next_route4='default via 192.0.2.2 dev br-lan', replies=('2', '20'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([s['target'] for s in samples], ['192.0.2.1', '192.0.2.2'])
+        self.assertEqual(samples[-1]['samples'], 1)
+        self.assertEqual(samples[-1]['jitter'], 0)
+
+    def test_latency_window(self):
+        result, samples = self.daemon(target='192.0.2.1', replies=('2',) + ('x',) * 10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(samples[-1]['samples'], 0)
+        self.assertEqual(samples[-1]['attempts'], 10)
+        self.assertEqual(samples[-1]['loss'], 100)
 
 
 if __name__ == '__main__':

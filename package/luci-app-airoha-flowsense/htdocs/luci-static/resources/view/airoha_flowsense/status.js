@@ -5,8 +5,7 @@
 'require ui';
 
 /* ── Drop-delta tracking (all counters are cumulative since interface up) ── */
-var _prevPseDrops    = null;
-var _prevCdmHwfDrops = null;
+var _prevEthHealth = {};
 var _prevBridgeDrops = null;
 var _prevPpeBnd      = null;  // for tachometer heartbeat
 var _prevBandBnd     = [null, null, null];  // per-WiFi-band BND, drives the HW-accel pulse
@@ -32,6 +31,8 @@ var callGetDeviceMode    = rpc.declare({ object: 'luci.airoha_flowsense', method
 var callGetNpuBypass     = rpc.declare({ object: 'luci.airoha_flowsense', method: 'getNpuBypass' });
 var callGetWanHealth     = rpc.declare({ object: 'luci.airoha_flowsense', method: 'getWanHealth' });
 var callGetJitterResult  = rpc.declare({ object: 'luci.airoha_flowsense', method: 'getJitterResult' });
+var callGetLatencyConfig = rpc.declare({ object: 'luci.airoha_flowsense', method: 'getLatencyConfig' });
+var callSetLatencyTarget = rpc.declare({ object: 'luci.airoha_flowsense', method: 'setLatencyTarget', params: ['target'] });
 var callGetConflictAlerts= rpc.declare({ object: 'luci.airoha_flowsense', method: 'getConflictAlerts' });
 var callGetWifiStats     = rpc.declare({ object: 'luci.airoha_flowsense', method: 'getWifiStats' });
 var callGetBridgeStats   = rpc.declare({ object: 'luci.airoha_flowsense', method: 'getBridgeStats' });
@@ -652,97 +653,69 @@ function renderConflictAlerts(alertData) {
 }
 
 /* ── HW Buffer Health (replaces SQM — NPU traffic bypasses qdisc entirely) ── */
-function hwBufferState(fe, ppe, mode) {
-	fe = fe || {}; ppe = ppe || {}; mode = mode || 'router';
-
-	// PSE port drops: cumulative across all internal ports (0-9).
-	// These include CDM/PPE internal paths that drop normally — not a reliable
-	// congestion signal on their own. Track for display only.
-	var ports = Array.isArray(fe.pse_ports) ? fe.pse_ports : [];
-	var pseDrops = 0;
-	ports.forEach(function(p) { pseDrops += (p.drops || 0); });
-
-	// CDM HW-forwarding drops — frames the NPU forwarded that CDM couldn't accept.
-	// More sensitive than GDM TX drops (which only fire at wire-level jam) and
-	// directly reflects NPU path congestion.
-	var cdmHwfDrops = ((fe.cdm1||{}).rx_hwf_drop||0) + ((fe.cdm2||{}).rx_hwf_drop||0);
-
-	// Delta since last poll — null on first call (baseline only, no alarm)
-	var pseDelta    = (_prevPseDrops    !== null && pseDrops    >= _prevPseDrops)    ? (pseDrops    - _prevPseDrops)    : 0;
-	var cdmHwfDelta = (_prevCdmHwfDrops !== null && cdmHwfDrops >= _prevCdmHwfDrops) ? (cdmHwfDrops - _prevCdmHwfDrops) : 0;
-	_prevPseDrops    = pseDrops;
-	_prevCdmHwfDrops = cdmHwfDrops;
-
-	// DROPPING on CDM HW-forwarding drops or very high PSE bursts (>200/poll).
-	var activeDrop = cdmHwfDelta > 0 || pseDelta > 200;
-
-	// PPE offload efficiency — BND/(BND+UNB). Shown in subtitle for info only.
-	// LOW OFFLOAD state removed: low BND% when idle is expected, not a problem.
-	var ppeBound = (ppe.bnd || {}).total || 0;
-	var ppeUnb   = (ppe.unb || {}).total || 0;
-	var ppeTotal = ppeBound + ppeUnb;
-	var ppePct   = ppeTotal > 0 ? Math.round(ppeBound / ppeTotal * 100) : 0;
-
-	var color = activeDrop ? '#f5a623' : '#00cc44';
-	return {
-		pseDrops: pseDrops, cdmHwfDrops: cdmHwfDrops, pseDelta: pseDelta, cdmHwfDelta: cdmHwfDelta,
-		activeDrop: activeDrop, available: fe.available !== false && !fe.error,
-		ppeBound: ppeBound, ppeTotal: ppeTotal, ppePct: ppePct,
-		color: color, pulsing: activeDrop
-	};
+function hwBufferState(fe) {
+	fe = fe || {};
+	if (fe.available !== true || fe.source !== 'driver-pse')
+		return {available:false, color:'#888', reason:fe.error || 'PSE data unavailable'};
+	var capacity = fe.pse_total - fe.pse_reserved;
+	if (!(capacity > 0) || !Number.isFinite(fe.pse_used) || !Number.isFinite(fe.pse_free) ||
+	    !(fe.pse_high > 0) || fe.pse_high > capacity || fe.pse_used < 0 ||
+	    fe.pse_used > fe.pse_total || fe.pse_free < 0 || fe.pse_free > fe.pse_total)
+		return {available:false, color:'#888', reason:'Invalid PSE buffer snapshot'};
+	var full = fe.pse_free === 0;
+	var high = fe.pse_used >= fe.pse_high;
+	return {available:true, used:fe.pse_used, free:fe.pse_free, capacity:capacity,
+		pct:Math.min(100, 100 * fe.pse_used / capacity), high:high, full:full,
+		color:full ? '#d0021b' : high ? '#f5a623' : '#00cc44', pulsing:full || high};
 }
 
-/* ── Compass SVG ── */
-function compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode) {
-	bypass = bypass || {}; hwBuf = hwBuf || {}; jitter = jitter || {};
-	wan = wan || {}; wifi = wifi || {}; bridge = bridge || {};
+function ethernetIntegrity(eth) {
+	var ports = ((eth || {}).ports || []).filter(function(p) { return p.stats_available === true; });
+	var active = ports.filter(function(p) { return p.up; });
+	var rx = 0, tx = 0, crc = 0, drops = 0, changes = 0, dropChanges = 0, sampled = 0;
+	var next = {};
+	active.forEach(function(p) {
+		var v = {rx:p.rx_errors || 0, tx:p.tx_errors || 0, crc:p.rx_crc_errors || 0,
+			drops:(p.rx_dropped || 0) + (p.tx_dropped || 0)};
+		var prev = _prevEthHealth[p.iface];
+		rx += v.rx; tx += v.tx; crc += v.crc; drops += v.drops;
+		if (prev) {
+			sampled++;
+			// A reset or interface restart establishes a fresh baseline.
+			if (v.rx >= prev.rx && v.tx >= prev.tx && v.crc >= prev.crc && v.drops >= prev.drops) {
+				// CRC errors can overlap RX errors; do not add them twice.
+				changes += Math.max(v.rx - prev.rx, v.crc - prev.crc) + v.tx - prev.tx;
+				dropChanges += v.drops - prev.drops;
+			}
+		}
+		next[p.iface] = v;
+	});
+	_prevEthHealth = next;
+	return {value:!ports.length ? 'N/A' : !active.length ? 'NO LINK' : !sampled ? 'SAMPLING' :
+		changes ? 'ERRORS' : dropChanges ? 'DROPS' : 'CLEAN',
+		color:changes ? '#d0021b' : dropChanges ? '#f5a623' : sampled ? '#00cc44' : '#888',
+		alarm:changes > 0, errors:changes,
+		detail:!ports.length ? 'Ethernet statistics unavailable' : !active.length ? 'No Ethernet port has carrier' :
+			active.map(function(p) {return p.iface.toUpperCase();}).join(' + ') +
+			' | Since last poll: ' + changes + ' errors, ' + dropChanges + ' drops' +
+			' | Totals RX: ' + rx + ' TX: ' + tx + ' CRC: ' + crc + ' drops: ' + drops};
+}
 
-	var npuActive = bypass.npu_active  === true;
-	var hwEnabled = bypass.hw_offload_enabled === true;
-	var cpuPct    = bypass.cpu_pct  || 0;
-	var wanMbps   = bypass.wan_mbps || 0;
-
-	// Latency — jitter daemon pings upstream and works in both router and AP mode
-	var latMs = jitter.last_ping || 0;
-
-	// Integrity / errors
-	var errCount = 0;
-	var eastAlarm = false;
-	var worstSignal = 0;  // dBm — 0 means no data; always negative when valid
-	// wbDelta holds per-band signal data; stored in cs so both render paths share it.
-	var wbDelta = [];
-	if (mode === 'router') {
-		errCount = (wan.rx_errors||0) + (wan.tx_errors||0);
-		eastAlarm = errCount > 0;
-	} else {
-		// AP mode: use per-station RSSI from iw station dump (signal avg field).
-		// min_signal = worst (lowest dBm) station on that band — most meaningful
-		// for link integrity since one weak client degrades the whole band's airtime.
-		(wifi.bands||[]).filter(function(b){ return (b.stations||0) > 0; }).forEach(function(b) {
-			var sig = b.min_signal || 0;
-			wbDelta.push({ band: b.band, stations: b.stations, signal: sig, avg_signal: b.avg_signal || 0 });
-			if (sig !== 0 && (worstSignal === 0 || sig < worstSignal)) worstSignal = sig;
-		});
-		// Alarm thresholds: < -75 dBm = weak link, < -82 dBm = poor link
-		eastAlarm = worstSignal !== 0 && worstSignal < -75;
-	}
-
-	var eastColor;
-	if (mode === 'router') {
-		eastColor = eastAlarm ? '#d0021b' : '#00cc44';
-	} else {
-		eastColor = worstSignal === 0 ? '#888'
-		          : worstSignal < -82  ? '#d0021b'
-		          : worstSignal < -75  ? '#f5a623'
-		          :                      '#00cc44';
-	}
+/* Compass uses physical Ethernet integrity in both routed and bridge mode. */
+function compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode, eth) {
+	bypass = bypass || {}; jitter = jitter || {};
+	var integrity = ethernetIntegrity(eth);
+	var latencyValid = jitter.available === true && jitter.reachable === true &&
+		typeof jitter.last_ping === 'number' && jitter.last_ping >= 0;
 	return {
-		npuActive:npuActive, hwEnabled:hwEnabled, cpuPct:cpuPct, wanMbps:wanMbps,
-		hwBuf:hwBuf, mode:mode,
-		latMs:latMs, errCount:errCount, eastAlarm:eastAlarm,
-		wbDelta:wbDelta, worstSignal:worstSignal,
-		latColor:latencyColor(latMs),
-		eastColor: eastColor
+		npuActive:bypass.npu_active === true, hwEnabled:bypass.hw_offload_enabled === true,
+		cpuPct:bypass.cpu_pct || 0, wanMbps:bypass.wan_mbps || 0,
+		hwBuf:hwBuf, mode:mode, integrity:integrity,
+		latMs:latencyValid ? jitter.last_ping : 0, latencyValid:latencyValid,
+		errCount:integrity.errors, eastAlarm:integrity.alarm,
+		wbDelta:[], worstSignal:0,
+		latColor:latencyValid ? latencyColor(jitter.last_ping) : jitter.state === 'unreachable' ? '#d0021b' : '#888',
+		eastColor:integrity.color
 	};
 }
 
@@ -1359,35 +1332,25 @@ function renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 		? 'CPU: '+cs.cpuPct+'%  |  Bridge drops Δ: '+bridgeDelta
 		: 'CPU: '+cs.cpuPct+'%  |  WAN: '+cs.wanMbps+' Mbps';
 
-	// East card: Integrity
-	var eastVal, eastSub;
-	if (mode === 'router') {
-		eastVal = cs.eastAlarm ? cs.errCount+' ERROR'+(cs.errCount>1?'S':'') : 'CLEAN';
-		eastSub = 'RX errors: '+(wan.rx_errors||0)+'  TX errors: '+(wan.tx_errors||0);
-	} else {
-		var ws = cs.worstSignal;
-		eastVal = cs.wbDelta.length === 0 ? 'N/A'
-		        : ws === 0               ? 'NO DATA'
-		        : ws < -82               ? 'POOR'
-		        : ws < -75               ? 'WEAK'
-		        :                          'CLEAN';
-		var bnames = ['2.4G','5G','6G'];
-		eastSub = cs.wbDelta.length > 0
-			? 'Signal: '+cs.wbDelta.map(function(b){ return (bnames[b.band]||('B'+b.band))+': '+b.signal+' dBm'; }).join('  |  ')
-			: 'See Ethernet port counters below';
-	}
-	var eastColor = cs.eastColor;
+	// Physical Ethernet health, independent of WAN naming or Wi-Fi presence.
+	var eastVal = cs.integrity.value;
+	var eastSub = cs.integrity.detail;
+	var eastColor = cs.integrity.color;
 
-	// South card: HW Buffer Health
-	var hb = cs.hwBuf || {};
-	var southVal   = hb.available === false ? 'N/A' : (hb.activeDrop ? 'DROPPING' : 'HEALTHY');
-	var southColor = hb.available === false ? '#888' : (hb.color || '#00cc44');
-	var southSub   = hb.available === false ? 'Raw hardware counters are unavailable' : 'PSE Δ: '+hb.pseDelta+' CDM Δ: '+hb.cdmHwfDelta+' | PPE: '+hb.ppePct+'% BND ('+hb.ppeBound+'/'+hb.ppeTotal+')';
+	var hb = cs.hwBuf;
+	var southVal = !hb.available ? 'N/A' : hb.full ? 'FULL' : hb.high ? 'HIGH' : hb.pct.toFixed(1) + '%';
+	var southColor = hb.color;
+	var southSub = !hb.available ? hb.reason :
+		'PSE shared: ' + hb.used + ' / ' + hb.capacity + ' pages | Free: ' + hb.free + ' pages';
 
-	// West card: Latency
-	var latVal   = cs.latMs > 0 ? cs.latMs.toFixed(1)+'ms' : (jitter.available===false ? 'N/A' : '---');
+	var states = {no_target:'NO TARGET', stopped:'STOPPED', stale:'STALE', unreachable:'NO REPLY'};
+	var latVal = cs.latencyValid ? cs.latMs.toFixed(2) + ' ms' : states[jitter.state] || 'WAITING';
 	var latColor = cs.latColor;
-	var latSub   = 'Jitter: '+(jitter.jitter||0).toFixed(1)+'ms  |  '+(jitter.samples||0)+' samples  |  '+(jitter.target||'1.1.1.1');
+	var latSub = jitter.state === 'no_target' ? 'No default gateway; set a reachable target below' :
+		jitter.state === 'stopped' ? 'Apply the target below to start latency monitoring' :
+		jitter.state === 'stale' ? 'No recent samples; apply the target below to restart monitoring' :
+		(jitter.target || 'Resolving target') + ' | Jitter: ' + (jitter.jitter || 0).toFixed(2) +
+		' ms | Loss: ' + (jitter.loss || 0).toFixed(0) + '% | Replies: ' + (jitter.samples || 0) + '/' + (jitter.attempts || 0);
 
 	function card(title, val, color, sub) {
 		return E('div', { 'class': 'compass-card' }, [
@@ -1410,6 +1373,27 @@ function updateCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 	if (cards) cards.replaceWith(renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode));
 }
 
+function renderLatencyTarget(config) {
+	var input = E('input', {id:'latency-target', 'class':'cbi-input-text', type:'text',
+		value:config.target || '', placeholder:_('Automatic gateway'), maxlength:253});
+	var message = E('span', {id:'latency-target-message', 'class':'soc-muted'});
+	var button = E('button', {'class':'cbi-button cbi-button-apply', type:'button',
+		click:function() {
+			button.disabled = true;
+			message.textContent = _('Saving…');
+			return callSetLatencyTarget(input.value.trim()).then(function(result) {
+				if (result.error) throw new Error(result.error);
+				message.textContent = _('Saved; collecting latency samples');
+			}).catch(function(error) {
+				message.textContent = error.message || String(error);
+			}).finally(function() { button.disabled = false; });
+		}}, _('Apply target'));
+	return E('div', {'class':'cbi-section'}, [
+		E('label', {'for':'latency-target'}, _('Latency target: ')), input, ' ', button, ' ', message,
+		E('p', {'class':'soc-muted'}, _('Leave empty to probe the default gateway. You can enter an IPv4/IPv6 address or hostname reachable from this device. Jitter is the mean absolute deviation of up to 10 replies; loss includes unanswered probes.'))
+	]);
+}
+
 /* ── Main View ── */
 return view.extend({
 	load: function() {
@@ -1429,7 +1413,8 @@ return view.extend({
 			callGetBridgeStats(),   // d[12]
 			callGetFlowOffload(),   // d[13]
 			callGetPppoeOffload(),  // d[14]
-			callGetEthStats()       // d[15]
+			callGetEthStats(),      // d[15]
+			callGetLatencyConfig() // d[16]
 		]);
 	},
 
@@ -1446,7 +1431,7 @@ return view.extend({
 		var mode = dm.mode || 'router';
 
 		var hwBuf = hwBufferState(fe, ppe, mode);
-		var cs = compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode);
+		var cs = compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode, eth);
 
 		// Compass SVG container — tachometer is embedded inside (innerHTML so we can update by element ID)
 		var compassSvgWrap = E('div', { 'class': 'compass-svg-wrap', 'id': 'compass-svg-wrap' });
@@ -1461,6 +1446,7 @@ return view.extend({
 
 			// Conflict alerts
 			renderConflictAlerts(alertData),
+			renderLatencyTarget(data[16] || {}),
 
 			// Offload Monitor
 			E('div',{'class':'cbi-section'},[
@@ -1505,7 +1491,7 @@ return view.extend({
 
 				// Compass update (tachometer embedded inside compass)
 				var hwBuf = hwBufferState(fe, ppe, mode);
-				var cs = compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode);
+				var cs = compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode, eth);
 				updateCompassSVG(cs, mode, ppe);
 				updateCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode);
 

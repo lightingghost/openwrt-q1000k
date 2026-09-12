@@ -1,0 +1,66 @@
+From: lightingghost <zhenp3ngzhou@gmail.com>
+Subject: [PATCH] net: airoha: expose AN7581 PSE buffer status through debugfs
+
+Expose the read-only PSE shared-buffer snapshot and its configured limits.
+FlowSense can monitor buffer pressure without /dev/mem or racing the
+GDM MIB accumulation and reset performed by the Ethernet driver.
+Gate this interface to AN7581; other SoC layouts have not been checked.
+
+The status register offset follows merbanan/air_tools fe_reg.sh and the
+community Airoha dashboards. Configuration masks are from airoha_regs.h.
+No forwarding behavior, register configuration or counter reset is changed.
+
+--- a/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe_debugfs.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "airoha_eth.h"
++#include "airoha_regs.h"
+ 
+ static void airoha_debugfs_ppe_print_tuple(struct seq_file *m,
+ 					   void *src_addr, void *dest_addr,
+@@ -173,6 +174,33 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_foe_bind);
+ 
++/* AN7581 PSE status, separate from the reset-on-update GDM MIBs.
++ * PSE_SHARE_BUF_STA is one read-only snapshot of shared use and free pages.
++ * Keep the register access in the driver and never reset counters here.
++ */
++#define REG_PSE_SHARE_BUF_STA		(PSE_BASE + 0x04)
++#define PSE_SHARE_USED_MASK		GENMASK(31, 16)
++#define PSE_FREE_PAGES_MASK		GENMASK(14, 0)
++
++static int airoha_ppe_debugfs_pse_show(struct seq_file *m, void *private)
++{
++	struct airoha_ppe *ppe = m->private;
++	struct airoha_eth *eth = ppe->eth;
++	u32 status, total, reserved, high;
++
++	status = airoha_fe_rr(eth, REG_PSE_SHARE_BUF_STA);
++	total = airoha_fe_get(eth, PSE_FQ_CFG, PSE_FQ_LIMIT_MASK);
++	reserved = airoha_fe_get(eth, REG_FE_PSE_BUF_SET, PSE_ALLRSV_MASK);
++	high = airoha_fe_get(eth, REG_PSE_SHARE_USED_THD,
++			     PSE_SHARE_USED_HTHD_MASK);
++
++	seq_printf(m, "version 1\ntotal %u\nreserved %u\nused %u\nfree %u\nhigh %u\n",
++		   total, reserved, (u32)FIELD_GET(PSE_SHARE_USED_MASK, status),
++		   (u32)FIELD_GET(PSE_FREE_PAGES_MASK, status), high);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(airoha_ppe_debugfs_pse);
++
+ int airoha_ppe_debugfs_init(struct airoha_ppe *ppe)
+ {
+ 	ppe->debugfs_dir = debugfs_create_dir("ppe", NULL);
+@@ -180,6 +208,9 @@
+ 			    &airoha_ppe_debugfs_foe_all_fops);
+ 	debugfs_create_file("bind", 0444, ppe->debugfs_dir, ppe,
+ 			    &airoha_ppe_debugfs_foe_bind_fops);
++	if (ppe->eth->soc->version == 0x7581)
++		debugfs_create_file("pse", 0400, ppe->debugfs_dir, ppe,
++				    &airoha_ppe_debugfs_pse_fops);
+ 
+ 	return 0;
+ }
