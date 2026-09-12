@@ -200,7 +200,7 @@ define Device/quantum_q1000k-ubi
   DEVICE_ALT1_MODEL := Q1000K
   DEVICE_ALT1_VARIANT := UBI
   DEVICE_DTS := an7581-q1000k
-  DEVICE_PACKAGES := fitblk nand-utils rtl826x-firmware
+  DEVICE_PACKAGES := fitblk nand-utils rtl826x-firmware bridge-hw-offload
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048

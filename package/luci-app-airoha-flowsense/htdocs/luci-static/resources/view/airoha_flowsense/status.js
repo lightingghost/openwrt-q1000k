@@ -1493,7 +1493,7 @@ return view.extend({
 
 		var view = E('div',{'class':'cbi-map'},[
 			E('h2',{},_('Airoha FlowSense')),
-			E('p',{},_('PPE entries show observed offloaded flows. Q1000K currently provides copper LAN only; optical PON service and standalone bridge hardware offload are not enabled. Temperature and VLAN/PPPoE bridge settings are on the Airoha SoC Status page.')),
+			E('p',{},_('PPE entries show observed offloaded flows. Q1000K supports routed and LAN bridge IP flow offload through the HW Flow Offload switch. Enable it and check bound entries during client-to-client traffic. Optical PON service is not enabled. Temperature and VLAN/PPPoE bridge settings are on the Airoha SoC Status page.')),
 
 			// Conflict alerts
 			renderConflictAlerts(alertData),

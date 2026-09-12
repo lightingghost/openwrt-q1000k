@@ -62,7 +62,8 @@ labelled **bridge filtering**. They set `bridge-nf-filter-vlan-tagged` and
 `bridge-nf-filter-pppoe-tagged`, respectively. They only affect bridge
 netfilter when its IP hooks are enabled; the packaged defaults leave those
 hooks disabled. They do not independently enable hardware offload or provide
-standalone bridge acceleration. Values persist in `/etc/sysctl.d/14-vlan-offload.conf`
+standalone bridge acceleration. Use FlowSense's HW Flow Offload control for
+the separate bridge flowtable service. Values persist in `/etc/sysctl.d/14-vlan-offload.conf`
 and `/etc/sysctl.d/15-pppoe-offload.conf`; upgrade keep lists preserve them.
 
 Q1000K uses the driver-default `airoha/en7581_npu_rv32.bin` unless DT supplies

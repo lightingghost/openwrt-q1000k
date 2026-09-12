@@ -1,13 +1,12 @@
 #!/bin/sh
 
-[ "$ACTION" = ifup ] || exit 0
+case "$ACTION" in ifup|ifupdate|ifdown) ;; *) exit 0;; esac
 [ "$INTERFACE" = lan ] || exit 0
+[ -x /etc/rc.d/S21bridge-hw-offload ] || exit 0
 
+# Wait for bridge membership updates, then read the latest configuration.
+# Serialization and error reporting are handled by apply-rules.sh.
 (
-	exec 9>/var/lock/bridge-hw-offload.lock
-	flock -n 9 || exit 0
-	sleep 10
-	/usr/share/bridge-hw-offload/apply-rules.sh
+	sleep 2
+	/etc/init.d/bridge-hw-offload reload
 ) &
-
-exit 0

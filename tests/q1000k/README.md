@@ -47,3 +47,42 @@ and failed reads/writes/source changes. It asserts that the active clock path
 is never disabled and the PLL is never changed while it is the CPU's source.
 It cannot establish physical clock-lock timing, voltage margins or firmware
 behavior on hardware.
+
+## Bridge flow offload
+
+```sh
+python3 tests/q1000k/test_bridge_offload.py
+python3 tests/q1000k/test_bridge_kernel.py
+```
+
+The service tests run the production shell script with real flock and temporary
+files, replacing only system paths and UCI/nft/firewall/logger commands. They
+cover both enable flags, early boot, removed/changed ports, safe device names,
+rule validation failure and firewall reload rollback.
+
+The kernel fixtures compile the prepared kernel's actual refragmentation
+function and PPE header-preservation block. They check exactly one packet
+owner for every error/success path, unchanged routed entries, the TTL bit,
+IPv6 source-MAC selector and preservation of unrelated bits/PPPoE IDs.
+
+For actual packet forwarding through the patched kernel on an x86-64 host:
+
+```sh
+tests/q1000k/run_bridge_uml.sh
+```
+
+This requires native kernel build tools, static `/usr/bin/busybox`, Python 3,
+iproute2 (ip and bridge), nftables and iperf3. It copies the prepared source
+into a separate /tmp directory, builds User Mode Linux, and boots it as the
+current user. UML needs permission to ptrace its own child processes. The
+host filesystem is mounted read-only in the guest; /tmp, /run, /proc, /sys
+and /dev are guest mounts. Do not run the init script directly: its kernel
+release guard restricts it to the disposable test kernel.
+
+The seven runtime tests exercise IPv4/IPv6 UDP and TCP, both flow directions,
+TTL/hop-limit and changing DSCP values, TTL=1 forwarding, IPv4 fragmentation,
+VLAN access ports, and routed forwarding through a bridge port. They inspect
+conntrack and require the slow-path counter to stop increasing for ordinary
+UDP flows. VLAN trunks/PPPoE, hardware PPE execution and performance still
+require Q1000K hardware testing. Build/run logs remain in the printed /tmp
+path. Success requires test exit 0 and no kernel BUG/Oops/panic.

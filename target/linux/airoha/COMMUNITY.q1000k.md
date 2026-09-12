@@ -28,8 +28,8 @@ in a separate commit rather than being folded into the imported apps.
 | `d57aa14633` | Enable EIP93 crypto | Full cherry-pick. The SoC crypto device and driver already exist; include the module. |
 | `4b786a7dc7` | CPUfreq / PM domain changes | Partial import after Q1000K runtime logs showed a zero CPU clock and no policy. Retain the PM-domain PLL fallback, then scope it to Q1000K and adapt it for shared syscon access, synchronized transitions and stock 500–1200 MHz levels. Keep existing Kconfig and domain/OPP attachment; patch 607 already fixes the positive attach-count check. See the SoC Status README for validation limits. |
 | `01b95e9ebe` | DSA modules and raw netlink access | Skip. Ethernet/NPU/DSA are already built into Q1000K's kernel. The proposed NPU module forces MT7996 firmware; raw switch-register netlink access is unnecessary for the dashboards. |
-| `947e986680` | Bridge-offload rule service | Skip with its kernel dependency below. Its dynamic nft rules alone cannot add bridge-family flowtable support. |
-| `57c9119d3d` | Standalone L2 bridge offload | Defer. Review found an explicit `kfree_skb()` followed by `NF_DROP` in the fragmentation error path (netfilter core also frees on `NF_DROP`). Forward-path selection also treats any bridge-port ingress as bridging without limiting the new behavior to the bridge nft family. Requires correction and forwarding/encapsulation tests before import. |
+| `947e986680` | Bridge-offload rule service | Full cherry-pick (`f952558b55`). Follow-up fixes procd calls, adds explicit module/locking dependencies, generates runtime rules with atomic fw4 reload and validation/rollback, and selects the package for Q1000K. |
+| `57c9119d3d` | Standalone L2 bridge offload | Full cherry-pick (`aaf8d452a1`) at the user's request. Airoha follow-up patches 9994/9995 fix packet ownership, bridge-family path selection and TTL/hop-limit/IPv6 source-MAC preservation. The rule service enables eligible bridged IPv4/IPv6 TCP/UDP flows; see `BRIDGE-OFFLOAD.q1000k.md` for configuration and validation limits. |
 | `a2910a20a4` | Reliability / compatibility bundle | Partial: apply 33 MHz SPI-NAND timing only to Q1000K. Skip W1700K LED/branding, regulatory, feed, audio and log-suppression changes. |
 | `81e1668e2b` | HW1.1 / HW2.1 compatibility | Partial: retain E2 PCS manual RX calibration and PHY reset deassertion before MDIO enumeration. Keep the existing RTL8261N driver; the extra RTL8261CE driver and W1700K profile do not match this board. |
 | `6b485caf7c` | Ramoops (PR #22473) | Full cherry-pick. Adds pstore and reserves 64 KiB at `0x86ff0000`, inside Q1000K RAM and outside existing ATF/NPU/QDMA reservations. Crash retention across resets still needs hardware verification. |
@@ -44,7 +44,7 @@ in a separate commit rather than being folded into the imported apps.
 | `df93b53d96` | Beamforming / 6 GHz hostapd changes | Skip: no Wi-Fi. |
 | `5244384f25` | Ethernet/NPU stability bundle | Defer Ethernet portion: combines new counters, IRQ locking changes, RX mapping and unverified meter-register retry logic; the retry code ignores read errors. The NPU-init changes affect WLAN memory setup and are not useful on Q1000K. |
 | `c180c48b4e` | W1700K applications pack | Partial: import Airoha NPU and FlowSense, preserving their authorship notices. Skip fan control, Wi-Fi/MLO apps, speed tests and fastfetch. Add kernel sensor temperatures to SoC Status instead. |
-| `2e85bf63bc` | FlowSense follow-up | Import the complete app commit. Its config-change event also works with stock firewall4; importing it does not imply importing standalone bridge offload. |
+| `2e85bf63bc` | FlowSense follow-up | Import the complete app commit. Its config-change event also reloads the imported bridge-offload service. |
 | `1b7cacf39a` | +200 MHz / performance governor | Skip: no Q1000K thermal or stability validation. Keep the stock OPPs and governor. |
 
 ## Q1000K app adaptations

@@ -1,0 +1,4 @@
+# Replaced atomically with the rest of the firewall on every fw4 reload.
+# A missing runtime fragment (early boot or disabled) leaves no bridge rules.
+destroy table bridge fw4
+include "/var/run/bridge-hw-offload/*.nft"

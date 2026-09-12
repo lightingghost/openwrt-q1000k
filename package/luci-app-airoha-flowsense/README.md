@@ -5,18 +5,21 @@ load, Ethernet port traffic and upstream latency. Select
 `CONFIG_PACKAGE_luci-app-airoha-flowsense=y` with the LuCI feed installed.
 The Q1000K community build profile selects this package. The package declares
 its `ip-full`, `ip-bridge`, `iputils-ping`, `tc-tiny`, `jshn`, `jsonfilter`
-and bridge-netfilter dependencies.
+bridge-netfilter and bridge-hw-offload dependencies.
 
 The Q1000K currently exposes `lan1` (1 GbE) and `lan2` (10 GbE), with PON
 disabled. Only existing Ethernet interfaces appear. Wi-Fi gauges are hidden
 when no wireless PHY is present. No MT7996 firmware is installed by this app;
 firmware detection follows the AN7581 driver default or device-tree override.
 
-Hardware flow offload can be configured here for routed traffic, matching
-firewall4's `flow_offloading` and `flow_offloading_hw` settings. It remains
-disabled by default. This tree does not include the experimental standalone
-bridge-offload kernel series. A LAN bridge is therefore not proof of an
-accelerated forwarding path; inspect PPE bound entries under real traffic.
+Hardware flow offload can be configured here for routed and LAN bridge IP
+traffic, matching firewall4's `flow_offloading` and `flow_offloading_hw`
+settings. It remains disabled by default and preserves existing settings on
+upgrade. The bridge-hw-offload service installs a bridge-family flowtable
+for br-lan members when both flags are enabled. The updated kernel and
+bridge-hw-offload package are required; installing only the app on an older
+kernel cannot add this support. Inspect PPE bound entries under real traffic.
+See `target/linux/airoha/BRIDGE-OFFLOAD.q1000k.md` for setup and diagnostics.
 Offloaded traffic bypasses CAKE/SQM queueing, as indicated by the app.
 
 Temperature and VLAN/PPPoE bridge-filtering controls are available in the

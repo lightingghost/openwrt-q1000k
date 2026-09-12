@@ -1,60 +1,82 @@
 #!/bin/sh
-# Bridge flow offloading rule generator
-# Detects bridge member ports and writes a persistent .nft file
-# that fw4 includes via its ruleset-post mechanism.
-#
-# After writing the file, triggers fw4 reload to apply the rules.
+# Keep the runtime bridge fragment and the live fw4 ruleset in sync.
+# The packaged ruleset-post include removes the old table even when disabled.
 
 BRIDGE="${1:-br-lan}"
-RULES_DIR="/usr/share/nftables.d/ruleset-post"
-RULES_FILE="${RULES_DIR}/30-bridge-offload.nft"
-FLOWTABLE="br_offload"
+RULES_DIR=/var/run/bridge-hw-offload
+RULES_FILE="$RULES_DIR/bridge.nft"
 
-detect_bridge_ports() {
-    local brif_dir="/sys/class/net/${BRIDGE}/brif"
-    [ -d "$brif_dir" ] || return 1
-    local ports=""
-    for port_dir in "$brif_dir"/*; do
-        [ -d "$port_dir" ] || continue
-        ports="${ports:+${ports}, }$(basename "$port_dir")"
-    done
-    [ -n "$ports" ] && echo "$ports"
+log_error() {
+	logger -t bridge-hw-offload "$*"
+	echo "bridge-hw-offload: $*" >&2
 }
 
-main() {
-    # Only use the NPU/hardware path when fw4 hardware offload is enabled.
-    if [ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" != "1" ]; then
-        rm -f "$RULES_FILE"
-        nft delete table bridge fw4 >/dev/null 2>&1
-        logger -t bridge-hw-offload "flow_offloading_hw not set, hardware offload disabled"
-    else
-        local devices
-        devices=$(detect_bridge_ports)
-        if [ -z "$devices" ]; then
-            logger -t bridge-hw-offload "No bridge ports found for ${BRIDGE}, skipping"
-            return 1
-        fi
+case "$BRIDGE" in ''|*[!a-zA-Z0-9_.:-]*) log_error 'Invalid bridge name'; exit 1;; esac
+mkdir -p "$RULES_DIR" /var/lock || exit 1
+exec 9>/var/lock/bridge-hw-offload.lock
+flock -x 9 || exit 1
 
-        mkdir -p "$RULES_DIR"
-        cat > "$RULES_FILE" <<EOF
-destroy table bridge fw4
+candidate=$(mktemp "$RULES_DIR/.candidate.XXXXXX") || exit 1
+previous=$(mktemp "$RULES_DIR/.previous.XXXXXX") || exit 1
+check=$(mktemp "$RULES_DIR/.check.XXXXXX") || exit 1
+trap 'rm -f "$candidate" "$previous" "$check"' EXIT
+trap 'exit 1' HUP INT TERM
 
+if [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = 1 ] &&
+   [ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = 1 ]; then
+	devices=""
+	count=0
+	for path in "/sys/class/net/$BRIDGE/brif/"*; do
+		[ -d "$path" ] || continue
+		port=${path##*/}
+		case "$port" in ''|*[!a-zA-Z0-9_.:-]*) log_error 'Invalid bridge port name'; exit 1;; esac
+		devices="${devices:+$devices, }\"$port\""
+		count=$((count + 1))
+	done
+	if [ "$count" -ge 2 ]; then
+		cat > "$candidate" <<RULES
 table bridge fw4 {
-    flowtable ${FLOWTABLE} {
-        hook ingress priority 0; devices = { ${devices} }; flags offload;
-    }
-
-    chain forward {
-        type filter hook forward priority 0; policy accept;
-        meta l4proto { tcp, udp } flow offload @${FLOWTABLE}
-    }
+	flowtable br_offload {
+		hook ingress priority 0; devices = { $devices };
+		counter; flags offload;
+	}
+	chain forward {
+		type filter hook forward priority 10; policy accept;
+		iifname { $devices } oifname { $devices } ct state established meta l4proto { tcp, udp } counter flow offload @br_offload
+	}
 }
-EOF
-        logger -t bridge-hw-offload "hardware offload enabled for ${devices}"
-    fi
+RULES
+	fi
+fi
 
-    # Reload fw4 so it picks up our ruleset-post include
-    /etc/init.d/firewall reload >/dev/null 2>&1 &
-}
+# Check only our table before changing the fragment. A check or fw4 failure
+# leaves the previous live ruleset intact and reports the actual error.
+{
+	echo 'destroy table bridge fw4'
+	cat "$candidate"
+} > "$check"
+if ! nft -c -f "$check"; then
+	log_error 'Bridge flowtable validation failed; check kernel/module support'
+	exit 1
+fi
 
-main
+had_previous=0
+if [ -f "$RULES_FILE" ]; then
+	cp "$RULES_FILE" "$previous" || exit 1
+	had_previous=1
+fi
+mv "$candidate" "$RULES_FILE" || exit 1
+if ! /etc/init.d/firewall reload; then
+	if [ "$had_previous" = 1 ]; then
+		mv "$previous" "$RULES_FILE"
+	else
+		rm -f "$RULES_FILE"
+	fi
+	log_error 'Firewall reload failed; restored the previous bridge fragment'
+	exit 1
+fi
+if [ -s "$RULES_FILE" ]; then
+	logger -t bridge-hw-offload "Hardware flow offload configured on $BRIDGE: $devices"
+else
+	logger -t bridge-hw-offload 'Bridge flow offload disabled or fewer than two ports available'
+fi

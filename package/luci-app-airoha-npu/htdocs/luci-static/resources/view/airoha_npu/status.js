@@ -234,7 +234,7 @@ return view.extend({
 
 			E('div',{'class':'cbi-section'},[
 				E('h3',{},_('VLAN / PPPoE Bridge Filtering')),
-				E('p',{},_('Allow bridge netfilter to inspect VLAN or PPPoE encapsulated traffic. These settings do not enable hardware acceleration by themselves; routed flow offloading is configured in Firewall or FlowSense. Bridge IP filtering must also be enabled for these settings to take effect.')),
+				E('p',{},_('Allow bridge netfilter to inspect VLAN or PPPoE encapsulated traffic. These settings do not enable hardware acceleration by themselves; routed and LAN bridge flow offloading is configured in Firewall or FlowSense. Bridge IP filtering must also be enabled for these settings to take effect.')),
 				E('table',{'class':'table'},[
 					E('tr',{'class':'tr'},[E('td',{'class':'td'},_('VLAN traffic')),E('td',{'class':'td'},renderBridgeFilter('vlan-offload-select',vo,callSetVlanOffload))]),
 					E('tr',{'class':'tr'},[E('td',{'class':'td'},_('PPPoE traffic')),E('td',{'class':'td'},renderBridgeFilter('pppoe-offload-select',po,callSetPppoeOffload))])
