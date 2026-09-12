@@ -116,8 +116,8 @@ get_ppe_entries() {
 
 	# Parse a PPE file into JSON entries array (awk function reused for both files)
 	parse_ppe() {
-		local file="$1" state_filter="$2" limit="$3"
-		awk -v state_filter="$state_filter" -v limit="$limit" '
+		local file="$1" state_filter="$2" limit="$3" result
+		result=$(awk -v state_filter="$state_filter" -v limit="$limit" '
 		BEGIN { total=0; shown=0; n4=0; n6=0 }
 		/^[0-9a-fA-F]+ / {
 			state = $2
@@ -136,11 +136,12 @@ get_ppe_entries() {
 			entry[shown]=sprintf("{\"index\":\"%s\",\"state\":\"%s\",\"type\":\"%s\",\"proto\":\"%s\",\"orig\":\"%s\",\"new_flow\":\"%s\",\"eth\":\"%s\"}",$1,state,type,subtype,orig,new_flow,eth)
 		}
 		END {
-			printf "{\"total\":%d,\"ipv4\":%d,\"ipv6\":%d,\"entries\":[",total,n4,n6
+			printf "{\"available\":true,\"total\":%d,\"ipv4\":%d,\"ipv6\":%d,\"entries\":[",total,n4,n6
 			for(i=1;i<=shown;i++){if(i>1)printf ","; printf "%s",entry[i]}
 			printf "]}"
 		}
-		' "$file" 2>/dev/null || echo '{"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
+		' "$file" 2>/dev/null) || result='{ "available":false,"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
+		printf '%s\n' "$result"
 	}
 
 	local bnd_json unb_json
@@ -148,13 +149,13 @@ get_ppe_entries() {
 	if [ -f "$bind_file" ]; then
 		bnd_json=$(parse_ppe "$bind_file" "BND" 25)
 	else
-		bnd_json='{"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
+		bnd_json='{"available":false,"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
 	fi
 
 	if [ -f "$entries_file" ]; then
 		unb_json=$(parse_ppe "$entries_file" "UNB" 25)
 	else
-		unb_json='{"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
+		unb_json='{"available":false,"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
 	fi
 
 	# Per-band BND counts: collect client MACs per band, match against eth= in bind file
@@ -382,7 +383,7 @@ get_frame_engine() {
 	printf '%s\n' "$snapshot" | awk '
 		NF == 2 && $2 ~ /^[0-9]+$/ { v[$1]=$2; seen[$1]++ }
 		END {
-			if (seen["version"] != 1 || v["version"] != 1 ||
+			if (seen["version"] != 1 || (v["version"] != 1 && v["version"] != 2) ||
 			    seen["total"] != 1 || seen["reserved"] != 1 ||
 			    seen["used"] != 1 || seen["free"] != 1 || seen["high"] != 1 ||
 			    v["total"] <= 0 || v["total"] > 32767 ||
@@ -392,8 +393,27 @@ get_frame_engine() {
 				print "{\"available\":false,\"error\":\"Invalid PSE buffer snapshot\"}"
 				exit
 			}
-			printf "{\"available\":true,\"source\":\"driver-pse\",\"pse_total\":%d,\"pse_reserved\":%d,\"pse_used\":%d,\"pse_free\":%d,\"pse_high\":%d}\n",
+			printf "{\"available\":true,\"source\":\"driver-pse\",\"pse_total\":%d,\"pse_reserved\":%d,\"pse_used\":%d,\"pse_free\":%d,\"pse_high\":%d,",
 				v["total"],v["reserved"],v["used"],v["free"],v["high"]
+			valid = v["version"] == 2
+			for (i=0; i<10; i++) {
+				key="pse_drop" i
+				if (seen[key] != 1 || v[key] > 4294967295) valid=0
+			}
+			for (i=1; i<=2; i++) {
+				key="cdm" i "_hwf_drop"
+				if (seen[key] != 1 || v[key] > 4294967295) valid=0
+			}
+			if (!valid) {
+				printf "\"drops_available\":false,\"drop_error\":\"%s\"}\n",
+					v["version"] == 1 ? "Drop counters require the updated Q1000K kernel" : "Invalid PSE/CDM drop snapshot"
+				exit
+			}
+			printf "\"drops_available\":true,\"pse_ports\":["
+			for (i=0; i<10; i++)
+				printf "%s{\"port\":%d,\"drops\":%.0f}", i ? "," : "", i, v["pse_drop" i]
+			printf "],\"cdm1\":{\"rx_hwf_drop\":%.0f},\"cdm2\":{\"rx_hwf_drop\":%.0f}}\n",
+				v["cdm1_hwf_drop"], v["cdm2_hwf_drop"]
 		}'
 }
 

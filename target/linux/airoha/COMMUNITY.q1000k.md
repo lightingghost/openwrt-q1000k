@@ -66,7 +66,8 @@ in a separate commit rather than being folded into the imported apps.
   The Q1000K kernel supplies a board-specific fallback for firmware lacking
   a usable CPU-frequency SMC, while keeping the stock OPP range.
   A follow-up adds PSE shared-buffer usage through a read-only AN7581 driver
-  interface. GDM/CDM raw MIB sampling remains excluded; the driver accumulates
+  interface, then restores the original PSE/CDM drop deltas and PPE bound
+  percentage. GDM raw MIB sampling remains excluded; the driver accumulates
   and resets GDM statistics. See the FlowSense README for register sources,
   limits, and the distinction between buffer occupancy and packet drops.
 - Integrity uses physical Ethernet error/drop counters in both modes, with

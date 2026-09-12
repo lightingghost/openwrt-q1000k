@@ -57,29 +57,65 @@ Existing anonymous jitter sections are supported too. Configuration survives
 sysupgrade; results are written atomically to `/tmp/npu-jitter.json` with a
 monotonic timestamp. Results older than 15 seconds are not shown as live data.
 
-**HW Buffer** displays AN7581 PSE shared-buffer occupancy and free pages.
-Patch `9991-net-airoha-expose-pse-buffer-status.patch` adds the root-readable
-`/sys/kernel/debug/ppe/pse` interface. The driver reads the PSE status register
-once per snapshot and reports configured total/reserved pages and the hardware
-high threshold. The card shows shared usage as a percentage of total minus
-reserved pages; HIGH means the shared-use threshold was reached and FULL
-means no free pages. These are snapshots, not a peak recorder or a packet-drop
-counter. Polling can miss brief bursts.
+**HW Buffer** retains the original community diagnostics and also displays
+buffer occupancy:
 
-The PSE status offset `0x104` and used/free decoding match the community
-AN7581 sampler; the offset is also named PSE_SHARE_BUF_STA in
-[merbanan's register map](https://github.com/merbanan/air_tools/blob/main/fe_reg.sh).
-The configured limits use the masks already used by the kernel driver.
-Access is restricted to the AN7581 driver. It does not access `/dev/mem`,
-write hardware registers, or sample/reset GDM/CDM MIB counters.
-The original app's GDM TX_DROP and the driver's TX_ETH_DROP offsets refer to
-different definitions; they are not substituted into this occupancy metric.
+- **PSE Δ**: observed increase in the ten internal PSE port drop counters
+  (ports 0–9) since the previous poll.
+- **CDM Δ**: observed increase in CDM1 + CDM2 RX hardware-forwarding drop
+  counters since the previous poll. These are distinct from GDM RX drops.
+- **PPE % BND**: `bound / (bound + unbound) × 100`, with both counts displayed.
+  This is the bound share of observed entries, not binds per second, bandwidth
+  offload percentage, or an alarm when idle. Empty tables show 0% (0/0);
+  missing tables show N/A.
+- **Occupancy**: shared PSE pages used divided by total minus reserved pages,
+  plus used/capacity/free page counts. A zero occupancy snapshot does not mean
+  that no packets were dropped between samples.
 
-HW Buffer requires the new kernel as well as the updated app; installing
-only the app on an older image reports that requirement. The read-only
-interface requires `CONFIG_KERNEL_DEBUG_FS=y` (enabled by the Q1000K build).
-A complete image build and automated register/backend/UI fixtures validate
-the integration; physical readings still need verification on a Q1000K.
+The card retains the community **DROPPING** warning when CDM Δ is positive
+or PSE Δ exceeds 200 per poll. Smaller PSE deltas are displayed but do not
+alone establish congestion: PSE includes internal discard paths. **HIGH**
+means shared usage reached the configured threshold; **FULL** means no free
+pages. Full buffers take priority over the drop warning. **OK** means neither
+threshold nor drop warning was observed in a valid sampled interval.
+
+The first sample is **SAMPLING**. Each counter has its own baseline so that
+one counter decreasing cannot be hidden by another increasing. A decrease
+(reset or wrap) marks that metric **reset**, discards its interval and starts
+a new baseline. Missing/invalid data shows N/A; an older occupancy-only
+kernel shows **PARTIAL** with an upgrade message. Polling is every five
+seconds. It can miss short occupancy peaks and resets between samples;
+these diagnostic deltas are not a lossless packet-loss accounting service.
+
+Patches `9991-net-airoha-expose-pse-buffer-status.patch` and
+`9993-net-airoha-expose-pse-cdm-drop-counters.patch` provide the root-readable
+`/sys/kernel/debug/ppe/pse` snapshot, restricted to AN7581. Version 2 adds
+`pse_drop0` through `pse_drop9`, `cdm1_hwf_drop` and `cdm2_hwf_drop`; the app
+also accepts version 1 for occupancy. The driver reads each register once
+per snapshot. CDM reads share the corresponding GDM statistics lock when
+that port exists. No additional counter reset or register write is introduced.
+The GDM packet counters accumulated/reset by the Ethernet driver remain
+outside this interface.
+
+The original community sampler and
+[merbanan's AN7581 register map](https://github.com/merbanan/air_tools/blob/main/fe_reg.sh)
+identify PSE shared status at FE offset `0x104`, PSE port drop counters at
+`0x120 + 4 × port`, and CDM1/2 RXHWF_DROP at `0x5a4`/`0x15a4`.
+Configured buffer-limit masks come from the existing driver. Neither the
+backend nor the UI accesses `/dev/mem`.
+
+The drop metrics require the updated kernel as well as app release 1.1.9-r9.
+PPE percentage and occupancy remain available when installing the app over
+the previous occupancy-capable kernel. `CONFIG_KERNEL_DEBUG_FS=y` is required
+and selected by the Q1000K build. Kernel/register, backend and UI fixtures
+check the integration; drop-counter behavior under real load still needs
+physical Q1000K validation. To inspect the source values after upgrading:
+
+```sh
+cat /sys/kernel/debug/ppe/pse
+ubus call luci.airoha_flowsense getFrameEngine
+ubus call luci.airoha_flowsense getPpeEntries
+```
 
 ## Origin
 

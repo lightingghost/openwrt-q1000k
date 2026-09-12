@@ -18,7 +18,8 @@ The Python tests run the production shell backends using BusyBox ash and
 host builds of OpenWrt jsonfilter/jshn. Runtime paths are redirected to a
 temporary fixture tree. They cover sensor values and absence, firmware
 selection, validated/persisted bridge settings, CPU policy discovery, fallback frequency tables, validated governor/max-frequency controls, PPE
-counts, PSE snapshot validation, Ethernet counters, latency target persistence,
+counts and missing-table handling, version 1/2 PSE snapshot validation,
+32-bit PSE/CDM counter values, Ethernet counters, latency target persistence,
 service restart failure, timestamp freshness, IPv4/IPv6 targets, zero RTT,
 loss and jitter windows. Ping, routes, service control and UCI are mocked.
 
@@ -26,11 +27,15 @@ The Node tests execute the production LuCI views against RPC fixtures and a
 minimal DOM. They check late CPU policy registration, current-frequency fallback,
 control errors and kernel readback, temperatures, VLAN/PPPoE controls, target settings,
 absent Wi-Fi, Ethernet error/drop deltas and resets, missing links, PSE
-occupancy/high/full/missing states, and successful/unanswered/missing latency.
+occupancy/high/full/missing states, PSE/CDM drop thresholds and per-counter
+resets, first/missing samples, PPE bound percentages and empty/unavailable
+tables, and successful/unanswered/missing latency.
 
 After preparing the target kernel, the PSE test compiles the actual driver
 reader from that tree with a read-only register fixture. It checks register
-addresses, masks, output fields and exactly one read per register. No write
+addresses, masks, all ten PSE and two CDM drop fields, unsigned 32-bit
+values and exactly one read per register. It verifies CDM locking both with
+and without the corresponding GDM ports. No write
 accessor is supplied. The target kernel build also checks the real kernel APIs.
 These tests do not replace browser or physical-hardware QA.
 

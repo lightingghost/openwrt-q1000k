@@ -155,7 +155,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(actual['pse_used'], 300)
         self.assertEqual(actual['pse_free'], 1200)
         good = data.read_text()
-        for broken in (good.replace('version 1', 'version 2'), good.replace('free 1200', 'free -1'),
+        for broken in (good.replace('version 1', 'version 3'), good.replace('free 1200', 'free -1'),
                        good.replace('free 1200', 'free 999999'), good.replace('high 1504', 'high 0'),
                        good.replace('total 2048', 'total broken'), good.replace('used 300\n', ''),
                        good + 'used 300\n'):
@@ -163,6 +163,42 @@ class AppTests(unittest.TestCase):
             self.assertFalse(self.rpc('flowsense', 'getFrameEngine')['available'], broken)
         data.write_text(good.replace('free 1200', 'free 0'))
         self.assertEqual(self.rpc('flowsense', 'getFrameEngine')['pse_free'], 0)
+
+    def test_pse_cdm_drop_snapshot(self):
+        occupancy = 'version 2\ntotal 2048\nreserved 512\nused 0\nfree 1536\nhigh 1504\n'
+        counters = ''.join(f'pse_drop{i} {i}\n' for i in range(10))
+        counters += 'cdm1_hwf_drop 4294967295\ncdm2_hwf_drop 12\n'
+        good = occupancy + counters
+        path = self.write('/sys/kernel/debug/ppe/pse', good)
+        value = self.rpc('flowsense','getFrameEngine')
+        self.assertTrue(value['drops_available'])
+        self.assertEqual([p['drops'] for p in value['pse_ports']], list(range(10)))
+        self.assertEqual(value['cdm1']['rx_hwf_drop'], 4294967295)
+        self.assertEqual(value['cdm2']['rx_hwf_drop'], 12)
+        for broken in (good.replace('pse_drop0 0', 'pse_drop0 4294967296'),
+                       good.replace('pse_drop9 9\n',''), good+'pse_drop2 2\n',
+                       good.replace('cdm2_hwf_drop 12','cdm2_hwf_drop -1'),
+                       good.replace('cdm1_hwf_drop 4294967295','cdm1_hwf_drop invalid')):
+            path.write_text(broken)
+            value = self.rpc('flowsense','getFrameEngine')
+            self.assertTrue(value['available']) # occupancy remains usable
+            self.assertFalse(value['drops_available'])
+        path.write_text(occupancy.replace('version 2','version 1'))
+        value = self.rpc('flowsense','getFrameEngine')
+        self.assertTrue(value['available'])
+        self.assertFalse(value['drops_available'])
+        self.assertIn('updated Q1000K kernel', value['drop_error'])
+
+    def test_ppe_source_availability(self):
+        missing = self.rpc('flowsense','getPpeEntries')
+        self.assertFalse(missing['bnd']['available'])
+        self.assertFalse(missing['unb']['available'])
+        self.write('/sys/kernel/debug/ppe/bind', '')
+        self.write('/sys/kernel/debug/ppe/entries', '')
+        empty = self.rpc('flowsense','getPpeEntries')
+        self.assertTrue(empty['bnd']['available'])
+        self.assertTrue(empty['unb']['available'])
+        self.assertEqual(empty['bnd']['total'] + empty['unb']['total'], 0)
 
     def test_ethernet_integrity_data(self):
         for iface, carrier, speed in [('lan1', '1', '1000'), ('lan2', '0', '-1')]:

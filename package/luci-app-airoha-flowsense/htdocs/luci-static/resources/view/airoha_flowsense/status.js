@@ -4,8 +4,9 @@
 'require rpc';
 'require ui';
 
-/* ── Drop-delta tracking (all counters are cumulative since interface up) ── */
+/* ── Per-poll counter baselines ── */
 var _prevEthHealth = {};
+var _prevBufferDrops = {pse:null, cdm:null};
 var _prevBridgeDrops = null;
 var _prevPpeBnd      = null;  // for tachometer heartbeat
 var _prevBandBnd     = [null, null, null];  // per-WiFi-band BND, drives the HW-accel pulse
@@ -653,20 +654,71 @@ function renderConflictAlerts(alertData) {
 }
 
 /* ── HW Buffer Health (replaces SQM — NPU traffic bypasses qdisc entirely) ── */
-function hwBufferState(fe) {
-	fe = fe || {};
-	if (fe.available !== true || fe.source !== 'driver-pse')
-		return {available:false, color:'#888', reason:fe.error || 'PSE data unavailable'};
+function dropDelta(kind, counters) {
+	var previous = _prevBufferDrops[kind];
+	_prevBufferDrops[kind] = counters;
+	if (!counters) return {state:'unavailable', delta:null};
+	if (!previous) return {state:'sampling', delta:null};
+	// Compare each counter: a reset must not be hidden by growth in another.
+	if (counters.some(function(value, i) { return value < previous[i]; }))
+		return {state:'reset', delta:null};
+	return {state:'ok', delta:counters.reduce(function(sum, value, i) { return sum + value - previous[i]; }, 0)};
+}
+
+function hwBufferState(fe, ppe) {
+	fe = fe || {}; ppe = ppe || {};
+	var ports = Array.isArray(fe.pse_ports) ? fe.pse_ports : [];
+	var raw = function(value) { return Number.isInteger(value) && value >= 0 && value <= 4294967295; };
+	var dropsAvailable = fe.available === true && fe.source === 'driver-pse' && fe.drops_available === true;
+	var pse = ports.slice().sort(function(a,b) {return a.port-b.port;});
+	var pseValid = dropsAvailable && pse.length === 10 && pse.every(function(p,i) {return p.port === i && raw(p.drops);});
+	var cdm = [(fe.cdm1 || {}).rx_hwf_drop, (fe.cdm2 || {}).rx_hwf_drop];
+	var pseChange = dropDelta('pse', pseValid ? pse.map(function(p) {return p.drops;}) : null);
+	var cdmChange = dropDelta('cdm', dropsAvailable && cdm.every(raw) ? cdm : null);
+	var bound = ppe.bnd || {}, unbound = ppe.unb || {};
+	var ppeAvailable = bound.available !== false && unbound.available !== false &&
+		Number.isInteger(bound.total) && bound.total >= 0 && Number.isInteger(unbound.total) && unbound.total >= 0;
+	var total = ppeAvailable ? bound.total + unbound.total : 0;
 	var capacity = fe.pse_total - fe.pse_reserved;
-	if (!(capacity > 0) || !Number.isFinite(fe.pse_used) || !Number.isFinite(fe.pse_free) ||
-	    !(fe.pse_high > 0) || fe.pse_high > capacity || fe.pse_used < 0 ||
-	    fe.pse_used > fe.pse_total || fe.pse_free < 0 || fe.pse_free > fe.pse_total)
-		return {available:false, color:'#888', reason:'Invalid PSE buffer snapshot'};
-	var full = fe.pse_free === 0;
-	var high = fe.pse_used >= fe.pse_high;
-	return {available:true, used:fe.pse_used, free:fe.pse_free, capacity:capacity,
-		pct:Math.min(100, 100 * fe.pse_used / capacity), high:high, full:full,
-		color:full ? '#d0021b' : high ? '#f5a623' : '#00cc44', pulsing:full || high};
+	var available = fe.available === true && fe.source === 'driver-pse' && capacity > 0 &&
+		Number.isFinite(fe.pse_used) && Number.isFinite(fe.pse_free) &&
+		fe.pse_high > 0 && fe.pse_high <= capacity && fe.pse_used >= 0 &&
+		fe.pse_used <= fe.pse_total && fe.pse_free >= 0 && fe.pse_free <= fe.pse_total;
+	var full = available && fe.pse_free === 0;
+	var high = available && fe.pse_used >= fe.pse_high;
+	// Retain the community warning policy. PSE drops alone include internal
+	// discard paths; a small delta is not proof of buffer congestion.
+	var dropping = cdmChange.delta > 0 || pseChange.delta > 200;
+	var reset = pseChange.state === 'reset' || cdmChange.state === 'reset';
+	var sampling = pseChange.state === 'sampling' || cdmChange.state === 'sampling';
+	var complete = pseChange.state === 'ok' && cdmChange.state === 'ok';
+	var value = full ? 'FULL' : dropping ? 'DROPPING' : high ? 'HIGH' :
+		reset ? 'RESET' : sampling ? 'SAMPLING' : !available ? 'N/A' : complete ? 'OK' : 'PARTIAL';
+	return {available:available, used:fe.pse_used, free:fe.pse_free, capacity:capacity,
+		pct:available ? Math.min(100, 100 * fe.pse_used / capacity) : null,
+		pseChange:pseChange, cdmChange:cdmChange, ppeAvailable:ppeAvailable,
+		ppeBound:bound.total, ppeTotal:total, ppePct:total > 0 ? Math.round(bound.total / total * 100) : 0,
+		reason:fe.error || 'Invalid PSE buffer snapshot',
+		dropReason:fe.drop_error || (!pseValid || !cdm.every(raw) ? 'PSE/CDM drop counters unavailable' : ''),
+		value:value, color:full ? '#d0021b' : dropping || high ? '#f5a623' :
+			available && complete ? '#00cc44' : '#888', pulsing:full || high || dropping};
+}
+
+function hwBufferDetail(hb) {
+	var deltaText = function(change) {
+		return change.state === 'ok' ? String(change.delta) :
+			change.state === 'sampling' ? 'sampling' : change.state === 'reset' ? 'reset' : 'N/A';
+	};
+	var metrics = 'PSE Δ: ' + deltaText(hb.pseChange) + ' | CDM Δ: ' + deltaText(hb.cdmChange) +
+		' | PPE: ' + (hb.ppeAvailable ? hb.ppePct + '% BND (' + hb.ppeBound + '/' + hb.ppeTotal + ')' : 'N/A');
+	var occupancy = hb.available ? 'Occupancy: ' + hb.pct.toFixed(1) + '% | PSE shared: ' +
+		hb.used + ' / ' + hb.capacity + ' pages | Free: ' + hb.free + ' pages' : hb.reason;
+	var lines = [metrics, occupancy];
+	if (hb.dropReason) lines.push(hb.dropReason);
+	if (hb.pseChange.state === 'reset' || hb.cdmChange.state === 'reset')
+		lines.push('Counter decreased; establishing a new baseline');
+	return E('div', {title:'PSE/CDM Δ: counter increases since the previous poll. PPE: bound share of observed entries.'},
+		lines.map(function(line) {return E('div', {}, line);}));
 }
 
 function ethernetIntegrity(eth) {
@@ -1338,10 +1390,9 @@ function renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 	var eastColor = cs.integrity.color;
 
 	var hb = cs.hwBuf;
-	var southVal = !hb.available ? 'N/A' : hb.full ? 'FULL' : hb.high ? 'HIGH' : hb.pct.toFixed(1) + '%';
+	var southVal = hb.value;
 	var southColor = hb.color;
-	var southSub = !hb.available ? hb.reason :
-		'PSE shared: ' + hb.used + ' / ' + hb.capacity + ' pages | Free: ' + hb.free + ' pages';
+	var southSub = hwBufferDetail(hb);
 
 	var states = {no_target:'NO TARGET', stopped:'STOPPED', stale:'STALE', unreachable:'NO REPLY'};
 	var latVal = cs.latencyValid ? cs.latMs.toFixed(2) + ' ms' : states[jitter.state] || 'WAITING';
@@ -1430,7 +1481,7 @@ return view.extend({
 		var memR = Array.isArray(st.memory_regions) ? st.memory_regions : [];
 		var mode = dm.mode || 'router';
 
-		var hwBuf = hwBufferState(fe, ppe, mode);
+		var hwBuf = hwBufferState(fe, ppe);
 		var cs = compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode, eth);
 
 		// Compass SVG container — tachometer is embedded inside (innerHTML so we can update by element ID)
@@ -1490,7 +1541,7 @@ return view.extend({
 				var mode = dm.mode || 'router';
 
 				// Compass update (tachometer embedded inside compass)
-				var hwBuf = hwBufferState(fe, ppe, mode);
+				var hwBuf = hwBufferState(fe, ppe);
 				var cs = compassState(bypass, hwBuf, jitter, wan, wifi, bridge, mode, eth);
 				updateCompassSVG(cs, mode, ppe);
 				updateCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode);
