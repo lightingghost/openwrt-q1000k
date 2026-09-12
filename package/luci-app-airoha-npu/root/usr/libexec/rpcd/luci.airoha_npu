@@ -1,20 +1,51 @@
 #!/bin/sh
 
-# Airoha SoC Status RPC backend for LuCI (NPU + CPU + Overclock)
+# Airoha SoC Status RPC backend for LuCI (NPU + CPU + Temperature)
 
-. /lib/functions.sh
+get_temperatures() {
+	. /usr/share/libubox/jshn.sh
+	local sensor value name label input
+	json_init
+	json_add_array sensors
+	for sensor in /sys/class/thermal/thermal_zone*; do
+		[ -r "$sensor/temp" ] || continue
+		value=$(cat "$sensor/temp" 2>/dev/null) || continue
+		case "${value#-}" in ''|*[!0-9]*) continue ;; esac
+		name=$(cat "$sensor/type" 2>/dev/null)
+		json_add_object
+		json_add_string name "${name:-${sensor##*/}}"
+		json_add_string source "${sensor##*/}"
+		json_add_int millidegrees "$value"
+		json_close_object
+	done
+	for sensor in /sys/class/hwmon/hwmon*; do
+		name=$(cat "$sensor/name" 2>/dev/null) || continue
+		# Thermal core also exposes the same zone as a hwmon device.
+		case "$(readlink -f "$sensor/device")" in */thermal_zone*) continue ;; esac
+		for input in "$sensor"/temp*_input; do
+			[ -r "$input" ] || continue
+			value=$(cat "$input" 2>/dev/null) || continue
+			case "${value#-}" in ''|*[!0-9]*) continue ;; esac
+			label=$(cat "${input%_input}_label" 2>/dev/null)
+			json_add_object
+			json_add_string name "$name ${label:-${input##*/}}"
+			json_add_string source "${sensor##*/}/${input##*/}"
+			json_add_int millidegrees "$value"
+			json_close_object
+		done
+	done
+	json_close_array
+	json_dump
+}
 
 get_status() {
-	# === NPU Status ===
-	# Read the actually-loaded NPU firmware path from DTS (firmware-name property).
-	local npu_fw=""
+	# Match the AN7581 driver default, overridden by a DT firmware-name list.
+	local npu_fw="/lib/firmware/airoha/en7581_npu_rv32.bin"
 	local npu_dt="/proc/device-tree/soc/npu@1e900000/firmware-name"
-	if [ -f "$npu_dt" ]; then
-		# firmware-name is a string list (null-separated). First entry is the rv32 code.
-		local fw_rel=$(tr '\0' '\n' < "$npu_dt" 2>/dev/null | grep -m1 "rv32")
+	if [ -r "$npu_dt" ]; then
+		local fw_rel=$(tr '\0' '\n' < "$npu_dt" | head -1)
 		[ -n "$fw_rel" ] && npu_fw="/lib/firmware/$fw_rel"
 	fi
-
 	local npu_ver="Unknown"
 	if [ -n "$npu_fw" ] && [ -f "$npu_fw" ]; then
 		npu_ver=$(strings "$npu_fw" 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+-)?TLB[0-9.]+[-_a-zA-Z0-9]*' | head -1)
@@ -37,7 +68,7 @@ get_status() {
 		npu_clock=$(cat /sys/kernel/debug/clk/npu/clk_rate 2>/dev/null || echo 0)
 	fi
 
-	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null || echo 0)
+	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null || :)
 
 	local offload_bound=$(cat /sys/kernel/debug/ppe/bind 2>/dev/null | grep -c "^[0-9a-fA-F]")
 	local offload_total=$(cat /sys/kernel/debug/ppe/entries 2>/dev/null | grep -c "^[0-9a-fA-F]")
@@ -84,23 +115,7 @@ get_status() {
 		cpu_avail_freqs=$(cat "$cpufreq_path/scaling_available_frequencies" 2>/dev/null || echo "")
 	fi
 
-	# Read actual PLL frequency from hardware (detects overclock)
 	local pll_freq=0
-	if command -v devmem > /dev/null 2>&1; then
-		local pcw_raw=$(devmem 0x1fa202b4 2>/dev/null)
-		local chg_raw=$(devmem 0x1fa202b8 2>/dev/null)
-		if [ -n "$pcw_raw" ] && [ -n "$chg_raw" ]; then
-			pcw_raw=$((pcw_raw))
-			chg_raw=$((chg_raw))
-			local pcw_int=$(( (pcw_raw >> 24) & 0x7F ))
-			local pll_posdiv=$(( (chg_raw >> 4) & 7 ))
-			if [ "$pll_posdiv" -eq 0 ]; then
-				pll_freq=$((pcw_int * 50))
-			else
-				pll_freq=$((pcw_int * 50 / (1 << pll_posdiv)))
-			fi
-		fi
-	fi
 
 	# Count online CPUs
 	local cpu_count=0
@@ -246,7 +261,8 @@ set_governor() {
 
 	# Validate governor is available
 	local avail=$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_available_governors 2>/dev/null)
-	if ! echo "$avail" | grep -qw "$governor"; then
+	case "$governor" in ''|*[!a-zA-Z0-9_-]*) echo '{"error":"invalid governor"}'; return ;; esac
+	if ! printf '%s\n' "$avail" | tr ' ' '\n' | grep -Fxq -- "$governor"; then
 		printf '{"error":"invalid governor: %s"}' "$governor"
 		return
 	fi
@@ -270,7 +286,8 @@ set_max_freq() {
 
 	# Validate freq is in available list
 	local avail=$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_available_frequencies 2>/dev/null)
-	if ! echo "$avail" | grep -qw "$freq"; then
+	case "$freq" in ''|*[!0-9]*) echo '{"error":"invalid freq"}'; return ;; esac
+	if ! printf '%s\n' "$avail" | tr ' ' '\n' | grep -Fxq -- "$freq"; then
 		printf '{"error":"invalid frequency: %s"}' "$freq"
 		return
 	fi
@@ -283,230 +300,71 @@ set_max_freq() {
 	fi
 }
 
-set_overclock() {
-	local target_mhz
-	target_mhz=$(echo "$1" | jsonfilter -e "@.freq_mhz" 2>/dev/null)
-
-	if [ -z "$target_mhz" ]; then
-		echo '{"error":"missing freq_mhz parameter"}'
-		return
-	fi
-
-	# Validate range (500-1600, crash likely above 1500 at stock voltage)
-	if [ "$target_mhz" -lt 500 ] || [ "$target_mhz" -gt 1600 ]; then
-		echo '{"error":"frequency must be 500-1600 MHz"}'
-		return
-	fi
-
-	if ! command -v devmem > /dev/null 2>&1; then
-		echo '{"error":"devmem not available"}'
-		return
-	fi
-
-	# Calculate PCW and posdiv
-	local posdiv pcw_int
-	if [ "$target_mhz" -lt 1000 ]; then
-		posdiv=1
-		pcw_int=$((target_mhz / 25))
-	else
-		posdiv=0
-		pcw_int=$((target_mhz / 50))
-	fi
-
-	# Lock governor to performance to prevent cpufreq from fighting
-	echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null
-
-	# Read current register values
-	local cur_clkmux=$(($(devmem 0x1fa201e0)))
-	local cur_pcw=$(($(devmem 0x1fa202b4)))
-	local cur_chg=$(($(devmem 0x1fa202b8)))
-
-	# Step 1: Enable PLL2 path in CLK_MUX (set bit 2)
-	devmem 0x1fa201e0 32 $(printf "0x%08X" $((cur_clkmux | 0x4)))
-
-	# Step 2: MCUCFG switch to PLL2 (sel=3 in bits[10:9])
-	local cur_u=$(($(devmem 0x1efbe640)))
-	devmem 0x1efbe640 32 $(printf "0x%08X" $(((cur_u & 0xFFFFFFE0) | 0x12)))
-	local cur_s=$(($(devmem 0x1efbe7c0)))
-	devmem 0x1efbe7c0 32 $(printf "0x%08X" $(((cur_s & 0xFFFFF9FF) | (3 << 9))))
-
-	# Step 3: Unlock PLL registers
-	local cur_p=$(($(devmem 0x1fa20268)))
-	devmem 0x1fa20268 32 $(printf "0x%08X" $(((cur_p & 0xFFFFFF00) | 0x12)))
-
-	# Step 4: Write new PCW integer
-	devmem 0x1fa202b4 32 $(printf "0x%08X" $(((cur_pcw & 0x00FFFFFF) | (pcw_int << 24))))
-
-	# Step 5: Write posdiv and toggle CHG bit
-	local chg_bit=$((cur_chg & 1))
-	local cleared=$((cur_chg & 0xFFFFFF8E))
-	if [ "$chg_bit" -eq 1 ]; then
-		devmem 0x1fa202b8 32 $(printf "0x%08X" $((cleared | (posdiv << 4))))
-	else
-		devmem 0x1fa202b8 32 $(printf "0x%08X" $((cleared | (posdiv << 4) | 1)))
-	fi
-
-	# Step 6: Wait for PLL lock
-	sleep 0.02
-
-	# Step 7: Enable ARMPLL path in CLK_MUX (set bit 0)
-	local cur_clkmux2=$(($(devmem 0x1fa201e0)))
-	devmem 0x1fa201e0 32 $(printf "0x%08X" $((cur_clkmux2 | 0x1)))
-
-	# Step 8: MCUCFG switch back to ARMPLL
-	local cur_u2=$(($(devmem 0x1efbe640)))
-	devmem 0x1efbe640 32 $(printf "0x%08X" $(((cur_u2 & 0xFFFFFFE0) | 0x12)))
-	local cur_s2=$(($(devmem 0x1efbe7c0)))
-	devmem 0x1efbe7c0 32 $(printf "0x%08X" $(((cur_s2 & 0xFFFFF9FF) | (1 << 9))))
-
-	# Step 9: Clear PLL2 path in CLK_MUX
-	local cur_clkmux3=$(($(devmem 0x1fa201e0)))
-	devmem 0x1fa201e0 32 $(printf "0x%08X" $((cur_clkmux3 & 0xFFFFFFFB)))
-
-	# Step 10: Re-lock PLL registers
-	local cur_p2=$(($(devmem 0x1fa20268)))
-	devmem 0x1fa20268 32 $(printf "0x%08X" $((cur_p2 & 0xFFFFFF00)))
-
-	# Verify
-	local final_pcw=$(($(devmem 0x1fa202b4)))
-	local final_chg=$(($(devmem 0x1fa202b8)))
-	local read_pcw=$(( (final_pcw >> 24) & 0x7F ))
-	local read_posdiv=$(( (final_chg >> 4) & 7 ))
-	local read_freq
-	if [ "$read_posdiv" -eq 0 ]; then
-		read_freq=$((read_pcw * 50))
-	else
-		read_freq=$((read_pcw * 50 / (1 << read_posdiv)))
-	fi
-
-	printf '{"result":"ok","target_mhz":%d,"actual_mhz":%d,"pcw":%d,"posdiv":%d}' \
-		"$target_mhz" "$read_freq" "$read_pcw" "$read_posdiv"
-}
-
 get_frame_engine() {
-	if ! command -v devmem > /dev/null 2>&1; then
-		echo '{"error":"devmem not available"}'
-		return
-	fi
-
-	# PSE queue status (IQ=hi16, OQ=lo16) and drop counts for each port
-	local i reg_q reg_d pse_ports=""
-	for i in 0 1 2 3 4 5 6 7 8 9; do
-		reg_q=$(printf "0x%x" $((0x1fb50150 + i * 4)))
-		reg_d=$(printf "0x%x" $((0x1fb50120 + i * 4)))
-		local qval=$(($(devmem $reg_q)))
-		local dval=$(($(devmem $reg_d)))
-		local iq=$(( (qval >> 16) & 0xFFFF ))
-		local oq=$(( qval & 0xFFFF ))
-		[ -n "$pse_ports" ] && pse_ports="${pse_ports},"
-		pse_ports="${pse_ports}{\"port\":${i},\"iq\":${iq},\"oq\":${oq},\"drops\":${dval}}"
-	done
-
-	# PSE shared buffer
-	local psb=$(($(devmem 0x1fb50104)))
-	local pse_used=$(( (psb >> 16) & 0xFFFF ))
-	local pse_free=$(( psb & 0x7FFF ))
-
-	# GDM counters (TX_OK, TX_DROP, RX_OK, RX_FC_DROP, RX_OVER_DROP)
-	# Read as hex to handle large 32-bit counters
-	local gdm1_tx=$(($(devmem 0x1fb50604)))
-	local gdm1_txd=$(($(devmem 0x1fb50608)))
-	local gdm1_rx=$(($(devmem 0x1fb50648)))
-	local gdm1_rxd=$(($(devmem 0x1fb5064c)))
-
-	local gdm2_tx=$(($(devmem 0x1fb51604)))
-	local gdm2_txd=$(($(devmem 0x1fb51608)))
-	local gdm2_rx=$(($(devmem 0x1fb51648)))
-	local gdm2_rxd=$(($(devmem 0x1fb5164c)))
-
-	local gdm4_tx=$(($(devmem 0x1fb52604)))
-	local gdm4_txd=$(($(devmem 0x1fb52608)))
-	local gdm4_rx=$(($(devmem 0x1fb52648)))
-	local gdm4_rxd=$(($(devmem 0x1fb5264c)))
-
-	# CDM counters (TX_OK, RXCPU_OK, RXHWF_OK, RXCPU_DROP, RXHWF_DROP)
-	local cdm1_tx=$(($(devmem 0x1fb50580)))
-	local cdm1_rxcpu=$(($(devmem 0x1fb50590)))
-	local cdm1_rxhwf=$(($(devmem 0x1fb50594)))
-	local cdm1_rxcpud=$(($(devmem 0x1fb505a0)))
-	local cdm1_rxhwfd=$(($(devmem 0x1fb505a4)))
-
-	local cdm2_tx=$(($(devmem 0x1fb51580)))
-	local cdm2_rxcpu=$(($(devmem 0x1fb51590)))
-	local cdm2_rxhwf=$(($(devmem 0x1fb51594)))
-	local cdm2_rxcpud=$(($(devmem 0x1fb515a0)))
-	local cdm2_rxhwfd=$(($(devmem 0x1fb515a4)))
-
-	printf '{"pse_ports":[%s],"pse_used":%d,"pse_free":%d,' "$pse_ports" "$pse_used" "$pse_free"
-	printf '"gdm1":{"tx":%d,"tx_drop":%d,"rx":%d,"rx_drop":%d},' "$gdm1_tx" "$gdm1_txd" "$gdm1_rx" "$gdm1_rxd"
-	printf '"gdm2":{"tx":%d,"tx_drop":%d,"rx":%d,"rx_drop":%d},' "$gdm2_tx" "$gdm2_txd" "$gdm2_rx" "$gdm2_rxd"
-	printf '"gdm4":{"tx":%d,"tx_drop":%d,"rx":%d,"rx_drop":%d},' "$gdm4_tx" "$gdm4_txd" "$gdm4_rx" "$gdm4_rxd"
-	printf '"cdm1":{"tx":%d,"rx_cpu":%d,"rx_hwf":%d,"rx_cpu_drop":%d,"rx_hwf_drop":%d},' "$cdm1_tx" "$cdm1_rxcpu" "$cdm1_rxhwf" "$cdm1_rxcpud" "$cdm1_rxhwfd"
-	printf '"cdm2":{"tx":%d,"rx_cpu":%d,"rx_hwf":%d,"rx_cpu_drop":%d,"rx_hwf_drop":%d}}' "$cdm2_tx" "$cdm2_rxcpu" "$cdm2_rxhwf" "$cdm2_rxcpud" "$cdm2_rxhwfd"
+	echo '{"available":false,"error":"Raw frame-engine counters are not sampled; use Ethernet and PPE statistics"}'
 }
 
 get_vlan_offload() {
 	local val
-	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null)
-	printf '{"enabled":%d}' "${val:-0}"
+	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null) || { echo '{"enabled":0,"available":false}'; return; }
+	printf '{"enabled":%d,"available":true}' "${val:-0}"
 }
 
 set_vlan_offload() {
-	local enabled
-	enabled=$(echo "$1" | jsonfilter -e "@.enabled" 2>/dev/null)
-
-	# jsonfilter returns empty string for integer 0; treat empty as 0
-	[ -z "$enabled" ] && enabled="0"
-
-	if [ "$enabled" != "0" ] && [ "$enabled" != "1" ]; then
-		echo '{"error":"enabled must be 0 or 1"}'
+	local enabled old
+	enabled=$(printf '%s' "$1" | jsonfilter -e '@.enabled' 2>/dev/null)
+	case "$enabled" in 0|1) ;; *) echo '{"error":"enabled must be 0 or 1"}'; return ;; esac
+	local path="/proc/sys/net/bridge/bridge-nf-filter-vlan-tagged"
+	local conf="/etc/sysctl.d/14-vlan-offload.conf"
+	old=$(cat "$path" 2>/dev/null) || { echo '{"error":"bridge filtering is unavailable"}'; return; }
+	if ! { printf '%s\n' "$enabled" > "$path"; } 2>/dev/null; then
+		echo '{"error":"failed to update bridge filtering"}'
 		return
 	fi
-
-	if ! echo "$enabled" > /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null; then
-		echo '{"error":"failed - bridge module may not be loaded"}'
+	if ! { mkdir -p /etc/sysctl.d && printf 'net.bridge.bridge-nf-filter-vlan-tagged=%s\n' "$enabled" > "$conf"; } 2>/dev/null; then
+		printf '%s\n' "$old" > "$path"
+		echo '{"error":"failed to persist bridge filtering"}'
 		return
 	fi
-
-	# Persist across reboots
-	echo "net.bridge.bridge-nf-filter-vlan-tagged=$enabled" > /etc/sysctl.d/14-vlan-offload.conf
+	chmod 644 "$conf"
 	printf '{"result":"ok","enabled":%d}' "$enabled"
 }
 
 get_pppoe_offload() {
 	local val
-	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null)
-	printf '{"enabled":%d}' "${val:-0}"
+	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null) || { echo '{"enabled":0,"available":false}'; return; }
+	printf '{"enabled":%d,"available":true}' "${val:-0}"
 }
 
 set_pppoe_offload() {
-	local enabled
-	enabled=$(echo "$1" | jsonfilter -e "@.enabled" 2>/dev/null)
-
-	# jsonfilter returns empty string for integer 0; treat empty as 0
-	[ -z "$enabled" ] && enabled="0"
-
-	if [ "$enabled" != "0" ] && [ "$enabled" != "1" ]; then
-		echo '{"error":"enabled must be 0 or 1"}'
+	local enabled old
+	enabled=$(printf '%s' "$1" | jsonfilter -e '@.enabled' 2>/dev/null)
+	case "$enabled" in 0|1) ;; *) echo '{"error":"enabled must be 0 or 1"}'; return ;; esac
+	local path="/proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged"
+	local conf="/etc/sysctl.d/15-pppoe-offload.conf"
+	old=$(cat "$path" 2>/dev/null) || { echo '{"error":"bridge filtering is unavailable"}'; return; }
+	if ! { printf '%s\n' "$enabled" > "$path"; } 2>/dev/null; then
+		echo '{"error":"failed to update bridge filtering"}'
 		return
 	fi
-
-	if ! echo "$enabled" > /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null; then
-		echo '{"error":"failed - bridge module may not be loaded"}'
+	if ! { mkdir -p /etc/sysctl.d && printf 'net.bridge.bridge-nf-filter-pppoe-tagged=%s\n' "$enabled" > "$conf"; } 2>/dev/null; then
+		printf '%s\n' "$old" > "$path"
+		echo '{"error":"failed to persist bridge filtering"}'
 		return
 	fi
-
-	# Persist across reboots
-	echo "net.bridge.bridge-nf-filter-pppoe-tagged=$enabled" > /etc/sysctl.d/15-pppoe-offload.conf
+	chmod 644 "$conf"
 	printf '{"result":"ok","enabled":%d}' "$enabled"
 }
 
 case "$1" in
 	list)
-		echo '{"getStatus":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setOverclock":{"freq_mhz":"int"},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPPPoEOffload":{},"setPPPoEOffload":{"enabled":"int"}}'
+		echo '{"getTemperatures":{},"getStatus":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPPPoEOffload":{},"setPPPoEOffload":{"enabled":"int"}}'
 		;;
 	call)
 		case "$2" in
+			getTemperatures)
+				get_temperatures
+				;;
 			getStatus)
 				get_status
 				;;
@@ -517,16 +375,12 @@ case "$1" in
 				get_token_info
 				;;
 			setGovernor)
-				read input
+				read -r input
 				set_governor "$input"
 				;;
 			setMaxFreq)
-				read input
+				read -r input
 				set_max_freq "$input"
-				;;
-			setOverclock)
-				read input
-				set_overclock "$input"
 				;;
 			getFrameEngine)
 				get_frame_engine
@@ -535,14 +389,14 @@ case "$1" in
 				get_vlan_offload
 				;;
 			setVlanOffload)
-				read input
+				read -r input
 				set_vlan_offload "$input"
 				;;
 			getPPPoEOffload)
 				get_pppoe_offload
 				;;
 			setPPPoEOffload)
-				read input
+				read -r input
 				set_pppoe_offload "$input"
 				;;
 			*)

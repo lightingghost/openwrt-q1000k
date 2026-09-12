@@ -628,7 +628,7 @@ function renderModeBanner(dm) {
 	var reasonText = reasonMap[reason] || '';
 	return E('div', { 'class': 'mode-banner' }, [
 		E('span', { 'class': 'mode-badge ' + (mode==='ap' ? 'mode-ap' : 'mode-router') },
-			mode === 'ap' ? 'AP MODE' : 'ROUTER MODE'),
+			mode === 'ap' ? 'BRIDGE / AP MODE' : 'ROUTER MODE'),
 		E('span', { 'class': 'soc-muted', 'style': 'font-size:12px' }, 'Auto-detected' + (reasonText ? ' \u2014 '+reasonText : '')),
 		E('span', { 'id': 'mode-banner-status', 'style': 'margin-left:auto;font-size:12px;color:var(--soc-muted)' }, '')
 	]);
@@ -686,7 +686,7 @@ function hwBufferState(fe, ppe, mode) {
 	var color = activeDrop ? '#f5a623' : '#00cc44';
 	return {
 		pseDrops: pseDrops, cdmHwfDrops: cdmHwfDrops, pseDelta: pseDelta, cdmHwfDelta: cdmHwfDelta,
-		activeDrop: activeDrop,
+		activeDrop: activeDrop, available: fe.available !== false && !fe.error,
 		ppeBound: ppeBound, ppeTotal: ppeTotal, ppePct: ppePct,
 		color: color, pulsing: activeDrop
 	};
@@ -1226,6 +1226,7 @@ function buildWifiFramesBanana(bandIdx, ws) {
 
 // Returns array of 3 elements (6 GHz, 5 GHz, 2.4 GHz) for direct inclusion in compass-wrap
 function buildWifiTachoElements(wifi, ti, st, ppe) {
+	if (wifi && wifi.available === false) return [];
 	var bands = (wifi && Array.isArray(wifi.bands)) ? wifi.bands : [];
 	var isMlo = !!(wifi && wifi.mlo);
 	var fallbackType = (st && st.npu_loaded) ? 'npu' : 'dma';
@@ -1365,7 +1366,7 @@ function renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 		eastSub = 'RX errors: '+(wan.rx_errors||0)+'  TX errors: '+(wan.tx_errors||0);
 	} else {
 		var ws = cs.worstSignal;
-		eastVal = cs.wbDelta.length === 0 ? 'NO CLIENTS'
+		eastVal = cs.wbDelta.length === 0 ? 'N/A'
 		        : ws === 0               ? 'NO DATA'
 		        : ws < -82               ? 'POOR'
 		        : ws < -75               ? 'WEAK'
@@ -1373,15 +1374,15 @@ function renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 		var bnames = ['2.4G','5G','6G'];
 		eastSub = cs.wbDelta.length > 0
 			? 'Signal: '+cs.wbDelta.map(function(b){ return (bnames[b.band]||('B'+b.band))+': '+b.signal+' dBm'; }).join('  |  ')
-			: 'No connected clients';
+			: 'See Ethernet port counters below';
 	}
 	var eastColor = cs.eastColor;
 
 	// South card: HW Buffer Health
 	var hb = cs.hwBuf || {};
-	var southVal   = hb.activeDrop ? 'DROPPING' : 'HEALTHY';
-	var southColor = hb.color || '#00cc44';
-	var southSub   = 'PSE Δ: '+hb.pseDelta+' CDM Δ: '+hb.cdmHwfDelta+' | PPE: '+hb.ppePct+'% BND ('+hb.ppeBound+'/'+hb.ppeTotal+')';
+	var southVal   = hb.available === false ? 'N/A' : (hb.activeDrop ? 'DROPPING' : 'HEALTHY');
+	var southColor = hb.available === false ? '#888' : (hb.color || '#00cc44');
+	var southSub   = hb.available === false ? 'Raw hardware counters are unavailable' : 'PSE Δ: '+hb.pseDelta+' CDM Δ: '+hb.cdmHwfDelta+' | PPE: '+hb.ppePct+'% BND ('+hb.ppeBound+'/'+hb.ppeTotal+')';
 
 	// West card: Latency
 	var latVal   = cs.latMs > 0 ? cs.latMs.toFixed(1)+'ms' : (jitter.available===false ? 'N/A' : '---');
@@ -1406,57 +1407,7 @@ function renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 
 function updateCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode) {
 	var cards = document.getElementById('compass-cards');
-	if (!cards) return;
-	var divs = cards.querySelectorAll('.compass-card');
-	if (divs.length < 4) return;
-
-	bypass=bypass||{}; jitter=jitter||{}; wan=wan||{}; wifi=wifi||{}; bridge=bridge||{};
-
-	function setCard(div, val, color, sub) {
-		var v = div.querySelector('.compass-card-value');
-		var s = div.querySelector('.compass-card-sub');
-		if (v) { v.textContent=val; v.style.color=color; }
-		if (s) s.textContent=sub;
-	}
-
-	var rawBridgeDrops2 = bridge.tx_dropped || 0;
-	var bridgeDelta2 = (_prevBridgeDrops !== null && rawBridgeDrops2 >= _prevBridgeDrops) ? (rawBridgeDrops2 - _prevBridgeDrops) : 0;
-	_prevBridgeDrops = rawBridgeDrops2;
-
-	setCard(divs[0], cs.npuActive?'ACTIVE':(cs.hwEnabled?'IDLE':'CPU PATH'),
-		cs.npuActive?'#00c8ff':(cs.hwEnabled?'#888':'#ff6b35'),
-		mode==='ap'
-			?'CPU: '+cs.cpuPct+'%  |  Bridge drops Δ: '+bridgeDelta2
-			:'CPU: '+cs.cpuPct+'%  |  WAN: '+cs.wanMbps+' Mbps');
-
-	if (mode === 'router') {
-		setCard(divs[1], cs.eastAlarm?cs.errCount+' ERROR'+(cs.errCount>1?'S':''):'CLEAN',
-			cs.eastColor,
-			'RX errors: '+(wan.rx_errors||0)+'  TX errors: '+(wan.tx_errors||0));
-	} else {
-		var ws2 = cs.worstSignal;
-		var bnames2 = ['2.4G','5G','6G'];
-		setCard(divs[1],
-			cs.wbDelta.length === 0 ? 'NO CLIENTS'
-			: ws2 === 0             ? 'NO DATA'
-			: ws2 < -82             ? 'POOR'
-			: ws2 < -75             ? 'WEAK'
-			:                         'CLEAN',
-			cs.eastColor,
-			cs.wbDelta.length > 0
-				? 'Signal: '+cs.wbDelta.map(function(b){ return (bnames2[b.band]||('B'+b.band))+': '+b.signal+' dBm'; }).join('  |  ')
-				: 'No connected clients');
-	}
-
-	var latVal = cs.latMs > 0 ? cs.latMs.toFixed(1)+'ms' : (jitter.available===false?'N/A':'---');
-	setCard(divs[2], latVal, cs.latColor,
-		'Jitter: '+(jitter.jitter||0).toFixed(1)+'ms  |  '+(jitter.samples||0)+' samples  |  '+(jitter.target||'1.1.1.1'));
-
-	var hb = cs.hwBuf || {};
-	setCard(divs[3],
-		hb.activeDrop?'DROPPING':'HEALTHY',
-		hb.color||'#00cc44',
-		'PSE Δ: '+hb.pseDelta+' CDM Δ: '+hb.cdmHwfDelta+' | PPE: '+hb.ppePct+'% BND ('+hb.ppeBound+'/'+hb.ppeTotal+')');
+	if (cards) cards.replaceWith(renderCompassCards(cs, bypass, jitter, wan, wifi, bridge, mode));
 }
 
 /* ── Main View ── */
@@ -1506,6 +1457,7 @@ return view.extend({
 
 		var view = E('div',{'class':'cbi-map'},[
 			E('h2',{},_('Airoha FlowSense')),
+			E('p',{},_('PPE entries show observed offloaded flows. Q1000K currently provides copper LAN only; optical PON service and standalone bridge hardware offload are not enabled. Temperature and VLAN/PPPoE bridge settings are on the Airoha SoC Status page.')),
 
 			// Conflict alerts
 			renderConflictAlerts(alertData),

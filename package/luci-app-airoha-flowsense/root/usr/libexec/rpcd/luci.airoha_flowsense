@@ -2,11 +2,14 @@
 
 # Airoha FlowSense RPC backend for LuCI (Offload & PPE Monitor)
 
-. /lib/functions.sh
-
 get_status() {
-	# === NPU Status ===
-	local npu_fw="/lib/firmware/airoha/en7581_MT7996_npu_rv32.bin"
+	# Match the AN7581 driver default, overridden by a DT firmware-name list.
+	local npu_fw="/lib/firmware/airoha/en7581_npu_rv32.bin"
+	local npu_dt="/proc/device-tree/soc/npu@1e900000/firmware-name"
+	if [ -r "$npu_dt" ]; then
+		local fw_rel=$(tr '\0' '\n' < "$npu_dt" | head -1)
+		[ -n "$fw_rel" ] && npu_fw="/lib/firmware/$fw_rel"
+	fi
 	local npu_ver="Unknown"
 
 	if [ -f "$npu_fw" ]; then
@@ -30,7 +33,7 @@ get_status() {
 		npu_clock=$(cat /sys/kernel/debug/clk/npu/clk_rate 2>/dev/null || echo 0)
 	fi
 
-	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null || echo 0)
+	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null || :)
 
 	local offload_bound=$(cat /sys/kernel/debug/ppe/bind 2>/dev/null | grep -c "^[0-9a-fA-F]")
 	local offload_total=$(cat /sys/kernel/debug/ppe/entries 2>/dev/null | grep -c "^[0-9a-fA-F]")
@@ -77,23 +80,8 @@ get_status() {
 		cpu_avail_freqs=$(cat "$cpufreq_path/scaling_available_frequencies" 2>/dev/null || echo "")
 	fi
 
-	# Read actual PLL frequency from hardware (detects overclock)
+	# Raw PLL registers are not accessed by this app.
 	local pll_freq=0
-	if command -v devmem > /dev/null 2>&1; then
-		local pcw_raw=$(devmem 0x1fa202b4 2>/dev/null)
-		local chg_raw=$(devmem 0x1fa202b8 2>/dev/null)
-		if [ -n "$pcw_raw" ] && [ -n "$chg_raw" ]; then
-			pcw_raw=$((pcw_raw))
-			chg_raw=$((chg_raw))
-			local pcw_int=$(( (pcw_raw >> 24) & 0x7F ))
-			local pll_posdiv=$(( (chg_raw >> 4) & 7 ))
-			if [ "$pll_posdiv" -eq 0 ]; then
-				pll_freq=$((pcw_int * 50))
-			else
-				pll_freq=$((pcw_int * 50 / (1 << pll_posdiv)))
-			fi
-		fi
-	fi
 
 	# Count online CPUs
 	local cpu_count=0
@@ -142,23 +130,7 @@ get_ppe_entries() {
 	local bnd_json unb_json
 
 	if [ -f "$bind_file" ]; then
-		local _bnd_parsed=$(parse_ppe "$bind_file" "" 25)
-
-		# The bind file may be a plain-text count ("946\n" or "946" no newline)
-		# OR a line-per-entry table. Try both and take the larger value.
-		# Only override parse_ppe's total when we have something bigger.
-		local _cnt_direct=$(tr -d '[:space:]' < "$bind_file" 2>/dev/null)
-		case "$_cnt_direct" in ''|*[!0-9]*) _cnt_direct=0 ;; esac
-		local _cnt_wc=$(wc -l < "$bind_file" 2>/dev/null | tr -d '[:space:]')
-		case "$_cnt_wc" in ''|*[!0-9]*) _cnt_wc=0 ;; esac
-		local _bnd_total=$(( _cnt_direct > _cnt_wc ? _cnt_direct : _cnt_wc ))
-
-		if [ "$_bnd_total" -gt 0 ] 2>/dev/null; then
-			bnd_json=$(printf '%s' "$_bnd_parsed" | sed 's/^{"total":[0-9]*/{"total":'"$_bnd_total"'/')
-		else
-			# Both external methods gave 0 — trust parse_ppe's own count
-			bnd_json="$_bnd_parsed"
-		fi
+		bnd_json=$(parse_ppe "$bind_file" "BND" 25)
 	else
 		bnd_json='{"total":0,"ipv4":0,"ipv6":0,"entries":[]}'
 	fi
@@ -385,65 +357,7 @@ get_token_info() {
 
 
 get_frame_engine() {
-	if ! command -v devmem > /dev/null 2>&1; then
-		echo '{"error":"devmem not available"}'
-		return
-	fi
-
-	# PSE queue status (IQ=hi16, OQ=lo16) and drop counts for each port
-	local i reg_q reg_d pse_ports=""
-	for i in 0 1 2 3 4 5 6 7 8 9; do
-		reg_q=$(printf "0x%x" $((0x1fb50150 + i * 4)))
-		reg_d=$(printf "0x%x" $((0x1fb50120 + i * 4)))
-		local qval=$(($(devmem $reg_q)))
-		local dval=$(($(devmem $reg_d)))
-		local iq=$(( (qval >> 16) & 0xFFFF ))
-		local oq=$(( qval & 0xFFFF ))
-		[ -n "$pse_ports" ] && pse_ports="${pse_ports},"
-		pse_ports="${pse_ports}{\"port\":${i},\"iq\":${iq},\"oq\":${oq},\"drops\":${dval}}"
-	done
-
-	# PSE shared buffer
-	local psb=$(($(devmem 0x1fb50104)))
-	local pse_used=$(( (psb >> 16) & 0xFFFF ))
-	local pse_free=$(( psb & 0x7FFF ))
-
-	# GDM counters (TX_OK, TX_DROP, RX_OK, RX_FC_DROP, RX_OVER_DROP)
-	# Read as hex to handle large 32-bit counters
-	local gdm1_tx=$(($(devmem 0x1fb50604)))
-	local gdm1_txd=$(($(devmem 0x1fb50608)))
-	local gdm1_rx=$(($(devmem 0x1fb50648)))
-	local gdm1_rxd=$(($(devmem 0x1fb5064c)))
-
-	local gdm2_tx=$(($(devmem 0x1fb51604)))
-	local gdm2_txd=$(($(devmem 0x1fb51608)))
-	local gdm2_rx=$(($(devmem 0x1fb51648)))
-	local gdm2_rxd=$(($(devmem 0x1fb5164c)))
-
-	local gdm4_tx=$(($(devmem 0x1fb52604)))
-	local gdm4_txd=$(($(devmem 0x1fb52608)))
-	local gdm4_rx=$(($(devmem 0x1fb52648)))
-	local gdm4_rxd=$(($(devmem 0x1fb5264c)))
-
-	# CDM counters (TX_OK, RXCPU_OK, RXHWF_OK, RXCPU_DROP, RXHWF_DROP)
-	local cdm1_tx=$(($(devmem 0x1fb50580)))
-	local cdm1_rxcpu=$(($(devmem 0x1fb50590)))
-	local cdm1_rxhwf=$(($(devmem 0x1fb50594)))
-	local cdm1_rxcpud=$(($(devmem 0x1fb505a0)))
-	local cdm1_rxhwfd=$(($(devmem 0x1fb505a4)))
-
-	local cdm2_tx=$(($(devmem 0x1fb51580)))
-	local cdm2_rxcpu=$(($(devmem 0x1fb51590)))
-	local cdm2_rxhwf=$(($(devmem 0x1fb51594)))
-	local cdm2_rxcpud=$(($(devmem 0x1fb515a0)))
-	local cdm2_rxhwfd=$(($(devmem 0x1fb515a4)))
-
-	printf '{"pse_ports":[%s],"pse_used":%d,"pse_free":%d,' "$pse_ports" "$pse_used" "$pse_free"
-	printf '"gdm1":{"tx":%d,"tx_drop":%d,"rx":%d,"rx_drop":%d},' "$gdm1_tx" "$gdm1_txd" "$gdm1_rx" "$gdm1_rxd"
-	printf '"gdm2":{"tx":%d,"tx_drop":%d,"rx":%d,"rx_drop":%d},' "$gdm2_tx" "$gdm2_txd" "$gdm2_rx" "$gdm2_rxd"
-	printf '"gdm4":{"tx":%d,"tx_drop":%d,"rx":%d,"rx_drop":%d},' "$gdm4_tx" "$gdm4_txd" "$gdm4_rx" "$gdm4_rxd"
-	printf '"cdm1":{"tx":%d,"rx_cpu":%d,"rx_hwf":%d,"rx_cpu_drop":%d,"rx_hwf_drop":%d},' "$cdm1_tx" "$cdm1_rxcpu" "$cdm1_rxhwf" "$cdm1_rxcpud" "$cdm1_rxhwfd"
-	printf '"cdm2":{"tx":%d,"rx_cpu":%d,"rx_hwf":%d,"rx_cpu_drop":%d,"rx_hwf_drop":%d}}' "$cdm2_tx" "$cdm2_rxcpu" "$cdm2_rxhwf" "$cdm2_rxcpud" "$cdm2_rxhwfd"
+	echo '{"available":false,"error":"Raw frame-engine counters are not sampled; use Ethernet and PPE statistics"}'
 }
 
 get_tx_stats() {
@@ -491,30 +405,27 @@ get_tx_stats() {
 
 get_vlan_offload() {
 	local val
-	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null)
-	printf '{"enabled":%d}' "${val:-0}"
+	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null) || { echo '{"enabled":0,"available":false}'; return; }
+	printf '{"enabled":%d,"available":true}' "${val:-0}"
 }
 
 set_vlan_offload() {
-	local enabled
-	enabled=$(echo "$1" | jsonfilter -e "@.enabled" 2>/dev/null)
-
-	# jsonfilter returns empty string for integer 0; treat empty as 0
-	[ -z "$enabled" ] && enabled="0"
-
-	if [ "$enabled" != "0" ] && [ "$enabled" != "1" ]; then
-		echo '{"error":"enabled must be 0 or 1"}'
+	local enabled old
+	enabled=$(printf '%s' "$1" | jsonfilter -e '@.enabled' 2>/dev/null)
+	case "$enabled" in 0|1) ;; *) echo '{"error":"enabled must be 0 or 1"}'; return ;; esac
+	local path="/proc/sys/net/bridge/bridge-nf-filter-vlan-tagged"
+	local conf="/etc/sysctl.d/14-vlan-offload.conf"
+	old=$(cat "$path" 2>/dev/null) || { echo '{"error":"bridge filtering is unavailable"}'; return; }
+	if ! { printf '%s\n' "$enabled" > "$path"; } 2>/dev/null; then
+		echo '{"error":"failed to update bridge filtering"}'
 		return
 	fi
-
-	if ! echo "$enabled" > /proc/sys/net/bridge/bridge-nf-filter-vlan-tagged 2>/dev/null; then
-		echo '{"error":"failed - bridge module may not be loaded"}'
+	if ! { mkdir -p /etc/sysctl.d && printf 'net.bridge.bridge-nf-filter-vlan-tagged=%s\n' "$enabled" > "$conf"; } 2>/dev/null; then
+		printf '%s\n' "$old" > "$path"
+		echo '{"error":"failed to persist bridge filtering"}'
 		return
 	fi
-
-	# Persist across reboots
-	echo "net.bridge.bridge-nf-filter-vlan-tagged=$enabled" > /etc/sysctl.d/14-vlan-offload.conf
-	chmod 644 /etc/sysctl.d/14-vlan-offload.conf
+	chmod 644 "$conf"
 	printf '{"result":"ok","enabled":%d}' "$enabled"
 }
 
@@ -533,7 +444,7 @@ set_flow_offload() {
 	local enabled
 	enabled=$(echo "$1" | jsonfilter -e "@.enabled" 2>/dev/null)
 
-	[ -z "$enabled" ] && enabled="0"
+
 
 	if [ "$enabled" != "0" ] && [ "$enabled" != "1" ]; then
 		echo '{"error":"enabled must be 0 or 1"}'
@@ -547,7 +458,7 @@ set_flow_offload() {
 		uci delete firewall.@defaults[0].flow_offloading 2>/dev/null
 		uci delete firewall.@defaults[0].flow_offloading_hw 2>/dev/null
 	fi
-	uci commit firewall
+	uci commit firewall || { echo '{"error":"failed to save firewall configuration"}'; return; }
 	# Emit the same config.change event rpcd sends after a LuCI commit,
 	# so procd reloads all firewall subscribers (firewall itself plus
 	# bridge-hw-offload) instead of only firewall.
@@ -558,29 +469,27 @@ set_flow_offload() {
 
 get_pppoe_offload() {
 	local val
-	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null)
-	printf '{"enabled":%d}' "${val:-0}"
+	val=$(cat /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null) || { echo '{"enabled":0,"available":false}'; return; }
+	printf '{"enabled":%d,"available":true}' "${val:-0}"
 }
 
 set_pppoe_offload() {
-	local enabled
-	enabled=$(echo "$1" | jsonfilter -e "@.enabled" 2>/dev/null)
-
-	[ -z "$enabled" ] && enabled="0"
-
-	if [ "$enabled" != "0" ] && [ "$enabled" != "1" ]; then
-		echo '{"error":"enabled must be 0 or 1"}'
+	local enabled old
+	enabled=$(printf '%s' "$1" | jsonfilter -e '@.enabled' 2>/dev/null)
+	case "$enabled" in 0|1) ;; *) echo '{"error":"enabled must be 0 or 1"}'; return ;; esac
+	local path="/proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged"
+	local conf="/etc/sysctl.d/15-pppoe-offload.conf"
+	old=$(cat "$path" 2>/dev/null) || { echo '{"error":"bridge filtering is unavailable"}'; return; }
+	if ! { printf '%s\n' "$enabled" > "$path"; } 2>/dev/null; then
+		echo '{"error":"failed to update bridge filtering"}'
 		return
 	fi
-
-	if ! echo "$enabled" > /proc/sys/net/bridge/bridge-nf-filter-pppoe-tagged 2>/dev/null; then
-		echo '{"error":"failed - bridge module may not be loaded"}'
+	if ! { mkdir -p /etc/sysctl.d && printf 'net.bridge.bridge-nf-filter-pppoe-tagged=%s\n' "$enabled" > "$conf"; } 2>/dev/null; then
+		printf '%s\n' "$old" > "$path"
+		echo '{"error":"failed to persist bridge filtering"}'
 		return
 	fi
-
-	# Persist across reboots
-	echo "net.bridge.bridge-nf-filter-pppoe-tagged=$enabled" > /etc/sysctl.d/15-pppoe-offload.conf
-	chmod 644 /etc/sysctl.d/15-pppoe-offload.conf
+	chmod 644 "$conf"
 	printf '{"result":"ok","enabled":%d}' "$enabled"
 }
 
@@ -680,6 +589,10 @@ get_jitter_result() {
 }
 
 get_wifi_stats() {
+	if ! ls /sys/class/ieee80211/phy* >/dev/null 2>&1; then
+		echo '{"available":false,"bands":[]}'
+		return
+	fi
 	# Collect per-band station stats from all AP interfaces using iw.
 	# MT7996 appears as a single phy0 with sub-interfaces (phy0.0-ap0,
 	# phy0.1-ap0, phy0.2-ap0), so we loop over interfaces and detect
@@ -1155,7 +1068,7 @@ get_npu_bypass() {
 		# Subtract 1 if file has a header line (starts with non-numeric)
 		local first
 		first=$(head -1 "$ppe_bind" 2>/dev/null)
-		case "$first" in [0-9]*) ;; *) offload_bound=$(( offload_bound - 1 )) ;; esac
+		case "$first" in [0-9a-fA-F]*) ;; *) offload_bound=$(( offload_bound - 1 )) ;; esac
 		[ "$offload_bound" -lt 0 ] && offload_bound=0
 	fi
 
@@ -1245,20 +1158,6 @@ get_conflict_alerts() {
 		alert_count=$((alert_count + 1))
 	fi
 
-	# ── Alert 3: NPU Bypass + High Latency ────────────────────────────────
-	# NPU is on but jitter result shows high latency — NPU not helping or
-	# the path has a real latency problem.
-	local jitter_file="/tmp/npu-jitter.json"
-	if [ "$hw_offload" = "1" ] && [ -f "$jitter_file" ]; then
-		local last_ping
-		last_ping=$(jsonfilter -i "$jitter_file" -e "@.last_ping" 2>/dev/null)
-		# Warn if ping > 60ms with hw offload on (something is wrong)
-		if [ -n "$last_ping" ] && awk "BEGIN{exit !($last_ping > 60)}"; then
-			[ -n "$alerts" ] && alerts="${alerts},"
-			alerts="${alerts}{\"id\":\"npu_bypass_latency\",\"severity\":\"warning\",\"title\":\"NPU Bypass Detected\",\"message\":\"HW offload is enabled but ISP latency is high (${last_ping}ms). Latency management may be skipped by hardware acceleration.\"}"
-			alert_count=$((alert_count + 1))
-		fi
-	fi
 
 	printf '{"alert_count":%d,"alerts":[%s]}' "$alert_count" "$alerts"
 }
@@ -1313,21 +1212,21 @@ case "$1" in
 				get_vlan_offload
 				;;
 			setVlanOffload)
-				read input
+				read -r input
 				set_vlan_offload "$input"
 				;;
 			getFlowOffload)
 				get_flow_offload
 				;;
 			setFlowOffload)
-				read input
+				read -r input
 				set_flow_offload "$input"
 				;;
 			getPppoeOffload)
 				get_pppoe_offload
 				;;
 			setPppoeOffload)
-				read input
+				read -r input
 				set_pppoe_offload "$input"
 				;;
 			getDeviceMode)

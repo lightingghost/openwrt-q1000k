@@ -1,5 +1,6 @@
 config jitter 'jitter'
-	option target '1.1.1.1'
+	# Empty selects the current IPv4 default gateway.
+	option target ''
 
 config settings 'settings'
 	# Airtime→goodput efficiency (%) for the offloaded-throughput needle estimate.
