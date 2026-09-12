@@ -12,8 +12,8 @@ fan controller, fixed hwmon index or fan-control service is required.
 
 CPU controls accept only frequencies/governors advertised by the kernel.
 They are runtime settings. Raw PLL overclocking and frame-engine register
-reads were removed: polling read-clear counters can interfere with the
-Ethernet driver's own statistics. CPU frequency is unavailable if the
+reads were removed: these counters are managed and periodically reset by the
+Ethernet driver, so unsynchronized reads are not reliable cumulative statistics. CPU frequency is unavailable if the
 stock firmware/driver does not expose a working cpufreq policy.
 
 The VLAN and PPPoE switches preserve the community RPC interface but are

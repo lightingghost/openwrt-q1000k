@@ -1,6 +1,6 @@
 # Airoha FlowSense for Q1000K
 
-LuCI **Status → Airoha FlowSense** monitors PPE bound/unbound entries, CPU
+LuCI **Status → FlowSense** monitors PPE bound/unbound entries, CPU
 load, Ethernet port traffic and upstream latency. Select
 `CONFIG_PACKAGE_luci-app-airoha-flowsense=y` with the LuCI feed installed.
 The Q1000K community build profile selects this package. The package declares

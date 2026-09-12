@@ -53,7 +53,7 @@ in a separate commit rather than being folded into the imported apps.
   NPU firmware/driver status and PPE entries. Sensors are discovered at
   runtime; absent sensors are reported explicitly. Fix the Q1000K thermal
   phandle to match the sensor's zero-cell binding.
-- **Status → Airoha FlowSense**: PPE counts, existing Ethernet ports, CPU
+- **Status → FlowSense**: PPE counts, existing Ethernet ports, CPU
   load, firewall flow-offload configuration and latency. Hide wireless gauges
   when there is no wireless PHY. Detect the plain AN7581 NPU firmware, with
   support for a DT firmware-name override.
@@ -63,7 +63,8 @@ in a separate commit rather than being folded into the imported apps.
   validate values and retain the sysctl configuration across sysupgrade.
   The package's default bridge IP hooks remain disabled.
 - Remove direct PLL writes and raw frame-engine counter reads. The latter
-  can consume read-clear Ethernet statistics. CPU controls use advertised
+  are managed and periodically reset by the Ethernet driver, so they are
+  not reliable cumulative statistics for an independent polling app. CPU controls use advertised
   kernel policies only. Missing raw counters show unavailable rather than
   healthy. High RTT alone is not evidence of failed offload.
 - Declare missing command dependencies, ensure executable RPC/init scripts,
@@ -83,3 +84,10 @@ Hardware checks still required: temperatures against the serial/sysfs
 readings, UART baud rates, cold-boot 10 GbE links on the actual silicon,
 forwarding and GRO behavior, EIP93 use, ramoops retention and a normal
 configuration-preserving sysupgrade. No device is flashed by this work.
+
+## Branches
+
+`main` tracks official OpenWrt upstream without Q1000K changes.
+`q1000k-support` is reserved for explicitly requested upstream PR work.
+All community imports and adaptations belong to `q1000k-dev`, which is
+also the source branch selected by the separate firmware builder.
