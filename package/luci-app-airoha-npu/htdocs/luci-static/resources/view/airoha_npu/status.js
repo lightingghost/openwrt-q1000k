@@ -104,55 +104,74 @@ function renderBridgeFilter(id, state, setter) {
 }
 
 /* ── CPU Frequency ── */
-function freqBarState(hw, min, max, pll, gov) {
-	var oc = gov==='performance' && pll>0 && (pll*1000)>max;
-	return { freq: oc ? pll*1000 : Math.min(hw,max), max: oc ? pll*1000 : max, oc: oc };
+function freqPercent(freq, min, max) {
+	return max > 0 && freq > 0 ? Math.max(0, Math.min(100,
+		Math.round((freq - min) / Math.max(1, max - min) * 100))) : 0;
 }
 
-function renderFreqBar(hw, min, max, pll, gov) {
-	if (!max) return E('span',{},'N/A');
-	var s = freqBarState(hw,min,max,pll,gov);
-	var pct = Math.round(((s.freq-min)/Math.max(1, s.max-min))*100);
-	pct = Math.max(0,Math.min(100,pct));
-	var bg = s.oc ? 'linear-gradient(90deg,#e65100,#ff9800)' : 'linear-gradient(90deg,#2e7d32,#66bb6a)';
-	var label = s.oc ? (pll+' MHz (OC)') : fmtFreq(s.freq);
-
+function renderFreqBar(freq, min, max) {
 	return E('div', { 'id':'cpu-freq-bar-wrap', 'style':'display:flex;align-items:center;gap:10px' }, [
-		E('span', { 'class':'soc-muted', 'style':'font-size:90%' }, fmtFreq(min)),
+		E('span', { 'id':'cpu-freq-min-label', 'class':'soc-muted' }, fmtFreq(min)),
 		E('div', { 'style':'flex:1;border-radius:4px;height:22px;position:relative;min-width:180px;max-width:350px;overflow:hidden', 'class':'soc-bar-track' }, [
-			E('div', { 'id':'cpu-freq-fill', 'style':'background:'+bg+';height:100%;border-radius:4px;width:'+pct+'%;transition:width .5s' }),
-			E('span', { 'id':'cpu-freq-text', 'style':'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:13px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6)' }, label)
+			E('div', { 'id':'cpu-freq-fill', 'style':'background:linear-gradient(90deg,#2e7d32,#66bb6a);height:100%;width:'+freqPercent(freq,min,max)+'%;transition:width .5s' }),
+			E('span', { 'id':'cpu-freq-text', 'style':'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:13px;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6)' }, fmtFreq(freq))
 		]),
-		E('span', { 'id':'cpu-freq-max-label', 'class':'soc-muted', 'style':'font-size:90%' }, fmtFreq(s.max))
+		E('span', { 'id':'cpu-freq-max-label', 'class':'soc-muted' }, fmtFreq(max))
 	]);
 }
 
-function updateFreqBar(hw, min, max, pll, gov) {
-	var s = freqBarState(hw,min,max,pll,gov);
-	var el = document.getElementById('cpu-freq-text'), fl = document.getElementById('cpu-freq-fill'), ml = document.getElementById('cpu-freq-max-label');
-	if (el) el.textContent = s.oc ? (pll+' MHz (OC)') : fmtFreq(s.freq);
-	if (fl && s.max>0) { var pct=Math.max(0,Math.min(100,Math.round(((s.freq-min)/Math.max(1, s.max-min))*100))); fl.style.width=pct+'%'; fl.style.background=s.oc?'linear-gradient(90deg,#e65100,#ff9800)':'linear-gradient(90deg,#2e7d32,#66bb6a)'; }
-	if (ml) ml.textContent = fmtFreq(s.max);
+function updateFreqBar(freq, min, max) {
+	var label = document.getElementById('cpu-freq-text');
+	var fill = document.getElementById('cpu-freq-fill');
+	var low = document.getElementById('cpu-freq-min-label');
+	var high = document.getElementById('cpu-freq-max-label');
+	if (label) label.textContent = fmtFreq(freq);
+	if (fill) fill.style.width = freqPercent(freq,min,max) + '%';
+	if (low) low.textContent = fmtFreq(min);
+	if (high) high.textContent = fmtFreq(max);
 }
 
-function renderGovSelect(avail, active) {
-	var gs = (avail||'').trim().split(/\s+/).filter(Boolean);
-	if (!gs.length) return E('span',{},'N/A');
-	return E('select', { 'id':'cpu-governor-select','class':'cbi-input-select','style':'min-width:140px','change':function(ev){
-		var g=ev.target.value; ev.target.disabled=true;
-		callSetGovernor(g).then(function(r){ev.target.disabled=false;if(r&&r.error) ui.addNotification(null,E('p',{},_('Error: ')+r.error),'error');}).catch(function(){ev.target.disabled=false;});
-	}}, gs.map(function(g){return E('option',{'value':g,'selected':g===active?'':null},g);}));
+function updateCpuSelect(select, available, active, format) {
+	if (!select || select._pending || select.matches(':focus')) return;
+	var values = (available || '').trim().split(/\s+/).filter(Boolean);
+	var key = values.join(' ');
+	if (select._options !== key) {
+		select.innerHTML = '';
+		(values.length ? values : ['']).forEach(function(value) {
+			select.appendChild(E('option', { 'value':value }, value ? format(value) : _('Unavailable')));
+		});
+		select._options = key;
+	}
+	select.disabled = !values.length;
+	select.value = values.indexOf(String(active)) >= 0 ? String(active) : '';
+	select._active = select.value;
 }
 
-function renderMaxFreqSelect(avail, cur) {
-	var fs = (avail||'').trim().split(/\s+/).filter(Boolean);
-	if (!fs.length) return E('span',{},'N/A');
-	return E('select', { 'id':'cpu-maxfreq-select','class':'cbi-input-select','style':'min-width:140px','change':function(ev){
-		var f=ev.target.value; ev.target.disabled=true;
-		callSetMaxFreq(parseInt(f)).then(function(r){ev.target.disabled=false;if(r&&r.error) ui.addNotification(null,E('p',{},_('Error: ')+r.error),'error');}).catch(function(){ev.target.disabled=false;});
-	}}, fs.map(function(f){return E('option',{'value':f,'selected':parseInt(f)===parseInt(cur)?'':null},(parseInt(f)/1000).toFixed(0)+' MHz');}));
+function renderCpuSelect(id, available, active, format, setter, field) {
+	var select = E('select', { 'id':id, 'class':'cbi-input-select', 'style':'min-width:140px',
+		'change':function(ev) {
+			var el = ev.target, previous = el._active;
+			el._pending = true;
+			el.disabled = true;
+			return setter(el.value).then(function(result) {
+				if (!result || result.error) throw new Error(result && result.error || _('No response from CPU frequency driver'));
+				el.value = String(result[field]);
+				el._active = el.value;
+			}).catch(function(error) {
+				el.value = previous;
+				ui.addNotification(null, E('p', {}, error.message), 'error');
+			}).finally(function() { el._pending = false; el.disabled = false; });
+		}
+	});
+	updateCpuSelect(select, available, active, format);
+	return select;
 }
 
+function formatGovernor(value) { return value; }
+function setMaxFreq(value) { return callSetMaxFreq(Number(value)); }
+function cpuPolicyMessage(st) {
+	return st.cpu_policy_available === false ? _('CPU frequency driver has not registered a policy. A firmware update is required to enable these controls.') : '';
+}
 
 /* ── PPE Table ── */
 function renderPpeRows(entries) {
@@ -188,10 +207,11 @@ return view.extend({
 			// CPU Frequency
 			E('div',{'class':'cbi-section'},[
 				E('h3',{},_('CPU Frequency')),
+				E('p',{'id':'cpu-policy-message','class':'soc-muted'},cpuPolicyMessage(st)),
 				E('table',{'class':'table'},[
-					E('tr',{'class':'tr'},[ E('td',{'class':'td','width':'33%'},E('strong',{},_('Current Frequency'))), E('td',{'class':'td'}, renderFreqBar(st.cpu_hw_freq,st.cpu_min_freq,st.cpu_max_freq,st.pll_freq_mhz,st.cpu_governor)) ]),
-					E('tr',{'class':'tr'},[ E('td',{'class':'td'},E('strong',{},_('Governor'))), E('td',{'class':'td'}, renderGovSelect(st.cpu_avail_governors,st.cpu_governor)) ]),
-					E('tr',{'class':'tr'},[ E('td',{'class':'td'},E('strong',{},_('Max Frequency'))), E('td',{'class':'td'}, renderMaxFreqSelect(st.cpu_avail_freqs,st.cpu_max_freq)) ]),
+					E('tr',{'class':'tr'},[ E('td',{'class':'td','width':'33%'},E('strong',{},_('Current Frequency'))), E('td',{'class':'td'}, renderFreqBar(st.cpu_hw_freq || st.cpu_cur_freq,st.cpu_min_freq,st.cpu_max_freq)) ]),
+					E('tr',{'class':'tr'},[ E('td',{'class':'td'},E('strong',{},_('Governor'))), E('td',{'class':'td'}, renderCpuSelect('cpu-governor-select',st.cpu_avail_governors,st.cpu_governor,formatGovernor,callSetGovernor,'governor')) ]),
+					E('tr',{'class':'tr'},[ E('td',{'class':'td'},E('strong',{},_('Max Frequency'))), E('td',{'class':'td'}, renderCpuSelect('cpu-maxfreq-select',st.cpu_avail_freqs,st.cpu_max_freq,fmtFreq,setMaxFreq,'freq')) ]),
 					E('tr',{'class':'tr'},[ E('td',{'class':'td'},E('strong',{},_('CPU Cores'))), E('td',{'class':'td'},(st.cpu_count||0).toString()) ])
 				])
 			]),
@@ -239,9 +259,10 @@ return view.extend({
 				var st=d[0]||{}, ppe=d[1]||{}, ti=d[2]||{}, fe=d[3]||{}, vo=d[4]||{}, po=d[5]||{};
 				var entries = Array.isArray(ppe.entries)?ppe.entries:[];
 
-				updateFreqBar(st.cpu_hw_freq,st.cpu_min_freq,st.cpu_max_freq,st.pll_freq_mhz,st.cpu_governor);
-				var gs=document.getElementById('cpu-governor-select'); if(gs&&!gs.matches(':focus')) gs.value=st.cpu_governor||'';
-				var fs=document.getElementById('cpu-maxfreq-select'); if(fs&&!fs.matches(':focus')) fs.value=(st.cpu_max_freq||0).toString();
+				updateFreqBar(st.cpu_hw_freq || st.cpu_cur_freq,st.cpu_min_freq,st.cpu_max_freq);
+				updateCpuSelect(document.getElementById('cpu-governor-select'),st.cpu_avail_governors,st.cpu_governor,formatGovernor);
+				updateCpuSelect(document.getElementById('cpu-maxfreq-select'),st.cpu_avail_freqs,st.cpu_max_freq,fmtFreq);
+				var cp=document.getElementById('cpu-policy-message'); if(cp) cp.textContent=cpuPolicyMessage(st);
 				var vs=document.getElementById('vlan-offload-select'); if(vs&&!vs.matches(':focus')) vs.value=(vo.enabled?'1':'0');
 				var ps=document.getElementById('pppoe-offload-select'); if(ps&&!ps.matches(':focus')) ps.value=(po.enabled?'1':'0');
 

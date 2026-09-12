@@ -26,7 +26,7 @@ in a separate commit rather than being folded into the imported apps.
 | --- | --- | --- |
 | `e4f4dfb8b5` | Inject buildbot vermagic | Skip. A changed kernel must keep its own ABI hash; pretending to match snapshot modules is unsafe. |
 | `d57aa14633` | Enable EIP93 crypto | Full cherry-pick. The SoC crypto device and driver already exist; include the module. |
-| `4b786a7dc7` | CPUfreq / PM domain changes | Skip. Q1000K already has the `airoha,en7581` compatible and patch 607 fixes the positive attach-count check. This community patch additionally duplicates Kconfig symbols, replaces domain/OPP attachment and adds unvalidated direct PLL programming. |
+| `4b786a7dc7` | CPUfreq / PM domain changes | Partial import after Q1000K runtime logs showed a zero CPU clock and no policy. Retain the PM-domain PLL fallback, then scope it to Q1000K and adapt it for shared syscon access, synchronized transitions and stock 500–1200 MHz levels. Keep existing Kconfig and domain/OPP attachment; patch 607 already fixes the positive attach-count check. See the SoC Status README for validation limits. |
 | `01b95e9ebe` | DSA modules and raw netlink access | Skip. Ethernet/NPU/DSA are already built into Q1000K's kernel. The proposed NPU module forces MT7996 firmware; raw switch-register netlink access is unnecessary for the dashboards. |
 | `947e986680` | Bridge-offload rule service | Skip with its kernel dependency below. Its dynamic nft rules alone cannot add bridge-family flowtable support. |
 | `57c9119d3d` | Standalone L2 bridge offload | Defer. Review found an explicit `kfree_skb()` followed by `NF_DROP` in the fragmentation error path (netfilter core also frees on `NF_DROP`). Forward-path selection also treats any bridge-port ingress as bridging without limiting the new behavior to the bridge nft family. Requires correction and forwarding/encapsulation tests before import. |
@@ -62,7 +62,9 @@ in a separate commit rather than being folded into the imported apps.
   independently enable hardware acceleration. Include `kmod-br-netfilter`,
   validate values and retain the sysctl configuration across sysupgrade.
   The package's default bridge IP hooks remain disabled.
-- Remove direct PLL writes; CPU controls use advertised kernel policies only.
+- Remove userspace direct PLL writes; CPU controls use advertised kernel policies only.
+  The Q1000K kernel supplies a board-specific fallback for firmware lacking
+  a usable CPU-frequency SMC, while keeping the stock OPP range.
   A follow-up adds PSE shared-buffer usage through a read-only AN7581 driver
   interface. GDM/CDM raw MIB sampling remains excluded; the driver accumulates
   and resets GDM statistics. See the FlowSense README for register sources,
@@ -86,7 +88,7 @@ hash. No optical service or automatic hardware offload is enabled.
 
 See `tests/q1000k/README.md` for reproducible backend and page tests.
 Hardware checks still required: temperatures against the serial/sysfs
-readings, UART baud rates, cold-boot 10 GbE links on the actual silicon,
+readings, CPU policy creation and frequency transitions under load, UART baud rates, cold-boot 10 GbE links on the actual silicon,
 forwarding and GRO behavior, EIP93 use, ramoops retention and a normal
 configuration-preserving sysupgrade. No device is flashed by this work.
 

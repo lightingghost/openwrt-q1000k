@@ -4,7 +4,7 @@ const path = require('path');
 const assert = require('assert/strict');
 const repo = path.resolve(__dirname, '../..');
 async function test(app) {
-  const ids = new Map(), callbacks = [], calls = [];
+  const ids = new Map(), callbacks = [], calls = [], notifications = [];
   class Element {
     constructor(tag, attrs = {}, children = []) {
       this.tag = tag; this.attrs = attrs; this.style = {}; this.children = [];
@@ -30,7 +30,7 @@ async function test(app) {
   const window = { getComputedStyle: () => ({backgroundColor:'rgb(255, 255, 255)', getPropertyValue: () => ''}), matchMedia: () => ({matches:false}) };
   const responses = {
     getStatus: { npu_loaded:true, npu_version:'TLB2.3', offload_bound:1, offload_total:2, cpu_count:4,
-      cpu_hw_freq:1200000, cpu_min_freq:500000, cpu_max_freq:1200000,
+      cpu_policy_available:true, cpu_hw_freq:0, cpu_cur_freq:625000, cpu_min_freq:500000, cpu_max_freq:1200000,
       cpu_avail_freqs:'500000 1200000', cpu_governor:'schedutil', cpu_avail_governors:'performance schedutil' },
     getTemperatures: {sensors:[{name:'CPU', millidegrees:53250}]},
     getPpeEntries: {entries:[], bnd:{total:1,entries:[]},unb:{total:1,entries:[]}},
@@ -40,17 +40,22 @@ async function test(app) {
     getPPPoEOffload:{enabled:0,available:true},getPppoeOffload:{enabled:0,available:true},
     getEthStats:{ports:[{iface:'lan1',up:true,speed:1000,tx_bytes:100,rx_bytes:200,stats_available:true,rx_errors:0,tx_errors:0,rx_crc_errors:0,rx_dropped:0,tx_dropped:0},{iface:'lan2',up:false,speed:0,tx_bytes:0,rx_bytes:0,stats_available:true,rx_errors:0,tx_errors:0,rx_crc_errors:0,rx_dropped:0,tx_dropped:0}]}
   };
-  const rpc = {declare: spec => (...args) => { calls.push([spec.method, args]); return Promise.resolve(responses[spec.method] || {}); }};
+  const rpc = {declare: spec => (...args) => { calls.push([spec.method, args]); return responses[spec.method] instanceof Error ? Promise.reject(responses[spec.method]) : Promise.resolve(responses[spec.method] || {}); }};
   const source = fs.readFileSync(path.join(repo, `package/luci-app-airoha-${app}/htdocs/luci-static/resources/view/airoha_${app}/status.js`), 'utf8');
   const view = new Function('view','rpc','poll','ui','E','L','_','document','window','getComputedStyle', source)(
-    {extend: v => v}, rpc, {add: cb => callbacks.push(cb)}, {addNotification:()=>{}}, E,
+    {extend: v => v}, rpc, {add: cb => callbacks.push(cb)}, {addNotification:(title,node)=>notifications.push(node)}, E,
     {bind:(fn,obj)=>fn.bind(obj)}, s=>s, document, window, window.getComputedStyle);
+  const cpuStatus = {...responses.getStatus};
+  if (app === 'npu') responses.getStatus = {cpu_policy_available:false};
   const tree = view.render(await view.load());
   const text = node => typeof node === 'object' ? (node.textContent || '') + node.innerHTML + node.children.map(text).join(' ') : String(node);
   if (app === 'npu') {
     assert(text(tree).includes('53.3 °C'));
     assert(ids.has('vlan-offload-select') && ids.has('pppoe-offload-select'));
     assert(!text(tree).includes('Overclock'));
+    assert(ids.get('cpu-governor-select').disabled && ids.get('cpu-maxfreq-select').disabled);
+    assert(text(tree).includes('has not registered a policy'));
+    responses.getStatus = cpuStatus; // policy can appear after the initial page load
     responses.getTemperatures = {sensors:[{name:'CPU',millidegrees:60000}]};
   } else {
     assert(!ids.has('wifi-svg-wrap-0'));
@@ -72,7 +77,37 @@ async function test(app) {
     assert.equal(ids.get('latency-target-message').textContent, 'Cannot save target');
   }
   for (const cb of callbacks) await cb();
-  if (app === 'npu') assert(text(ids.get('temperature-sensors')).includes('60.0 °C'));
+  if (app === 'npu') {
+    assert(text(ids.get('temperature-sensors')).includes('60.0 °C'));
+    assert.equal(ids.get('cpu-freq-text').textContent, '625 MHz'); // scaling fallback
+    assert.equal(ids.get('cpu-policy-message').textContent, '');
+    const gov = ids.get('cpu-governor-select'), freq = ids.get('cpu-maxfreq-select');
+    assert(!gov.disabled && !freq.disabled);
+    assert.equal(gov.children.length, 2);
+    gov.value = 'performance'; responses.setGovernor = {result:'ok',governor:'performance'};
+    await gov.attrs.change({target:gov});
+    assert(calls.some(([m,args]) => m==='setGovernor' && args[0]==='performance'));
+    gov.value = 'schedutil'; responses.setGovernor = {error:'Driver rejected governor'};
+    await gov.attrs.change({target:gov});
+    assert.equal(gov.value, 'performance');
+    assert(text(notifications.at(-1)).includes('Driver rejected governor'));
+    freq.value = '500000'; responses.setMaxFreq = {result:'ok',freq:1200000};
+    await freq.attrs.change({target:freq});
+    assert(calls.some(([m,args]) => m==='setMaxFreq' && args[0]===500000));
+    assert.equal(freq.value, '1200000'); // use actual kernel readback
+    freq.value = '500000'; responses.setMaxFreq = new Error('Connection lost');
+    await freq.attrs.change({target:freq});
+    assert.equal(freq.value, '1200000');
+    assert(text(notifications.at(-1)).includes('Connection lost'));
+    responses.getStatus.cpu_hw_freq=1200000;
+    responses.getStatus.cpu_max_freq=500000;
+    for (const cb of callbacks) await cb();
+    assert.equal(ids.get('cpu-freq-text').textContent,'1200 MHz'); // do not clamp real reading
+    responses.getStatus={cpu_policy_available:false};
+    for (const cb of callbacks) await cb();
+    assert(gov.disabled && freq.disabled);
+    assert.equal(ids.get('cpu-freq-text').textContent,'N/A');
+  }
   if (app === 'flowsense') {
     assert(text(ids.get('compass-cards')).includes('CLEAN'));
     responses.getEthStats.ports[0].rx_crc_errors = 2;

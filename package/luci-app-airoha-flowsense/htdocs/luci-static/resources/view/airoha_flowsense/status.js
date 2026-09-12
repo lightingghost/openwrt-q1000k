@@ -853,7 +853,7 @@ function buildCpuNpuTacho(cs, ppe, st, ti) {
 	               : (cs.npuActive ? 100 : 0);
 
 	// CPU frequency — same source as the existing freq bar
-	var fs       = freqBarState(st.cpu_hw_freq, st.cpu_min_freq, st.cpu_max_freq, st.pll_freq_mhz, st.cpu_governor);
+	var fs       = freqBarState(st.cpu_hw_freq || st.cpu_cur_freq, st.cpu_min_freq, st.cpu_max_freq, st.pll_freq_mhz, st.cpu_governor);
 	var freqMhz  = Math.round(fs.freq / 1000);
 	var governor = (st.cpu_governor && st.cpu_governor !== 'unknown') ? st.cpu_governor.toUpperCase() : '';
 

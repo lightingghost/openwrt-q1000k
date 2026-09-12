@@ -10,11 +10,52 @@ hwmon temperature devices. The page discovers sensors at runtime, converts
 millidegrees to Celsius and reports missing sensors explicitly. No NCT7802
 fan controller, fixed hwmon index or fan-control service is required.
 
-CPU controls accept only frequencies/governors advertised by the kernel.
-They are runtime settings. Raw PLL overclocking and frame-engine register
-reads were removed: these counters are managed and periodically reset by the
-Ethernet driver, so unsynchronized reads are not reliable cumulative statistics. CPU frequency is unavailable if the
-stock firmware/driver does not expose a working cpufreq policy.
+CPU controls discover the CPU0 policy (or another registered policy directory)
+and accept only frequencies/governors advertised by the kernel. Current
+frequency uses `cpuinfo_cur_freq`, falling back to `scaling_cur_freq` when the
+hardware readout is absent. The page refreshes controls if a policy appears
+later, displays the kernel's actual readback after changes and reports errors.
+Governor and maximum-frequency changes are runtime settings.
+
+### Q1000K CPUFreq firmware compatibility
+
+The reported boot failure was `cpufreq_policy_online: ->get() failed`, followed
+by `cpufreq-dt: failed register driver: -19` and no policy directories. The
+original clock provider assumes the vendor ATF SMC `0x82000301` / operation
+`0xddddddd2` returns a CPU frequency in MHz. If it returns zero, the provider
+reports zero Hz and CPUFreq rejects the policy before LuCI can use it. The log
+establishes the missing clock rate; it does not contain the raw SMC reply.
+
+The kernel now validates the firmware rate and retains SMC control when it
+works. Q1000K explicitly opts into an AN7581 PLL fallback when SMC does not
+supply a usable rate. This partially imports Ryan Chen's community fallback,
+then adapts it to share the existing chip-SCU syscon and quiesce all CPUs during
+clock transitions. It reads the PLL's fixed-point rate and post-divider,
+checks clock-source/register readback, preserves unrelated register bits,
+and keeps the backup clock enabled until the main clock is selected again.
+Only the existing 500–1200 MHz OPPs are accepted; voltage settings and the
+stock governor are unchanged. The LuCI apps never write raw PLL registers.
+
+A kernel/firmware upgrade is required for this fix; installing only the LuCI
+package cannot create a missing CPUFreq policy. After booting the updated
+image, check:
+
+```sh
+dmesg | grep -Ei 'cpufreq|cpu frequency|direct PLL|ATF SMC'
+ls /sys/devices/system/cpu/cpufreq
+cat /sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq
+cat /sys/devices/system/cpu/cpufreq/policy*/scaling_available_frequencies
+cat /sys/devices/system/cpu/cpufreq/policy*/scaling_available_governors
+ubus call luci.airoha_npu getStatus
+```
+
+The kernel build and simulated register transitions are tested. Clock changes,
+load stability and temperature still require validation on a physical Q1000K.
+No device is flashed by these tests.
+
+Raw GDM/CDM frame-engine register reads remain removed: the Ethernet driver
+accumulates and resets those counters. FlowSense uses driver-provided Ethernet
+statistics and a separate read-only PSE buffer snapshot.
 
 The VLAN and PPPoE switches preserve the community RPC interface but are
 labelled **bridge filtering**. They set `bridge-nf-filter-vlan-tagged` and

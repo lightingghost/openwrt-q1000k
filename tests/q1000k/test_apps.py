@@ -107,6 +107,36 @@ class AppTests(unittest.TestCase):
         self.assertEqual(freq.read_text(), '1200000\n')
         self.assertIn('error', self.rpc('npu', 'setOverclock', {'freq_mhz': 1400}))
 
+    def test_cpu_policy_discovery_and_controls(self):
+        for app in self.scripts:
+            self.assertFalse(self.rpc(app, 'getStatus')['cpu_policy_available'])
+        for method, args in [('setGovernor', {'governor':'performance'}), ('setMaxFreq', {'freq':500000})]:
+            self.assertIn('has not registered a policy', self.rpc('npu', method, args)['error'])
+        # Policy ID is not guaranteed to be zero. cpuinfo_cur_freq may be absent.
+        base = '/sys/devices/system/cpu/cpufreq/policy2/'
+        for name, value in {'scaling_cur_freq':'750000', 'scaling_min_freq':'500000',
+                            'scaling_max_freq':'1200000', 'scaling_governor':'ondemand',
+                            'scaling_available_governors':'ondemand performance',
+                            'stats/time_in_state':'500000 1\n750000 2\n1200000 3'}.items():
+            self.write(base+name, value+'\n')
+        for app in self.scripts:
+            status = self.rpc(app, 'getStatus')
+            self.assertTrue(status['cpu_policy_available'])
+            self.assertEqual(status['cpu_cur_freq'], 750000)
+            self.assertEqual(status['cpu_hw_freq'], 0)
+            self.assertEqual(status['cpu_avail_freqs'].split(), ['500000','750000','1200000'])
+            self.assertEqual(status['cpu_governor'], 'ondemand')
+        self.assertEqual(self.rpc('npu', 'setGovernor', {'governor':'performance'}),
+                         {'result':'ok','governor':'performance'})
+        self.assertEqual(self.rpc('npu', 'setMaxFreq', {'freq':750000}), {'result':'ok','freq':750000})
+        self.write(base+'scaling_min_freq', '750000\n')
+        self.assertIn('below the current minimum', self.rpc('npu', 'setMaxFreq', {'freq':500000})['error'])
+        self.assertEqual((self.root / (base+'scaling_max_freq').lstrip('/')).read_text(), '750000\n')
+        # Prefer CPU0's policy link/path if it exists.
+        self.write('/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq', '1000000\n')
+        for app in self.scripts:
+            self.assertEqual(self.rpc(app, 'getStatus')['cpu_cur_freq'], 1000000)
+
     def test_ppe_hex_indices_and_counts(self):
         bind = 'a000 BND IPv4 5T orig=192.0.2.1:1->192.0.2.2:2 eth=aa:bb:cc:dd:ee:ff->11:22:33:44:55:66\n'
         self.write('/sys/kernel/debug/ppe/bind', bind)
