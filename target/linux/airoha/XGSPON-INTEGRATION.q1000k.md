@@ -64,7 +64,9 @@ The old `READ_FE_REG` abstraction is especially misleading:
 
 These are not both FE registers. XGS-PON work must retire the unrelated EPON
 operation or route an explicitly supported operation through its real owner.
-A generic unchecked `ioremap` wrapper would hide an ownership bug.
+The Q1000K build now omits `prepare_epon()` and rejects EPON mode startup
+and the EPON FEC API with `-EOPNOTSUPP`. A generic unchecked `ioremap` wrapper
+would hide an ownership bug.
 
 ## Packet and queue contract
 
@@ -114,8 +116,8 @@ initialization, QoS/weights, rate meters, thresholds, congestion and channel
 closure. They call FE APIs for channel enable/retirement, forwarding, queue
 reservation, packet lengths, meters and counters. These use dynamic ECNT hooks,
 so most missing providers do **not** appear as unresolved linker symbols.
-The [9-symbol list](XGSPON-STATUS.q1000k.md#kernel-audit) is only the linker
-boundary, not the complete runtime dependency list.
+The [resolved linker inventory](XGSPON-STATUS.q1000k.md#kernel-audit) therefore
+does not mean the runtime dependency list is implemented.
 
 The API wrappers now initialize every request with an unsupported error and
 zero the other fields. A missing/inactive hook returns the legacy hook error;
@@ -195,8 +197,8 @@ service model and its managed-entity behavior have not been established.
 
 Completed local checks: factory/backend/LuCI host tests, controller transport
 and every-transfer fault injection, read-only controller status tests, controller
-APK build, BSP/PHY build and symbol resolution, MAC C compilation and a failing
-modpost that names the remaining dependencies. The normal builder and protected
+APK build, BSP/PHY/MAC modpost, complete vendor APK generation, resource/hook
+fixtures, validated MAC/FSAN handoff and unsupported-control error propagation. The normal builder and protected
 source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared

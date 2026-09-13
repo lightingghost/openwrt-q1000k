@@ -237,7 +237,10 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
 
 Step 1's dependency matrix is now recorded in the implementation checkpoint.
 Controller selection, the EN7573 loader and TX-disabled MD32 bring-up are
-implemented and historically bench-tested. BSP/PHY compilation now passes.
+implemented and historically bench-tested. The BSP/PHY/MAC package now
+builds without suppressed or unresolved symbols. The MAC uses validated
+identity parameters and rejects absent runtime providers; unrelated OEM
+debug and EPON interfaces are omitted or explicitly unsupported.
 The remaining dependencies are production-DT/cold-boot validation, complete
 analog/PHY startup, shared-resource/QDMA integration and OMCI service support.
 Keep `pon_pcs` and `gdm2` disabled until those runtime dependencies are resolved.

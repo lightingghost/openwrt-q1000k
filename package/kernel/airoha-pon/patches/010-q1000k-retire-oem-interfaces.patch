@@ -1,0 +1,217 @@
+Retire unrelated OEM interfaces from the Q1000K XGS-PON build.
+
+Omit the OEM command interpreter, NAT debug control and packet speed-test
+interceptor. Reject unsupported storm control and EPON FEC explicitly; do
+not map the shared QDMA or DSA switch ranges as PON-owned FE registers.
+
+--- a/xpon-en757x/xpon_10g/src/epon/epon_debug.c
++++ b/xpon-en757x/xpon_10g/src/epon/epon_debug.c
+@@ -38,9 +38,11 @@
+ void del_fix_reg_list(uint32_t addr);
+ static uint32_t strToHex(char *str);
+ 
++#ifndef Q1000K_PON_IDENTITY
+ static int doEpon(int argc, char *argv[], void *p);
+ static int doEponSet(int argc, char *argv[], void *p);
+ static int doEponMpcp(int argc, char *argv[], void *p);
++#endif
+ 
+ 
+ int eponRegDefCheck(void);
+@@ -595,6 +597,7 @@
+     return EPON_SUCCESS;
+ }
+ 
++#ifndef Q1000K_PON_IDENTITY
+ static const cmds_t eponSetCmds[] = {
+ 	{"llidThrshldNum",		doEponSetLlidThrshldNum,	0x02,  	1,  "<llidIndex(0~7)> <llidThrshldNum(1~3)>"},
+ 	{"llidQueThrshld",		doEponSetLlidQueThrshld, 	0x02,	1,	"<llidIndex(0~7)> <thrshldIndex(0~2)> <q0 value> ... <q7 value>"},
+@@ -699,6 +702,8 @@
+ {
+ 	cmd_unregister("epon");
+ }
++#endif /* OEM kernel command interpreter */
++
+ /*______________________________________________________________________________
+ **	function name
+ **		doEponRegCheck
+@@ -1525,11 +1530,14 @@
+ 	printk("\r\n ONU lost count : %d times\n", gp_epon_global_data->lost_count);
+ }
+ 
++#ifndef Q1000K_PON_IDENTITY
+ void doEponHwnatNoclean(uint action1, uint action2, uint action3)
+ {
+ 	is_hwnat_dont_clean = action1;
+     printk("\r\n no clean hw_nat done no_clean_action: %d\n", is_hwnat_dont_clean);
+ }
++#endif
++
+ 
+ void doEponMacOam(uint action1, uint action2, uint action3)
+ {
+@@ -1925,7 +1933,9 @@
+     {"dbgTmOff",    doEponDbgTmOff},
+     {"show_time",    doEponShowTime},
+     {"lost_count",    doEponLostTime},
++#ifndef Q1000K_PON_IDENTITY
+     {"hw_nat_noclean",    doEponHwnatNoclean},
++#endif
+     {"mac_oam_cnt",    doEponMacOam},
+     {"mac_eth_cnt",    doEponEth},
+     {"staticrpt",    doEponStaticrpt},
+--- a/xpon-en757x/xpon_10g/src/epon/epon_init.c
++++ b/xpon-en757x/xpon_10g/src/epon/epon_init.c
+@@ -336,7 +336,9 @@
+     	
+ 	epon_get_onu_mac_addr(gp_epon_global_data->onu_mac_addr);
+ 	/* cmd init */
++#ifndef Q1000K_PON_IDENTITY
+ 	eponCmdInit();
++#endif
+ 	
+ 	ret = epon_init_private_data(gpEponPriv);
+ 	if (ret < 0) {
+@@ -413,7 +415,9 @@
+     epon_proc_exit();
+ 	
+ 	/* cmd exit */
++#ifndef Q1000K_PON_IDENTITY
+ 	eponCmdExit();
++#endif
+ 	unregister_chrdev(EPON_MAC_MAJOR, "epon_mac");
+     
+ #ifdef TCSUPPORT_EPON_POWERSAVING
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -761,6 +761,7 @@
+ 			skb->protocol = 0;
+ 		}
+ 
++#ifndef Q1000K_PON_IDENTITY
+ 		if(wan_speed_test_hook)
+ 		{
+ 			if(wan_speed_test_hook(skb)==SPEED_TEST_SUCCESS){
+@@ -770,6 +771,8 @@
+ 				return SPEED_TEST_SUCCESS;
+ 			}
+ 		}
++
++#endif /* OEM speed-test packet interceptor */
+ 
+ #ifdef TCSUPPORT_RA_HWNAT
+ 		if(ra_sw_nat_hook_rxinfo && ppeMagic) {
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
+@@ -766,6 +766,7 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
++#ifndef Q1000K_PON_IDENTITY
+ void prepare_epon(void){
+ 	if(gpPonSysData->sysPonMode == XMCS_IF_WAN_DETECT_MODE_1G_1G_EPON || gpPonSysData->sysPonMode == XMCS_IF_WAN_DETECT_MODE_TURBO_EPON){
+ 		XPON_PHY_FW_READY_DISABLE();
+@@ -784,6 +785,8 @@
+ 	}
+ 	WRITE_FE_REG(0xbfb59640,0x0);
+ }
++#endif /* EPON setup writes the DSA switch register space. */
++
+ /*______________________________________________________________________________
+ **	function name
+ **		xmcs_null
+@@ -802,6 +805,12 @@
+ **____________________________________________________________________________*/
+ int xmcs_set_connection_start(XPON_Mode_t mode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if ((mode == XPON_ENABLE || mode == XPON_OTHER) &&
++	    (gpPonSysData->sysPonMode != XMCS_IF_WAN_DETECT_MODE_XGSPON ||
++	     gpPhyData->working_mode == PHY_EPON_CONFIG))
++		return -EOPNOTSUPP;
++#endif
+     XPON_DPRINT_MSG("mode=%d\n", mode);
+     /* notify XPON PHY Driver get ready to handle interrupts*/
+ 	if(auto_mode_flag == AUTOMODE_XEPON1G_TURBOEPON)
+@@ -825,7 +834,11 @@
+                 break;
+ 
+             case PHY_EPON_CONFIG:
++#ifdef Q1000K_PON_IDENTITY
++				return -EOPNOTSUPP;
++#else
+                 prepare_epon();
++#endif
+                 break;
+ 
+             default:
+@@ -2065,6 +2078,10 @@
+ **____________________________________________________________________________*/
+ int xmcs_set_storm_ctrl_config(struct XMCS_StormCtrlConfig_S *pStormCfg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* No shared-Ethernet implementation of the OEM storm control. */
++	return -EOPNOTSUPP;
++#else
+ 	uint threld = pStormCfg->threld;
+ 	uint timer = pStormCfg->timer;
+ 	
+@@ -2080,6 +2097,7 @@
+ 	qdma_fwd_timer = timer;
+ 
+ 	return 0 ;
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -2127,6 +2145,10 @@
+ **____________________________________________________________________________*/
+ int xmcs_get_storm_ctrl_config(struct XMCS_StormCtrlConfig_S *pStormCfg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* No shared-Ethernet implementation of the OEM storm control. */
++	return -EOPNOTSUPP;
++#else
+ 	printk("xmcs_get_storm_ctrl_config: ----- storm_ctrl_shrehold = %d\r\n", storm_ctrl_shrehold);
+ 	printk("xmcs_get_storm_ctrl_config: ----- qdma_fwd_timer = %d\r\n", qdma_fwd_timer);
+ 
+@@ -2134,6 +2156,7 @@
+ 	pStormCfg->timer = qdma_fwd_timer;
+ 
+ 	return 0 ;
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+--- a/xpon-en757x/xpon_10g/inc/xmcs/xmcs_if.h
++++ b/xpon-en757x/xpon_10g/inc/xmcs/xmcs_if.h
+@@ -191,6 +191,8 @@
+ 
+ int xpon_reset_qdma_tx_buf(void );
+ int getPonMacfromflash(unchar * mac_addr);
++#ifndef Q1000K_PON_IDENTITY
+ void prepare_epon(void);
++#endif
+ 
+ #endif /*_XMCS_IF_H*/
+--- a/xpon-en757x/xpon_10g/src/ic/AN7581.c
++++ b/xpon-en757x/xpon_10g/src/ic/AN7581.c
+@@ -494,6 +494,10 @@
+ 
+ int an7581_epon_set_llid_tx_fec(const void *in, void *out)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* EPON FEC accesses QDMA1 through a misnamed raw FE accessor. */
++	return -EOPNOTSUPP;
++#else
+ 	uint8_t llidIndex = 0;
+ 	uint8_t fecFlag = 0;
+     uint32_t val = 0;
+@@ -537,6 +541,7 @@
+ 	}
+ 
+     return 0;
++#endif
+ }
+ 
+ int an7581_epon_get_llid_tx_fec(const void *in, void *out)

@@ -28,6 +28,7 @@ After preparing the v2 vendor PON package, run the resource tests with:
 python3 tests/q1000k/test_pon_resources.py
 python3 tests/q1000k/test_pon_hooks.py
 python3 tests/q1000k/test_pon_identity.py
+python3 tests/q1000k/test_pon_unsupported.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -41,6 +42,8 @@ claim concurrent-unregister or DMA execution coverage.
 The identity fixtures exercise the production parameter/cache implementation
 and MAC callers for exact input lengths, malformed MAC/FSAN, missing values,
 byte order, immutable copies and unchanged outputs on failure.
+Unsupported-control fixtures verify the actual storm/FEC entry points and
+storm ioctl dispatch return an error without MMIO or user-output writes.
 Set `Q1000K_PON_BSP` to test another prepared BSP source directory. Kernel
 compilation checks the real APIs; these fixtures do not activate hardware or
 establish reset/clock sequencing.

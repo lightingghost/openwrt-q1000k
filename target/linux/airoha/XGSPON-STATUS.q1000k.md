@@ -12,7 +12,8 @@ The new controller module was loaded only from RAM for testing, then
 powered off and removed; the temporary harness restored GPIO/mux state.
 No firmware image was flashed or package persistently installed. The
 vendor PHY/MAC runtime integration and OMCI/service provisioning remain
-unimplemented. BSP/PHY compilation now passes; the MAC still fails modpost.
+unimplemented. BSP, PHY and MAC now compile and pass modpost, and the
+experimental vendor package builds with no unresolved symbols.
 
 **Current device restriction: read-only access, never flash firmware.**
 The initialization results below are historical, from before this restriction.
@@ -44,7 +45,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
-| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects compile; modpost correctly fails on 9 remaining symbols. | Integrate interrupt consumers, QDMA/FE, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
+| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects and the complete MAC module compile and pass modpost. | Integrate interrupt consumers, QDMA/FE, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -175,20 +176,28 @@ PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
 type/format errors and unresolved symbols remain fatal. The imported MAC's
 stack-frame warning exception also remains; runtime/stack auditing is pending.
-All package patches apply to freshly prepared source. A full package build
-reproduces successful BSP/PHY linking and the MAC modpost failure. No vendor
-package is produced or loaded.
+All package patches apply to freshly prepared source. The complete vendor
+package now builds against Linux 6.18.44 with no suppressed or unresolved
+symbols. The artifact is
+`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r7.apk`.
+It remains gated by `BROKEN`, unselected and without autoload. No vendor
+module or package has been installed or executed on the device.
 
-The previous 41-symbol inventory included state/event definitions in the
-omitted procfs source; those definitions were not missing vendor source.
-Comparing the current MAC object against the kernel, BSP and PHY symbol tables
-leaves these **9 unresolved symbols**:
+Patch 010 removes the remaining nine linker dependencies by retiring OEM
+interfaces that do not implement the Q1000K XGS-PON path:
 
-| Integration area | Unresolved symbols |
+| Former dependency | Resolution |
 | --- | --- |
-| Shared frame engine | `get_frame_engine_data`, `set_frame_engine_data` |
-| WAN/QDMA | `qdma_wan_fwd_timer`, `storm_ctrl_shrehold_wan` |
-| OEM debug/command hooks | `cmd_register`, `cmd_unregister`, `subcmd`, `is_hwnat_dont_clean`, `wan_speed_test_hook` |
+| `cmd_register`, `cmd_unregister`, `subcmd` | Omit the OEM kernel command interpreter and its registration calls. |
+| `is_hwnat_dont_clean`, `wan_speed_test_hook` | Omit the OEM NAT debug command and packet speed-test interception; RX continues through the normal path. |
+| `qdma_wan_fwd_timer`, `storm_ctrl_shrehold_wan` | Storm-control get/set return `-EOPNOTSUPP`, preserving ioctl errors and caller outputs. |
+| `get_frame_engine_data`, `set_frame_engine_data` | Omit EPON setup that writes DSA registers; reject EPON FEC that accesses QDMA1. No raw FE compatibility mapper is supplied. |
+
+Combined with the resource and identity changes, the previous 19-symbol
+integration inventory is resolved. This is a link-complete module, not an
+implemented packet path. Missing dynamic QDMA WAN/FE providers still cause
+MAC startup to fail before hardware initialization. Host tests confirm the
+unsupported controls do not access registers or publish successful output.
 
 The new `airoha_ecnt_xpon` provider resolves the four PON resource symbols.
 Its DT node remains disabled, and the provider has not been loaded.
@@ -289,8 +298,8 @@ is QKX001-06.00.44.00:
   LOS true/false, failed polling, unknown schema and identity validation.
 - Both userspace packages and the standalone controller module build. The
   pinctrl patch applies and its objects compile; the board DTS compiles.
-  The vendor BSP/PHY now build, but the complete package still fails MAC
-  modpost on the 9 integration dependencies above. Host MMIO/regmap fixtures
+  The vendor BSP/PHY/MAC and complete package now build with no unresolved
+  symbols. Host MMIO/regmap fixtures
   pass for bounds, absent providers, failures and masked shared SCU access.
 - The production loader's host test checks layout, address spaces, endian
   behavior, readback mismatch and immediate failure at 15,388 I2C transfer
