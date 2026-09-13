@@ -11,7 +11,13 @@ complete PM/DM/calibration readback, MCU enable and asserted TX-disable.
 The new controller module was loaded only from RAM for testing, then
 powered off and removed; the temporary harness restored GPIO/mux state.
 No firmware image was flashed or package persistently installed. The
-vendor PHY/MAC stack and OMCI/service provisioning remain unimplemented.
+vendor PHY/MAC runtime integration and OMCI/service provisioning remain
+unimplemented. BSP/PHY compilation now passes; the MAC still fails modpost.
+
+**Current device restriction: read-only access, never flash firmware.**
+The initialization results below are historical, from before this restriction.
+The latest continuation only read cached kernel resource/interrupt inventories;
+it did not install files, load modules, change GPIOs, probe I2C or reboot.
 
 ## Imported references
 
@@ -37,9 +43,9 @@ OMCI daemon and unrelated PR changes were not imported.
 | Optical GPIOs and I2C | Force-GPIO mux plus active-low enables resolve ENXIO. Both paths return `0x1388`; power-off tests distinguish ownership. DT GPIO descriptors and pinctrl fixes added. | Boot-test the compiled production DT and pinctrl changes. GPON LOS is still based on OEM mapping. |
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
-| BSP/PHY modules | Hook declaration and AN7581 IOMUX table-size bugs fixed in patches. Normal Linux 6.18 compilation still fails. | Fix remaining C/kernel API issues and remove AN7583-only modules from the AN7581 dependency graph. |
-| PON MAC | Diagnostic compilation reaches modpost with 41 unresolved symbols. Four resource accessors exist in an unbuilt BSP source; the others have no export in the imported tree. | Integrate resource ownership, interrupts, QDMA/FE, XG-PON events, packet metadata and management traffic. |
-| OMCI | PR #24577's native daemon cross-compiles for AArch64, but has EN7528 transport, baseline-only OMCI and a DZS/H660GM-A MIB. It was not run or installed. | Implement/choose an AN7581 transport and Q1000K service model, extended OMCI as needed, correct errors and procd lifecycle. |
+| BSP/PHY modules | AN7581 builds the hook, SCU and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Port shared SCU/resource ownership and complete analog/startup sequencing before loading. |
+| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects compile; modpost correctly fails on 19 remaining symbols. | Integrate resource ownership, interrupts, QDMA/FE, factory identity, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
+| OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
 
@@ -121,50 +127,48 @@ command. The package must not produce a nominally successful build
 with unresolved symbols. No compatibility no-ops were added to satisfy
 missing runtime interfaces.
 
-The two Q1000K follow-up patches fix the `__ECNT_HOOK` declaration mismatch
-and unused local, and derive the IOMUX table's bound from its actual size
-(AN7581 has nine initializers, versus seven on the other branch). All
-package patches apply to freshly prepared source. Normal compilation still
-fails on vendor missing prototypes and other warnings treated as errors.
+Patches 002/003 fix the hook declaration and AN7581 IOMUX table bound.
+Patches 004/005 select the AN7581 BSP dependency graph and fix public
+declarations, arm64 IRQ flags, PHY probe error lifetime, callback/argument
+and return types, jiffies width and mapped PHY register access. AN7583 retains
+its extra board/OLT/combo-PHY objects. The three AN7581 BSP modules and
+`phy_10g.ko` compile and pass modpost against Linux 6.18.44/GCC 14.4.0.
 
-For diagnosis only, separate direct kernel builds used `KCFLAGS=-Wno-error`
-while keeping modpost failures fatal. This is not a shipping build setting.
-The BSP reached module linking; the PHY still failed on implicit declarations,
-pointer-to-integer assignments, an incompatible kthread entry function and
-value returns in void functions. Examples include `delay1ms`,
-`XPON_DIG_ref_release`, `SET_FORCE_GPIO32_EN`, missing `vmalloc`/`vfree`
-declarations and shared PHY command prototypes. No PHY symbol table was
-available for the MAC check.
+Patch 006 restores runtime state and PHY-to-MAC event dispatch from the
+original `gpon_proc.c`, which the imported compatibility patch had replaced
+with success stubs. It exposes cached software state through a read-only
+`/proc/xgpon/status` seq_file and propagates procfs creation failures. Obsolete
+writable debug commands remain unavailable. It also disables OEM WAN-to-LAN
+mirroring, replaces `random32()` with `get_random_u32()` and fixes const/label
+compilation issues.
 
-The MAC object built in that diagnostic configuration but failed modpost.
-Comparing its undefined references against the target kernel and BSP export
-tables gives these 41 missing symbols (excluding kbuild's `__this_module`):
+PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
+prototypes without treating those categories as errors. Implicit declarations,
+type/format errors and unresolved symbols remain fatal. The imported MAC's
+stack-frame warning exception also remains; runtime/stack auditing is pending.
+All package patches apply to freshly prepared source. A full package build
+reproduces successful BSP/PHY linking and the MAC modpost failure. No vendor
+package is produced or loaded.
+
+The previous 41-symbol inventory included state/event definitions in the
+omitted procfs source; those definitions were not missing vendor source.
+Comparing the current MAC object against the kernel, BSP and PHY symbol tables
+leaves these **19 unresolved symbols**:
 
 | Integration area | Unresolved symbols |
 | --- | --- |
 | PON resource owner | `get_xpon_data`, `set_xpon_data`, `get_xpon_dev`, `get_xpon_irq` |
-| Frame engine | `get_frame_engine_data`, `set_frame_engine_data` |
-| WAN/QDMA and offload | `macSend`, `qdma_wan_fwd_timer`, `dropCpuTxPktsFlag`, `storm_ctrl_shrehold_wan`, `is_hwnat_dont_clean`, `wan_speed_test_hook` |
+| Shared frame engine | `get_frame_engine_data`, `set_frame_engine_data` |
+| WAN/QDMA | `qdma_wan_fwd_timer`, `storm_ctrl_shrehold_wan` |
 | Factory/flash/OEM identity | `GetMacAddr`, `get_ethaddr`, `get_onutype`, `flash_base`, `ranand_read_byte`, `spi_type` |
-| Vendor command API | `cmd_register`, `cmd_unregister`, `subcmd` |
-| Legacy kernel API | `random32` |
-| PON event/timing/OMCI | `XGPON_MAC_EVENT_HANDLER`, `gpon_tod_adjust`, `omciIkIdxExchange`, `omciMicErrSwCnt` |
-| NG-PON control state | `ng2_ignore_disable`, `ng2_man_set_09`, `ng2_mon_not_gnt`, `ng2_no_rollback`, `ng2_o4_to_09`, `ng2_o8_to_05`, `ng2_tun_resp_key` |
-| Vendor diagnostic/control state | `drop_print_flag`, `masko_on_off`, `max_cnt`, `rdk_gtc_dbg`, `rdk_mic_err_dbg`, `sw_resync_flag`, `xgpon_fast_mode_flag`, `xpon_mac_print_open` |
+| OEM debug/command hooks | `cmd_register`, `cmd_unregister`, `subcmd`, `is_hwnat_dont_clean`, `wan_speed_test_hook` |
 
-The four resource functions are exported by `bsp/core/ecnt_xpon.c`, which
-the imported BSP Makefile does not build. Merely adding it is insufficient:
-it expects an `econet,ecnt-xpon` DT binding and must share resources correctly
-with the existing upstream Ethernet/PCS drivers. None of the other 37 symbols
-has an export in the imported source, including the unbuilt PHY sources.
-Some are obsolete optional test hooks, while others are required runtime
-interfaces; each call site needs a real port or removal of its unsupported
-feature. Turning them all into zero-return stubs would not provide service.
-
-The imported compatibility patch also returns success from flow-mapping
-hooks without programming hardware and stores vendor metadata in `skb->cb`.
-These remain known integration gaps even after symbol resolution. The
-unconditional AN7583 combo-PHY module needs separate review on AN7581.
+The resource functions exist in unbuilt `bsp/core/ecnt_xpon.c`; adding it
+requires a current DT/resource contract. SCU still expects the OEM hierarchy.
+The current Ethernet driver already owns both QDMA blocks and the FE; the
+DSA switch owns its register region. The dynamic QDMA/FE hooks, imported
+success-only flow helpers and `skb->cb` metadata need real integration even
+after every linker error is resolved. See the [integration audit](XGSPON-INTEGRATION.q1000k.md).
 
 ## Build and use the diagnostics
 
@@ -183,7 +187,7 @@ race while regenerating shared package metadata. All pass using the local
 GCC 14.4.0 musl toolchain. Outputs include
 `bin/packages/aarch64_cortex-a53/base/q1000k-xgspon-2.apk`,
 `bin/packages/aarch64_cortex-a53/base/luci-app-econet-xpon-1-r3.apk` and
-`bin/targets/airoha/an7581/packages/kmod-q1000k-pon-control-6.18.44-r1.apk`.
+`bin/targets/airoha/an7581/packages/kmod-q1000k-pon-control-6.18.44-r2.apk`.
 LuCI depends on `luci-base` and `q1000k-xgspon`; it has no dependency on the
 EN7528 kernel package or the broken vendor AN7581 package.
 
@@ -208,7 +212,11 @@ q1000k-xgspon initialize
 q1000k-xgspon off
 ```
 
-`status` returns schema version 1 with a `controller` object. LOS is null
+`status` returns schema version 1 with a `controller` object. In controller
+release 2, status sampling never powers off, selects or writes controller
+registers. A failed sample reports unknown MCU/TX fields and its errno; an
+unexpected bit value is reported as sampled with `-EIO`. Shutdown requires
+an explicit operation. Status polling is not a protection mechanism. LOS is null
 until initialized and sampled by the driver. Registration, OMCI, service
 readiness and optical measurements remain null. `validate` checks the selected
 factory/override serial and MAC. Blank `/etc/config/q1000k-xgspon` overrides
@@ -254,10 +262,13 @@ is QKX001-06.00.44.00:
   LOS true/false, failed polling, unknown schema and identity validation.
 - Both userspace packages and the standalone controller module build. The
   pinctrl patch applies and its objects compile; the board DTS compiles.
-  The complete vendor kernel package remains broken as detailed above.
+  The vendor BSP/PHY now build, but the complete package still fails MAC
+  modpost on the 19 integration dependencies above.
 - The production loader's host test checks layout, address spaces, endian
   behavior, readback mismatch and immediate failure at 15,388 I2C transfer
   points. No MCU enable occurs before successful full-memory verification.
+  Additional tests sample all MCU/TX bit combinations and both read-failure
+  points with no write/delay callbacks; failed samples clear stale values.
 - Live factory/backend checks, both controller IDs, firmware/calibration
   loading and readback pass. Two consecutive CLI initialization/off cycles
   passed with the final module. Short calibration and corrupted firmware
@@ -274,34 +285,3 @@ boot validation and remaining PHY/analog initialization, then resource/QDMA
 integration and OMCI. Keep `pon_pcs` and `gdm2` disabled until their owner and
 initialization order are implemented. Keep optical packages optional until
 the bench, registration, service and recovery gates pass.
-
-## Read-only continuation: BSP/PHY compile checkpoint
-
-The latest device restriction is **read-only access and no firmware flashing**.
-The live initialization results above are historical tests from before that
-restriction. This continuation only read cached kernel resource/interrupt
-inventories; it did not install files, load modules, change GPIOs or probe I2C.
-
-Patches 004/005 select only the hook, SCU and PON PHY BSP modules for AN7581;
-AN7583 retains its additional board/OLT/combo-PHY objects. They fix public
-BSP declarations, arm64 IRQ flags, probe failure lifetime, PHY argument and
-return types, the NG-PON thread callback/error handling and mapped PHY register
-access. The three AN7581 BSP modules and `phy_10g.ko` now compile and pass
-modpost against Linux 6.18.44/GCC 14.4.0. PHY builds retain warnings for unused
-vendor diagnostic code and missing prototypes without treating those categories
-as errors; implicit declarations, type/format errors and unresolved symbols
-remain fatal. No module was loaded. This does not validate analog startup.
-
-The earlier 41-symbol MAC inventory describes the previous diagnostic build.
-Several missing variables and the PHY-to-MAC event handler have implementations
-in the original `gpon_proc.c`, omitted by the imported compatibility patch.
-They need separating from its obsolete procfs debug interface; they are not all
-missing vendor source. MAC porting remains in progress.
-
-The read-only `/proc/iomem` inventory confirms the existing `1fb50000.ethernet`
-driver owns FE `1fb50000-1fb525ff`, QDMA0 `1fb54000-1fb55fff` and QDMA1
-`1fb56000-1fb57fff`. The DSA switch owns `1fb58000-1fb5ffff`. The vendor SCU
-module still expects the OEM DT hierarchy, and no PON resource/queue adapter
-exists for the current Ethernet driver. Keep the vendor package `BROKEN`,
-unselected and without autoload. Successful PHY compilation is not permission
-to load this stack or to enable `pon_pcs`/`gdm2`.

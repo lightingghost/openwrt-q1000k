@@ -14,6 +14,13 @@ controller and pinctrl/DT changes are implemented; full-image cold boot,
 remaining analog/PHY work, MAC/QDMA and OMCI are still pending. The numbered steps
 below remain the full acceptance plan; they are not all complete.
 
+The current continuation is restricted to **read-only device access and no
+firmware flashing**. Historical RAM tests do not authorize further hardware
+changes. Cold boots, module loading, GPIO/PHY activation, optical traffic,
+recovery and upgrade tests below are pending acceptance gates, not commands
+to execute under the current restriction. The [integration audit](XGSPON-INTEGRATION.q1000k.md)
+records the current resource contract, unresolved interfaces and OMCI decision.
+
 The reference is [coolsnowwolf/lede commit f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358).
 Its relevant package is `kmod-airoha-xpon-en757x`, variant `v2`, containing
 the BSP modules, `phy_10g.ko` and `xpon_10g.ko`. The package permits unresolved
@@ -229,8 +236,11 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    README's PON status only to the level actually demonstrated on hardware.
 
 Step 1's dependency matrix is now recorded in the implementation checkpoint.
-The EN7573 loader, board selection/power wiring and AN7581 datapath remain
-the largest gaps; board-level DTS enablement follows their resolution.
+Controller selection, the EN7573 loader and TX-disabled MD32 bring-up are
+implemented and historically bench-tested. BSP/PHY compilation now passes.
+The remaining dependencies are production-DT/cold-boot validation, complete
+analog/PHY startup, shared-resource/QDMA integration and OMCI service support.
+Keep `pon_pcs` and `gdm2` disabled until those runtime dependencies are resolved.
 
 Evidence available locally: [PON data inventory](../../../../http-uboot-q1000k/doc/board/airoha/q1000k-pon-data.md),
 [current Q1000K DTS](dts/an7581-q1000k.dts),
