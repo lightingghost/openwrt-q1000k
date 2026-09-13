@@ -48,6 +48,14 @@ removal/reuse races, 100 concurrent duplicate registrations, partial batch
 rollback, ID exhaustion, invalid indices and inactive providers. Its grace
 period fixture rejects waiting from within an RCU read section. This is a
 host concurrency model, not execution of the Linux RCU implementation.
+For a separate test with real Linux RCU, run
+`tests/q1000k/run_pon_hook_uml.sh`. It builds an isolated UML guest with
+`PROVE_RCU`, lockdep and atomic-sleep diagnostics, then runs 100 hook
+registration/removal cycles concurrently with a dispatching kernel thread.
+Success requires a zero test exit and no kernel/RCU/locking diagnostics. Only
+the extracted registry is loaded in the guest; its host filesystem is read
+only, and no network or optical device is configured. Like the crypto runner
+below, it accepts `Q1000K_UML_BASE` to copy an existing UML build cache.
 The identity fixtures exercise the production parameter/cache implementation
 and MAC callers for exact input lengths, malformed MAC/FSAN, missing values,
 byte order, immutable copies and unchanged outputs on failure.

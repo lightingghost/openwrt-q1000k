@@ -2,6 +2,9 @@
 
 Prepared 2026-09-12 on the user-requested `q1000k-xgspon` branch, created
 from `q1000k-dev` at `b287be4f00581e04ddee27f1157a4897455078e5`.
+It has since been rebased onto `q1000k-dev` at
+`c526db0e25fa159ca79b60125741afd4e08440c9`, retaining all imported authorship.
+The device build profile is now `quantum_q1000k-ubi`.
 All XGS-PON plans, imports and adaptations belong to this branch.
 Hardware baseline supplied by the user: **AN7581SIT SoC and
 two EN7573AN devices**. This document plans the implementation; it does not

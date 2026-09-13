@@ -1,7 +1,7 @@
 # Q1000K XGS-PON implementation checkpoint
 
 2026-09-12, branch `q1000k-xgspon`, based on `q1000k-dev` at
-`b287be4f00581e04ddee27f1157a4897455078e5`.
+`c526db0e25fa159ca79b60125741afd4e08440c9` after the support/profile rebase.
 
 **Both controller paths detect and XGS-PON MD32 bring-up works; optical
 service does not.** The new `kmod-q1000k-pon-control`, factory backend and
@@ -24,8 +24,8 @@ only; it made no device connection or change.
 
 | Import | Local commit | Original source |
 | --- | --- | --- |
-| Complete `package/kernel/airoha-pon` source import | `b7ffe704f6` | [coolsnowwolf/lede f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358) |
-| Complete `luci-app-econet-xpon` source import | `17a58803da` | [AKoo7/openwrt e27eee8](https://github.com/AKoo7/openwrt/commit/e27eee81fddad217e111ce67bc7a8102b00b24b4), from [OpenWrt PR #24577](https://github.com/openwrt/openwrt/pull/24577) |
+| Complete `package/kernel/airoha-pon` source import | `406e859e25` | [coolsnowwolf/lede f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358) |
+| Complete `luci-app-econet-xpon` source import | `87650e5472` | [AKoo7/openwrt e27eee8](https://github.com/AKoo7/openwrt/commit/e27eee81fddad217e111ce67bc7a8102b00b24b4), from [OpenWrt PR #24577](https://github.com/openwrt/openwrt/pull/24577) |
 
 The import commits retain original authors and source trailers. Follow-up
 changes move LuCI to `package/luci-app-econet-xpon`, use the existing LuCI
@@ -208,7 +208,12 @@ reuse. Enable and diagnostic queries validate indices and traverse under RCU.
 A pthread/UBSan fixture passes 100 blocked-reader removal/reuse races and 100
 simultaneous duplicate-registration races, plus partial-batch rollback and
 invalid-index checks. This models the lifetime contract; it does not execute
-Linux RCU or replace a native Ethernet attachment/provider pin.
+Linux RCU or replace a native Ethernet attachment/provider pin. A separate
+disposable Linux 6.18.44 UML guest also passes 100 actual registration/removal
+cycles while a kernel thread dispatches callbacks (162,513 in the recorded
+run). `PROVE_RCU`, lockdep and atomic-sleep diagnostics are enabled; no RCU,
+locking, BUG/Oops or panic report occurs. Only the registry routines are
+included in this UML test module, with no optical driver or network device.
 
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
@@ -250,7 +255,7 @@ Use an existing Q1000K build checkout with its feeds and toolchain prepared:
 
 ```sh
 test "$(git branch --show-current)" = q1000k-xgspon
-git merge-base --is-ancestor b287be4f00581e04ddee27f1157a4897455078e5 HEAD
+git merge-base --is-ancestor c526db0e25fa159ca79b60125741afd4e08440c9 HEAD
 make -j8 package/network/utils/q1000k-xgspon/compile CONFIG_PACKAGE_q1000k-xgspon=m V=s
 make -j8 package/luci-app-econet-xpon/compile CONFIG_PACKAGE_luci-app-econet-xpon=m CONFIG_PACKAGE_q1000k-xgspon=m V=s
 make -j8 package/kernel/q1000k-pon-control/compile CONFIG_PACKAGE_kmod-q1000k-pon-control=m V=s
@@ -266,7 +271,7 @@ LuCI depends on `luci-base` and `q1000k-xgspon`; it has no dependency on the
 EN7528 kernel package or the broken vendor AN7581 package.
 
 For a diagnostics image, add [q1000k-xgspon.config](q1000k-xgspon.config) to
-an existing `quantum_q1000k` configuration on this branch and run
+an existing `quantum_q1000k-ubi` configuration on this branch and run
 `make defconfig`. Pin the checkout revision for any shared test image. This
 fragment selects the standalone controller, with no autoload, but leaves
 the broken vendor PON stack unselected. The normal `q1000k-build`
