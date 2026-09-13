@@ -1,0 +1,21 @@
+--- a/bsp/core/ecnt_scu.c
++++ b/bsp/core/ecnt_scu.c
+@@ -130,8 +130,7 @@
+ #define GET_REG_SAVE_INFO				((SYS_GLOBAL_PARM_T){ .word = get_np_scu_data(CR_NP_SCU_SCREG_WR1)})
+ #define SET_REG_SAVE_INFO(x)			(set_np_scu_data(CR_NP_SCU_SCREG_WR1, x))
+ 
+-#define CR_CHIP_SCU_IOMUX_NUM        7
+-u32 CHIP_SCU_IOMUX_REG[CR_CHIP_SCU_IOMUX_NUM] = {
++static const u32 CHIP_SCU_IOMUX_REG[] = {
+ #if defined(TCSUPPORT_CPU_EN7581) || defined(TCSUPPORT_CPU_AN7552)
+ 	(CR_CHIP_SCU_BASE + 0x214),  //IOMUX_CTRL_1
+ 	(CR_CHIP_SCU_BASE + 0x218),  //IOMUX_CTRL_2
+@@ -725,7 +724,7 @@
+     u32 regval, ctladr;
+     u32 ctrno = (iomux >> 16)-1;
+ 
+-    if (ctrno < CR_CHIP_SCU_IOMUX_NUM) {
++    if (ctrno < ARRAY_SIZE(CHIP_SCU_IOMUX_REG)) {
+         ctladr = CHIP_SCU_IOMUX_REG[ctrno];
+     }else {
+         printk("No this iomux number.\n");

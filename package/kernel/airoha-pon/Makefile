@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -33,7 +33,7 @@ endef
 
 define KernelPackage/airoha-xpon-en757x
   $(call KernelPackage/airoha-pon/Default)
-  DEPENDS+=@(TARGET_airoha_an7581||TARGET_airoha_an7583)
+  DEPENDS+=@BROKEN @(TARGET_airoha_an7581||TARGET_airoha_an7583)
   TITLE:=Airoha EN757x xPON driver (v2)
   VARIANT:=v2
   FILES:= \
@@ -46,11 +46,14 @@ define KernelPackage/airoha-xpon-en757x
 	$(PON_BSP_DIR)/airoha_an7583_combo_phy.ko \
 	$(PKG_BUILD_DIR)/xpon-en757x/xpon_phy_10g/phy_10g.ko \
 	$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g/xpon_10g.ko
-  AUTOLOAD:=$(call AutoProbe,airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_olt_phy airoha_arht_board airoha_arht_serdes airoha_an7583_combo_phy phy_10g xpon_10g)
+  # Board initialization and factory calibration must precede module loading.
+  # No autoload until the AN7581 datapath and optical startup are integrated.
 endef
 
 define KernelPackage/airoha-xpon-en757x/description
- Kernel modules for the v2 Airoha EN7581 and AN7583 GPON and EPON MAC and PHY.
+ Experimental vendor source for the v2 Airoha EN7581 and AN7583 PON MAC and
+ PHY. Requires Linux 6.18 API fixes, optical initialization and integration
+ with the upstream Airoha Ethernet driver. Do not load on a running Q1000K.
 endef
 
 PON_BSP_DIR:=$(PKG_BUILD_DIR)/bsp
@@ -105,7 +108,6 @@ define Build/Compile
 		modules
 	+$(KERNEL_MAKE) $(PKG_JOBS) M="$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g" \
 		KCFLAGS="$(PON_INCLUDE_FLAGS) $(PON_V2_CPU_CFLAGS) -DTCSUPPORT_WAN_GPON=1 -DTCSUPPORT_WAN_EPON=1" \
-		KBUILD_MODPOST_WARN=1 \
 		KBUILD_EXTRA_SYMBOLS="$(PON_BSP_DIR)/Module.symvers $(PKG_BUILD_DIR)/xpon-en757x/xpon_phy_10g/Module.symvers" \
 		XPON_BSP_MODULES_XPON_10G_DRIVER="$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g" \
 		XPON_BSP_GLOBAL_INC_PRIVATE="$(PON_BSP_DIR)/include/global_inc" \
