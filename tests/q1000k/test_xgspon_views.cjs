@@ -40,6 +40,14 @@ async function main() {
     assert.match(text(tree), /Unavailable/);
     assert.match(text(tree), /Not available in this build/);
     assert.doesNotMatch(text(tree), /Signal detected|Signal lost/);
+    h.state.result = { ...sample, controller: { available: true, mode: 'xgspon',
+        gpon_detected: true, xgspon_detected: true, md32_enabled: true,
+        tx_disabled: true, firmware_verified: true, stage: 'initialized', last_error: 0 } };
+    await h.polls[0]();
+    assert.match(text(tree), /Detected/);
+    assert.match(text(tree), /Enabled/);
+    assert.match(text(tree), /Disabled/);
+    assert.doesNotMatch(text(tree), /Signal detected|Signal lost/);
     h.state.result = { ...sample, los: true };
     await h.polls[0]();
     assert.match(text(tree), /Signal lost/);

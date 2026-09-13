@@ -13,13 +13,22 @@ function state(v, yes, no) {
     return typeof v !== 'boolean' ? _('Unavailable') : (v ? yes : no);
 }
 function rows(d) {
-    var f = d.factory || {}, i = d.identity || {}, fw = d.firmware || {}, m = d.modules || {};
+    var f = d.factory || {}, i = d.identity || {}, fw = d.firmware || {}, m = d.modules || {}, c = d.controller || {};
     return [
         [ _('Device'), value(d.model) ],
         [ _('SoC'), value(d.soc) ],
         [ _('Optical controllers'), value(d.optics) ],
         [ _('Mode'), value(d.mode) ],
         [ _('Optical service'), state(d.activation_supported, _('Supported'), _('Not available in this build')) ],
+        [ _('Controller driver'), state(c.available, _('Available'), _('Not loaded')) ],
+        [ _('GPON detection (last check)'), state(c.gpon_detected, _('Detected'), _('Not detected')) ],
+        [ _('XGS-PON detection (last check)'), state(c.xgspon_detected, _('Detected'), _('Not detected')) ],
+        [ _('Controller power mode'), value(c.mode) ],
+        [ _('Controller initialization'), value(c.stage) ],
+        [ _('Controller error'), value(c.last_error) ],
+        [ _('Optical MCU'), state(c.md32_enabled, _('Enabled'), _('Disabled')) ],
+        [ _('Optical transmission'), state(c.tx_disabled, _('Disabled'), _('Enabled')) ],
+        [ _('Controller memory verification'), state(c.firmware_verified, _('Verified'), _('Not initialized')) ],
         [ _('Factory identity and calibration'), state(f.available, _('Available'), _('Unavailable or invalid')) ],
         [ _('Factory serial'), value(f.serial) ],
         [ _('Factory WAN MAC'), value(f.wan_mac) ],

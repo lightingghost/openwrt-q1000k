@@ -5,9 +5,20 @@
 case "$1" in
 	status) xgspon_status ;;
 	validate) xgspon_validate ;;
-	prepare)
+	detect|off)
+		controller=$(find_controller) || {
+			echo 'Q1000K controller driver is unavailable; load q1000k-pon-control on a matching board DT.' >&2
+			exit 1
+		}
+		printf '%s\n' "$1" > "$controller/operation"
+		result=$?
+		xgspon_status
+		exit "$result"
+		;;
+	prepare|initialize)
 		# Stage this unit's exact calibration record in private RAM storage.
-		# This command does not enable GPIOs, load modules or start transmission.
+		# prepare only stages data. initialize additionally powers XGS-PON
+		# and loads/verifies MD32 with TX disabled. Neither loads modules.
 		umask 077
 		read_identity
 		read_firmware
@@ -22,11 +33,23 @@ case "$1" in
 			rmdir "$dir"
 			exit 1
 		fi
+		if [ "$1" = initialize ]; then
+			trap 'rm -f "$dir/xgspon-calibration.bin"; rmdir "$dir"' EXIT HUP INT TERM
+			controller=$(find_controller) || {
+				echo 'Q1000K controller driver is unavailable.' >&2
+				exit 1
+			}
+			cat "$dir/xgspon-calibration.bin" > "$controller/calibration" || exit 1
+			printf 'initialize\n' > "$controller/operation"
+			result=$?
+			xgspon_status
+			exit "$result"
+		fi
 		printf '%s\n' "$dir"
 		;;
 	start|restart|reload)
-		echo 'Optical activation is unavailable: EN7573 loader and AN7581 MAC integration are pending.' >&2
+		echo 'Optical service activation is unavailable: AN7581 PON MAC and OMCI integration are pending.' >&2
 		exit 1
 		;;
-	*) echo 'Usage: q1000k-xgspon status|validate|prepare' >&2; exit 2 ;;
+	*) echo 'Usage: q1000k-xgspon status|validate|prepare|detect|initialize|off' >&2; exit 2 ;;
 esac

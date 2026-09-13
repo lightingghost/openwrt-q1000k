@@ -46,10 +46,55 @@ read_firmware() {
 		21618dc3694a1e6f6b28c7da7141964dea1d6e57f2d2956bbe72a780ca6166a4 && dm_ready=1
 }
 
+find_controller() {
+	local path found=
+	for path in /sys/bus/i2c/drivers/q1000k-pon-control/*-0051; do
+		[ -r "$path/status" ] && [ -w "$path/operation" ] || continue
+		[ -z "$found" ] || return 1
+		found=$path
+	done
+	[ -n "$found" ] || return 1
+	printf '%s\n' "$found"
+}
+
+read_controller() {
+	local path data previous version
+	controller_available=0
+	json_set_namespace q1000k_controller previous
+	json_init
+	path=$(find_controller)
+	if [ -n "$path" ]; then
+		data=$(cat "$path/status" 2>/dev/null)
+		if json_load "$data"; then
+			json_get_var version schema_version
+			[ "$version" = 1 ] && controller_available=1
+		fi
+	fi
+	json_set_namespace "$previous"
+}
+
+controller_field() {
+	local name="$1" expected="$2" previous type value
+	json_set_namespace q1000k_controller previous
+	json_get_type type "$name"
+	json_get_var value "$name"
+	json_set_namespace "$previous"
+	if [ "$controller_available" = 1 ] && [ "$type" = "$expected" ]; then
+		case "$type" in
+			boolean) json_add_boolean "$name" "$value" ;;
+			int) json_add_int "$name" "$value" ;;
+			string) json_add_string "$name" "$value" ;;
+		esac
+	else
+		json_add_null "$name"
+	fi
+}
+
 xgspon_status() {
 	local phy=0 mac=0 uptime=0
 	read_identity
 	read_firmware
+	read_controller
 	[ -d /sys/module/phy_10g ] && phy=1
 	[ -d /sys/module/xpon_10g ] && mac=1
 	read -r uptime ignored < /proc/uptime
@@ -61,7 +106,7 @@ xgspon_status() {
 	json_add_string optics '2 × EN7573AN'
 	json_add_string mode 'XGS-PON'
 	json_add_boolean activation_supported 0
-	json_add_string limitation 'Optical loader and MAC datapath integration are pending.'
+	json_add_string limitation 'Controller bring-up is available; PON MAC and OMCI service integration are pending.'
 	json_add_object factory
 	json_add_boolean available "${factory_available:-0}"
 	json_add_string source "$factory_source"
@@ -83,9 +128,22 @@ xgspon_status() {
 	json_add_boolean phy_loaded "$phy"
 	json_add_boolean mac_loaded "$mac"
 	json_close_object
-	# No authoritative AN7581 control/status ABI yet. Never infer an optical
-	# signal, O5, OMCI health or a provisioned service from module presence.
-	json_add_null los
+	json_add_object controller
+	json_add_boolean available "$controller_available"
+	controller_field mode string
+	controller_field stage string
+	controller_field gpon_detected boolean
+	controller_field xgspon_detected boolean
+	controller_field checked_uptime int
+	controller_field md32_enabled boolean
+	controller_field tx_disabled boolean
+	controller_field firmware_verified boolean
+	controller_field calibration_supplied boolean
+	controller_field last_error int
+	json_close_object
+	# LOS is sampled by the initialized controller driver. O5, OMCI and
+	# service readiness still have no authoritative implementation.
+	controller_field los boolean
 	json_add_null registration
 	json_add_null omci
 	json_add_null service_ready

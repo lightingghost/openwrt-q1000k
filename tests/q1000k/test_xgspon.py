@@ -161,6 +161,39 @@ class BackendTests(unittest.TestCase):
         self.assertIsNone(d['omci'])
         self.assertIsNone(d['service_ready'])
 
+    def test_controller_status_and_unavailable_samples(self):
+        base = 'sys/bus/i2c/drivers/q1000k-pon-control/0-0051/'
+        status = {'schema_version': 1, 'mode': 'xgspon', 'stage': 'initialized',
+                  'gpon_detected': True, 'xgspon_detected': True,
+                  'checked_uptime': 100, 'md32_enabled': True, 'tx_disabled': True,
+                  'firmware_verified': True, 'calibration_supplied': True,
+                  'los': True, 'last_error': 0}
+        self.write(base + 'operation', '')
+        sample = self.write(base + 'status', json.dumps(status))
+        _, d = self.call()
+        self.assertTrue(d['controller']['available'])
+        self.assertTrue(d['controller']['xgspon_detected'])
+        self.assertTrue(d['controller']['md32_enabled'])
+        self.assertTrue(d['controller']['tx_disabled'])
+        self.assertTrue(d['los'])
+        self.assertFalse(d['activation_supported'])
+        self.assertIsNone(d['service_ready'])
+        for invalid in ('{', json.dumps(dict(status, schema_version=99))):
+            sample.write_text(invalid)
+            _, d = self.call()
+            self.assertFalse(d['controller']['available'])
+            self.assertIsNone(d['controller']['xgspon_detected'])
+            self.assertIsNone(d['los'])
+        sample.write_text(json.dumps(dict(status, los='true', md32_enabled='true')))
+        _, d = self.call()
+        self.assertIsNone(d['los'])
+        self.assertIsNone(d['controller']['md32_enabled'])
+        sample.write_text(json.dumps(status))
+        # Ambiguous devices cannot be selected for commands or status.
+        self.write(base.replace('0-0051', '1-0051') + 'status', json.dumps(status))
+        self.write(base.replace('0-0051', '1-0051') + 'operation', '')
+        self.assertFalse(self.call()[1]['controller']['available'])
+
     def test_identity_fallback_and_override_validation(self):
         self.write('factory.json', json.dumps({'available': True, 'source': 'factory',
                                              'serial': 'TEST01234567', 'wan_mac': '00:11:22:33:44:55'}))

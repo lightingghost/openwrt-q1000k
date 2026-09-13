@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -15,9 +15,9 @@ define Package/q1000k-xgspon
 endef
 
 define Package/q1000k-xgspon/description
- Read-only factory-data access and diagnostics for Q1000K XGS-PON development.
- Optical activation remains unavailable until the MAC datapath and EN7573
- loader are integrated. Installing this package does not load PON modules.
+ Factory-data access, diagnostics and explicit EN7573 controller bring-up.
+ Optical service remains unavailable until the MAC datapath and OMCI are
+ integrated. Installing this package does not load PON modules.
 endef
 
 define Package/q1000k-xgspon/conffiles
