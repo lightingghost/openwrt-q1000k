@@ -53,7 +53,7 @@ static struct sk_buff_head fake_dma;
 static struct net_device *lower_dev;
 static bool fake_busy, wake_during_busy, fail_attach, detach_during_attach, hold_dma;
 static bool early_rx, record_order;
-static int quiesce_error, channel_quiesce_error;
+static int quiesce_error, channel_quiesce_error, tx_channel_error;
 static atomic_t allocations, destructions, accepted, received, busy_calls, violations;
 static unsigned int order[256];
 static u32 test_word0 = 0xfedcu << 14 | 27u << 3 | 5u;
@@ -189,6 +189,16 @@ int airoha_pon_set_queue_close(struct airoha_pon *pon,u8 channel,u8 closed)
 /* Native channel counts are tested in the transport guest. This fixture
  * supplies native return codes to check the adapter's RCU/lifetime wrapper.
  */
+int airoha_pon_set_tx_channel(struct airoha_pon *pon,u8 channel,bool enabled)
+{
+    if(channel>31) return -EINVAL;
+    RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "FE wrapper outside RCU");
+    if(!pon->connected) return -ENODEV;
+    /* The native guest tests FE register/admission behavior; this checks
+     * argument forwarding and exact native error propagation. */
+    WARN_ON(channel!=29 || !enabled);
+    return tx_channel_error;
+}
 int airoha_pon_quiesce_channel(struct airoha_pon *pon,u8 channel)
 {
     if(channel>31) return -EINVAL;
@@ -388,6 +398,7 @@ static int run_tests(void)
     CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
     CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
     CHECK(q1000k_transport_quiesce_channel(27)==-ENODEV);
+    CHECK(q1000k_transport_set_tx_channel(29,true)==-ENODEV);
     CHECK(q1000k_transport_start(NULL, receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("", receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("bad/name", receive_packet) == -EINVAL);
@@ -407,6 +418,13 @@ static int run_tests(void)
     fake_receive(); CHECK(atomic_read(&received) == rx + 1);
     early_rx = false;
     CHECK(!q1000k_transport_get_queue_close(27,&closed) && closed==255);
+    CHECK(q1000k_transport_set_tx_channel(32,true)==-EINVAL);
+    for(i=0;i<4;i++) {
+        const int errors[]={0,-EAGAIN,-ESHUTDOWN,-EIO};
+        tx_channel_error=errors[i];
+        CHECK(q1000k_transport_set_tx_channel(29,true)==errors[i]);
+    }
+    tx_channel_error=0;
     CHECK(q1000k_transport_quiesce_channel(32)==-EINVAL);
     channel_quiesce_error=-EAGAIN;
     CHECK(q1000k_transport_quiesce_channel(30)==-EAGAIN);
@@ -490,6 +508,7 @@ static int run_tests(void)
     CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
     CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
     CHECK(q1000k_transport_quiesce_channel(27)==-ENODEV);
+    CHECK(q1000k_transport_set_tx_channel(29,true)==-ENODEV);
     CHECK(!q1000k_transport_stop()); CHECK(!q1000k_transport_stop());
 
     /* Accepted native DMA can outlive adapter stop after a reported timeout. */

@@ -1,0 +1,25 @@
+Subject: [PATCH] xpon: route T-CONT FE TX setup through the native owner
+
+---
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -666,8 +666,7 @@
+ 	ret = q1000k_transport_set_queue_close(channel, 0xff);
+ 	if (ret)
+ 		goto rollback;
+-	ret = FE_API_SET_CHANNEL_ENABLE(FE_GDM_SEL_GDMA2, FE_GDM_SEL_TX,
+-				channel, FE_ENABLE);
++	ret = q1000k_transport_set_tx_channel(channel, true);
+ 	if (ret)
+ 		goto rollback;
+ 	ret = q1000k_transport_set_queue_close(channel, 0);
+@@ -685,8 +684,7 @@
+ 	cleanup = q1000k_transport_quiesce_channel(channel);
+ 	if (cleanup)
+ 		pr_err("Q1000K T-CONT %d native TX rollback incomplete: %d\n", channel, cleanup);
+-	cleanup = FE_API_SET_CHANNEL_ENABLE(FE_GDM_SEL_GDMA2, FE_GDM_SEL_TX,
+-				channel, FE_DISABLE);
++	cleanup = q1000k_transport_set_tx_channel(channel, false);
+ 	if (cleanup)
+ 		pr_err("Q1000K T-CONT %d FE rollback failed: %d\n", channel, cleanup);
+ 	cleanup = gponDevDisableTCont(alloc_id);

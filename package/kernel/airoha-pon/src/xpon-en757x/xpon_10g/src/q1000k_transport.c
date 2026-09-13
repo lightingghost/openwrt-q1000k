@@ -205,6 +205,19 @@ int q1000k_transport_set_queue_close(u8 channel, u8 closed)
 	return ret;
 }
 
+int q1000k_transport_set_tx_channel(u8 channel, bool enabled)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	rcu_read_lock();
+	transport = rcu_dereference(q1000k_current);
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_set_tx_channel(transport->pon, channel, enabled);
+	rcu_read_unlock();
+	return ret;
+}
+
 int q1000k_transport_get_queue_close(u8 channel, u8 *closed)
 {
 	struct q1000k_transport *transport;

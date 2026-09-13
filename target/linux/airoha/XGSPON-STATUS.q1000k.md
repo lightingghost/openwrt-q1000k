@@ -47,8 +47,8 @@ OMCI daemon and unrelated PR changes were not imported.
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
 | PON MAC | Runtime state/event dispatch and native packet attachment are integrated; startup/teardown fault fixtures and module modpost pass. | Complete native control/QoS/FE operations, physical interrupt/drain/PHY coordination and service-level management traffic. |
-| Native packet transport | Native metadata/raw RX, bounded vendor TX retries, startup/teardown and callback attachment are implemented; host and UML concurrency tests pass. GDM2 stays disabled. | Native QDMA/FE control/QoS providers, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
-| T-CONTs | Serialized table commands, verified writes, duplicate preservation, setup rollback and per-channel native TX drain are implemented. Removal preserves bindings and reports incomplete retirement. | FE/optical FIFO drain and ONU/OMCC assignment. |
+| Native packet transport | Native metadata/raw RX, bounded vendor TX retries, callback lifetime, queue closure and verified GDM2 TX-channel control pass host/UML tests. The GDM2 board node stays disabled. | Remaining FE/QoS operations, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
+| T-CONTs | Serialized table commands, verified writes, duplicate preservation, native FE TX setup/rollback and per-channel native TX drain are implemented. Removal preserves bindings and reports incomplete retirement. | FE/optical FIFO drain and ONU/OMCC assignment. |
 | GEM bindings | Serialized verified commands, shared GEM/T-CONT publication, bounded packet snapshots and retirement containment pass host/UML tests. | Physical retirement, encrypted activation, ONU/OMCC identity, live replacement and recovery. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
@@ -85,6 +85,14 @@ replacement remain unsupported. All 27 host PON tests and the real-kernel GEM
 concurrency/interrupt test pass; all six vendor modules pass modpost and the
 r17 package builds. See the
 [GEM checkpoint](XGSPON-INTEGRATION.q1000k.md#gem-command-and-binding-checkpoint-2026-09-13).
+Kernel patch 9999c and vendor patch 021 add verified native GDM2 FE TX-channel
+control to T-CONT setup/rollback. Enabling requires closed queues and reclaimed
+native mappings; disable permanently closes admission. Readback faults block
+new transmission and cannot be cleared by a later successful write. All 27
+host tests, the native/adapter UML tests, the AN7581 kernel and r18 package
+build pass. Physical RX/FIFO retirement and the remaining FE/QoS/PHY/OMCI
+integration are still required; see the
+[FE TX-channel checkpoint](XGSPON-INTEGRATION.q1000k.md#native-fe-tx-channel-checkpoint-2026-09-13).
 No SSH access or device changes were made for this continuation.
 
 The reference loader was inspected at

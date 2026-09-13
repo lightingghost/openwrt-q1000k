@@ -162,7 +162,11 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    retained retirement state. Host fault/caller/packet tests and Linux UML
    interrupt/concurrency tests pass. Active rebinding, encryption activation
    and legacy recovery remain unsupported.
-   Native FE/QoS providers, physical FIFO/RX
+   Kernel patch 9999c and vendor patch 021 implement verified native GDM2
+   TX-channel enable/disable for T-CONT setup and rollback, with closed-queue
+   and native-mapping preconditions, permanent disable and latched MMIO faults.
+   Host and UML IRQ/concurrency tests pass, as do kernel/module builds.
+   Remaining FE/QoS operations, physical FIFO/RX
    drain, FE flow operations and the PHY/phylink
    connection remain outstanding; the board's PON nodes stay disabled.
 

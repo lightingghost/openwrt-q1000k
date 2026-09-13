@@ -184,6 +184,17 @@ duplicate completions, permanent closure, pending polls and errors after
 disconnect/readback failure. The native UML guest races channel retirement
 against TX and reopening, and executes a channel operation from real interrupt
 context. The adapter guest checks that its RCU wrapper preserves native errors.
+
+Native FE tests cover all 32 GDM2 TX-enable bits and preservation of other
+channels. Attachment rejects loopback and verifies all-off before publication;
+enable requires closed queues and reclaimed native mappings. Fault injection
+covers ignored enable/disable writes, mismatched readback and QDMA-close
+failure. A failed disable cannot claim FE stopped; later disable attempts
+all-off without clearing the fault. The native UML guest exercises FE control
+in hard-IRQ context and alongside TX, queue closure and detach; the adapter
+guest verifies exact error forwarding under RCU. These are modeled FE
+registers, not evidence of physical FIFO or optical retirement.
+
 All PON UML runners explicitly reject kernel diagnostics; a negated `grep`
 alone does not trigger `set -e` and is insufficient as a failure check.
 

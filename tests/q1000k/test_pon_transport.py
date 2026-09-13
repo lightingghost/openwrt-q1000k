@@ -20,6 +20,9 @@ class PonTransportTests(unittest.TestCase):
         regs = (ETH / 'airoha_regs.h').read_text()
         masks = '\n'.join(line for line in regs.splitlines() if re.match(
             r'#define (?:QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)|REG_QUEUE_CLOSE_CFG)', line))
+        masks += '\n' + re.search(r'#define GDM_BASE\(_n\).*?(?=\n\n)', regs, re.S).group()
+        masks += '\n' + '\n'.join(line for line in regs.splitlines() if re.match(
+            r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK)', line))
         run_c(r'''
 #include <assert.h>
 #include <errno.h>
@@ -40,6 +43,7 @@ typedef int netdev_tx_t;
 #define CHECKSUM_NONE 0
 #define CHECKSUM_PARTIAL 1
 #define AIROHA_NUM_TX_RING 32
+#define AIROHA_GDM2_IDX 2
 #define AIROHA_NUM_QOS_CHANNELS 4
 #define U32_MAX UINT32_MAX
 #define AIROHA_MAX_RX_SIZE 16128
@@ -136,7 +140,18 @@ struct airoha_gdm_dev {
     atomic_t pon_tx_pending;
 };
 struct airoha_gdm_port { struct airoha_gdm_dev *devs[2]; };
-struct airoha_eth { struct airoha_gdm_port *ports[4]; struct airoha_qdma qdma[2]; };
+struct airoha_eth { struct airoha_gdm_port *ports[4]; struct airoha_qdma qdma[2]; u32 fe_tx,fe_loopback; };
+static unsigned int fe_reads,fe_writes;
+static bool fe_fault,fe_ignore_write;
+static u32 airoha_fe_rr(struct airoha_eth *eth,u32 reg) {
+    assert(rtnl_held || rcu_readers); fe_reads++;
+    assert(reg==0x151c || reg==0x1524);
+    return reg==0x151c ? eth->fe_loopback : eth->fe_tx ^ (fe_fault ? 1u<<19 : 0);
+}
+static void airoha_fe_wr(struct airoha_eth *eth,u32 reg,u32 value) {
+    assert((rtnl_held || rcu_readers) && reg==0x1524); fe_writes++;
+    if(!fe_ignore_write) eth->fe_tx=value;
+}
 struct sk_buff {
     struct net_device *dev;
     u16 queue;
@@ -223,7 +238,15 @@ int main(void) {
     eth.qdma[1].qos_channel_map[0]=1;
     assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
     eth.qdma[1].qos_channel_map[0]=0;
-    assert(reg_writes==0 && reg_reads==0); /* failed reservations must not touch MMIO */
+    assert(reg_writes==0 && reg_reads==0 && !fe_reads && !fe_writes); /* failed reservations must not touch MMIO */
+    eth.fe_loopback=1;
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY && !reg_writes && !fe_writes);
+    eth.fe_loopback=0;
+    fe_fault=true;
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EIO && !gdm.pon);
+    fe_fault=false; fe_ignore_write=true; eth.fe_tx=BIT(5);
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EIO && !gdm.pon);
+    fe_ignore_write=false;
     for(int reg=0xa0;reg<=0xbc;reg+=4) {
         fault_register=reg;
         assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EIO && !gdm.pon);
@@ -237,6 +260,11 @@ int main(void) {
     }
     tx.epoch=123;
     assert(airoha_pon_prepare_tx(pon,&tx)==-ESHUTDOWN && tx.epoch==123);
+    assert(airoha_pon_set_queue_close(pon,31,0)==-ESHUTDOWN);
+    for(int ch=0;ch<32;ch++) {
+        assert(!airoha_pon_set_tx_channel(pon,ch,true));
+        assert(eth.fe_tx==(UINT32_MAX>>(31-ch)) && pon->tx_enabled==eth.fe_tx);
+    }
     assert(!airoha_pon_set_queue_close(pon,31,0));
     assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch==1);
     assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
@@ -387,6 +415,66 @@ int main(void) {
     airoha_pon_release(next);
     assert(airoha_pon_quiesce(NULL,1)==-EINVAL);
     airoha_pon_tx_get(NULL,0); airoha_pon_tx_complete(NULL,0);
+    /* Independent attachments model physically quiescent hardware. */
+    pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon && !eth.fe_tx);
+    unsigned int fw=fe_writes;
+    assert(airoha_pon_set_tx_channel(NULL,0,true)==-EINVAL);
+    assert(airoha_pon_set_tx_channel(pon,32,true)==-EINVAL && fw==fe_writes);
+    for(int ch=0;ch<32;ch++) assert(!airoha_pon_set_tx_channel(pon,ch,true));
+    assert(!airoha_pon_set_queue_close(pon,8,0));
+    assert(airoha_pon_set_tx_channel(pon,8,true)==-EBUSY);
+    struct airoha_pon_tx_meta lease={.channel=8};
+    assert(!airoha_pon_prepare_tx(pon,&lease));
+    airoha_pon_tx_get(pon,8);
+    assert(!airoha_pon_set_queue_close(pon,8,255));
+    assert(airoha_pon_set_tx_channel(pon,8,true)==-EAGAIN);
+    assert(!airoha_pon_set_tx_channel(pon,8,false));
+    assert(!(eth.fe_tx&BIT(8)) && (pon->retiring&BIT(8)) && atomic_read(&pon->channel_pending[8])==1);
+    assert(airoha_pon_set_tx_channel(pon,8,true)==-ESHUTDOWN);
+    assert(airoha_pon_set_queue_close(pon,8,0)==-ESHUTDOWN);
+    airoha_pon_tx_complete(pon,8);
+    assert(airoha_pon_set_tx_channel(pon,8,true)==-ESHUTDOWN);
+    reset_skb(&skb,&upper); sent=xmit_calls;
+    assert(!airoha_pon_xmit(pon,&skb,&lease) && skb.freed && xmit_calls==sent);
+    for(int ch=0;ch<32;ch++) {
+        u32 expected=eth.fe_tx & ~BIT(ch);
+        assert(!airoha_pon_set_tx_channel(pon,ch,false));
+        assert(eth.fe_tx==expected && pon->tx_enabled==expected);
+    }
+    airoha_pon_release(pon);
+    for(int failure=0;failure<4;failure++) {
+        pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon);
+        assert(!airoha_pon_set_tx_channel(pon,7,true));
+        if(failure==3) assert(!airoha_pon_set_queue_close(pon,7,0));
+        if(failure==0 || failure==3) fe_ignore_write=true;
+        if(failure==1) fe_fault=true;
+        if(failure==2) fault_register=0xa0;
+        int err=failure==3 ? airoha_pon_set_tx_channel(pon,7,false) :
+            failure==2 ? airoha_pon_set_tx_channel(pon,0,false) : airoha_pon_set_tx_channel(pon,0,true);
+        assert(err==-EIO && pon->control_fault);
+        if(failure==3) {
+            assert((pon->retiring & BIT(7)) && pon->closed[7]==255);
+            assert(eth.fe_tx==BIT(7)); /* failed disable cannot claim FE stopped */
+        }
+        fw=fe_writes;
+        assert(airoha_pon_set_tx_channel(pon,1,true)==-EIO && fe_writes==fw);
+        lease.channel=7; lease.epoch=123;
+        assert(airoha_pon_prepare_tx(pon,&lease)==-EIO && lease.epoch==123);
+        reset_skb(&skb,&upper); sent=xmit_calls;
+        assert(!airoha_pon_xmit(pon,&skb,&lease) && skb.freed && xmit_calls==sent);
+        if(failure==3) {
+            assert(airoha_pon_set_tx_channel(pon,7,false)==-EIO);
+            assert(eth.fe_tx==BIT(7) && pon->tx_enabled==BIT(7) && pon->control_fault);
+        }
+        fe_ignore_write=fe_fault=false; fault_register=-1;
+        /* A later disable attempts all-off but never clears the fault. */
+        assert(airoha_pon_set_tx_channel(pon,7,false)==-EIO && !eth.fe_tx && !pon->tx_enabled);
+        lease.channel=7; lease.epoch=123;
+        assert(airoha_pon_prepare_tx(pon,&lease)==-EIO && lease.epoch==123);
+        assert(!airoha_pon_quiesce(pon,0)); fw=fe_writes;
+        assert(airoha_pon_set_tx_channel(pon,0,false)==-ENODEV && fe_writes==fw);
+        airoha_pon_release(pon);
+    }
     assert(allocations==releases && !rtnl_held && !rcu_readers);
     return 0;
 }

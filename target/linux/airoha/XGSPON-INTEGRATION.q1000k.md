@@ -375,8 +375,9 @@ identity or resetting the MAC when bulk retirement is incomplete. Other legacy
 reset paths and ONU/OMCC assignment still need their own lifecycle audit.
 
 Patch 020 below subsequently synchronizes data GEM mutation and packet
-metadata preparation with these transactions. The setup success path is tested with a synthetic FE
-provider; a native FE implementation is still absent. These changes therefore
+metadata preparation with these transactions. This checkpoint tested setup with
+a synthetic FE provider; patch 021 below replaces TX-channel enable/disable with
+the native owner's verified API. These changes therefore
 retain both readiness gates, disabled board nodes, the `BROKEN` package marker
 and explicit service-start failure.
 
@@ -542,6 +543,55 @@ kernel locking diagnostics. The six AN7581 vendor modules pass modpost and the
 r17 APK builds locally. No SSH, device command, module installation or flash
 operation was performed. These tests model registers and native drain; they
 do not establish physical command timing or working optical service.
+
+## Native FE TX-channel checkpoint (2026-09-13)
+
+Kernel patch `9999c-net-airoha-pon-fe-tx-channel.patch` adds
+`airoha_pon_set_tx_channel()` to the native GDM2/QDMA1 owner. The existing
+AN7581 Ethernet definitions identify the GDM2 TX-channel bitmap at FE offset
+`0x1524`; the adjacent RX enable and channel-release registers are separate
+operations. This checkpoint implements only that 32-bit TX bitmap. It does
+not infer RX or retirement behavior from the upstream loopback setup.
+
+Attachment requires exclusive QDMA1 ownership and rejects active GDM2
+loopback before any write. It verifies closure of all 32 x 8 QDMA queues,
+then verifies that every FE TX channel is disabled before publishing the
+handle. Enabling one channel requires all its queues closed and no remaining
+native mappings; it leaves the queues closed. Queue opening and both packet
+admission stages require a verified enabled channel. Disable permanently
+closes that channel's admission before changing FE, preventing reuse by this
+attachment even after descriptor reclamation.
+
+The existing IRQ-safe admission lock serializes FE control, QDMA closure and
+TX submission. The entire FE bitmap is written from a verified shadow and
+read back, preserving other channels. Any FE/QDMA readback fault blocks all
+software TX admission and subsequent enables. A later disable attempts to
+clear the entire FE TX bitmap but still returns `-EIO`; it cannot clear the
+fault or prove physical retirement. An ignored disable write is an error,
+with queues closed and the channel permanently marked retiring.
+
+Vendor patch `021-q1000k-native-fe-tx-channel.patch` routes T-CONT setup and
+rollback directly through the new RCU-pinned adapter wrapper. The original
+operation's error reaches the caller; rollback still attempts native closure,
+FE disable and MAC invalidation. No partial ECNT FE provider is registered.
+T-CONT/GEM removal continues to preserve mappings and report incomplete
+physical retirement. Disable can leave frames buffered in FE/optical FIFOs;
+it is not a drain operation. Detach still disconnects callbacks, and native
+descriptor reclamation does not establish RX/optical quiescence. The complete
+FE/QoS, physical drain, PHY and OMCI gates remain in place, with board PON
+nodes disabled and no autoload.
+
+Validation: all 27 host PON tests pass against the prepared sources. Native
+fault fixtures cover all 32 bitmap positions, preserved channels, closed-queue
+and pending-mapping preconditions, ignored enable/disable writes, mismatched
+readback, QDMA-close failure, fault containment and disconnected handles.
+The native Linux 6.18.44 UML guest passes 100 attachment cycles, concurrent
+FE/QDMA/TX controls and real hard-IRQ enable/disable. The adapter UML guest
+passes 50 cycles and checks exact forwarding of native errors. Both logs
+contain no kernel diagnostics. The AN7581 kernel and r18 vendor APK build;
+all six vendor modules resolve against the nine native API exports.
+Registers and DMA remain modeled in these tests. No SSH or device access,
+module installation or flash operation was performed.
 
 ## Q1000K RX framing checkpoint (2026-09-13)
 

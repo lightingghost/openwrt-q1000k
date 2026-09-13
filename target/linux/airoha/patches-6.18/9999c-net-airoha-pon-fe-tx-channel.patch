@@ -1,0 +1,215 @@
+Subject: [PATCH] net: airoha: own and verify PON FE TX channel admission
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -22,8 +22,9 @@
+ 	u64 epoch[32];
+ 	u8 closed[32];
+ 	u32 retiring;
++	u32 tx_enabled;
+ 	atomic_t channel_pending[32];
+-	bool queue_fault;
++	bool control_fault;
+ 	/* Native DMA owns the lower storage until its descriptors are reaped. */
+ 	struct airoha_gdm_dev *dma_dev;
+ 	refcount_t refs;
+@@ -163,8 +164,11 @@
+ 	    !bitmap_empty(dev->eth->qdma[1].qos_channel_map,
+ 			  AIROHA_NUM_QOS_CHANNELS))
+ 		goto out;
+-	/* Exclusive QDMA1 owner; start with every TX queue closed. No DMA
+-	 * reset, FE retirement, PHY access or optical-drain claim is involved.
++	/* A stale loopback configuration is not owned by the PON consumer. */
++	if (airoha_fe_rr(dev->eth, REG_GDM_LPBK_CFG(AIROHA_GDM2_IDX)) & LPBK_EN_MASK)
++		goto out;
++	/* Exclusive GDM2/QDMA1 owner: start with FE TX and all queues closed.
++	 * No RX, DMA reset, PHY, FIFO flush or optical-drain operation occurs.
+ 	 */
+ 	spin_lock_init(&pon->admission_lock);
+ 	for (i = 0; i < ARRAY_SIZE(pon->closed); i += 4) {
+@@ -174,6 +178,11 @@
+ 			err = -EIO;
+ 			goto out;
+ 		}
++	}
++	airoha_fe_wr(dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), 0);
++	if (airoha_fe_rr(dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX))) {
++		err = -EIO;
++		goto out;
+ 	}
+ 	memset(pon->closed, 0xff, sizeof(pon->closed));
+ 	for (i = 0; i < ARRAY_SIZE(pon->epoch); i++) {
+@@ -317,9 +326,10 @@
+ 	lockdep_assert_held(&pon->admission_lock);
+ 	if (!rcu_dereference(pon->netdev))
+ 		return -ENODEV;
+-	if (pon->queue_fault)
++	if (pon->control_fault)
+ 		return -EIO;
+-	if ((pon->retiring & BIT(channel)) && closed != 0xff)
++	if (closed != 0xff && ((pon->retiring & BIT(channel)) ||
++	    !(pon->tx_enabled & BIT(channel))))
+ 		return -ESHUTDOWN;
+ 	qdma = &pon->dma_dev->eth->qdma[1];
+ 	mask = 0xffU << ((channel & 3) * 8);
+@@ -327,7 +337,7 @@
+ 	airoha_qdma_rmw(qdma, REG_QUEUE_CLOSE_CFG(channel), mask, value);
+ 	/* Flush the posted write and fail closed on a register mismatch. */
+ 	if ((airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(channel)) & mask) != value) {
+-		pon->queue_fault = true;
++		pon->control_fault = true;
+ 		ret = -EIO;
+ 		return ret;
+ 	}
+@@ -337,13 +347,78 @@
+ 	 */
+ 	if (closed & ~pon->closed[channel]) {
+ 		if (++pon->epoch[channel] == 0) {
+-			pon->queue_fault = true;
++			pon->control_fault = true;
+ 			ret = -EOVERFLOW;
+ 		}
+ 	}
+ 	pon->closed[channel] = closed;
+ 	return ret;
+ }
++
++int airoha_pon_set_tx_channel(struct airoha_pon *pon, u8 channel, bool enabled)
++{
++	struct airoha_eth *eth;
++	unsigned long flags;
++	u32 value;
++	int ret = 0;
++
++	if (!pon || channel >= ARRAY_SIZE(pon->closed))
++		return -EINVAL;
++	rcu_read_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_dereference(pon->netdev)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	if (enabled) {
++		if (pon->control_fault) {
++			ret = -EIO;
++			goto out;
++		}
++		if (pon->retiring & BIT(channel)) {
++			ret = -ESHUTDOWN;
++			goto out;
++		}
++		if (pon->closed[channel] != 0xff) {
++			ret = -EBUSY;
++			goto out;
++		}
++		if (atomic_read_acquire(&pon->channel_pending[channel])) {
++			ret = -EAGAIN;
++			goto out;
++		}
++	} else {
++		/* Disable is permanent for this attachment. Close admission before
++		 * touching FE, even if a later hardware write fails.
++		 */
++		pon->retiring |= BIT(channel);
++		ret = airoha_pon_set_queue_close_locked(pon, channel, 0xff);
++	}
++	eth = pon->dma_dev->eth;
++	/* This attachment exclusively owns the entire 32-channel bitmap.
++	 * Preserve other verified channels without trusting an uncertain read.
++	 * After any control fault, a disable request attempts to stop all TX;
++	 * success cannot clear the fault or establish physical retirement.
++	 */
++	value = enabled ? pon->tx_enabled | BIT(channel) :
++			  pon->tx_enabled & ~BIT(channel);
++	if (pon->control_fault)
++		value = 0;
++	airoha_fe_wr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), value);
++	if (airoha_fe_rr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX)) != value) {
++		pon->control_fault = true;
++		ret = -EIO;
++	} else {
++		pon->tx_enabled = value;
++		if (pon->control_fault)
++			ret = -EIO;
++	}
++out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_set_tx_channel);
+ 
+ int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed)
+ {
+@@ -394,7 +469,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_dereference(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->queue_fault)
++	else if (pon->control_fault)
+ 		ret = -EIO;
+ 	else
+ 		*closed = pon->closed[channel];
+@@ -419,9 +494,10 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_dereference(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->queue_fault)
++	else if (pon->control_fault)
+ 		ret = -EIO;
+-	else if (pon->closed[meta->channel] & BIT(meta->queue))
++	else if (!(pon->tx_enabled & BIT(meta->channel)) ||
++		 (pon->closed[meta->channel] & BIT(meta->queue)))
+ 		ret = -ESHUTDOWN;
+ 	else
+ 		meta->epoch = pon->epoch[meta->channel];
+@@ -453,7 +529,8 @@
+ 	rcu_read_lock();
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	netdev = rcu_dereference(pon->netdev);
+-	if (!netdev || !netif_running(netdev) || pon->queue_fault ||
++	if (!netdev || !netif_running(netdev) || pon->control_fault ||
++	    !(pon->tx_enabled & BIT(meta->channel)) ||
+ 	    (pon->closed[meta->channel] & BIT(meta->queue)) ||
+ 	    meta->epoch != pon->epoch[meta->channel]) {
+ 		dev_kfree_skb_any(skb);
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -79,18 +79,33 @@
+ int airoha_pon_quiesce_channel(struct airoha_pon *pon, u8 channel);
+ 
+ /* Queue configuration requires exclusive QDMA1 ownership: attach rejects
+- * every other assigned netdev (even down) and QoS allocation, then closes all
+- * 32 x 8 TX queues. set/get/prepare are IRQ-safe and serialized against TX.
++ * every other assigned netdev (even down) and QoS allocation, then disables all
++ * GDM2 TX channels and closes all 32 x 8 TX queues. GDM2 loopback must be off.
++ * set/get/prepare are IRQ-safe and serialized against TX.
+  * Callers must retain the handle and MUST NOT hold a consumer callback lock.
++ * Opening queues requires an enabled FE TX channel.
+  * closed has one bit per queue; get returns the last verified configuration,
+  * not hardware FIFO occupancy. Errors leave output arguments unchanged.
+- * An MMIO readback failure disables all software admission until reattach.
++ * A QDMA/FE readback failure disables all software admission until reattach.
+  * Detach makes control calls return -ENODEV without touching registers.
+  * Closure is NOT retirement: previously submitted descriptors/FIFOs may still
+  * contain frames. Coordinate physical draining before reallocating T-CONTs.
+  */
+ int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed);
+ int airoha_pon_get_queue_close(struct airoha_pon *pon, u8 channel, u8 *closed);
++
++/* Enable one GDM2 FE TX channel while all its QDMA queues are closed and
++ * its native mappings are reclaimed. Enabling does not open queues. Disable
++ * first closes queues permanently for this attachment, then verifies FE TX
++ * disable; other verified channels are preserved. A control readback failure
++ * latches a fault. Later disable attempts write an all-disabled FE bitmap but
++ * still report -EIO; there is no fault-clear operation. IRQ-safe, handle must
++ * remain owned; no consumer callback lock may be held. -EBUSY means queues
++ * are open, -EAGAIN means mappings remain, -ESHUTDOWN means retired.
++ * This neither controls RX nor retires FE/optical FIFOs. Disabling may leave
++ * frames buffered; coordinate physical draining before reset or ID reuse.
++ */
++int airoha_pon_set_tx_channel(struct airoha_pon *pon, u8 channel, bool enabled);
+ 
+ /* Capture admission for a fully prepared frame BEFORE enqueueing it. Returns
+  * -ESHUTDOWN for a closed queue. xmit drops stale epochs even after reopen;

@@ -101,9 +101,9 @@ static int q1000k_transport_quiesce_channel(u8 channel)
     retiring |= 1u<<channel;
     return q1000k_transport_set_queue_close(channel,255);
 }
-static int FE_API_SET_CHANNEL_ENABLE(int gdm,int direction,u8 channel,int enable)
+static int q1000k_transport_set_tx_channel(u8 channel,bool enable)
 {
-    assert(gdm==2 && direction==1 && channel>0 && channel<32);
+    assert(channel>0 && channel<32);
     record('F',channel,enable);
     int ret=result();
     if(!ret) fe_enabled[channel]=enable;

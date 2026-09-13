@@ -27,6 +27,7 @@ print(r'''
 #error This test is for a disposable UML guest only.
 #endif
 #define AIROHA_NUM_TX_RING 32
+#define AIROHA_GDM2_IDX 2
 #define AIROHA_NUM_QOS_CHANNELS 4
 #define AIROHA_MAX_RX_SIZE 16128
 ''')
@@ -64,7 +65,18 @@ struct airoha_gdm_dev {
     bool pon_port;
 };
 struct airoha_gdm_port { struct airoha_gdm_dev *devs[1]; };
-struct airoha_eth { struct airoha_qdma qdma[2]; struct airoha_gdm_port *ports[4]; };
+struct airoha_eth { struct airoha_qdma qdma[2]; struct airoha_gdm_port *ports[4]; u32 fe_tx,fe_loopback; };
+static void check_fe_access(struct airoha_eth *eth);
+static u32 airoha_fe_rr(struct airoha_eth *eth,u32 reg) {
+    check_fe_access(eth);
+    if(WARN_ON(reg!=0x151c && reg!=0x1524)) return ~0U;
+    return reg==0x151c ? eth->fe_loopback : eth->fe_tx;
+}
+static void airoha_fe_wr(struct airoha_eth *eth,u32 reg,u32 value) {
+    check_fe_access(eth);
+    if(WARN_ON(reg!=0x1524)) return;
+    eth->fe_tx=value;
+}
 static const struct net_device_ops airoha_netdev_ops;
 bool airoha_pon_qdma_busy(struct airoha_qdma *qdma);
 void airoha_pon_stop(struct airoha_gdm_dev *dev);
@@ -122,14 +134,29 @@ static int dma_worker(void *unused)
 ''')
 print('\n'.join(line for line in (eth / 'airoha_regs.h').read_text().splitlines()
                 if re.match(r'#define (?:QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)|REG_QUEUE_CLOSE_CFG)', line)))
+regs = (eth / 'airoha_regs.h').read_text()
+print(re.search(r'#define GDM_BASE\(_n\).*?(?=\n\n)', regs, re.S).group())
+print('\n'.join(line for line in regs.splitlines() if re.match(
+    r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK)', line)))
 source = (eth / 'airoha_pon.c').read_text()
 print(re.sub(r'^#include[^\n]*\n', '', source, flags=re.M))
 print(r'''
+static void check_fe_access(struct airoha_eth *eth)
+{
+    struct airoha_pon *pon;
+    if(lockdep_rtnl_is_held()) return;
+    RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "FE access outside RCU");
+    WARN_ON(!irqs_disabled());
+    pon=rcu_dereference(eth->ports[1]->devs[0]->pon);
+    if(WARN_ON(!pon)) return;
+    lockdep_assert_held(&pon->admission_lock);
+}
 static void check_admission(struct airoha_pon *pon,u32 msg)
 {
     unsigned int channel=(msg>>3)&31,queue=msg&7;
     lockdep_assert_held(&pon->admission_lock);
-    WARN_ON(pon->queue_fault || (pon->closed[channel] & BIT(queue)));
+    WARN_ON(pon->control_fault || !(pon->tx_enabled & BIT(channel)) ||
+        (pon->closed[channel] & BIT(queue)));
 }
 static struct airoha_pon *irq_test_pon;
 static int irq_control_result;
@@ -138,6 +165,9 @@ static void irq_channel_control(struct irq_work *work)
 {
     irq_control_ran=in_hardirq();
     irq_control_result=airoha_pon_quiesce_channel(irq_test_pon,1);
+    WARN_ON(airoha_pon_set_tx_channel(irq_test_pon,10,true));
+    WARN_ON(airoha_pon_set_tx_channel(irq_test_pon,10,false));
+    WARN_ON(airoha_pon_set_tx_channel(irq_test_pon,10,true)!=-ESHUTDOWN);
 }
 static DEFINE_IRQ_WORK(channel_irq_work,irq_channel_control);
 static struct airoha_pon __rcu *active;
@@ -214,6 +244,7 @@ static int channel_worker(void *unused)
             /* Adjacent byte shares channel 5's register. Keep its value
              * recognizable to catch collateral RMW corruption.
              */
+            airoha_pon_set_tx_channel(pon,6,true);
             airoha_pon_set_queue_close(pon,4,0x5a);
             airoha_pon_set_queue_close(pon,5,(++n&1) ? 0xff : 0);
         }
@@ -251,6 +282,7 @@ static int __init pon_transport_test_init(void)
     pon=airoha_pon_attach(lower,&ops,NULL);
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
     skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+    CHECK(!airoha_pon_set_tx_channel(pon,tx.channel,true));
     CHECK(!airoha_pon_set_queue_close(pon,tx.channel,0));
     CHECK(!airoha_pon_prepare_tx(pon,&tx));
     CHECK(airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_OK);
@@ -270,6 +302,7 @@ static int __init pon_transport_test_init(void)
     CHECK(airoha_pon_prepare_tx(pon,&tx)==-ESHUTDOWN);
     CHECK(airoha_pon_set_queue_close(pon,1,0)==-ESHUTDOWN);
     tx.channel=2;
+    CHECK(!airoha_pon_set_tx_channel(pon,2,true));
     CHECK(!airoha_pon_set_queue_close(pon,2,0));
     CHECK(!airoha_pon_prepare_tx(pon,&tx));
     atomic_set(&hold_dma,1);
@@ -290,6 +323,8 @@ static int __init pon_transport_test_init(void)
         atomic_set(&live,1);
         pon=airoha_pon_attach(lower,&ops,NULL);
         if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
+        CHECK(!airoha_pon_set_tx_channel(pon,4,true));
+        CHECK(!airoha_pon_set_tx_channel(pon,5,true));
         CHECK(!airoha_pon_set_queue_close(pon,5,0));
         rcu_assign_pointer(active,pon);
         msleep(1);
@@ -300,6 +335,8 @@ static int __init pon_transport_test_init(void)
             ret=airoha_pon_quiesce_channel(pon,5);
         }
         CHECK(!ret && !atomic_read(&pon->channel_pending[5]));
+        CHECK(!airoha_pon_set_tx_channel(pon,5,false));
+        CHECK(airoha_pon_set_tx_channel(pon,5,true)==-ESHUTDOWN);
         CHECK(airoha_pon_set_queue_close(pon,5,0)==-ESHUTDOWN);
         if (i&1) {
             rtnl_lock(); dev_close(lower); rtnl_unlock();
@@ -323,6 +360,7 @@ static int __init pon_transport_test_init(void)
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
     atomic_set(&hold_dma,1);
     skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+    CHECK(!airoha_pon_set_tx_channel(pon,tx.channel,true));
     CHECK(!airoha_pon_set_queue_close(pon,tx.channel,0));
     CHECK(!airoha_pon_prepare_tx(pon,&tx));
     CHECK(airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_OK);
@@ -345,7 +383,7 @@ out:
     if(registered) unregister_netdev(lower);
     if(dma) kthread_stop(dma);
     free_netdev(lower);
-    if(!ret) pr_info("Q1000K_PON_TRANSPORT_KERNEL_PASS cycles=100 drain_timeout_retry=pass channel_drain=pass irq_control=pass late_dma=pass rx=%d wake=%d detach=%d\n",
+    if(!ret) pr_info("Q1000K_PON_TRANSPORT_KERNEL_PASS cycles=100 drain_timeout_retry=pass channel_drain=pass fe_control=pass irq_control=pass late_dma=pass rx=%d wake=%d detach=%d\n",
         atomic_read(&rx_calls),atomic_read(&wake_calls),atomic_read(&detached_calls));
     return ret;
 }
