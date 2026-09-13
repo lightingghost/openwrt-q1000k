@@ -33,6 +33,7 @@ python3 tests/q1000k/test_pon_unsupported.py
 python3 tests/q1000k/test_pon_crypto.py
 python3 tests/q1000k/test_pon_lifecycle.py
 python3 tests/q1000k/test_pon_packet.py
+python3 tests/q1000k/test_pon_omci_tx.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -128,6 +129,22 @@ socket on a synthetic netdevice. It checks exact raw bytes for baseline and
 extended OMCI plus Ethernet, including fragmented input. It accepts the same
 `Q1000K_UML_BASE` cache option, mounts hostfs read-only and attaches no physical
 NIC. It does not validate MIC/authentication, OMCI provisioning or hardware.
+
+The OMCI TX fixture runs the production framing helper and prepared vendor
+MIC caller. It checks all extended length values, complete versus truncated
+frames, optional trailers, buffer expansion, and allocation/CMAC failures.
+
+```sh
+tests/q1000k/run_pon_omci_tx_uml.sh
+```
+
+This UML runner executes those same routines with real Linux skbs, clones,
+page fragments, trimming and tail expansion. Its 80 cases combine baseline
+and extended frames, linear/fragmented and cloned input, presence/absence of
+a trailer, success, and missing-provider/allocation/CMAC failures. DMA and
+hardware CMAC are fixtures; the test validates ownership, framing and error
+propagation, not a cryptographic result, key selection or optical operation.
+It accepts `Q1000K_UML_BASE` and uses the same read-only hostfs/UML guards.
 
 To execute the same cryptographic helpers with the real Linux crypto API:
 

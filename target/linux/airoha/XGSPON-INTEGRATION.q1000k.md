@@ -346,6 +346,34 @@ The complete six-module vendor package builds and passes modpost as
 new helpers. It remains `BROKEN`, unselected and without autoload. No module,
 package or firmware has been loaded on the device in this continuation.
 
+## OMCI transmit framing checkpoint (2026-09-13)
+
+The original transmit path changes `skb->len` directly while removing and
+adding the four-byte OMCI trailer, leaving the tail inconsistent. Its extended
+length calculation can wrap at 16 bits, accepts truncated input, and discards
+unexpected extra data. Its software-MIC caller also returns success after a
+CMAC error. These are prerequisites to resolve before native TX submission.
+
+Vendor patch 015 uses `q1000k_omci_tx_prepare()` on Q1000K. It accepts only a
+complete baseline/extended body, optionally followed by one four-byte trailer,
+and rejects unsupported offload metadata. It linearizes fragments, makes
+cloned data writable, reserves room for a replacement MIC and trims with the
+skb API. The imported MIC caller validates direct calls as well, appends via
+`skb_put_data()` only after success, and returns failure for CMAC errors.
+Failure leaves buffer ownership with its caller. Other targets keep the
+imported implementation.
+
+All 19 host PON tests pass. New tests execute the helper and actual imported
+MIC caller, including every extended length value and allocation/CMAC faults.
+A Linux UML test passes 80 combinations of baseline/extended, linear/fragmented,
+cloned, trailer present/absent, success and failures. Length/tail consistency,
+unchanged parent clones, cleanup and failure propagation are checked with real
+skbs; DMA and CMAC calls are fixtures. No kernel diagnostics occur. The complete
+vendor APK builds as release 12 without unresolved symbols or autoload.
+
+This checkpoint does not establish hardware CMAC/key selection, authenticate
+incoming MICs, connect the native TX adapter or validate an OMCI service.
+
 ## MAC identity handoff
 
 The Q1000K MAC now requires `wan_mac` (exact colon-separated 6-byte unicast

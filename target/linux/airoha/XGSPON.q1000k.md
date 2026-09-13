@@ -148,7 +148,9 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    Patch 9998 adds per-descriptor ownership and bounded TX reclamation waits,
    with timeout/retry and late-completion tests. Vendor patch 014 normalizes
    Q1000K RX lengths and preserves raw OMCI framing; host callback fixtures and
-   Linux packet-socket tests pass. The vendor adapter, physical
+   Linux packet-socket tests pass. Patch 015 bounds outgoing OMCI frames,
+   fixes skb tail handling and propagates MIC-generation failures; real-skb
+   UML fault tests pass. The vendor adapter, physical
    FIFO/RX drain, FE flow operations and PHY/phylink connection remain outstanding; the board's PON nodes stay disabled.
 
    Acceptance: one coherent optical data path with working management

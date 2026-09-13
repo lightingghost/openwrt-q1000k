@@ -388,6 +388,20 @@ autoload. These are framing/bounds checks; the native adapter, MIC/authenticatio
 PHY sequencing and optical/OMCI service are still pending. Device access remained
 read-only; this continuation made no device connection.
 
+## OMCI transmit framing checkpoint (2026-09-13)
+
+Vendor patch 015 rejects truncated/overflowing OMCI TX frames, preserves skb
+length/tail consistency when replacing a trailer, linearizes fragments and
+reserves writable space even for clones. MIC-generation errors now fail the
+send instead of returning success. Caller ownership is retained on failure.
+
+All 19 host tests pass. The actual vendor MIC caller also passes 80 UML cases
+using real skb trimming, expansion, clones and page fragments, with injected
+provider/allocation/CMAC failures. Hardware DMA/CMAC are fixtures, so this does
+not prove authentication or optical operation. The complete optional package
+builds as release 12. Native TX/FE integration, PHY and OMCI service remain
+pending. No device connection or firmware flash was performed.
+
 ## Validation and remaining acceptance gates
 
 - Eleven Python tests pass for the production C reader, shell backend, CLI and

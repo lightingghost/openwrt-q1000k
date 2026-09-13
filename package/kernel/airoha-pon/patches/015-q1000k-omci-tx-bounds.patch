@@ -1,0 +1,88 @@
+Subject: [PATCH] xpon: bound Q1000K OMCI TX and propagate MIC failures
+
+Keep skb length and tail consistent when replacing an OMCI trailer.
+Reject truncated/overflowing extended lengths before hardware CMAC input,
+reserve writable tailroom, and fail submission when MIC generation fails.
+This does not establish the OMCC key or hardware authentication contract.
+
+---
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -46,6 +46,9 @@
+ #include "common/xpon_global.h"
+ #include <ecnt_hook/ecnt_hook_fe.h>
+ #include "common/xpon_api.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_omci.h"
++#endif
+ #if defined(TCSUPPORT_XPON_LED)
+ #include <asm/tc3162/ledcetrl.h>
+ #endif
+@@ -634,6 +637,9 @@
+ ******************************************************************************/
+ static int remove_omci_crc_if_exist(struct sk_buff * skb)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_omci_tx_prepare(skb);
++#else
+     pOmci_Header pOmciHeader = NULL;
+     u16 omci_msg_len = 0;
+     u16 extra_len = 0;
+@@ -671,6 +677,7 @@
+     }
+ 
+     return XPON_SUCCESS;
++#endif
+ }
+ 
+ /******************************************************************************
+@@ -692,6 +699,12 @@
+ 	int count = 0;
+ 
+ 	struct device *xpon_dev = NULL;
++
++#ifdef Q1000K_PON_IDENTITY
++	/* Also validate direct callers before any header or CMAC input read. */
++	if (q1000k_omci_tx_prepare(skb))
++		return XPON_FAIL;
++#endif
+ 
+ 	if((xpon_dev = get_xpon_dev()) == NULL)
+ 	{
+@@ -766,9 +779,13 @@
+        PON_MSG(MSG_DBG, "cmac0 calculate omci mic fail with key index:%d\n",gpGponPriv->gponSecurity.omciIkIdx) ;
+     }
+ 	else{
++#ifdef Q1000K_PON_IDENTITY
++		skb_put_data(skb, omci_reslt, OMCI_CRC_LEN);
++#else
+         skb->len += OMCI_CRC_LEN;
+         omci_mic =skb->data + omci_msg_len;
+         memcpy(omci_mic,omci_reslt, OMCI_CRC_LEN);
++#endif
+     }
+   
+     XPON_ARR_PRINT(MSG_DBG,"cmac golden Downstream omci mic reslt noncache data: ","%x ",omci_reslt,5);    
+@@ -783,7 +800,11 @@
+     kfree(NONCACHE_TO_CACHE(omci_reslt)); 
+ #endif
+     
++#ifdef Q1000K_PON_IDENTITY
++	return ret ? XPON_FAIL : XPON_SUCCESS;
++#else
+     return XPON_SUCCESS;
++#endif
+ }    
+ /******************************************************************************
+ ******************************************************************************/
