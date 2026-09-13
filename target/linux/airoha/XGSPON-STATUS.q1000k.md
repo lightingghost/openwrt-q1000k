@@ -274,3 +274,34 @@ boot validation and remaining PHY/analog initialization, then resource/QDMA
 integration and OMCI. Keep `pon_pcs` and `gdm2` disabled until their owner and
 initialization order are implemented. Keep optical packages optional until
 the bench, registration, service and recovery gates pass.
+
+## Read-only continuation: BSP/PHY compile checkpoint
+
+The latest device restriction is **read-only access and no firmware flashing**.
+The live initialization results above are historical tests from before that
+restriction. This continuation only read cached kernel resource/interrupt
+inventories; it did not install files, load modules, change GPIOs or probe I2C.
+
+Patches 004/005 select only the hook, SCU and PON PHY BSP modules for AN7581;
+AN7583 retains its additional board/OLT/combo-PHY objects. They fix public
+BSP declarations, arm64 IRQ flags, probe failure lifetime, PHY argument and
+return types, the NG-PON thread callback/error handling and mapped PHY register
+access. The three AN7581 BSP modules and `phy_10g.ko` now compile and pass
+modpost against Linux 6.18.44/GCC 14.4.0. PHY builds retain warnings for unused
+vendor diagnostic code and missing prototypes without treating those categories
+as errors; implicit declarations, type/format errors and unresolved symbols
+remain fatal. No module was loaded. This does not validate analog startup.
+
+The earlier 41-symbol MAC inventory describes the previous diagnostic build.
+Several missing variables and the PHY-to-MAC event handler have implementations
+in the original `gpon_proc.c`, omitted by the imported compatibility patch.
+They need separating from its obsolete procfs debug interface; they are not all
+missing vendor source. MAC porting remains in progress.
+
+The read-only `/proc/iomem` inventory confirms the existing `1fb50000.ethernet`
+driver owns FE `1fb50000-1fb525ff`, QDMA0 `1fb54000-1fb55fff` and QDMA1
+`1fb56000-1fb57fff`. The DSA switch owns `1fb58000-1fb5ffff`. The vendor SCU
+module still expects the OEM DT hierarchy, and no PON resource/queue adapter
+exists for the current Ethernet driver. Keep the vendor package `BROKEN`,
+unselected and without autoload. Successful PHY compilation is not permission
+to load this stack or to enable `pon_pcs`/`gdm2`.

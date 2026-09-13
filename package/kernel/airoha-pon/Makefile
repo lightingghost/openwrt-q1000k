@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -40,10 +40,11 @@ define KernelPackage/airoha-xpon-en757x
 	$(PON_BSP_DIR)/airoha_ecnt_hook.ko \
 	$(PON_BSP_DIR)/airoha_ecnt_scu.ko \
 	$(PON_BSP_DIR)/airoha_ecnt_pon_phy.ko \
-	$(PON_BSP_DIR)/airoha_ecnt_olt_phy.ko \
-	$(PON_BSP_DIR)/airoha_arht_board.ko \
-	$(PON_BSP_DIR)/airoha_arht_serdes.ko \
-	$(PON_BSP_DIR)/airoha_an7583_combo_phy.ko \
+	$(if $(CONFIG_TARGET_airoha_an7583),\
+		$(PON_BSP_DIR)/airoha_ecnt_olt_phy.ko \
+		$(PON_BSP_DIR)/airoha_arht_board.ko \
+		$(PON_BSP_DIR)/airoha_arht_serdes.ko \
+		$(PON_BSP_DIR)/airoha_an7583_combo_phy.ko) \
 	$(PKG_BUILD_DIR)/xpon-en757x/xpon_phy_10g/phy_10g.ko \
 	$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g/xpon_10g.ko
   # Board initialization and factory calibration must precede module loading.

@@ -1,0 +1,496 @@
+Select AN7581 BSP dependencies and fix arm64 declarations and probe lifetime.
+
+AN7581 compile checkpoint only; resource/startup integration remains gated.
+
+--- a/bsp/Makefile
++++ b/bsp/Makefile
+@@ -9,6 +9,7 @@
+ obj-m += airoha_ecnt_pon_phy.o
+ airoha_ecnt_pon_phy-y := core/ecnt_pon_phy.o core/legacy_api.o module/ecnt_pon_phy_meta.o
+ 
++ifneq ($(TCSUPPORT_CPU_AN7583),)
+ obj-m += airoha_ecnt_olt_phy.o
+ airoha_ecnt_olt_phy-y := core/ecnt_olt_phy.o module/ecnt_olt_phy_meta.o
+ 
+@@ -26,3 +27,5 @@
+ 	an7583/pon_pma/src/pon_pma.o \
+ 	an7583/pcie0_pma/src/pcie0_pma.o \
+ 	module/an7583_combo_phy_meta.o
++
++endif
+--- a/bsp/core/ecnt_pon_phy.c
++++ b/bsp/core/ecnt_pon_phy.c
+@@ -40,6 +40,7 @@
+ *************************************************************************
+ */
+ #include <linux/module.h>
++#include <ecnt_pon_phy_api.h>
+ #include <linux/types.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+@@ -310,7 +311,7 @@
+ {
+ 	u32 reg_phy = 0;
+ 	u32 reg_val = 0;
+-	u32 flags;
++	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&data_lock, flags);
+ 
+@@ -403,7 +404,7 @@
+ void set_pon_phy_data(u32 reg, u32 val)
+ {
+ 	u32 reg_phy = 0;
+-	u32 flags;
++	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&data_lock, flags);
+ 
+@@ -504,12 +505,12 @@
+ }
+ EXPORT_SYMBOL(get_pon_phy_dev);
+ 
+-int get_pon_phy_irq(void)
++int get_pon_phy_irq(void)
+ {
+ 	return ecnt_pon_phy->phy_irq;
+ 	
+ }
+-EXPORT_SYMBOL(get_pon_phy_irq);
++EXPORT_SYMBOL(get_pon_phy_irq);
+ 
+ 
+ void (*set_pon_phy_mode_config)(Xpon_Phy_Mode_t xpon_mode, int tx_enable) = NULL;
+@@ -528,8 +529,14 @@
+ static int ecnt_pon_phy_probe(struct platform_device *pdev)
+ {
+     struct resource *res = NULL;
+-	int irq = 0;
+-	int irq_idx = 0;
++    struct ecnt_pon_phy *phy;
++#if !defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++    int irq, irq_idx;
++#endif
++
++    if (ecnt_pon_phy) {
++        return -EBUSY;
++    }
+ 
+ 	printk("\n(%s) probe start\n", __func__);
+ 
+@@ -538,104 +545,97 @@
+         return -EINVAL;
+     }
+ 
+-    ecnt_pon_phy = devm_kzalloc(&pdev->dev, sizeof(struct ecnt_pon_phy), GFP_KERNEL);
+-    if (!ecnt_pon_phy)
++    phy = devm_kzalloc(&pdev->dev, sizeof(struct ecnt_pon_phy), GFP_KERNEL);
++    if (!phy)
+         return -ENOMEM;
+ 
+-    platform_set_drvdata(pdev, ecnt_pon_phy);
+ 
+     /* PON_PHY_ASIC_RG physical address */
+     res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+-    ecnt_pon_phy->pon_phy_rg_base_1= devm_ioremap_resource(&pdev->dev, res);
+-    if (IS_ERR(ecnt_pon_phy->pon_phy_rg_base_1))
++    phy->pon_phy_rg_base_1= devm_ioremap_resource(&pdev->dev, res);
++    if (IS_ERR(phy->pon_phy_rg_base_1))
+     {
+-    	devm_kfree(&pdev->dev, ecnt_pon_phy);
+-        return PTR_ERR(ecnt_pon_phy->pon_phy_rg_base_1);
+-    }
+-	printk("(%s) rg_base1= 0x%8x\n", __func__,ecnt_pon_phy->pon_phy_rg_base_1);
++        return PTR_ERR(phy->pon_phy_rg_base_1);
++    }
++	printk("(%s) rg_base1= %p\n", __func__,phy->pon_phy_rg_base_1);
+ 
+ 	/* PON_PHY_FPGA_RG TX_OFF physical address */
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+-    ecnt_pon_phy->pon_phy_fpga_rg_tx_off = devm_ioremap_resource(&pdev->dev, res);
+-    if (IS_ERR(ecnt_pon_phy->pon_phy_fpga_rg_tx_off))
+-    {    	
+-    	devm_kfree(&pdev->dev, ecnt_pon_phy);
+-        return PTR_ERR(ecnt_pon_phy->pon_phy_fpga_rg_tx_off);
++    phy->pon_phy_fpga_rg_tx_off = devm_ioremap_resource(&pdev->dev, res);
++    if (IS_ERR(phy->pon_phy_fpga_rg_tx_off))
++    {    	
++        return PTR_ERR(phy->pon_phy_fpga_rg_tx_off);
+     }
+  #ifndef TCSUPPORT_CPU_AN7552       
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+-	ecnt_pon_phy->pon_phy_rg_base_2= devm_ioremap_resource(&pdev->dev, res);
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_rg_base_2))
++	phy->pon_phy_rg_base_2= devm_ioremap_resource(&pdev->dev, res);
++	if (IS_ERR(phy->pon_phy_rg_base_2))
+ 	{		
+-    	devm_kfree(&pdev->dev, ecnt_pon_phy);
+-		return PTR_ERR(ecnt_pon_phy->pon_phy_rg_base_2);
+-	}
+-
+-	printk("(%s) rg_base2= 0x%8x\n", __func__,ecnt_pon_phy->pon_phy_rg_base_2);
++		return PTR_ERR(phy->pon_phy_rg_base_2);
++	}
++
++	printk("(%s) rg_base2= %p\n", __func__,phy->pon_phy_rg_base_2);
+ 	
+     res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
+-    ecnt_pon_phy->pon_phy_rg_base_3= devm_ioremap_resource(&pdev->dev, res);
+-    if (IS_ERR(ecnt_pon_phy->pon_phy_rg_base_3))
++    phy->pon_phy_rg_base_3= devm_ioremap_resource(&pdev->dev, res);
++    if (IS_ERR(phy->pon_phy_rg_base_3))
+     {
+-    	devm_kfree(&pdev->dev, ecnt_pon_phy);
+-        return PTR_ERR(ecnt_pon_phy->pon_phy_rg_base_3);
+-    }
+-
+-	printk("(%s) rg_base3= 0x%8x\n", __func__,ecnt_pon_phy->pon_phy_rg_base_3);
++        return PTR_ERR(phy->pon_phy_rg_base_3);
++    }
++
++	printk("(%s) rg_base3= %p\n", __func__,phy->pon_phy_rg_base_3);
+ 	#endif
+ 
+ #ifdef TCSUPPORT_CPU_EN7581
+-	#if 0
++	#ifndef TCSUPPORT_CPU_AN7583
+ 	if(isFPGA) 
+ 	{
+ 		res = platform_get_resource(pdev, IORESOURCE_MEM, 4);
+-	    ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst= devm_ioremap_resource(&pdev->dev, res);
+-	    if (IS_ERR(ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst))
++	    phy->pon_phy_fpga_rg_xilinx_rst= devm_ioremap_resource(&pdev->dev, res);
++	    if (IS_ERR(phy->pon_phy_fpga_rg_xilinx_rst))
+ 	    {
+-	    	devm_kfree(&pdev->dev, ecnt_pon_phy);
+-	        return PTR_ERR(ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst);
++	        return PTR_ERR(phy->pon_phy_fpga_rg_xilinx_rst);
+ 	    }
+ 		
+ 		res = platform_get_resource(pdev, IORESOURCE_MEM, 5);
+-	    ecnt_pon_phy->pon_phy_fpga_rg_xilinx_ctl= devm_ioremap_resource(&pdev->dev, res);
+-	    if (IS_ERR(ecnt_pon_phy->pon_phy_fpga_rg_xilinx_ctl))
++	    phy->pon_phy_fpga_rg_xilinx_ctl= devm_ioremap_resource(&pdev->dev, res);
++	    if (IS_ERR(phy->pon_phy_fpga_rg_xilinx_ctl))
+ 	    {
+-	    	devm_kfree(&pdev->dev, ecnt_pon_phy);
+-	        return PTR_ERR(ecnt_pon_phy->pon_phy_fpga_rg_xilinx_ctl);
++	        return PTR_ERR(phy->pon_phy_fpga_rg_xilinx_ctl);
+ 	    }
+ 	}
+ 	#else
+ 	if(isFPGA) 
+ 	{
+-		ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x24; //  0x1fa84024
+-		ecnt_pon_phy->pon_phy_fpga_rg_xilinx_ctl = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x30; //  0x1fa84030
+-		 if (IS_ERR(ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst))
++		phy->pon_phy_fpga_rg_xilinx_rst = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x24; //  0x1fa84024
++		phy->pon_phy_fpga_rg_xilinx_ctl = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x30; //  0x1fa84030
++		 if (IS_ERR(phy->pon_phy_fpga_rg_xilinx_rst))
+ 	    {
+-			 printk("pon_phy_fpga_rg_xilinx_rst= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst);
++			 printk("pon_phy_fpga_rg_xilinx_rst= %lx\n", (unsigned long)phy->pon_phy_fpga_rg_xilinx_rst);
+ 	    }
+ 	}
+-	ecnt_pon_phy->pon_phy_xfi_ana = Get_Base(PON_PHY_XFI_ANA_BASE); 
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_xfi_ana))
++	phy->pon_phy_xfi_ana = Get_Base(PON_PHY_XFI_ANA_BASE); 
++	if (IS_ERR(phy->pon_phy_xfi_ana))
+     {
+-		printk("pon_phy_xfi_ana= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_xfi_ana);
++		printk("pon_phy_xfi_ana= %lx\n", (unsigned long)phy->pon_phy_xfi_ana);
+     }
+ 	
+-	ecnt_pon_phy->pon_phy_xfi_pma = Get_Base(PON_PHY_XFI_PMA_BASE);  
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_xfi_pma))
++	phy->pon_phy_xfi_pma = Get_Base(PON_PHY_XFI_PMA_BASE);  
++	if (IS_ERR(phy->pon_phy_xfi_pma))
+     {
+-		printk("pon_phy_xfi_pma= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_xfi_pma);
++		printk("pon_phy_xfi_pma= %lx\n", (unsigned long)phy->pon_phy_xfi_pma);
+     }
+ 	
+-	ecnt_pon_phy->pon_phy_pon_ana = Get_Base(PON_PHY_PON_ANA_BASE);  
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_pon_ana))
++	phy->pon_phy_pon_ana = Get_Base(PON_PHY_PON_ANA_BASE);  
++	if (IS_ERR(phy->pon_phy_pon_ana))
+     {
+-		printk("pon_phy_pon_ana= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_pon_ana);
++		printk("pon_phy_pon_ana= %lx\n", (unsigned long)phy->pon_phy_pon_ana);
+     }
+ 	
+-	ecnt_pon_phy->pon_phy_pon_pma = Get_Base(PON_PHY_PON_PMA_BASE);  	
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_pon_pma))
++	phy->pon_phy_pon_pma = Get_Base(PON_PHY_PON_PMA_BASE);  	
++	if (IS_ERR(phy->pon_phy_pon_pma))
+     {
+-		printk("pon_phy_pon_pma= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_pon_pma);
++		printk("pon_phy_pon_pma= %lx\n", (unsigned long)phy->pon_phy_pon_pma);
+     }
+ 	
+ #endif
+@@ -644,27 +644,27 @@
+ #ifdef TCSUPPORT_CPU_AN7552
+ if(isFPGA) 
+ 	{
+-		ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x24; //  0x1fa84024
+-		ecnt_pon_phy->pon_phy_fpga_rg_xilinx_ctl = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x30; //  0x1fa84030
+-		 if (IS_ERR(ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst))
++		phy->pon_phy_fpga_rg_xilinx_rst = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x24; //  0x1fa84024
++		phy->pon_phy_fpga_rg_xilinx_ctl = Get_Base(PON_PHY_FPGA_RG_XILINX)+0x30; //  0x1fa84030
++		 if (IS_ERR(phy->pon_phy_fpga_rg_xilinx_rst))
+ 	    {
+-			 printk("pon_phy_fpga_rg_xilinx_rst= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_fpga_rg_xilinx_rst);
++			 printk("pon_phy_fpga_rg_xilinx_rst= %lx\n", (unsigned long)phy->pon_phy_fpga_rg_xilinx_rst);
+ 	    }
+ 	}
+-	ecnt_pon_phy->pon_phy_pon_ana = Get_Base(PON_PHY_PON_ANA_BASE);  
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_pon_ana))
++	phy->pon_phy_pon_ana = Get_Base(PON_PHY_PON_ANA_BASE);  
++	if (IS_ERR(phy->pon_phy_pon_ana))
+     {
+-		printk("pon_phy_pon_ana= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_pon_ana);
+-    }
+-	ecnt_pon_phy->pon_phy_pon_pma = Get_Base(PON_PHY_PON_PMA_BASE); 	
+-	if (IS_ERR(ecnt_pon_phy->pon_phy_pon_pma))
++		printk("pon_phy_pon_ana= %lx\n", (unsigned long)phy->pon_phy_pon_ana);
++    }
++	phy->pon_phy_pon_pma = Get_Base(PON_PHY_PON_PMA_BASE); 	
++	if (IS_ERR(phy->pon_phy_pon_pma))
+ 	{
+-		printk("pon_phy_pon_pma= %lx\n", (unsigned long)ecnt_pon_phy->pon_phy_pon_pma);
+-	}
+-
+-#endif
+-
+-    ecnt_pon_phy->dev = &pdev->dev;
++		printk("pon_phy_pon_pma= %lx\n", (unsigned long)phy->pon_phy_pon_pma);
++	}
++
++#endif
++
++    phy->dev = &pdev->dev;
+     
+ 	//printk("spin_lock_init\n");
+     spin_lock_init(&data_lock);
+@@ -677,20 +677,21 @@
+ 		irq = platform_get_irq(pdev, irq_idx);
+ 		if (irq <= 0)
+ 		{
+-    		devm_kfree(&pdev->dev, ecnt_pon_phy);
+ 			return irq;
+ 		}
+ 
+-		ecnt_pon_phy->phy_irq = irq;
++		phy->phy_irq = irq;
+ 	}
+ 	#endif 
+ 	#endif 
++    platform_set_drvdata(pdev, phy);
++    ecnt_pon_phy = phy;
+     return 0;
+ }
+ 
+ static void ecnt_pon_phy_remove(struct platform_device *pdev)
+ {
+-    return;
++    ecnt_pon_phy = NULL;
+ }
+ 
+ static void ecnt_pon_phy_shutdown(struct platform_device *pdev)
+--- a/bsp/core/ecnt_scu.c
++++ b/bsp/core/ecnt_scu.c
+@@ -40,6 +40,7 @@
+ *************************************************************************
+ */
+ #include <linux/module.h>
++#include <ecnt_scu_api.h>
+ #include <linux/types.h>
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+@@ -1201,7 +1202,7 @@
+ 	return IRQ_HANDLED;
+ }
+ 
+-int ECNT_SCU_DRV_PROBE(void)
++static int ECNT_SCU_DRV_PROBE(void)
+ {
+ 	struct resource *res = NULL;
+     struct device_node *node=NULL;
+@@ -1245,8 +1246,9 @@
+ 	/* Get Clk ctl address (For FPGA only)*/
+     res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
+     ecnt_scu->clk_ctl_base = devm_ioremap_resource(&pdev->dev, res);
+-    if (IS_ERR(ecnt_scu->clk_ctl_base))
+-        return PTR_ERR(ecnt_scu->clk_ctl_base);
++	if (IS_ERR(ecnt_scu->clk_ctl_base)) {
++		return PTR_ERR(ecnt_scu->clk_ctl_base);
++	}
+ 
+ 	ecnt_scu->dev = &pdev->dev;
+ 	
+--- a/bsp/core/legacy_api.c
++++ b/bsp/core/legacy_api.c
+@@ -1,4 +1,5 @@
+ #include <linux/i2c.h>
++#include <legacy_pon_api.h>
+ #include <linux/module.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
+--- /dev/null
++++ b/bsp/include/ecnt_pon_phy_api.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ECNT_PON_PHY_API_H
++#define _ECNT_PON_PHY_API_H
++#include <linux/types.h>
++struct device;
++struct platform_device;
++u32 get_pon_phy_asic_data_1(u32 reg);
++u32 get_pon_phy_asic_data_2(u32 reg);
++u32 get_pon_phy_asic_data_3(u32 reg);
++u32 get_pon_phy_data(u32 reg);
++struct device* get_pon_phy_dev(void);
++u32 get_pon_phy_fpga_rg_tx_off_data(u32 reg);
++u32 get_pon_phy_fpga_rg_xilinx_ctl_data(u32 reg);
++u32 get_pon_phy_fpga_rg_xilinx_rst_data(u32 reg);
++int get_pon_phy_irq(void);
++u32 get_pon_phy_pon_ana(u32 reg);
++u32 get_pon_phy_pon_pma(u32 reg);
++u32 get_pon_phy_xfi_ana(u32 reg);
++u32 get_pon_phy_xfi_pma(u32 reg);
++void set_pon_phy_asic_data_1(u32 reg, u32 val);
++void set_pon_phy_asic_data_2(u32 reg, u32 val);
++void set_pon_phy_asic_data_3(u32 reg, u32 val);
++void set_pon_phy_data(u32 reg, u32 val);
++void set_pon_phy_fpga_rg_tx_off_data(u32 val);
++void set_pon_phy_fpga_rg_xilinx_ctl_data(u32 val);
++void set_pon_phy_fpga_rg_xilinx_rst_data(u32 val);
++void set_pon_phy_pon_ana(u32 reg, u32 val);
++void set_pon_phy_pon_pma(u32 reg, u32 val);
++void set_pon_phy_xfi_ana(u32 reg, u32 val);
++void set_pon_phy_xfi_pma(u32 reg, u32 val);
++#endif
+--- /dev/null
++++ b/bsp/include/ecnt_scu_api.h
+@@ -0,0 +1,106 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ECNT_SCU_API_H
++#define _ECNT_SCU_API_H
++#include <linux/types.h>
++struct device;
++struct platform_device;
++u32 GET_CLK_PER_ICG_ENABLE(void);
++u32 GET_CLK_PER_ICG_ENABLE1(void);
++u32 GET_DMTC(void);
++u32 GET_DRAMC_CONF(void);
++u32 GET_DRAM_SIZE(void);
++u32 GET_ECO_HWFIX(void);
++u32 GET_GPIO2_EN(void);
++u32 GET_HIR(void);
++u32 GET_HWCONF(void);
++u32 GET_IOMUX_CTRL_2(void);
++#ifndef GET_IS_DDR4
++u32 GET_IS_DDR4(void);
++#endif
++u32 GET_IS_FPGA(void);
++u32 GET_IS_SPI_CONTROLLER_ECC(void);
++u32 GET_MDIOIAC(int bank);
++u32 GET_NP_SCU_EMMC(void);
++u32 GET_NP_SCU_SERDES_ETHERNET_SEL(void);
++u32 GET_NP_SCU_SERDES_PON_SEL(void);
++u32 GET_NP_SCU_SERDES_USB0_SEL(void);
++u32 GET_NP_SCU_SERDES_USB1_SEL(void);
++u32 GET_NP_SCU_SERDES_WIFI0_SEL(void);
++u32 GET_NP_SCU_SERDES_WIFI1_SEL(void);
++u32 GET_NP_SCU_SSTR(void);
++u32 GET_PACKAGE_ID(void);
++u32 GET_PCIC(void);
++u32 GET_PCM_CHIP_SCU(u32 reg);
++u32 GET_PCM_NP_SCU(u32 reg);
++u32 GET_PDIDR(void);
++u32 GET_PON_I2C_MODE(void);
++u32 GET_RGS_XTAL_FREQ(void);
++u32 GET_SCREG_WF0(void);
++u32 GET_SCU_CLK_CFG(void);
++u32 GET_SCU_RGS_CLK_BUS(void);
++u32 GET_SCU_RGS_CLK_EMI(void);
++u32 GET_SCU_RGS_CLK_FE(void);
++u32 GET_SCU_RGS_CLK_GSW(void);
++u32 GET_SCU_RGS_CLK_NPU(void);
++u32 GET_SCU_RGS_OPEN_DRAIN(void);
++u32 GET_SCU_RST_CTRL_1(void);
++u32 GET_SHARE_UNZIPMEM_SEL(void);
++u32 GET_SPI_CLK(void);
++u32 GET_SPI_QUAD_SHARED_PIN_RG(void);
++u32 GET_SYS_CLK(void);
++int RW_SCREG_REG_TEST(u32 wVal);
++void SET_CLK_PER_ICG_ENABLE(u32 val);
++void SET_CLK_PER_ICG_ENABLE1(u32 val);
++void SET_DMTC(u32 val);
++void SET_DRAMC_CONF(u32 val);
++void SET_DRAM_SIZE(u32 val);
++void SET_FORCE_GPIO32_EN(u32 mask, u32 bits);
++void SET_GPIO2_EN(u32 mask, u32 bits);
++void SET_IOMUX_CTRL_2(u32 val);
++void SET_IOMUX_CTRL_BIT(u32 iomux, u32 val);
++void SET_IS_DDR4(u32 val);
++void SET_IS_FPGA(u32 val);
++void SET_IS_SPI_CONTROLLER_ECC(u32 val);
++void SET_MDIOIAC(int bank,u32 data);
++void SET_NP_SCU_SERDES_ETHERNET_SEL(u32 val);
++void SET_NP_SCU_SERDES_PON_SEL(u32 val);
++void SET_NP_SCU_SERDES_USB0_SEL(u32 val);
++void SET_NP_SCU_SERDES_USB1_SEL(u32 val);
++void SET_NP_SCU_SERDES_WIFI0_SEL(u32 val);
++void SET_NP_SCU_SERDES_WIFI1_SEL(u32 val);
++void SET_NP_SCU_SSTR(u32 val);
++void SET_PCIC(u32 val);
++void SET_PCM_CHIP_SCU(u32 reg, u32 val);
++void SET_PCM_NP_SCU(u32 reg, u32 val);
++void SET_PON_I2C_MODE(u32 mask, u32 bits);
++void SET_SCREG_WF0(u32 val);
++void SET_SCU_CLK_CFG(u32 val);
++void SET_SCU_RGS_CLK_BUS(u32 val);
++void SET_SCU_RGS_CLK_EMI(u32 val);
++void SET_SCU_RGS_CLK_FE(u32 val);
++void SET_SCU_RGS_CLK_GSW(u32 val);
++void SET_SCU_RGS_CLK_NPU(u32 val);
++void SET_SCU_RGS_OPEN_DRAIN(u32 val);
++void SET_SCU_RST_CTRL_1(u32 val);
++void SET_SHARE_FEMEM_SEL(u32 val);
++void SET_SHARE_UNZIPMEM_SEL(u32 val);
++void SET_SPI_CLK(u32 val);
++void SET_SPI_QUAD_SHARED_PIN_RG(u32 val);
++void SET_SSR3(u32 val);
++void SET_SYS_CLK(u32 val);
++int disable_interrupts(void);
++u32 get_chip_scu_data(u32 reg);
++unsigned int get_l2c_sram_size(void);
++u32 get_npScuReg_bits(u32 reg, u32 mask, u32 offset);
++u32 get_np_scu_data(u32 reg);
++u32 get_pbus_err_addr(void);
++u32 get_rbus_clk(void);
++int isPbusTimeoutEn(void);
++void scu_Enable_Module_Clock (u8 module);
++void set_chipScuReg_bits(u32 reg, u32 mask, u32 bits);
++void set_chip_scu_data(u32 reg, u32 val);
++void set_npScuReg_bits(u32 reg, u32 mask, u32 bits);
++void set_np_scu_data(u32 reg, u32 val);
++void set_npu_clk_power_save(u32 reg, u32 bit, u32 val, char en);
++void set_rbus_clk(u32 val);
++#endif
+--- /dev/null
++++ b/bsp/include/legacy_pon_api.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LEGACY_PON_API_H
++#define _LEGACY_PON_API_H
++#include <linux/types.h>
++u16 SIF_X_Read(u8 channel, u16 clk_div, u8 dev_addr, u8 word_addr_len,
++		u32 word_addr, u8 *buf, u16 len);
++u16 SIF_X_Write(u8 channel, u16 clk_div, u8 dev_addr, u8 word_addr_len,
++		u32 word_addr, u8 *buf, u16 len);
++void ledTurnOff(u8 led_no);
++void ledTurnOn(u8 led_no);
++#endif

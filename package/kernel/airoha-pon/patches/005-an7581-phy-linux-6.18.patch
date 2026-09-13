@@ -1,0 +1,412 @@
+Fix AN7581 PHY types, callbacks, register accessors and Linux 6.18 compilation.
+
+AN7581 compile checkpoint only; resource/startup integration remains gated.
+
+--- a/xpon-en757x/xpon_phy_10g/Makefile
++++ b/xpon-en757x/xpon_phy_10g/Makefile
+@@ -55,3 +55,7 @@
+ 	$(MAKE) -C $(KERNELDIR) M=`pwd` clean
+ 
+ 
++
++# Vendor diagnostic helpers retain unused locals and private entry points.
++ccflags-y += -Wno-error=unused-variable -Wno-error=unused-function \
++	-Wno-error=unused-but-set-variable -Wno-error=missing-prototypes
+--- a/xpon-en757x/xpon_phy_10g/inc/en7581.h
++++ b/xpon-en757x/xpon_phy_10g/inc/en7581.h
+@@ -25,8 +25,8 @@
+ int en7581_fw_ready(int fwrdy_en);
+ int en7581_disable_pcs_tdc(void);
+ 
+-void en7581_pon_phy_clear_rogueonu(void);
+-void en7581_pon_phy_rogueonu_int_en(unchar rogue_int_en);
++void pon_phy_clear_rogueonu(void);
++void pon_phy_rogueonu_int_en(unchar rogue_int_en);
+ 
+ #if ASIC_SERDES
+ void freq_check (void);	//add by david 20180904
+@@ -90,6 +90,10 @@
+     UINT32 Raw;
+ } EN7581_REG_PHY_PSBU_INFO;
+ 
++void phy_delay1ms(int ms);
++int pma_dbg_reg_dump(void);
++void xpon_rx_bist_recheck_result(uint check_onoff, uint duration);
++void normal_rx_bist_check(uint BIST_check_switch, XPON_PMA_RX_Bist_Check_t align_pattern);
++void t2r_rx_bist_check(uint BIST_check_switch, XPON_PMA_RX_Bist_Check_t align_pattern);
+ 
+ #endif /* _EN7581_H_ */
+-
+--- a/xpon-en757x/xpon_phy_10g/inc/en7581_pma.h
++++ b/xpon-en757x/xpon_phy_10g/inc/en7581_pma.h
+@@ -218,4 +218,9 @@
+ void sw_pma_rst_release(void);
+ void sw_tx_rst(void); //add by ang_20191031
+ 
++void XPON_DIG_ref_release(void);
++void phy_delay1ms(int ms);
++
++int xpon_pma_init(void);
++
+ #endif /* _EN7580_PMA_H_ */
+--- a/xpon-en757x/xpon_phy_10g/inc/phy.h
++++ b/xpon-en757x/xpon_phy_10g/inc/phy.h
+@@ -19,7 +19,7 @@
+ 	unchar					t1 ; /* ms */
+ 	unchar					t2 ; /* times */
+ 	ushort					intCounter ;
+-	uint					intTime ;
++	unsigned long			intTime ;
+ 	#if 1  //EN7580_TEST_CODE for /* BIG_ENDIAN LITTLE_ENDIAN */  
+ 	struct {
+ 		unchar				txPowerEnFlag;
+--- a/xpon-en757x/xpon_phy_10g/inc/phy_reg.h
++++ b/xpon-en757x/xpon_phy_10g/inc/phy_reg.h
+@@ -31,7 +31,7 @@
+ 
+ #define FE_GENTIME										0xbfb50020   //FPGA build date
+ 
+-#define RG_GPIO_PON_MODE			            		(1<<15)
++#define PHY_GPIO_PON_MODE_MASK			            		(1<<15)
+ #define RG_PON_I2C_MODE			            			(1<<0)
+ #define RG_GPIO_XPON_MODE							(0xBFA20218)
+ 
+--- a/xpon-en757x/xpon_phy_10g/inc/phy_reg_util.h
++++ b/xpon-en757x/xpon_phy_10g/inc/phy_reg_util.h
+@@ -50,9 +50,9 @@
+  Input:			arg1: device register
+  Output:		return the value of register
+ ************************************************************************/
+-static uint __inline__ GetReg(uint reg)
++static inline uint GetReg(uint reg)
+ {
+-	return ioread32((void __iomem *)reg) ;
++	return IO_GPHYREG(reg) ;
+ }
+ 
+ /************************************************************************
+@@ -61,9 +61,9 @@
+  				arg2: setting value
+   Output:		no return
+ ************************************************************************/
+-static void __inline__ SetReg(uint reg, uint value)
++static inline void SetReg(uint reg, uint value)
+ {
+-	iowrite32(value, (void __iomem *)reg) ;
++	IO_SPHYREG(reg, value) ;
+ }
+ 
+ 
+@@ -74,9 +74,9 @@
+  				arg3: offset of the mask
+  Output:		return the mask value of register
+ ************************************************************************/
+-static uint __inline__ GetRegMask(uint reg, uint mask, uint shift)
++static inline uint GetRegMask(uint reg, uint mask, uint shift)
+ {
+-	return (((ioread32((void __iomem *)reg))>>shift) & mask) ;
++	return (((IO_GPHYREG(reg))>>shift) & mask) ;
+ }
+ 
+ /************************************************************************
+@@ -87,12 +87,12 @@
+  				arg4: setting value
+  Output:		no return
+ ************************************************************************/
+-static void __inline__ SetRegMask(uint reg, uint mask, uint shift, uint value)
++static inline void SetRegMask(uint reg, uint mask, uint shift, uint value)
+ {
+-    uint data = ioread32((void __iomem *)reg) ;
++    uint data = IO_GPHYREG(reg) ;
+     
+     data = (data & ~(mask<<shift)) | ((value&mask)<<shift) ;
+-    iowrite32(data, (void __iomem *)reg) ;
++    IO_SPHYREG(reg, data) ;
+ }
+ 
+ /************************************************************************
+@@ -101,12 +101,12 @@
+  				arg2: multiple bits
+  Output:		no return
+ ************************************************************************/
+-static void __inline__ SetBits(uint reg, uint bits)
++static inline void SetBits(uint reg, uint bits)
+ {
+-    uint data = ioread32((void __iomem *)reg) ;
++    uint data = IO_GPHYREG(reg) ;
+     
+     data |= bits ;
+-	iowrite32(data, (void __iomem *)reg) ;
++	IO_SPHYREG(reg, data) ;
+ }
+ 
+ /************************************************************************
+@@ -115,12 +115,12 @@
+  				arg2: multiple bits
+  Output:		no return
+ ************************************************************************/
+-static void __inline__ ClearBits(uint reg, uint bits)
++static inline void ClearBits(uint reg, uint bits)
+ {
+-    uint data =ioread32((void __iomem *)reg) ;
++    uint data =IO_GPHYREG(reg) ;
+     
+     data &= ~bits ;
+-	iowrite32(data, (void __iomem *)reg) ;
++	IO_SPHYREG(reg, data) ;
+ }
+ 
+ #endif /* _DRV_REG_UTIL_H_ */
+--- a/xpon-en757x/xpon_phy_10g/src/en7580.c
++++ b/xpon-en757x/xpon_phy_10g/src/en7580.c
+@@ -2218,7 +2218,7 @@
+ 
+ 	/* switch GPIO to XPON mode*/
+ 	read_data = IO_GREG(IOMUX_Control_1_register);
+-	read_data = read_data | (RG_GPIO_PON_MODE) | (RG_PON_I2C_MODE) ;
++	read_data = read_data | (PHY_GPIO_PON_MODE_MASK) | (RG_PON_I2C_MODE) ;
+ 	IO_SREG(IOMUX_Control_1_register, read_data);
+ #endif 	
+ 
+@@ -6143,7 +6143,7 @@
+ 		
+ 	/* switch GPIO to XPON mode*/
+ 	read_data = IO_GREG(IOMUX_Control_1_register);                                               
+-	read_data = read_data | (RG_GPIO_PON_MODE) | (RG_PON_I2C_MODE) ;
++	read_data = read_data | (PHY_GPIO_PON_MODE_MASK) | (RG_PON_I2C_MODE) ;
+ 	IO_SREG(IOMUX_Control_1_register, read_data);                          
+ #endif 	
+ 
+--- a/xpon-en757x/xpon_phy_10g/src/en7581.c
++++ b/xpon-en757x/xpon_phy_10g/src/en7581.c
+@@ -32,6 +32,8 @@
+ #include "i2c.h"
+ #include <ecnt_hook/ecnt_hook_pon_phy.h>
+ 
++#include <linux/vmalloc.h>
++#include <ecnt_scu_api.h>
+ #include "en7581.h"
+ #include "en7581_pma.h"
+ #include "en7581_reg.h"
+@@ -52,6 +54,11 @@
+ #define PHY_REG_READ_WRITE_TEST  0
+ #define PHY_REG_ALL_ZEROS        0x0
+ #define PHY_REG_ALL_ONES         0xFFFFFFFF
++
++static int en7581_ngpon2_thread(void *unused)
++{
++	return xfp_trans_set_ngpon2_chan(&gpPhyPriv->Ngpon2_chan);
++}
+ 
+ static uint en7581_bist_check_err_cnt;  
+ //extern uint pma_hi_rate_opt_val;
+@@ -193,7 +200,7 @@
+ {
+ #ifdef TCSUPPORT_CPU_ARMV8
+ 
+-	delay1ms(ms);
++	mdelay(ms);
+ 
+ #else
+ 	volatile uint32 timer_now, timer_last;
+@@ -902,7 +909,7 @@
+ 		case SCU_WAN_CONF_REG_WAN_SEL_GPON:
+             read_data = IO_GPHYREG(EN7581_GEPON_CSR_PHYSET2);
+ 			if(fwrdy_en == PHY_ENABLE)
+-				write_data = read_data & (EN7581_GEPON_PHY_FW_RDY_MASK) | (EN7581_GEPON_PHY_FW_RDY_EN);
++				write_data = (read_data & EN7581_GEPON_PHY_FW_RDY_MASK) | EN7581_GEPON_PHY_FW_RDY_EN;
+ 			else if(fwrdy_en == PHY_DISABLE)
+ 				write_data = read_data & (EN7581_GEPON_PHY_FW_RDY_MASK);
+ 			else
+@@ -1150,7 +1157,7 @@
+ 
+ 	/* switch GPIO to XPON mode*/
+ 	read_data = IO_GREG(IOMUX_Control_1_register);
+-	read_data = read_data | (RG_GPIO_PON_MODE) | (RG_PON_I2C_MODE) ;
++	read_data = read_data | (PHY_GPIO_PON_MODE_MASK) | (RG_PON_I2C_MODE) ;
+ 	IO_SREG(IOMUX_Control_1_register, read_data);
+ #endif 	
+ 
+@@ -1587,7 +1594,7 @@
+         case PON_SET_PHY_FW_READY:
+             read_data = IO_GPHYREG(EN7581_GEPON_CSR_PHYSET2);
+ 			if((*api_data->data) == PHY_ENABLE)
+-				write_data = read_data & (EN7581_GEPON_PHY_FW_RDY_MASK) | (EN7581_GEPON_PHY_FW_RDY_EN);
++				write_data = (read_data & EN7581_GEPON_PHY_FW_RDY_MASK) | EN7581_GEPON_PHY_FW_RDY_EN;
+ 			else if((*api_data->data) == PHY_DISABLE)
+ 				write_data = read_data & (EN7581_GEPON_PHY_FW_RDY_MASK);
+ 			else
+@@ -3115,7 +3122,7 @@
+ 	
+ 		/* switch GPIO to XPON mode*/
+ 		read_data = IO_GREG(IOMUX_Control_1_register);
+-		read_data = read_data | (RG_GPIO_PON_MODE) | (RG_PON_I2C_MODE) ;
++		read_data = read_data | (PHY_GPIO_PON_MODE_MASK) | (RG_PON_I2C_MODE) ;
+ 		IO_SREG(IOMUX_Control_1_register, read_data);
+ #endif 	
+ 
+@@ -3179,8 +3186,14 @@
+ 	{
+ 		if(FALSE==phy_ngpon2_task_wait_start)
+ 		{
+-			phy_ngpon2_task_wait_start=TRUE;
+-			gpPhyPriv->phy_ngpon2_task_wait= kthread_run(xfp_trans_set_ngpon2_chan, NULL, "phy_ngpon2_task_wait"); //julia_20221021 ngpon2
++			gpPhyPriv->phy_ngpon2_task_wait= kthread_run(en7581_ngpon2_thread, NULL, "phy_ngpon2_task_wait"); //julia_20221021 ngpon2
++			if (IS_ERR(gpPhyPriv->phy_ngpon2_task_wait)) {
++				int err = PTR_ERR(gpPhyPriv->phy_ngpon2_task_wait);
++
++				gpPhyPriv->phy_ngpon2_task_wait = NULL;
++				return err;
++			}
++			phy_ngpon2_task_wait_start = TRUE;
+ 			PON_PHY_PRINT(PHY_MSG_ERR,"run phy_ngpon2_task_wait\n");
+ 		}
+ 		else
+@@ -3225,11 +3238,11 @@
+ 					|EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN\
+ 					|EN7581_XGPON_PHY_RX_LOS_INT_EN;
+ 		
+-					//EN7581_XGPON_PHY_XG_PHYA_RDY_INT_EN\		
+-					//|EN7581_XGPON_PHY_TX_SFP_CONTINUE_INT_EN\
+-					//|EN7581_XGPON_PHY_TX_SFP_ABNORMAL_INT_EN\
+-					//|EN7581_XGPON_PHY_RX_CW_CNT_ERR_INT_EN\
+-					//|EN7581_XGPON_PHY_RX_FEC_ERR_INT_EN\
++					//EN7581_XGPON_PHY_XG_PHYA_RDY_INT_EN
++					//|EN7581_XGPON_PHY_TX_SFP_CONTINUE_INT_EN
++					//|EN7581_XGPON_PHY_TX_SFP_ABNORMAL_INT_EN
++					//|EN7581_XGPON_PHY_RX_CW_CNT_ERR_INT_EN
++					//|EN7581_XGPON_PHY_RX_FEC_ERR_INT_EN
+ 
+ 		PON_PHY_PRINT(PHY_MSG_TRACE,"XGPON Phy use default int_type:0x%.8x\n", write_data);
+ 	}
+@@ -3873,7 +3886,7 @@
+ 			
+ 		case PON_SET_PHY_TX_D_PADDING_CONFIG:
+ 			api_data->ret = PHY_SUCCESS;
+-            if(api_data->data == PHY_ENABLE)
++            if(*api_data->data == PHY_ENABLE)
+ 			{
+ 				IO_SPHYREG(EN7581_XGPON_PHY_XG_TX_IDLE_CTRL, EN7581_XGPON_PHY_XG_TX_IDLE_CTRL_PATTERN_SEL(0));
+ 				write_data=IO_GPHYREG(EN7581_XGPON_PHY_XG_TX_IDLE_CTRL);
+@@ -5465,7 +5478,7 @@
+ 		
+ 	/* switch GPIO to XPON mode*/
+ 	read_data = IO_GREG(IOMUX_Control_1_register);                                               
+-	read_data = read_data | (RG_GPIO_PON_MODE) | (RG_PON_I2C_MODE) ;
++	read_data = read_data | (PHY_GPIO_PON_MODE_MASK) | (RG_PON_I2C_MODE) ;
+ 	IO_SREG(IOMUX_Control_1_register, read_data);                          
+ #endif 	
+ 
+@@ -8193,7 +8206,7 @@
+ 	{    				
+ 	    phy_print_time();		
+ 		printk("PRBS Error Counter = %u \n",0xfffffff);		
+-		return 0;    
++		return;    
+ 	}
+ 	
+ 	if(duration<100)
+@@ -8695,14 +8708,14 @@
+ 	else
+ 	{
+ 		printk("Alloc data memory size %d error, recommand(1~50000)\n",ncpo_check_cnt) ;
+-		return 0;
++		return;
+ 	}
+ 		
+ 	
+ 	if(!ncpo_arr) 
+ 	{
+ 		printk("Alloc data memory failed\n") ;
+-		return 0;
++		return;
+ 	}
+ 
+ 	memset(ncpo_arr, 0, (sizeof(*ncpo_arr)*ncpo_check_cnt)) ;
+@@ -8742,7 +8755,7 @@
+ 	printk("	ncpo_diff=0x%08x (ncpo_max-ncpo_min)\r\n",(ncpo_max-ncpo_min));
+ 
+ 	vfree(ncpo_arr);
+-	return 0;
++	return;
+ 
+ }
+ 
+--- a/xpon-en757x/xpon_phy_10g/src/i2c.c
++++ b/xpon-en757x/xpon_phy_10g/src/i2c.c
+@@ -34,7 +34,9 @@
+ #include "en7581_pma.h"
+ #include "en7581_reg.h"
+ 
++#ifdef TCSUPPORT_CPU_AN7583
+ #include "en7583.h"
++#endif
+ //#include "en7583_pma.h"
+ #include "en7583_reg.h"
+ int an7583_set_trans_setting(void);
+--- a/xpon-en757x/xpon_phy_10g/src/phy.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy.c
+@@ -178,8 +178,9 @@
+ ******************************************************************************/
+ int phy_set_traffic_status(ENUM_PhyTrafficStatus  traffic_status)
+ {
+-    if (TRAFFIC_STATUS_DOWN != traffic_status && TRAFFIC_STATUS_UP !=  traffic_status)
+-        return PHY_FAILURE;
++    if (TRAFFIC_STATUS_DOWN != traffic_status && TRAFFIC_STATUS_UP != traffic_status) {
++		return PHY_FAILURE;
++	}
+     
+ 	gpPhyPriv->phyCfg.flags.trafficStatus  = traffic_status;
+ 	return PHY_SUCCESS ;
+@@ -1263,8 +1264,8 @@
+ 	{
+ 		PHY_GPON_Delimiter_Guard_t gpon_delimiter_guard = {0};
+ 
+-		gpon_delimiter_guard.delimiter=&hex1;
+-		gpon_delimiter_guard.guard_time=&hex2;
++		gpon_delimiter_guard.delimiter=hex1;
++		gpon_delimiter_guard.guard_time=hex2;
+ 		PHY_INTERNAL_SET_API(PON_SET_PHY_GPON_DELIMITER_GUARD,&gpon_delimiter_guard);
+ 	}
+     else if((!strcmp(cmd, "Phy_Rogue_PRBS"))||(!strcmp(cmd, "rogue")))
+@@ -2087,7 +2088,7 @@
+ 		gpPhyPriv->phyCfg.intCounter = 0 ;
+ 
+ 		if((jiffies - gpPhyPriv->phyCfg.intTime) < 1000) { //phy interrupt occur 10 times during 1000 system clk
+-			PON_PHY_PRINT(PHY_MSG_INT, "[%s:%d] detect frequently ISR (0x%x~0x%x), turn off ISR dbg msg!\n",__FUNCTION__,__LINE__,gpPhyPriv->phyCfg.intTime,jiffies) ;
++			PON_PHY_PRINT(PHY_MSG_INT, "[%s:%d] detect frequently ISR (0x%lx~0x%lx), turn off ISR dbg msg!\n",__FUNCTION__,__LINE__,gpPhyPriv->phyCfg.intTime,jiffies) ;
+ 
+ 			ret = phy_disable_pcs_tdc();	//ang_20180502
+ 			mdelay(50);
+--- a/xpon-en757x/xpon_phy_10g/src/phy_init.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy_init.c
+@@ -37,7 +37,9 @@
+ #include "en7581_pma.h"
+ #include "en7581_reg.h"
+ 
++#ifdef TCSUPPORT_CPU_AN7583
+ #include "en7583.h"
++#endif
+ //#include "en7583_pma.h"
+ #include "en7583_reg.h"
+ 
+--- a/xpon-en757x/xpon_phy_10g/src/phy_tx.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy_tx.c
+@@ -13,6 +13,7 @@
+ 
+ #include "phy_global.h"
+ #include "i2c.h"
++#include <ecnt_scu_api.h>
+ #include "phy.h"
+ #include "phy_def.h"
+ #include "phy_debug.h"
+@@ -24,7 +25,9 @@
+ #include "en7581.h"
+ #include "en7581_pma.h"
+ #include "en7581_reg.h"
++#ifdef TCSUPPORT_CPU_AN7583
+ #include "en7583.h"
++#endif
+ //#include "en7583_pma.h"
+ #include "en7583_reg.h"
+ 
