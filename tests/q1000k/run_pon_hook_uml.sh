@@ -52,5 +52,8 @@ TMPDIR=/tmp timeout 60 "$work/build/linux" mem=256M rootfstype=hostfs rootflags=
 	"PON_HOOK_TEST_MODULE=$work/module/pon_hook_test.ko" > "$work/run.log" 2>&1
 tr -d '\r' < "$work/run.log" | grep -qx 'Q1000K_PON_HOOK_TEST_EXIT=0'
 grep -q 'Q1000K_PON_HOOK_KERNEL_PASS' "$work/run.log"
-! grep -Eq 'BUG:|WARNING:|Oops:|Kernel panic|INFO:.*(RCU|rcu|lock|task)' "$work/run.log"
+if grep -Eq 'BUG:|WARNING:|Oops:|Kernel panic|INFO:.*(RCU|rcu|lock|task)' "$work/run.log"; then
+	echo "Kernel diagnostics found: $work/run.log" >&2
+	exit 1
+fi
 echo 'Kernel hook registration and RCU lifetime tests passed.'

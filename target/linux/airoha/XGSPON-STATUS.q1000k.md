@@ -48,7 +48,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
 | PON MAC | Runtime state/event dispatch and native packet attachment are integrated; startup/teardown fault fixtures and module modpost pass. | Complete native control/QoS/FE operations, physical interrupt/drain/PHY coordination and service-level management traffic. |
 | Native packet transport | Native metadata/raw RX, bounded vendor TX retries, startup/teardown and callback attachment are implemented; host and UML concurrency tests pass. GDM2 stays disabled. | Native QDMA/FE control/QoS providers, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
-| T-CONTs | Serialized table commands, verified writes, duplicate preservation, native queue controls and setup rollback are implemented. Removal closes queues but preserves bindings and reports incomplete retirement. | Per-channel descriptor/FE/optical drain, GEM transaction synchronization and ONU/OMCC assignment. |
+| T-CONTs | Serialized table commands, verified writes, duplicate preservation, setup rollback and per-channel native TX drain are implemented. Removal preserves bindings and reports incomplete retirement. | FE/optical FIFO drain, GEM transaction synchronization and ONU/OMCC assignment. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -68,6 +68,14 @@ PON tests, a separate Linux UML T-CONT concurrency test and the r15 vendor
 package build pass. FE retirement, GEM mapping synchronization and complete
 ONU/OMCC transactions remain pending; see the
 [T-CONT checkpoint](XGSPON-INTEGRATION.q1000k.md#t-cont-command-and-setup-checkpoint-2026-09-13).
+Kernel patch 9999b and vendor patch 019 add native TX reclamation per channel
+and prevent reopening within the attachment. Native/adapter UML tests pass,
+including control from a real interrupt; the native locking warning they
+exposed is fixed, and all PON runners now reject kernel diagnostics explicitly.
+The final Linux 6.18.44 AN7581 kernel and r16 vendor APK build successfully;
+all six vendor modules pass modpost against the eight native API exports.
+All 24 host PON tests also pass against the final prepared kernel/package tree.
+See the [channel drain checkpoint](XGSPON-INTEGRATION.q1000k.md#per-channel-tx-drain-checkpoint-2026-09-13).
 No SSH access or device changes were made for this continuation.
 
 The reference loader was inspected at

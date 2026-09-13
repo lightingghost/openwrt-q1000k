@@ -177,6 +177,15 @@ behavior are fixtures; these tests cannot establish physical FIFO retirement.
 `Q1000K_PON_HEADER` can select the matching native public header for either
 UML generator when testing a separately prepared driver tree.
 
+The native tests also cover per-channel descriptor reclamation: all 32 encoded
+channel IDs, every fragment mapping failure, mixed-channel/out-of-order and
+duplicate completions, permanent closure, pending polls and errors after
+disconnect/readback failure. The native UML guest races channel retirement
+against TX and reopening, and executes a channel operation from real interrupt
+context. The adapter guest checks that its RCU wrapper preserves native errors.
+All PON UML runners explicitly reject kernel diagnostics; a negated `grep`
+alone does not trigger `set -e` and is insufficient as a failure check.
+
 The T-CONT host tests execute the production table helper and prepared vendor
 transaction/caller functions. They check reserved command bits, channel/ID
 bounds, unchanged outputs, stale invalid entries, duplicate preservation,

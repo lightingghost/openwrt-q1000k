@@ -41,7 +41,7 @@ typedef struct { unsigned int allocId; unsigned char allocIdType; } AllocId_Conf
 struct XMCS_TcontCfg_S { u16 allocId; };
 static int selected_channel, backend_step, fault[16], calls, events;
 static bool reenter;
-static uint32_t quarantined;
+static uint32_t quarantined, retiring;
 static u8 queue_closed[32];
 static bool mac_valid[32], fe_enabled[32];
 static struct { char op; int channel,value; } trace[32];
@@ -82,10 +82,17 @@ static int gponDevDisableTCont(u16 id)
 }
 static int q1000k_transport_set_queue_close(u8 channel,u8 closed)
 {
+    assert(closed==255 || !(retiring & (1u<<channel)));
     record('Q',channel,closed);
     int ret=result();
     if(!ret) queue_closed[channel]=closed;
     return ret;
+}
+static int q1000k_transport_quiesce_channel(u8 channel)
+{
+    assert(channel<32);
+    retiring |= 1u<<channel;
+    return q1000k_transport_set_queue_close(channel,255);
 }
 static int FE_API_SET_CHANNEL_ENABLE(int gdm,int direction,u8 channel,int enable)
 {
@@ -127,7 +134,7 @@ static void reset_model(void)
     memset(fe_enabled,0,sizeof(fe_enabled)); memset(mac_valid,0,sizeof(mac_valid));
     memset(fault,0,sizeof(fault)); memset(trace,0,sizeof(trace)); memset(recovered,33,sizeof(recovered));
     selected_channel=4; backend_step=calls=events=errors_logged=0;
-    quarantined=0; reenter=false; q1000k_tcont_config_busy.value=0;
+    quarantined=retiring=0; reenter=false; q1000k_tcont_config_busy.value=0;
 }
 static void reset_trace(void) { calls=backend_step=0; memset(fault,0,sizeof(fault)); }
 int main(void)
@@ -158,7 +165,7 @@ int main(void)
     assert(gwan_create_new_tcont(200)==-EEXIST && !calls && !memcmp(&wan,&before,sizeof(wan)));
     assert(gwan_remove_tcont(200)==-EOPNOTSUPP);
     assert(calls==1 && trace[0].op=='Q' && trace[0].value==255);
-    assert(quarantined==(1u<<4) && queue_closed[4]==255 && mac_valid[4]);
+    assert(retiring==(1u<<4) && quarantined==(1u<<4) && queue_closed[4]==255 && mac_valid[4]);
     assert(!memcmp(&wan,&before,sizeof(wan))); /* no false removal or global FCS reset */
 
     for(unsigned int failure=1;failure<=4;failure++) {
@@ -168,7 +175,7 @@ int main(void)
         assert(!q1000k_tcont_config_busy.value && !events);
         if(failure==1) assert(calls==1 && !quarantined);
         else {
-            assert(calls==(int)failure+3 && quarantined==(1u<<4));
+            assert(calls==(int)failure+3 && quarantined==(1u<<4) && retiring==(1u<<4));
             assert(trace[failure].op=='Q' && trace[failure].value==255);
             assert(trace[failure+1].op=='F' && !trace[failure+1].value);
             assert(trace[failure+2].op=='D' && !mac_valid[4] && !fe_enabled[4]);
@@ -192,6 +199,12 @@ int main(void)
     assert(quarantined==((1u<<4)|(1u<<31)) && !memcmp(&wan,&before,sizeof(wan)));
     reset_trace();
     assert(gwan_remove_all_tcont()==-EOPNOTSUPP && calls==3);
+    assert(!memcmp(&wan,&before,sizeof(wan)));
+    reset_trace(); fault[1]=-EAGAIN;
+    assert(gwan_remove_all_tcont()==-EAGAIN && calls==3);
+    assert(!memcmp(&wan,&before,sizeof(wan)));
+    reset_trace(); fault[1]=-EAGAIN;
+    assert(gwan_remove_tcont(200)==-EAGAIN && retiring & (1u<<4));
     assert(!memcmp(&wan,&before,sizeof(wan)));
     reset_model(); wan.gpon.allocId[0]=0xffff;
     assert(!gwan_remove_all_tcont() && !calls);

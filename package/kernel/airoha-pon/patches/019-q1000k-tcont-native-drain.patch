@@ -1,0 +1,45 @@
+Subject: [PATCH] xpon: quiesce native T-CONT descriptors before FE retirement
+
+Use the native owner's per-channel reclamation poll for removal and failed
+setup. Preserve pending/error results and never reopen a retiring channel.
+Completed native reclamation still does not establish FE/optical retirement.
+
+---
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -330,9 +330,9 @@
+ 	 * Never reuse this slot during the current MAC instance.
+ 	 */
+ 	q1000k_tcont_quarantine(channel);
+-	cleanup = q1000k_transport_set_queue_close(channel, 0xff);
++	cleanup = q1000k_transport_quiesce_channel(channel);
+ 	if (cleanup)
+-		pr_err("Q1000K T-CONT %d queue rollback failed: %d\n", channel, cleanup);
++		pr_err("Q1000K T-CONT %d native TX rollback incomplete: %d\n", channel, cleanup);
+ 	cleanup = FE_API_SET_CHANNEL_ENABLE(FE_GDM_SEL_GDMA2, FE_GDM_SEL_TX,
+ 				channel, FE_DISABLE);
+ 	if (cleanup)
+@@ -359,10 +359,11 @@
+ 		if (gpWanPriv->gpon.allocId[i] != alloc_id)
+ 			continue;
+ 		q1000k_tcont_quarantine(i);
+-		ret = q1000k_transport_set_queue_close(i, 0xff);
++		ret = q1000k_transport_quiesce_channel(i);
+ 		/* G_TX_FCS_TBL_INIT is global. Do not reset it for one T-CONT or
+-		 * claim removal until native descriptors and FE/optical FIFOs have
+-		 * a verified retirement path. Keep bindings/counts for diagnosis.
++		 * claim removal until FE/optical FIFOs have a verified retirement
++		 * path, even once native descriptors have been reclaimed. Keep
++		 * bindings/counts for diagnosis.
+ 		 */
+ 		if (!ret)
+ 			ret = -EOPNOTSUPP;
+@@ -382,7 +383,7 @@
+ 		if (gpWanPriv->gpon.allocId[i] == GPON_10G_UNASSIGN_ALLOC_ID)
+ 			continue;
+ 		q1000k_tcont_quarantine(i);
+-		err = q1000k_transport_set_queue_close(i, 0xff);
++		err = q1000k_transport_quiesce_channel(i);
+ 		/* Try to close every assigned channel, preserving the first error. */
+ 		if (err && (!ret || ret == -EOPNOTSUPP))
+ 			ret = err;

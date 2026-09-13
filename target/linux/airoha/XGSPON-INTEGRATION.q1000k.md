@@ -324,8 +324,10 @@ unchanged neighbouring registers. The native implementation passes 100 real
 Linux UML attachment cycles with concurrent channel control, TX/RX and delayed
 DMA completion (709,762 RX/wake callbacks). The adapter passes 50 cycles with
 1,141,128 allocated/destroyed packets, including closure/reopening under BUSY,
-unchanged rejected skbs and unregister/timeout cleanup. Both guests report no
-kernel, RCU or locking diagnostics. These are synthetic register/DMA tests,
+unchanged rejected skbs and unregister/timeout cleanup. Reinspection of the
+native guest log found a softirq warning despite its zero runner exit status;
+patch 9999b below fixes that locking issue and the runner's failure check.
+The earlier claim of a clean native log was incorrect. These are synthetic register/DMA tests,
 not measurements of physical queue or optical behavior. The complete AN7581
 kernel and experimental r14 module package build locally. No device access,
 module loading, installation or flashing was performed.
@@ -363,8 +365,9 @@ invoke the shared legacy QDMA buffer reset for these operations.
 
 **Removal is deliberately incomplete.** It quarantines the slot and attempts
 native queue closure, preserving bindings and counts. Successful closure
-returns `-EOPNOTSUPP`, because neither per-channel native descriptor drain nor
-FE/optical FIFO retirement exists yet. Bulk removal attempts every assigned
+returns `-EOPNOTSUPP`, because FE/optical FIFO retirement is absent. Patch 019
+adds the native per-channel descriptor drain described below. Bulk removal
+attempts every assigned
 channel and preserves the first control failure. It does not use the vendor's
 global `G_TX_FCS_TBL_INIT` write as a per-channel retirement mechanism. The
 `gpon_disable()` and inconsistent ONU-ID reassignment paths stop before clearing
@@ -386,6 +389,56 @@ it passes command, verification and quarantine checks without kernel/locking
 diagnostics. Register behavior is emulated, not measured on hardware. All six
 vendor modules pass modpost and the experimental r15 APK builds. No SSH,
 device writes, module installation or flashing was performed.
+
+## Per-channel TX drain checkpoint (2026-09-13)
+
+Kernel patch 9999b adds `airoha_pon_quiesce_channel()`. It permanently closes
+one channel for the current attachment and polls its native TX mappings without
+sleeping. `-EAGAIN` means mappings remain; zero means that channel's mappings
+have been reclaimed. Other channels and callbacks remain active. Queue opening
+after this operation returns `-ESHUTDOWN`, even once the native count reaches
+zero. Disconnect and failed queue readback return errors rather than a false
+drain result. The caller must retain its handle throughout the operation.
+
+Every mapped TX descriptor now retains its encoded T-CONT channel. Completion,
+mapping rollback and cleanup decrement that channel's count only after native
+DMA unmapping. Release/acquire ordering connects unmapping to the drain poll.
+An out-of-order completion of the final packet fragment cannot hide outstanding
+earlier fragments, and activity on another channel does not delay a completed
+channel's poll. Attachment references still survive until all descriptors have
+been reclaimed, including after consumer release.
+
+The expanded Linux test exposed a softirq warning in the existing admission
+path: it held an IRQ-saving lock around nested `_bh` unlocks. Native TX queue
+locks now preserve IRQ state across submission, completion and cleanup. The
+exclusive PON admission lock serializes direct submissions without taking the
+ordinary netdev TX lock; ordinary Ethernet keeps its existing netdev lock and
+cannot submit data to the PON port. Stop/disconnect continues to serialize
+against admission before draining callbacks.
+
+Vendor patch 019 uses the new operation for T-CONT removal and setup rollback.
+The adapter pins its current transport with RCU and preserves native error
+codes. An incomplete native drain remains an error. A completed native drain
+still returns `-EOPNOTSUPP` from T-CONT removal, preserving bindings/counts,
+because FE/optical FIFO retirement is not implemented. Reattachment or module
+reload must not be used to bypass that missing hardware retirement.
+
+All 24 host PON tests pass, including all 32 channels, every fragment mapping
+failure, mixed-channel completion, duplicate completion, pending/retry behavior
+and blocked reopening. The native UML test passes 100 attachment cycles with
+concurrent TX/control, delayed completions and a real interrupt-context channel
+operation (415,138 RX/wake pairs). The adapter UML test passes 50 cycles and
+841,950 allocated/destroyed packets. Final guest logs contain no kernel/RCU/
+locking diagnostics. PON UML runners now explicitly fail on diagnostics;
+their previous negated `grep` was exempt from shell `errexit`. Historical
+runner exit status alone is therefore insufficient evidence of a clean log.
+These tests use synthetic registers/DMA and do not validate physical drain.
+
+The final Linux 6.18.44 AN7581 kernel and r16 vendor package build successfully;
+all six modules pass modpost against the eight native API exports. The final
+prepared trees match the tested source files. Board nodes and service gates
+remain disabled; no device access,
+installation or flashing is part of this continuation.
 
 ## Vendor packet adapter findings
 

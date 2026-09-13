@@ -75,8 +75,8 @@ struct sk_buff {
     struct { __sum16 check; } tcp;
 };
 struct airoha_qdma_desc { u32 ctrl,addr,data,msg0,msg1,msg2; };
-struct airoha_pon { int pending; };
-struct airoha_queue_entry { struct airoha_pon *pon; struct list_head list; struct sk_buff *skb; dma_addr_t dma_addr; u16 dma_len; };
+struct airoha_pon { int pending, channel_pending[32]; };
+struct airoha_queue_entry { u8 pon_channel; struct airoha_pon *pon; struct list_head list; struct sk_buff *skb; dma_addr_t dma_addr; u16 dma_len; };
 struct airoha_qdma;
 struct airoha_queue {
     struct airoha_qdma *qdma; bool lock,txq_stopped;
@@ -97,16 +97,18 @@ static bool batching;
 static unsigned irq_len,pon_wakes,irq_enables;
 static struct airoha_pon consumer;
 static int tracking_gets,tracking_puts;
-static void airoha_pon_tx_get(struct airoha_pon *pon) {
-    if(pon) { pon->pending++; tracking_gets++; }
+static void airoha_pon_tx_get(struct airoha_pon *pon,u8 channel) {
+    if(pon) { assert(channel<32); pon->channel_pending[channel]++; pon->pending++; tracking_gets++; }
 }
-static void airoha_pon_tx_complete(struct airoha_pon *pon) {
-    if(pon) { assert(pon->pending>0 && unmaps>tracking_puts); pon->pending--; tracking_puts++; }
+static void airoha_pon_tx_complete(struct airoha_pon *pon,u8 channel) {
+    if(pon) { assert(channel<32 && pon->channel_pending[channel]>0); pon->channel_pending[channel]--; assert(pon->pending>0 && unmaps>tracking_puts); pon->pending--; tracking_puts++; }
 }
 static bool dma_live[64];
 static void rcu_read_lock(void) { rcu_readers++; }
 static void rcu_read_unlock(void) { assert(rcu_readers); rcu_readers--; }
 #define rcu_dereference(p) (assert(rcu_readers),(p))
+#define spin_lock_irqsave(l,f) do { (f)=0; spin_lock_bh(l); } while(0)
+#define spin_unlock_irqrestore(l,f) do { (void)(f); spin_unlock_bh(l); } while(0)
 static void spin_lock_bh(bool *l) { assert(!*l); *l=true; }
 static void spin_unlock_bh(bool *l) { assert(*l); *l=false; }
 static struct airoha_gdm_dev *netdev_priv(struct net_device *n) { return n->priv; }
@@ -162,7 +164,7 @@ static void setup(struct airoha_qdma *qdma,struct airoha_eth *eth,struct net_dev
     skb->shinfo.nr_frags=fragments; skb->len=48+fragments*16;
     for(int i=0;i<fragments;i++) skb->shinfo.frags[i].size=16;
     memset(dev->txq,0,sizeof(dev->txq)); maps=unmaps=freed=orphans=doorbells=dsa_calls=map_fail=0;
-    memset(dma_live,0,sizeof(dma_live)); consumer.pending=tracking_gets=tracking_puts=0;
+    memset(dma_live,0,sizeof(dma_live)); memset(&consumer,0,sizeof(consumer)); tracking_gets=tracking_puts=0;
 }
 static int free_entries(struct airoha_queue *q) {
     int n=0; struct list_head *p;
@@ -178,8 +180,10 @@ int main(void) {
     struct airoha_eth eth={0}; struct airoha_qdma qdma;
     struct airoha_gdm_dev gdm={.qdma=&qdma,.pon_port=true}; struct net_device dev={.priv=&gdm};
     struct sk_buff skb,before; u32 msg=0x40afc15d; struct airoha_queue *q=&qdma.q_tx[31];
+    for(int channel=0;channel<32;channel++)
     for(int management=0;management<2;management++)
     for(int frags=0;frags<=3;frags++) for(int failure=0;failure<=frags+1;failure++) {
+        msg=(msg & ~(31u<<3)) | (channel<<3);
         msg=(msg & ~(1u<<8)) | (management<<8);
         setup(&qdma,&eth,&dev,&skb,frags); map_fail=failure; batching=true;
         assert(__airoha_dev_xmit(&skb,&dev,&msg,&consumer)==NETDEV_TX_OK && !rcu_readers && !q->lock && !dsa_calls);
@@ -190,10 +194,12 @@ int main(void) {
             assert(free_entries(q)==8 && !dev.txq[31].sent);
             for(int i=0;i<8;i++) assert(!q->entry[i].dma_addr);
         } else {
+            assert(consumer.channel_pending[channel]==frags+1);
             assert(consumer.pending==frags+1 && tracking_gets==frags+1 && !tracking_puts);
             assert(maps==frags+1 && !unmaps && !freed && q->queued==frags+1 && doorbells==1);
             assert(free_entries(q)==8-frags-1 && dev.txq[31].sent==(int)skb.len);
             for(int i=0;i<=frags;i++) {
+                assert(q->entry[i].pon_channel==channel);
                 assert(q->desc[i].msg0==msg && q->desc[i].msg1==(0x7f2007ffu | ((u32)management<<31)));
                 assert(q->desc[i].msg2==0xffff && q->entry[i].skb==(i==frags?&skb:NULL));
                 assert(!!(q->desc[i].ctrl&(1u<<29))==(i<frags));
@@ -203,6 +209,7 @@ int main(void) {
             assert(unmaps==frags+1 && freed==1 && !q->queued && free_entries(q)==8);
             airoha_qdma_cleanup_tx_queue(q); assert(freed==1 && unmaps==frags+1);
         }
+        for(int i=0;i<32;i++) assert(!consumer.channel_pending[i]);
         for(int i=0;i<64;i++) assert(!dma_live[i]);
         for(int i=0;i<8;i++) assert(!q->entry[i].pon);
     }
@@ -238,5 +245,21 @@ int main(void) {
     complete(&qdma,0); assert(!consumer.pending && q->queued==0 && unmaps==4);
     assert(tracking_gets==tracking_puts && freed==2 && free_entries(q)==8);
     airoha_qdma_cleanup_tx_queue(q); assert(freed==2 && unmaps==4);
+    setup(&qdma,&eth,&dev,&skb,2); gdm.pon_port=true;
+    msg=3u<<3;
+    assert(!__airoha_dev_xmit(&skb,&dev,&msg,&consumer));
+    struct sk_buff second={.dev=&dev,.len=48,.headlen=48,.queue=31};
+    msg=29u<<3;
+    assert(!__airoha_dev_xmit(&second,&dev,&msg,&consumer));
+    assert(consumer.channel_pending[3]==3 && consumer.channel_pending[29]==1);
+    complete(&qdma,2);
+    assert(consumer.channel_pending[3]==2 && consumer.channel_pending[29]==1);
+    complete(&qdma,3);
+    assert(consumer.channel_pending[3]==2 && !consumer.channel_pending[29]);
+    complete(&qdma,3); /* duplicate must not decrement either channel */
+    assert(consumer.channel_pending[3]==2 && !consumer.channel_pending[29]);
+    airoha_qdma_cleanup_tx_queue(q);
+    assert(!consumer.pending && maps==unmaps);
+    for(int i=0;i<32;i++) assert(!consumer.channel_pending[i]);
     return 0;
 }

@@ -24,6 +24,12 @@ bool q1000k_transport_running(void);
 int q1000k_transport_set_queue_close(u8 channel, u8 closed);
 int q1000k_transport_get_queue_close(u8 channel, u8 *closed);
 
+/* Permanently close this attachment's channel and poll native TX mappings.
+ * IRQ-safe; -EAGAIN means mappings remain. Zero does not prove FE/optical
+ * FIFO retirement. No queue reopening is available after this operation.
+ */
+int q1000k_transport_quiesce_channel(u8 channel);
+
 /* Zero transfers ownership to the bounded retry queue. Negative errno leaves
  * skb unchanged and owned by the caller. Never returns NETDEV_TX_BUSY: the
  * vendor has already modified the skb by this point. Accepted packets may be

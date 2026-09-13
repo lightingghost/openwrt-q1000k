@@ -152,8 +152,13 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    fixes skb tail handling and propagates MIC-generation failures; real-skb
    UML fault tests pass. Patch 016 connects the vendor packet path through
    bounded deferred TX and native RX, with startup/teardown and concurrency
-   tests. Patch 9999 preserves the management no-drop hint. Native control/QoS
-   providers, physical FIFO/RX drain, FE flow operations and the PHY/phylink
+   tests. Patch 9999 preserves the management no-drop hint. Patch 9999a adds
+   exclusive QDMA1 queue closure and packet admission epochs; 9999b tracks
+   per-channel TX reclamation and prevents reopening a retiring channel.
+   Vendor patches 018/019 serialize and verify T-CONT commands, propagate setup
+   errors and preserve bindings until physical retirement is implemented.
+   Native FE/QoS providers, GEM transaction synchronization, physical FIFO/RX
+   drain, FE flow operations and the PHY/phylink
    connection remain outstanding; the board's PON nodes stay disabled.
 
    Acceptance: one coherent optical data path with working management

@@ -18,6 +18,7 @@ print(r'''
 #include <linux/slab.h>
 #include <linux/bitfield.h>
 #include <linux/kthread.h>
+#include <linux/irq_work.h>
 #include <linux/delay.h>
 #include <linux/utsname.h>
 #include <linux/refcount.h>
@@ -71,9 +72,9 @@ void airoha_pon_netdev_uninit(struct net_device *netdev);
 u64 airoha_pon_generation(struct airoha_gdm_dev *dev);
 void airoha_pon_rx(struct airoha_gdm_dev *dev, struct sk_buff *skb, const u32 words[4], u64 generation);
 void airoha_pon_tx_wake(struct airoha_gdm_dev *dev);
-void airoha_pon_tx_get(struct airoha_pon *pon);
-void airoha_pon_tx_complete(struct airoha_pon *pon);
-struct pending_tx { struct list_head list; struct airoha_pon *pon; struct sk_buff *skb; };
+void airoha_pon_tx_get(struct airoha_pon *pon,u8 channel);
+void airoha_pon_tx_complete(struct airoha_pon *pon,u8 channel);
+struct pending_tx { u8 channel; struct list_head list; struct airoha_pon *pon; struct sk_buff *skb; };
 static LIST_HEAD(pending_tx);
 static DEFINE_SPINLOCK(pending_lock);
 static unsigned int pending_count;
@@ -82,34 +83,36 @@ static void check_admission(struct airoha_pon *pon,u32 msg);
 static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *skb, struct net_device *netdev,
                                      u32 msg, struct airoha_pon *pon)
 {
+    unsigned long flags;
     struct pending_tx *tx=kmalloc(sizeof(*tx),GFP_ATOMIC);
     RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "PON TX outside RCU");
     check_admission(pon,msg);
     if(!tx) { dev_kfree_skb_any(skb); return NETDEV_TX_OK; }
-    spin_lock_bh(&pending_lock);
+    spin_lock_irqsave(&pending_lock,flags);
     if(pending_count==64) {
-        spin_unlock_bh(&pending_lock); kfree(tx); return NETDEV_TX_BUSY;
+        spin_unlock_irqrestore(&pending_lock,flags); kfree(tx); return NETDEV_TX_BUSY;
     }
     /* Model two descriptors completing after submission returns. */
-    tx->pon=pon; tx->skb=skb;
-    airoha_pon_tx_get(pon); airoha_pon_tx_get(pon);
+    tx->pon=pon; tx->skb=skb; tx->channel=(msg>>3)&31;
+    airoha_pon_tx_get(pon,tx->channel); airoha_pon_tx_get(pon,tx->channel);
     list_add_tail(&tx->list,&pending_tx); pending_count++;
-    spin_unlock_bh(&pending_lock);
+    spin_unlock_irqrestore(&pending_lock,flags);
     return NETDEV_TX_OK;
 }
 static int dma_worker(void *unused)
 {
     for(;;) {
+        unsigned long flags;
         struct pending_tx *tx=NULL;
-        spin_lock_bh(&pending_lock);
+        spin_lock_irqsave(&pending_lock,flags);
         if(!list_empty(&pending_tx) && (!atomic_read(&hold_dma) || kthread_should_stop())) {
             tx=list_first_entry(&pending_tx,struct pending_tx,list);
             list_del(&tx->list); pending_count--;
         }
-        spin_unlock_bh(&pending_lock);
+        spin_unlock_irqrestore(&pending_lock,flags);
         if(tx) {
             dev_kfree_skb_any(tx->skb);
-            airoha_pon_tx_complete(tx->pon); airoha_pon_tx_complete(tx->pon);
+            airoha_pon_tx_complete(tx->pon,tx->channel); airoha_pon_tx_complete(tx->pon,tx->channel);
             kfree(tx);
         } else if(kthread_should_stop()) break;
         else msleep(1);
@@ -128,6 +131,15 @@ static void check_admission(struct airoha_pon *pon,u32 msg)
     lockdep_assert_held(&pon->admission_lock);
     WARN_ON(pon->queue_fault || (pon->closed[channel] & BIT(queue)));
 }
+static struct airoha_pon *irq_test_pon;
+static int irq_control_result;
+static bool irq_control_ran;
+static void irq_channel_control(struct irq_work *work)
+{
+    irq_control_ran=in_hardirq();
+    irq_control_result=airoha_pon_quiesce_channel(irq_test_pon,1);
+}
+static DEFINE_IRQ_WORK(channel_irq_work,irq_channel_control);
 static struct airoha_pon __rcu *active;
 static struct airoha_eth eth;
 static struct airoha_gdm_port port;
@@ -243,6 +255,26 @@ static int __init pon_transport_test_init(void)
     CHECK(!airoha_pon_prepare_tx(pon,&tx));
     CHECK(airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_OK);
     CHECK(atomic_read(&gdm->pon_tx_pending)==2);
+    CHECK(atomic_read(&pon->channel_pending[1])==2);
+    irq_test_pon=pon;
+    irq_work_queue(&channel_irq_work);
+    irq_work_sync(&channel_irq_work);
+    CHECK(irq_control_ran && irq_control_result==-EAGAIN);
+    CHECK(airoha_pon_quiesce_channel(pon,1)==-EAGAIN);
+    CHECK(airoha_pon_set_queue_close(pon,1,0)==-ESHUTDOWN);
+    CHECK(!airoha_pon_quiesce_channel(pon,31)); /* other channel has no mappings */
+    CHECK(atomic_read(&gdm->pon_tx_pending)==2);
+    atomic_set(&hold_dma,0);
+    for(i=0;i<1000 && atomic_read(&pon->channel_pending[1]);i++) msleep(1);
+    CHECK(!airoha_pon_quiesce_channel(pon,1));
+    CHECK(airoha_pon_prepare_tx(pon,&tx)==-ESHUTDOWN);
+    CHECK(airoha_pon_set_queue_close(pon,1,0)==-ESHUTDOWN);
+    tx.channel=2;
+    CHECK(!airoha_pon_set_queue_close(pon,2,0));
+    CHECK(!airoha_pon_prepare_tx(pon,&tx));
+    atomic_set(&hold_dma,1);
+    skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+    CHECK(airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_OK);
     CHECK(airoha_pon_quiesce(pon,0)==-ETIMEDOUT);
     CHECK(PTR_ERR(airoha_pon_attach(lower,&ops,NULL))==-EBUSY);
     CHECK(airoha_pon_quiesce(pon,1)==-ETIMEDOUT);
@@ -261,6 +293,14 @@ static int __init pon_transport_test_init(void)
         CHECK(!airoha_pon_set_queue_close(pon,5,0));
         rcu_assign_pointer(active,pon);
         msleep(1);
+        ret=airoha_pon_quiesce_channel(pon,5);
+        CHECK(ret==0 || ret==-EAGAIN);
+        for(int attempt=0;attempt<1000 && ret==-EAGAIN;attempt++) {
+            msleep(1);
+            ret=airoha_pon_quiesce_channel(pon,5);
+        }
+        CHECK(!ret && !atomic_read(&pon->channel_pending[5]));
+        CHECK(airoha_pon_set_queue_close(pon,5,0)==-ESHUTDOWN);
         if (i&1) {
             rtnl_lock(); dev_close(lower); rtnl_unlock();
             CHECK(!rcu_access_pointer(gdm->pon));
@@ -305,7 +345,7 @@ out:
     if(registered) unregister_netdev(lower);
     if(dma) kthread_stop(dma);
     free_netdev(lower);
-    if(!ret) pr_info("Q1000K_PON_TRANSPORT_KERNEL_PASS cycles=100 drain_timeout_retry=pass late_dma=pass rx=%d wake=%d detach=%d\n",
+    if(!ret) pr_info("Q1000K_PON_TRANSPORT_KERNEL_PASS cycles=100 drain_timeout_retry=pass channel_drain=pass irq_control=pass late_dma=pass rx=%d wake=%d detach=%d\n",
         atomic_read(&rx_calls),atomic_read(&wake_calls),atomic_read(&detached_calls));
     return ret;
 }

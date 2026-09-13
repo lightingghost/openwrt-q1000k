@@ -218,6 +218,19 @@ int q1000k_transport_get_queue_close(u8 channel, u8 *closed)
 	return ret;
 }
 
+int q1000k_transport_quiesce_channel(u8 channel)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	rcu_read_lock();
+	transport = rcu_dereference(q1000k_current);
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_quiesce_channel(transport->pon, channel);
+	rcu_read_unlock();
+	return ret;
+}
+
 int q1000k_transport_start(const char *lower, q1000k_pon_receive_t receive)
 {
 	struct q1000k_transport *transport;

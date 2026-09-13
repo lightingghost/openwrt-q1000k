@@ -52,5 +52,8 @@ TMPDIR=/tmp timeout 60 "$work/build/linux" mem=256M rootfstype=hostfs rootflags=
 	"PON_CRYPTO_TEST_MODULE=$work/module/pon_crypto_test.ko" > "$work/run.log" 2>&1
 tr -d '\r' < "$work/run.log" | grep -qx 'Q1000K_PON_CRYPTO_TEST_EXIT=0'
 grep -q 'Q1000K_PON_CRYPTO_KERNEL_PASS' "$work/run.log"
-! grep -Eq 'BUG:|WARNING: CPU:|Oops:|Kernel panic' "$work/run.log"
+if grep -Eq 'BUG:|WARNING: CPU:|Oops:|Kernel panic' "$work/run.log"; then
+	echo "Kernel diagnostics found: $work/run.log" >&2
+	exit 1
+fi
 echo 'Kernel AES/CMAC known-answer tests passed.'

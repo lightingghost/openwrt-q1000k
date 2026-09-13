@@ -45,6 +45,7 @@ struct airoha_pon {
     bool connected;
     u64 epoch[32];
     u8 closed[32];
+    u32 retiring;
 };
 static struct airoha_pon __rcu *fake_current;
 static DEFINE_SPINLOCK(fake_tx_lock);
@@ -52,7 +53,7 @@ static struct sk_buff_head fake_dma;
 static struct net_device *lower_dev;
 static bool fake_busy, wake_during_busy, fail_attach, detach_during_attach, hold_dma;
 static bool early_rx, record_order;
-static int quiesce_error;
+static int quiesce_error, channel_quiesce_error;
 static atomic_t allocations, destructions, accepted, received, busy_calls, violations;
 static unsigned int order[256];
 static u32 test_word0 = 0xfedcu << 14 | 27u << 3 | 5u;
@@ -177,10 +178,26 @@ int airoha_pon_set_queue_close(struct airoha_pon *pon,u8 channel,u8 closed)
 {
     if(channel>31) return -EINVAL;
     spin_lock_bh(&fake_tx_lock);
+    if((pon->retiring & BIT(channel)) && closed!=255) {
+        spin_unlock_bh(&fake_tx_lock); return -ESHUTDOWN;
+    }
     if(closed & ~pon->closed[channel]) pon->epoch[channel]++;
     pon->closed[channel]=closed;
     spin_unlock_bh(&fake_tx_lock);
     return 0;
+}
+/* Native channel counts are tested in the transport guest. This fixture
+ * supplies native return codes to check the adapter's RCU/lifetime wrapper.
+ */
+int airoha_pon_quiesce_channel(struct airoha_pon *pon,u8 channel)
+{
+    if(channel>31) return -EINVAL;
+    spin_lock_bh(&fake_tx_lock);
+    pon->retiring |= BIT(channel);
+    if(pon->closed[channel]!=255) pon->epoch[channel]++;
+    pon->closed[channel]=255;
+    spin_unlock_bh(&fake_tx_lock);
+    return channel_quiesce_error;
 }
 int airoha_pon_get_queue_close(struct airoha_pon *pon,u8 channel,u8 *closed)
 {
@@ -370,6 +387,7 @@ static int run_tests(void)
     CHECK(!q1000k_transport_stop());
     CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
     CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
+    CHECK(q1000k_transport_quiesce_channel(27)==-ENODEV);
     CHECK(q1000k_transport_start(NULL, receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("", receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("bad/name", receive_packet) == -EINVAL);
@@ -389,6 +407,14 @@ static int run_tests(void)
     fake_receive(); CHECK(atomic_read(&received) == rx + 1);
     early_rx = false;
     CHECK(!q1000k_transport_get_queue_close(27,&closed) && closed==255);
+    CHECK(q1000k_transport_quiesce_channel(32)==-EINVAL);
+    channel_quiesce_error=-EAGAIN;
+    CHECK(q1000k_transport_quiesce_channel(30)==-EAGAIN);
+    CHECK(q1000k_transport_set_queue_close(30,0)==-ESHUTDOWN);
+    channel_quiesce_error=-EIO;
+    CHECK(q1000k_transport_quiesce_channel(30)==-EIO);
+    channel_quiesce_error=0;
+    CHECK(!q1000k_transport_quiesce_channel(30));
     skb=packet_new(1); CHECK(skb);
     CHECK(q1000k_transport_xmit(skb,test_word0,test_word1)==-ESHUTDOWN);
     CHECK(skb->len==60 && skb->data[0]==0x5a && skb->cb[0]==0xa5);
@@ -463,6 +489,7 @@ static int run_tests(void)
     closed=0xa5;
     CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
     CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
+    CHECK(q1000k_transport_quiesce_channel(27)==-ENODEV);
     CHECK(!q1000k_transport_stop()); CHECK(!q1000k_transport_stop());
 
     /* Accepted native DMA can outlive adapter stop after a reported timeout. */
