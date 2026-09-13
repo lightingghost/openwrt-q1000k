@@ -48,6 +48,7 @@ static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
 {
     if (offset==0x1020) return BIT(3); /* Native byte-weight mode. */
     if (offset==0x1024) return qdma->qos_cmd;
+    if (offset>=0x1280 && offset<=0x129c && !(offset&3)) return 0;
     if (offset>=0x1040 && offset<=0x104c && !(offset&3))
         return qdma->qos_modes[(offset-0x1040)/4];
     if (WARN_ON(offset<0xa0 || offset>0xbc || (offset&3))) return 0;
@@ -81,17 +82,32 @@ struct airoha_gdm_dev {
     bool pon_port;
 };
 struct airoha_gdm_port { struct airoha_gdm_dev *devs[1]; };
-struct airoha_eth { struct airoha_qdma qdma[2]; struct airoha_gdm_port *ports[4]; u32 fe_tx,fe_loopback; };
+struct airoha_eth {
+    struct airoha_qdma qdma[2]; struct airoha_gdm_port *ports[4];
+    u32 fe_tx,fe_loopback,fe_rx,fe_forward,fe_release;
+};
 static void check_fe_access(struct airoha_eth *eth);
 static u32 airoha_fe_rr(struct airoha_eth *eth,u32 reg) {
     check_fe_access(eth);
-    if(WARN_ON(reg!=0x151c && reg!=0x1524)) return ~0U;
-    return reg==0x151c ? eth->fe_loopback : eth->fe_tx;
+    switch(reg) {
+    case 0x140c: return eth->fe_forward;
+    case 0x151c: return eth->fe_loopback;
+    case 0x1520: return eth->fe_release | (eth->fe_release&1 ? 2 : 0);
+    case 0x1524: return eth->fe_tx;
+    case 0x1528: return eth->fe_rx;
+    case 0x1570: return 0;
+    default: WARN_ON(1); return ~0U;
+    }
 }
 static void airoha_fe_wr(struct airoha_eth *eth,u32 reg,u32 value) {
     check_fe_access(eth);
-    if(WARN_ON(reg!=0x1524)) return;
-    eth->fe_tx=value;
+    switch(reg) {
+    case 0x140c: eth->fe_forward=value; break;
+    case 0x1520: eth->fe_release=value; break;
+    case 0x1524: eth->fe_tx=value; break;
+    case 0x1528: eth->fe_rx=value; break;
+    default: WARN_ON(1);
+    }
 }
 static const struct net_device_ops airoha_netdev_ops;
 bool airoha_pon_qdma_busy(struct airoha_qdma *qdma);
@@ -156,6 +172,9 @@ print('\n'.join(line for line in regs.splitlines() if re.match(
 print(re.search(r'#define GDM_BASE\(_n\).*?(?=\n\n)', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK)', line)))
+print(re.search(r'#define CDM_BASE\(_n\).*?(?=\n(?:#|\n))', regs, re.S).group())
+print('\n'.join(line for line in regs.splitlines() if re.match(
+    r'#define (?:CDM[12]_BASE|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
 source = (eth / 'airoha_pon.c').read_text()
 print(re.sub(r'^#include[^\n]*\n', '', source, flags=re.M))
 print(r'''
@@ -199,6 +218,9 @@ static void irq_channel_control(struct irq_work *work)
     WARN_ON(airoha_pon_set_tx_channel(irq_test_pon,10,true));
     WARN_ON(airoha_pon_set_tx_channel(irq_test_pon,10,false));
     WARN_ON(airoha_pon_set_tx_channel(irq_test_pon,10,true)!=-ESHUTDOWN);
+    WARN_ON(airoha_pon_pause(irq_test_pon,0)!=-EWOULDBLOCK);
+    WARN_ON(airoha_pon_resume(irq_test_pon)!=-EWOULDBLOCK);
+    WARN_ON(airoha_pon_retire_fe(irq_test_pon,0)!=-EWOULDBLOCK);
 }
 static DEFINE_IRQ_WORK(channel_irq_work,irq_channel_control);
 static struct airoha_pon __rcu *active;
@@ -313,6 +335,31 @@ static int __init pon_transport_test_init(void)
     pon=airoha_pon_attach(lower,&ops,NULL);
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
     CHECK(!check_qos(pon));
+    /* Exercise a non-detaching pause with actual pending DMA and waitqueues,
+     * then the FE release transaction while RTNL pins the native owner.
+     */
+    {
+        struct airoha_pon_tx_meta paused_tx={.channel=31,.queue=0,.gem=123};
+        CHECK(!airoha_pon_set_tx_channel(pon,31,true));
+        CHECK(!airoha_pon_set_queue_close(pon,31,0));
+        CHECK(!airoha_pon_prepare_tx(pon,&paused_tx));
+        skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+        CHECK(airoha_pon_xmit(pon,skb,&paused_tx)==NETDEV_TX_OK);
+        CHECK(airoha_pon_pause(pon,0)==-ETIMEDOUT);
+        CHECK(pon->paused && !pon->pause_ready && pon->closed[31]==0);
+        CHECK(airoha_pon_resume(pon)==-EBUSY);
+        CHECK(airoha_pon_prepare_tx(pon,&paused_tx)==-ESHUTDOWN);
+        atomic_set(&hold_dma,0);
+        CHECK(!airoha_pon_pause(pon,1000));
+        CHECK(!airoha_pon_retire_fe(pon,31));
+        CHECK(!airoha_pon_resume(pon));
+        CHECK(airoha_pon_set_tx_channel(pon,31,true)==-ESHUTDOWN);
+        CHECK(!atomic_read(&pon->pending));
+        airoha_pon_release(pon);
+        pon=airoha_pon_attach(lower,&ops,NULL);
+        if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
+        atomic_set(&hold_dma,1);
+    }
     skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
     CHECK(!airoha_pon_set_tx_channel(pon,tx.channel,true));
     CHECK(!airoha_pon_set_queue_close(pon,tx.channel,0));

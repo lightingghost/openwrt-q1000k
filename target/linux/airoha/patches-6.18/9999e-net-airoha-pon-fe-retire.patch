@@ -1,0 +1,392 @@
+Subject: [PATCH] net: airoha: own the PON FE channel release transaction
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -22,6 +22,9 @@
+ 	spinlock_t admission_lock;
+ 	u64 epoch[32];
+ 	u8 closed[32];
++	u8 paused_closed[32];
++	bool paused;
++	bool pause_ready;
+ 	u32 retiring;
+ 	u32 tx_enabled;
+ 	u32 configuring;
+@@ -326,11 +329,13 @@
+ 	int ret = 0;
+ 
+ 	lockdep_assert_held(&pon->admission_lock);
+-	if (!rcu_dereference(pon->netdev))
++	if (!rcu_dereference_check(pon->netdev, lockdep_rtnl_is_held()))
+ 		return -ENODEV;
+ 	if (pon->control_fault)
+ 		return -EIO;
+ 	if (pon->configuring & BIT(channel))
++		return -EBUSY;
++	if (closed != 0xff && pon->paused)
+ 		return -EBUSY;
+ 	if (closed != 0xff && ((pon->retiring & BIT(channel)) ||
+ 	    !(pon->tx_enabled & BIT(channel))))
+@@ -576,6 +581,269 @@
+ }
+ EXPORT_SYMBOL_GPL(airoha_pon_get_qos);
+ 
++int airoha_pon_pause(struct airoha_pon *pon, unsigned int timeout_ms)
++{
++	unsigned long flags;
++	int i, ret = 0;
++
++	if (!pon || timeout_ms > 3000)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring)
++		ret = -EBUSY;
++	if (ret)
++		goto unlock;
++	if (!pon->paused) {
++		memcpy(pon->paused_closed, pon->closed, sizeof(pon->closed));
++		pon->paused = true;
++		pon->pause_ready = false;
++		/* Invalidate all userspace/adapter retry packets before waiting.
++		 * Keep hardware queues as they are until CPU DMA has completed.
++		 */
++		for (i = 0; i < ARRAY_SIZE(pon->epoch); i++)
++			if (++pon->epoch[i] == 0) {
++				pon->control_fault = true;
++				ret = -EOVERFLOW;
++			}
++	}
++	if (ret)
++		goto unlock;
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	if (!wait_event_timeout(pon->drained, !atomic_read_acquire(&pon->pending),
++				msecs_to_jiffies(timeout_ms))) {
++		ret = -ETIMEDOUT;
++		goto out;
++	}
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	for (i = 0; i < ARRAY_SIZE(pon->closed); i++) {
++		ret = airoha_pon_set_queue_close_locked(pon, i, 0xff);
++		if (ret)
++			break;
++	}
++	if (!ret)
++		pon->pause_ready = true;
++unlock:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++out:
++	rtnl_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_pause);
++
++int airoha_pon_resume(struct airoha_pon *pon)
++{
++	unsigned long flags;
++	int i, ret = 0;
++
++	if (!pon)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring || !pon->paused || !pon->pause_ready)
++		ret = -EBUSY;
++	if (ret)
++		goto out;
++	/* No TX or IRQ-side control can observe a partially resumed bitmap. */
++	pon->paused = false;
++	for (i = 0; i < ARRAY_SIZE(pon->closed); i++) {
++		u8 closed = pon->paused_closed[i];
++
++		if ((pon->retiring & BIT(i)) || !(pon->tx_enabled & BIT(i)))
++			closed = 0xff;
++		ret = airoha_pon_set_queue_close_locked(pon, i, closed);
++		if (ret) {
++			pon->paused = true;
++			break;
++		}
++	}
++	pon->pause_ready = false;
++out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rtnl_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_resume);
++
++/* The OEM release engine temporarily isolates GDM2. Require closed CPU
++ * admission and reclaimed mappings for the whole port, and keep IRQ controls
++ * excluded until every altered register is restored and verified.
++ */
++static int airoha_pon_fe_write_checked(struct airoha_eth *eth, u32 reg, u32 value)
++{
++	airoha_fe_wr(eth, reg, value);
++	return airoha_fe_rr(eth, reg) == value ? 0 : -EIO;
++}
++
++int airoha_pon_retire_fe(struct airoha_pon *pon, u8 channel)
++{
++	struct airoha_eth *eth;
++	struct airoha_qdma *qdma;
++	unsigned long flags;
++	u32 tx, rx, forward, ages, status, busy, queues, mask;
++	unsigned int i, stable = 0;
++	int ret = 0, restore = 0;
++	bool command = false, changed = false;
++
++	if (!pon || channel >= 32)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring)
++		ret = -EBUSY;
++	else if (!pon->paused || !pon->pause_ready)
++		ret = -EBUSY;
++	else if (atomic_read_acquire(&pon->pending))
++		ret = -EAGAIN;
++	for (i = 0; !ret && i < 32; i++)
++		if (pon->closed[i] != 0xff)
++			ret = -EBUSY;
++	if (ret) {
++		spin_unlock_irqrestore(&pon->admission_lock, flags);
++		goto out;
++	}
++	pon->configuring = U32_MAX;
++	pon->retiring |= BIT(channel);
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	eth = pon->dma_dev->eth;
++	qdma = &eth->qdma[1];
++	tx = airoha_fe_rr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX));
++	rx = airoha_fe_rr(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX));
++	forward = airoha_fe_rr(eth, REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX));
++	status = airoha_fe_rr(eth, REG_GDM_CHN_RLS(AIROHA_GDM2_IDX));
++	ages = status & (MBI_RX_AGE_SEL_MASK | MBI_TX_AGE_SEL_MASK);
++	if (tx != pon->tx_enabled || status == U32_MAX ||
++	    (airoha_fe_rr(eth, REG_GDM_LPBK_CFG(AIROHA_GDM2_IDX)) & LPBK_EN_MASK)) {
++		ret = -EIO;
++		goto complete;
++	}
++	/* Do not overwrite an active command or run speculative MBI termination
++	 * recovery. A wedged MBI needs the coordinated device recovery path.
++	 */
++	if (status & (BIT(0) | BIT(16) | BIT(19) | BIT(24) | BIT(27))) {
++		ret = -EBUSY;
++		goto complete;
++	}
++	for (i = 0; i < 32; i += 4)
++		if (airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(i)) != U32_MAX) {
++			ret = -EIO;
++			goto complete;
++		}
++	changed = true;
++	/* Block new forwarded work before temporarily opening the target's
++	 * hardware queues. Software admission stays closed throughout.
++	 */
++	ret = airoha_pon_fe_write_checked(eth,
++				REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX), 0);
++	if (ret)
++		goto restore;
++	ret = airoha_pon_fe_write_checked(eth,
++				REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), BIT(channel));
++	if (ret)
++		goto restore;
++	ret = airoha_pon_fe_write_checked(eth,
++				REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), BIT(channel));
++	if (ret)
++		goto restore;
++	mask = 0xffU << ((channel & 3) * 8);
++	airoha_qdma_wr(qdma, REG_QUEUE_CLOSE_CFG(channel), ~mask);
++	if (airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(channel)) != ~mask) {
++		ret = -EIO;
++		goto restore;
++	}
++	command = true;
++	airoha_fe_wr(eth, REG_GDM_CHN_RLS(AIROHA_GDM2_IDX),
++		     ages | ((u32)channel << 4) | BIT(0));
++	ret = -ETIMEDOUT;
++	for (i = 0; i < 12; i++) {
++		usleep_range(1000, 1500);
++		status = airoha_fe_rr(eth, REG_GDM_CHN_RLS(AIROHA_GDM2_IDX));
++		busy = airoha_fe_rr(eth, REG_GDM_CHN_BUSY(AIROHA_GDM2_IDX));
++		queues = airoha_qdma_rr(qdma, REG_CHAN_QUEUE_STATUS(channel));
++		if (status == U32_MAX || busy == U32_MAX ||
++		    (status & (MBI_RX_AGE_SEL_MASK | MBI_TX_AGE_SEL_MASK |
++			       GENMASK(8, 4) | BIT(0))) !=
++		    (ages | ((u32)channel << 4) | BIT(0))) {
++			ret = -EIO;
++			break;
++		}
++		if ((status & BIT(1)) && !(busy & BIT(channel)) && !(queues & mask)) {
++			if (++stable == 2) {
++				ret = 0;
++				break;
++			}
++		} else {
++			stable = 0;
++		}
++	}
++restore:
++	/* Always close physical queues before allowing any peer to resume. */
++	airoha_qdma_wr(qdma, REG_QUEUE_CLOSE_CFG(channel), U32_MAX);
++	if (airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(channel)) != U32_MAX)
++		restore = -EIO;
++	if (command) {
++		airoha_fe_wr(eth, REG_GDM_CHN_RLS(AIROHA_GDM2_IDX), ages);
++		status = airoha_fe_rr(eth, REG_GDM_CHN_RLS(AIROHA_GDM2_IDX));
++		if (status == U32_MAX ||
++		    (status & (MBI_RX_AGE_SEL_MASK | MBI_TX_AGE_SEL_MASK |
++			       GENMASK(8, 4) | BIT(0) | BIT(16) | BIT(24))) != ages)
++			restore = -EIO;
++	}
++	/* Failed release or restoration never resumes the isolated port. */
++	if (ret || restore)
++		tx = rx = forward = 0;
++	else {
++		tx &= ~BIT(channel);
++		rx &= ~BIT(channel);
++		forward &= ~BIT(channel);
++	}
++	if (airoha_pon_fe_write_checked(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), tx))
++		restore = -EIO;
++	if (airoha_pon_fe_write_checked(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), rx))
++		restore = -EIO;
++	if (airoha_pon_fe_write_checked(eth, REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX), forward))
++		restore = -EIO;
++	if (restore) {
++		/* A failed peer restoration can leave an enabled bitmap uncertain.
++		 * Attempt containment on all three independently, retain the error.
++		 */
++		airoha_pon_fe_write_checked(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), 0);
++		airoha_pon_fe_write_checked(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), 0);
++		airoha_pon_fe_write_checked(eth, REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX), 0);
++		ret = -EIO;
++	}
++complete:
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (changed && !ret)
++		pon->tx_enabled = tx;
++	if (ret && ret != -EBUSY)
++		pon->control_fault = true;
++	pon->configuring = 0;
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++out:
++	rtnl_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_retire_fe);
++
+ int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed)
+ {
+ 	unsigned long flags;
+@@ -586,6 +854,8 @@
+ 	rcu_read_lock();
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	ret = airoha_pon_set_queue_close_locked(pon, channel, closed);
++	if (!ret && pon->paused)
++		pon->paused_closed[channel] |= closed;
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ 	rcu_read_unlock();
+ 	return ret;
+@@ -652,7 +922,7 @@
+ 		ret = -ENODEV;
+ 	else if (pon->control_fault)
+ 		ret = -EIO;
+-	else if (!(pon->tx_enabled & BIT(meta->channel)) ||
++	else if (pon->paused || !(pon->tx_enabled & BIT(meta->channel)) ||
+ 		 (pon->closed[meta->channel] & BIT(meta->queue)))
+ 		ret = -ESHUTDOWN;
+ 	else
+@@ -685,7 +955,7 @@
+ 	rcu_read_lock();
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	netdev = rcu_dereference(pon->netdev);
+-	if (!netdev || !netif_running(netdev) || pon->control_fault ||
++	if (!netdev || !netif_running(netdev) || pon->control_fault || pon->paused ||
+ 	    !(pon->tx_enabled & BIT(meta->channel)) ||
+ 	    (pon->closed[meta->channel] & BIT(meta->queue)) ||
+ 	    meta->epoch != pon->epoch[meta->channel]) {
+--- a/drivers/net/ethernet/airoha/airoha_regs.h
++++ b/drivers/net/ethernet/airoha/airoha_regs.h
+@@ -113,6 +113,8 @@
+ 
+ #define REG_CDM_VLAN_CTRL(_n)		CDM_BASE(_n)
+ #define CDM_VLAN_MASK			GENMASK(31, 16)
++
++#define REG_CDM_HWFWD_CHN(_n)		(CDM_BASE(_n) + 0x0c)
+ 
+ #define REG_CDM_FWD_CFG(_n)		(CDM_BASE(_n) + 0x08)
+ #define CDM_OAM_QSEL_MASK		GENMASK(31, 27)
+@@ -169,6 +171,8 @@
+ #define REG_GDM_CHN_RLS(_n)		(GDM_BASE(_n) + 0x20)
+ #define MBI_RX_AGE_SEL_MASK		GENMASK(26, 25)
+ #define MBI_TX_AGE_SEL_MASK		GENMASK(18, 17)
++
++#define REG_GDM_CHN_BUSY(_n)		(GDM_BASE(_n) + 0x70)
+ 
+ #define REG_GDM_TXCHN_EN(_n)		(GDM_BASE(_n) + 0x24)
+ #define REG_GDM_RXCHN_EN(_n)		(GDM_BASE(_n) + 0x28)
+@@ -781,6 +785,8 @@
+ #define INGRESS_SLOW_TICK_RATIO_MASK	GENMASK(29, 16)
+ #define INGRESS_FAST_TICK_MASK		GENMASK(15, 0)
+ 
++#define REG_CHAN_QUEUE_STATUS(_n)	(0x1280 + ((_n) & 0x1c))
++
+ #define REG_QUEUE_CLOSE_CFG(_n)		(0x00a0 + ((_n) & 0xfc))
+ #define TXQ_DISABLE_CHAN_QUEUE_MASK(_n, _m)	BIT((_m) + (((_n) & 0x3) << 3))
+ 
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -133,6 +133,33 @@
+ int airoha_pon_get_qos(struct airoha_pon *pon, u8 channel,
+ 		       struct airoha_pon_qos *qos);
+ 
++/* Process context, no RTNL or callback locks. Retain the handle. ALL port
++ * queues must be closed and native mappings reclaimed. This executes the
++ * FE/QDMA release sequence, temporarily isolating the entire GDM2 port and
++ * opening only the target's hardware queues while CPU admission stays closed.
++ * Requires two consecutive release-done, not-busy, empty-queue observations.
++ * Success leaves the target permanently closed with TX/RX/forwarding disabled;
++ * other bitmaps are restored and verified. Failure attempts whole-port
++ * containment and latches a control fault. Active MBI/release recovery returns
++ * -EBUSY instead of attempting undocumented termination recovery.
++ * This is ONLY the FE/QDMA stage: the caller still must establish MAC FIFO,
++ * RX and optical quiescence before destroying/reusing any T-CONT or GEM.
++ * It changes hardware and MUST NOT be used in read-only device diagnostics.
++ */
++int airoha_pon_retire_fe(struct airoha_pon *pon, u8 channel);
++
++/* Pause CPU admission without disconnecting RX/consumer callbacks. Invalidate
++ * every old TX lease, wait up to timeout_ms (0..3000) for native mappings,
++ * then close all physical queues. Retrying a timed-out pause is supported;
++ * timeout keeps admission paused and cannot be undone by resume. The caller
++ * serializes the complete MAC/FE lifecycle; no RTNL or callback lock is held.
++ * Resume restores only the saved queue masks of channels that remain owned
++ * and enabled. IRQ-side closures during pause are retained. Resume does not
++ * clear faults or revive retired channels. Neither call claims optical drain.
++ */
++int airoha_pon_pause(struct airoha_pon *pon, unsigned int timeout_ms);
++int airoha_pon_resume(struct airoha_pon *pon);
++
+ /* Capture admission for a fully prepared frame BEFORE enqueueing it. Returns
+  * -ESHUTDOWN for a closed queue. xmit drops stale epochs even after reopen;
+  * never call prepare_tx again for a frame returned as NETDEV_TX_BUSY. A new

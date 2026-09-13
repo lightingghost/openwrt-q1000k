@@ -231,6 +231,28 @@ int airoha_pon_quiesce_channel(struct airoha_pon *pon,u8 channel)
     spin_unlock_bh(&fake_tx_lock);
     return channel_quiesce_error;
 }
+static int fake_lifecycle(struct airoha_pon *pon)
+{
+    RCU_LOCKDEP_WARN(rcu_read_lock_held(), "Sleepable lifecycle wrapper inside RCU");
+    WARN_ON(irqs_disabled() || in_interrupt());
+    if(!pon->connected) return -ENODEV;
+    msleep(1);
+    return tx_channel_error;
+}
+int airoha_pon_pause(struct airoha_pon *pon,unsigned int timeout_ms)
+{
+    WARN_ON(timeout_ms!=750);
+    return fake_lifecycle(pon);
+}
+int airoha_pon_resume(struct airoha_pon *pon)
+{
+    return fake_lifecycle(pon);
+}
+int airoha_pon_retire_fe(struct airoha_pon *pon,u8 channel)
+{
+    WARN_ON(channel!=29);
+    return fake_lifecycle(pon);
+}
 int airoha_pon_get_queue_close(struct airoha_pon *pon,u8 channel,u8 *closed)
 {
     if(channel>31 || !closed) return -EINVAL;
@@ -424,6 +446,9 @@ static int run_tests(void)
     CHECK(q1000k_transport_set_tx_channel(29,true)==-ENODEV);
     CHECK(q1000k_transport_set_qos(29,&qos)==-ENODEV);
     CHECK(q1000k_transport_get_qos(29,&qos)==-ENODEV);
+    CHECK(q1000k_transport_pause(750)==-ENODEV);
+    CHECK(q1000k_transport_retire_fe(29)==-ENODEV);
+    CHECK(q1000k_transport_resume()==-ENODEV);
     CHECK(q1000k_transport_start(NULL, receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("", receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("bad/name", receive_packet) == -EINVAL);
@@ -444,11 +469,14 @@ static int run_tests(void)
     early_rx = false;
     CHECK(!q1000k_transport_get_queue_close(27,&closed) && closed==255);
     CHECK(q1000k_transport_set_tx_channel(32,true)==-EINVAL);
-    for(i=0;i<4;i++) {
-        const int errors[]={0,-EAGAIN,-ESHUTDOWN,-EIO};
+    for(i=0;i<6;i++) {
+        const int errors[]={0,-EAGAIN,-ESHUTDOWN,-EIO,-ETIMEDOUT,-EBUSY};
         tx_channel_error=errors[i];
         CHECK(q1000k_transport_set_tx_channel(29,true)==errors[i]);
         CHECK(q1000k_transport_set_qos(29,&qos)==errors[i]);
+        CHECK(q1000k_transport_pause(750)==errors[i]);
+        CHECK(q1000k_transport_retire_fe(29)==errors[i]);
+        CHECK(q1000k_transport_resume()==errors[i]);
         saved=qos;
         CHECK(q1000k_transport_get_qos(29,&qos)==errors[i]);
         CHECK(errors[i] ? !memcmp(&saved,&qos,sizeof(qos)) : qos.mode==1);

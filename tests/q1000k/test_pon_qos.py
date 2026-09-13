@@ -15,7 +15,8 @@ HEADER = Path(os.environ['Q1000K_PON_HEADER']) if 'Q1000K_PON_HEADER' in os.envi
 class PonQosTests(unittest.TestCase):
     def test_channels_schedulers_commands_and_faults(self):
         source = (ETH / 'airoha_pon.c').read_text()
-        source = source[source.index('/* RTNL serializes the indirect QDMA1'):source.index('int airoha_pon_set_queue_close(struct')]
+        end = 'EXPORT_SYMBOL_GPL(airoha_pon_get_qos);'
+        source = source[source.index('/* RTNL serializes the indirect QDMA1'):source.index(end) + len(end)]
         regs = '\n'.join(line for line in (ETH / 'airoha_regs.h').read_text().splitlines()
                          if re.match(r'#define (?:REG_TXWRR_|TWRR_|REG_CHAN_QOS_MODE)', line))
         struct = re.search(r'struct airoha_pon_qos \{.*?\n\};', HEADER.read_text(), re.S).group()

@@ -15,8 +15,10 @@ class PonTransportTests(unittest.TestCase):
     def test_attachment_generations_metadata_and_skb_ownership(self):
         source = (ETH / 'airoha_pon.c').read_text()
         source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
-        # The sleepable scheduler API has its own complete command/fault fixture.
-        source = re.sub(r'/\* RTNL serializes the indirect QDMA1.*?(?=int airoha_pon_set_queue_close\(struct)',
+        # Indirect QoS and FE release have separate command/fault fixtures.
+        source = re.sub(r'/\* RTNL serializes the indirect QDMA1.*?EXPORT_SYMBOL_GPL\(airoha_pon_get_qos\);',
+                        '', source, flags=re.S)
+        source = re.sub(r'/\* The OEM release engine.*?EXPORT_SYMBOL_GPL\(airoha_pon_retire_fe\);',
                         '', source, flags=re.S)
         # Keep the wire masks from the real driver; numeric expectations below
         # are independent of FIELD_PREP and the production encode/decode code.
@@ -61,6 +63,8 @@ typedef int netdev_tx_t;
 #define ERR_PTR(n) ((void *)(intptr_t)(n))
 #define PTR_ERR(p) ((intptr_t)(p))
 #define EXPORT_SYMBOL_GPL(...)
+#define in_interrupt() false
+#define irqs_disabled() false
 static int rtnl_held,rcu_readers,graces,alloc_fail,allocations,releases;
 #define ASSERT_RTNL() assert(rtnl_held)
 static void rtnl_lock(void) { assert(!rtnl_held && !rcu_readers); rtnl_held=1; }
@@ -69,6 +73,7 @@ static void rcu_read_lock(void) { rcu_readers++; }
 static void rcu_read_unlock(void) { assert(rcu_readers); rcu_readers--; }
 #define rcu_access_pointer(p) (p)
 #define rcu_dereference(p) (assert(rcu_readers), (p))
+#define rcu_dereference_check(p,c) (assert(rcu_readers || (c)), (p))
 #define rcu_dereference_protected(p,c) (assert(c), (p))
 #define rcu_assign_pointer(p,v) ((p)=(v))
 #define lockdep_rtnl_is_held() (rtnl_held)
@@ -95,7 +100,7 @@ static void wake_up_all(wait_queue_head_t *p) { p->wakes++; }
 #define msecs_to_jiffies(ms) (ms)
 static void (*wait_progress)(void);
 #define wait_event_timeout(wq,condition,timeout) ({ \
-    assert(!rtnl_held && !rcu_readers); \
+    assert(!rcu_readers); \
     if (!(condition) && (timeout) && wait_progress) wait_progress(); \
     (condition) ? 1 : 0; })
 struct airoha_pon;
@@ -338,6 +343,29 @@ int main(void) {
     assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch!=epoch);
     xmit_result=NETDEV_TX_OK;
     reset_skb(&skb,&upper); assert(!airoha_pon_xmit(pon,&skb,&tx) && xmit_calls==sent+1);
+    /* Pause first closes CPU admission, allowing already-mapped DMA to run.
+     * A timeout is retryable and cannot be bypassed through resume.
+     */
+    assert(!airoha_pon_set_queue_close(pon,4,0));
+    airoha_pon_tx_get(pon,31); writes=reg_writes;
+    epoch=tx.epoch;
+    assert(airoha_pon_pause(pon,0)==-ETIMEDOUT && pon->paused && !pon->pause_ready);
+    assert(reg_writes==writes && pon->closed[31]==0);
+    assert(airoha_pon_resume(pon)==-EBUSY);
+    assert(airoha_pon_set_queue_close(pon,31,0)==-EBUSY);
+    assert(airoha_pon_prepare_tx(pon,&tx)==-ESHUTDOWN && tx.epoch==epoch);
+    reset_skb(&skb,&upper);
+    assert(!airoha_pon_xmit(pon,&skb,&tx) && skb.freed && xmit_calls==sent+1);
+    airoha_pon_tx_complete(pon,31);
+    assert(!airoha_pon_pause(pon,0) && pon->pause_ready);
+    for(int i=0;i<32;i++) assert(pon->closed[i]==255);
+    assert(!airoha_pon_set_queue_close(pon,4,255)); /* Retained across resume. */
+    assert(!airoha_pon_resume(pon) && !pon->paused && !pon->pause_ready);
+    assert(pon->closed[31]==0 && pon->closed[4]==255);
+    reset_skb(&skb,&upper);
+    assert(!airoha_pon_xmit(pon,&skb,&tx) && skb.freed && xmit_calls==sent+1);
+    assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch!=epoch);
+    assert(airoha_pon_pause(pon,3001)==-EINVAL);
     /* Native drain is per channel and permanent for this attachment. */
     assert(airoha_pon_quiesce_channel(NULL,0)==-EINVAL);
     assert(airoha_pon_quiesce_channel(pon,32)==-EINVAL);
@@ -478,6 +506,24 @@ int main(void) {
         assert(airoha_pon_set_tx_channel(pon,0,false)==-ENODEV && fe_writes==fw);
         airoha_pon_release(pon);
     }
+    for(int stage=0;stage<2;stage++) for(int reg=0xa0;reg<=0xbc;reg+=4) {
+        pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon);
+        for(int ch=0;ch<32;ch++) {
+            assert(!airoha_pon_set_tx_channel(pon,ch,true));
+            assert(!airoha_pon_set_queue_close(pon,ch,0));
+        }
+        if(stage) assert(!airoha_pon_pause(pon,0));
+        fault_register=reg;
+        assert((stage ? airoha_pon_resume(pon) : airoha_pon_pause(pon,0))==-EIO);
+        assert(pon->paused && pon->control_fault);
+        assert(airoha_pon_resume(pon)==-EIO);
+        fault_register=-1; airoha_pon_release(pon);
+    }
+    pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon);
+    pon->epoch[17]=UINT64_MAX; writes=reg_writes;
+    assert(airoha_pon_pause(pon,0)==-EOVERFLOW && reg_writes==writes);
+    assert(pon->paused && pon->control_fault && airoha_pon_resume(pon)==-EIO);
+    airoha_pon_release(pon);
     assert(allocations==releases && !rtnl_held && !rcu_readers);
     return 0;
 }

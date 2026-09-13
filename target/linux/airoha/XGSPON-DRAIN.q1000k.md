@@ -115,3 +115,44 @@ errors and enables channels without ownership checks.
 All 30 PON host tests pass, including MAC stop faults and startup unwind. The
 Linux 6.18.44 AArch64 vendor package builds successfully as r20. No stop
 command has been executed on the Q1000K.
+
+## Native FE/QDMA retirement and pause
+
+Kernel patch `9999e-net-airoha-pon-fe-retire.patch` adds a live-port CPU pause,
+FE release, and resume. Pause invalidates every previous TX admission epoch,
+waits for submitted native DMA to complete while its hardware queues can
+still run, then closes all physical queues. Timeout keeps CPU admission
+paused and supports retry. Resume requires a completed pause, retains
+concurrent explicit queue closures, and cannot revive retired channels or
+clear a control fault.
+
+The FE stage requires the entire port paused and mappings reclaimed. Under
+RTNL, it excludes IRQ-side controls, verifies the native TX bitmap and queue
+closures, disables hardware forwarding, isolates the target TX/RX channel,
+and temporarily opens its hardware queues while CPU admission stays closed.
+It preserves the MBI age fields and requires two consecutive release-done,
+busy-clear, empty-status observations. An existing release or MBI recovery
+operation returns `-EBUSY`; speculative termination recovery is not attempted.
+
+Cleanup closes the hardware queues and clears the release request before
+restoring peer TX/RX/forwarding bits. The retired channel remains disabled.
+Every restoration is checked. Failure attempts all-off containment and
+latches a control fault; successful software bookkeeping cannot hide failed
+MMIO. Native QDMA0, DSA and other FE port registers are never accessed by this
+transaction. The packet adapter provides sleepable wrappers pinned by its
+lifecycle mutex.
+
+The 31 host tests pass, including every channel, every FE write failure,
+completion instability, all timeout predicates, pause/resume register faults,
+stale packets and epoch overflow. The native transport and adapter UML guests
+pass with lockdep, RCU and atomic-sleep checks. The native guest exercises
+pause timeout/retry with real waitqueues and asynchronous DMA completion,
+then FE release and resume; the adapter guest verifies sleepable forwarding
+and exact errors. Linux 6.18.44 and vendor r21 build successfully; the vendor
+APK is 335,387 bytes.
+
+This implements the FE/QDMA stage, not the complete per-GEM/T-CONT retirement
+transaction. MAC FIFO, pending downstream RX, service-table invalidation,
+and optical quiescence must be coordinated before identifiers can be reused.
+The whole-port isolation may interrupt peer channels; it is not a lossless
+per-channel operation. No retirement or pause command was run on hardware.

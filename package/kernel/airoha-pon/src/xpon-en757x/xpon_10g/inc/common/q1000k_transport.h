@@ -37,6 +37,16 @@ int q1000k_transport_set_tx_channel(u8 channel, bool enabled);
 int q1000k_transport_set_qos(u8 channel, const struct airoha_pon_qos *qos);
 int q1000k_transport_get_qos(u8 channel, struct airoha_pon_qos *qos);
 
+/* Process-context lifecycle stages, outside RTNL/RCU. The caller serializes
+ * the complete operation with MAC provisioning. Pause drains CPU mappings
+ * without detaching RX. retire_fe requires a completed pause and only retires
+ * FE/QDMA; MAC/optical and RX draining remain mandatory before ID reuse.
+ * Resume restores eligible saved queues only after the caller's MAC work.
+ */
+int q1000k_transport_pause(unsigned int timeout_ms);
+int q1000k_transport_retire_fe(u8 channel);
+int q1000k_transport_resume(void);
+
 /* Permanently close this attachment's channel and poll native TX mappings.
  * IRQ-safe; -EAGAIN means mappings remain. Zero does not prove FE/optical
  * FIFO retirement. No queue reopening is available after this operation.
