@@ -1,0 +1,446 @@
+Subject: [PATCH] xpon: serialize Q1000K T-CONT commands and contain failures
+
+Use the bounded native MAC table helper, preserve bindings on failed setup,
+close queues through the native Ethernet consumer, and propagate control
+errors. Never reuse uncertain channels or substitute a global FCS reset for
+verified per-channel retirement. The service readiness gates remain intact.
+
+---
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -311,6 +311,14 @@
+ void gpon_disable(GPON_RESET_TYPE_t type)
+ {
+ 	PON_PHY_Event_data_t phy_event;
++#ifdef Q1000K_PON_IDENTITY
++	int ret = gwan_remove_all_tcont();
++
++	if (ret) {
++		pr_err("Q1000K T-CONT retirement incomplete; MAC reset blocked: %d\n", ret);
++		return;
++	}
++#endif
+ 	PON_MSG(MSG_INT, "gpon_disable: mac %s reset.\n",(type==GPON_MAC_PLAIN_RESET ? "plain":"with phy")) ;
+ 		
+ 	snSendInO23Cnt=0;
+@@ -323,7 +331,9 @@
+     gpGponPriv->gponSecurity.ploamIkIdx = GPON_PLOAM_IK_IDX1;
+ 	gpGponPriv->gponSecurity.omciIkIdx = GPON_OMCI_IK_IDX1;	
+     gpGponPriv->gponSecurity.kekIdx = GPON_KEK_IK_IDX1;
+-	gwan_remove_all_tcont();	
++#ifndef Q1000K_PON_IDENTITY
++	gwan_remove_all_tcont();
++#endif
+ 	gwan_remove_all_gemport_for_disable() ;
+     /*		to do discard burst porfiles ...	*/
+ 	if(gpGponPriv->emergencyState) {
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -42,6 +42,10 @@
+ #include <linux/kernel.h>
+ #include <linux/delay.h>
+ #include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_tcont.h"
++#include "common/q1000k_transport.h"
++#endif
+ #include "common/phy_if_wrapper.h"
+ #include "gpon/gpon_security.h"
+ 
+@@ -493,6 +497,10 @@
+ ******************************************************************************/
+ GPON_TCONT_CMD_RESULT_t gponDevSetTCont(GPON_TCONT_t isValid, int tcont_index, ushort allocId)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* The DVT setter bypasses queue closure, ownership and retirement. */
++	return GPON_TCONT_CMD_FAIL;
++#else
+ 	REG_TCONT_ID_CFG gponTcontCfg ;
+ 	REG_TCONT_ID_STS gponTcontSts ;
+ 	
+@@ -519,6 +527,7 @@
+ 
+ 	PON_MSG(MSG_ERR, "[%s:%s]\n  Fail to set tcont:%d.", strrchr(__FILE__, '/') + 1, __func__, tcont_index) ;
+ 	return GPON_TCONT_CMD_FAIL;
++#endif
+ }
+ /******************************************************************************
+  Descriptor:	Get tcont info .
+@@ -530,6 +539,20 @@
+ ******************************************************************************/
+ static GPON_TCONT_CMD_RESULT_t gponDevGetTCont(GPON_TCONT_t *isValid, int tcont_index, ushort *allocId)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	bool valid;
++	u16 id;
++	int ret;
++
++	if (!isValid || !allocId || tcont_index < 0)
++		return GPON_TCONT_CMD_FAIL;
++	ret = q1000k_tcont_read(tcont_index, &valid, &id);
++	if (ret)
++		return GPON_TCONT_CMD_FAIL;
++	*isValid = valid ? GPON_TCONT_VALID : GPON_TCONT_INVALID;
++	*allocId = id;
++	return GPON_TCONT_CMD_SUCCESS;
++#else
+ 	REG_TCONT_ID_CFG gponTcontCfg;
+ 	REG_TCONT_ID_STS gponTcontSts;
+ 	
+@@ -557,6 +580,7 @@
+ 
+ 	PON_MSG(MSG_ERR, "[%s:%s]\n  Fail to get tcont:%d.", strrchr(__FILE__, '/') + 1, __func__, tcont_index) ;
+ 	return GPON_TCONT_CMD_FAIL;
++#endif
+ }
+ /*****************************************************************************
+ Descriptor:	disable tcont alloc ID.
+@@ -566,6 +590,9 @@
+ ******************************************************************************/
+ int gponDevDisableTCont(ushort allocId)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_tcont_disable(allocId, GPON_ONU_ID);
++#else
+ 	int i=0;
+ 	GPON_TCONT_t valid;
+ 	ushort id =0;
+@@ -589,6 +616,7 @@
+ 		}
+ 	}
+ 	return -EFAULT ;
++#endif
+ } 
+ 
+ /*****************************************************************************
+@@ -599,6 +627,9 @@
+ ******************************************************************************/
+ int gponDevEnableTCont(ushort allocId)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_tcont_enable(allocId, GPON_ONU_ID);
++#else
+ 	int i;
+ 	GPON_TCONT_t valid;
+ 	ushort id;
+@@ -631,6 +662,7 @@
+ 		}
+ 	}
+ 	return -EFAULT ;
++#endif
+ } 
+ /******************************************************************************
+ ******************************************************************************/
+@@ -656,6 +688,24 @@
+ /*****************************************************************************
+ ******************************************************************************/
+ int gponDevAssignNewAllocId(unsigned long data){
++#ifdef Q1000K_PON_IDENTITY
++	AllocId_Config_t *cfg = (void *)data;
++	int ret;
++
++	/* Validate the full-width request before converting to a register ID. */
++	if (!cfg || cfg->allocId > Q1000K_ALLOC_ID_MAX)
++		return -EINVAL;
++	if (cfg->allocIdType == PLOAM_ALLOC_ID_ASSIGN) {
++		ret = gwan_create_new_tcont(cfg->allocId);
++		if (!ret)
++			xmcs_report_event(XMCS_EVENT_TYPE_GPON,
++				XMCS_EVENT_GPON_TCONT_ALLOCED, cfg->allocId);
++		return ret;
++	}
++	if (cfg->allocIdType == PLOAM_ALLOC_ID_DEALLOCATE)
++		return gwan_remove_tcont(cfg->allocId);
++	return -EINVAL;
++#else
+ 
+ 	AllocId_Config_t * gponConfig = (AllocId_Config_t *)data ;
+ 
+@@ -685,6 +735,7 @@
+ 		PON_MSG((MSG_ERR|MSG_OAM), "wrong alloc id config type\n") ;
+ 	}
+ 	return 0;
++#endif
+ }
+ /*****************************************************************************
+ ******************************************************************************/
+@@ -3783,6 +3834,9 @@
+ ******************************************************************************/
+ int gponDevGetTcontInfo(ushort allocId, unchar * tcontIdx)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_tcont_find(allocId, GPON_ONU_ID, tcontIdx);
++#else
+ 	int i;
+ 	GPON_TCONT_t valid;
+ 	ushort id;
+@@ -3802,6 +3856,7 @@
+ 	}
+ 
+ 	return -EFAULT ;
++#endif
+ }
+ 
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -541,11 +541,19 @@
+ 		if(gpGponPriv->gponCfg.onu_id == msgAssignOnuId ){
+ 			PON_MSG(MSG_OAM, "PLOAM: ignore consistent ONU-ID setting in O4/O5 \n") ;
+ 		}else{
++#ifdef Q1000K_PON_IDENTITY
++			int ret = gwan_remove_all_tcont();
++
++			if (ret)
++				return ret;
++#endif
+ 			/* discard ONU-ID,default OMCI, XGEM port id*/
+ 			gpGponPriv->gponCfg.eqd = 0 ;
+ 			gpGponPriv->gponCfg.onu_id = GPON_UNASSIGN_ONU_ID ;
+ 			gpGponPriv->gponCfg.omcc = GPON_UNASSIGN_ONU_ID ;
++#ifndef Q1000K_PON_IDENTITY
+ 			gwan_remove_all_tcont() ;
++#endif
+ 			gwan_remove_all_gemport_for_disable();
+ 			/* discard burst porfiles ...
+ 			*/	
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -44,6 +44,10 @@
+ #include <linux/version.h>
+ #include <linux/skbuff.h>
+ #include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_tcont.h"
++#include "common/q1000k_transport.h"
++#endif
+ #include <ecnt_hook/ecnt_hook_fe.h>
+ #include "common/xpon_api.h"
+ #ifdef Q1000K_PON_IDENTITY
+@@ -267,8 +271,134 @@
+ }
+ /*****************************************************************************
+ ******************************************************************************/
++#ifdef Q1000K_PON_IDENTITY
++static atomic_t q1000k_tcont_config_busy = ATOMIC_INIT(0);
++
++static int q1000k_gwan_create_tcont(u16 alloc_id)
++{
++	int channel, ret, cleanup, i;
++
++	if (alloc_id > Q1000K_ALLOC_ID_MAX)
++		return -EINVAL;
++	if (GPON_ONU_ID < GPON_UNASSIGN_ONU_ID && alloc_id == GPON_ONU_ID)
++		return -EOPNOTSUPP;
++	if (atomic_cmpxchg(&q1000k_tcont_config_busy, 0, 1))
++		return -EBUSY;
++	for (i = 0; i < CONFIG_GPON_10G_MAX_TCONT; i++) {
++		if (gpWanPriv->gpon.allocId[i] == alloc_id) {
++			ret = -EEXIST;
++			goto out;
++		}
++	}
++	channel = gponDevEnableTCont(alloc_id);
++	if (channel < 0) {
++		ret = channel;
++		goto out;
++	}
++	if (!channel || channel >= CONFIG_GPON_10G_MAX_TCONT) {
++		ret = -EIO;
++		goto out;
++	}
++	/* Native attachment starts closed; verify closure before enabling FE. */
++	ret = q1000k_transport_set_queue_close(channel, 0xff);
++	if (ret)
++		goto rollback;
++	ret = FE_API_SET_CHANNEL_ENABLE(FE_GDM_SEL_GDMA2, FE_GDM_SEL_TX,
++				channel, FE_ENABLE);
++	if (ret)
++		goto rollback;
++	ret = q1000k_transport_set_queue_close(channel, 0);
++	if (ret)
++		goto rollback;
++	/* Publish the allocation last. Existing GEM entries for this Alloc-ID
++	 * remain unusable while the software allocation is unassigned.
++	 */
++	for (i = 0; i < CONFIG_GPON_10G_MAX_GEMPORT; i++) {
++		if (gpWanPriv->gpon.gemPort[i].info.valid &&
++		    gpWanPriv->gpon.gemPort[i].info.allocId == alloc_id) {
++			gpon_recovery_set_channel(gpWanPriv->gpon.gemPort[i].info.portId,
++					  channel);
++			gpWanPriv->gpon.gemPort[i].info.channel = channel;
++		}
++	}
++	WRITE_ONCE(gpWanPriv->gpon.allocId[channel], alloc_id);
++	gpWanPriv->activeChannelNum++;
++	ret = 0;
++	goto out;
++rollback:
++	/* Even successful rollback does not prove FE/optical FIFO retirement.
++	 * Never reuse this slot during the current MAC instance.
++	 */
++	q1000k_tcont_quarantine(channel);
++	cleanup = q1000k_transport_set_queue_close(channel, 0xff);
++	if (cleanup)
++		pr_err("Q1000K T-CONT %d queue rollback failed: %d\n", channel, cleanup);
++	cleanup = FE_API_SET_CHANNEL_ENABLE(FE_GDM_SEL_GDMA2, FE_GDM_SEL_TX,
++				channel, FE_DISABLE);
++	if (cleanup)
++		pr_err("Q1000K T-CONT %d FE rollback failed: %d\n", channel, cleanup);
++	cleanup = gponDevDisableTCont(alloc_id);
++	if (cleanup != channel)
++		pr_err("Q1000K T-CONT %d MAC rollback failed: %d\n", channel, cleanup);
++	if (ret > 0)
++		ret = -EIO;
++out:
++	atomic_set_release(&q1000k_tcont_config_busy, 0);
++	return ret;
++}
++
++static int q1000k_gwan_remove_tcont(u16 alloc_id)
++{
++	int i, ret = -ENOENT;
++
++	if (alloc_id > Q1000K_ALLOC_ID_MAX)
++		return -EINVAL;
++	if (atomic_cmpxchg(&q1000k_tcont_config_busy, 0, 1))
++		return -EBUSY;
++	for (i = 0; i < CONFIG_GPON_10G_MAX_TCONT; i++) {
++		if (gpWanPriv->gpon.allocId[i] != alloc_id)
++			continue;
++		q1000k_tcont_quarantine(i);
++		ret = q1000k_transport_set_queue_close(i, 0xff);
++		/* G_TX_FCS_TBL_INIT is global. Do not reset it for one T-CONT or
++		 * claim removal until native descriptors and FE/optical FIFOs have
++		 * a verified retirement path. Keep bindings/counts for diagnosis.
++		 */
++		if (!ret)
++			ret = -EOPNOTSUPP;
++		break;
++	}
++	atomic_set_release(&q1000k_tcont_config_busy, 0);
++	return ret;
++}
++
++static int q1000k_gwan_remove_all_tcont(void)
++{
++	int i, err, ret = 0;
++
++	if (atomic_cmpxchg(&q1000k_tcont_config_busy, 0, 1))
++		return -EBUSY;
++	for (i = 0; i < CONFIG_GPON_10G_MAX_TCONT; i++) {
++		if (gpWanPriv->gpon.allocId[i] == GPON_10G_UNASSIGN_ALLOC_ID)
++			continue;
++		q1000k_tcont_quarantine(i);
++		err = q1000k_transport_set_queue_close(i, 0xff);
++		/* Try to close every assigned channel, preserving the first error. */
++		if (err && (!ret || ret == -EOPNOTSUPP))
++			ret = err;
++		else if (!ret)
++			ret = -EOPNOTSUPP;
++	}
++	atomic_set_release(&q1000k_tcont_config_busy, 0);
++	return ret;
++}
++#endif
++
+ int gwan_create_new_tcont(ushort allocId)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_gwan_create_tcont(allocId);
++#else
+ 	int ret = 0;
+ 	unchar channel = 0;
+ 	uint i=0;
+@@ -303,12 +433,16 @@
+ 	} 
+ 	
+ 	return ret ;
++#endif
+ }
+ 
+ /*****************************************************************************
+ ******************************************************************************/
+ int gwan_remove_tcont(ushort allocId)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_gwan_remove_tcont(allocId);
++#else
+ 	int i=0 ;
+ 	QDMA_ChannelStatus_T chnlCloseStatusSet = {0};
+ 	uint readData = 0;
+@@ -353,11 +487,15 @@
+ 	}
+ 
+ 	return -ENOENT ;
++#endif
+ }
+ /*****************************************************************************
+ ******************************************************************************/
+ int gwan_remove_all_tcont(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_gwan_remove_all_tcont();
++#else
+ 	int i = 0;
+ 
+ 	for(i=0 ; i< CONFIG_GPON_10G_MAX_TCONT ; i++) {
+@@ -366,6 +504,7 @@
+ 	}
+ 	
+ 	return 0 ;
++#endif
+ }
+ 
+ int gwanCheckAllocIdExist(ushort allocId)
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
+@@ -1747,7 +1747,10 @@
+ **		v1.0
+ **____________________________________________________________________________*/
+ int xmcs_remove_tcont_info(ushort allocId)
+-{	
++{
++#ifdef Q1000K_PON_IDENTITY
++	return gwan_remove_tcont(allocId);
++#else
+ 
+     if(allocId != gpGponPriv->gponCfg.onu_id) {
+ 		/* Setting the MAC register, set the Alloc-ID unvalid */
+@@ -1763,11 +1766,17 @@
+ 	}
+ 	
+     return 0;
++#endif
+ }
+ /***************************************************************
+ ***************************************************************/
+ int xmcs_create_tcont_info(struct XMCS_TcontCfg_S *pTcontCfg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (!pTcontCfg)
++		return -EINVAL;
++	return gwan_create_new_tcont(pTcontCfg->allocId);
++#else
+ 	ushort allocId = pTcontCfg->allocId; 
+ 	
+ 	if(allocId != gpGponPriv->gponCfg.onu_id)
+@@ -1789,6 +1798,7 @@
+ 	}
+ 
+ 	return 0 ;
++#endif
+ }
+ 
+ int xmcs_get_omcc_info(struct XMCS_OMCC_Info_S *ptOmccInfo)

@@ -35,6 +35,7 @@ python3 tests/q1000k/test_pon_lifecycle.py
 python3 tests/q1000k/test_pon_packet.py
 python3 tests/q1000k/test_pon_omci_tx.py
 python3 tests/q1000k/test_pon_adapter.py
+python3 tests/q1000k/test_pon_tcont.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -175,6 +176,29 @@ BUSY retry retains its original epoch across reopening. Register and DMA
 behavior are fixtures; these tests cannot establish physical FIFO retirement.
 `Q1000K_PON_HEADER` can select the matching native public header for either
 UML generator when testing a separately prepared driver tree.
+
+The T-CONT host tests execute the production table helper and prepared vendor
+transaction/caller functions. They check reserved command bits, channel/ID
+bounds, unchanged outputs, stale invalid entries, duplicate preservation,
+concurrent allocation, permanent quarantine, all 33 command timeout points
+and write verification. Setup fixtures inject failures at each MAC/native/FE
+stage and during rollback, including reentrant control requests. Removal must
+preserve bindings/counts and report incomplete retirement; reset guards must
+stop before clearing identity or touching the remaining reset sequence.
+
+For the table helper with real Linux spinlocks, IRQ state and kthreads:
+
+```sh
+tests/q1000k/run_pon_tcont_uml.sh
+```
+
+This separate UML guest uses two emulated registers and no physical hardware.
+It checks timeout fault latching, verification and quarantine, and races 64
+allocation callers. The guest mounts the host filesystem read-only, enables
+lockdep/atomic-sleep diagnostics and accepts `Q1000K_UML_BASE` as a build cache.
+Never execute its generated init script on the host. These tests establish
+software behavior only; they do not validate physical command completion,
+FIFO emptiness, channel retirement or optical service.
 
 To execute the same cryptographic helpers with the real Linux crypto API:
 

@@ -48,6 +48,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
 | PON MAC | Runtime state/event dispatch and native packet attachment are integrated; startup/teardown fault fixtures and module modpost pass. | Complete native control/QoS/FE operations, physical interrupt/drain/PHY coordination and service-level management traffic. |
 | Native packet transport | Native metadata/raw RX, bounded vendor TX retries, startup/teardown and callback attachment are implemented; host and UML concurrency tests pass. GDM2 stays disabled. | Native QDMA/FE control/QoS providers, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
+| T-CONTs | Serialized table commands, verified writes, duplicate preservation, native queue controls and setup rollback are implemented. Removal closes queues but preserves bindings and reports incomplete retirement. | Per-channel descriptor/FE/optical drain, GEM transaction synchronization and ONU/OMCC assignment. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -56,11 +57,17 @@ The 2026-09-13 continuation adds exclusive native QDMA1 queue configuration,
 verified queue-close writes and packet admission epochs. The adapter rejects
 closed queues and preserves the epoch across retries, preventing a queued frame
 from becoming valid when its channel is reopened. Four remaining AN7581 QDMA
-wrappers now propagate unsupported/dispatcher errors. All 21 host PON tests,
-native/adapter UML concurrency tests, the kernel build and r14 vendor package
-build pass. T-CONT transactions still need to adopt these controls alongside
-FE retirement and GEM mapping synchronization; see the
+wrappers now propagate unsupported/dispatcher errors. The native/adapter UML
+concurrency tests and full kernel build pass; see the
 [queue admission checkpoint](XGSPON-INTEGRATION.q1000k.md#native-queue-admission-checkpoint-2026-09-13).
+Patch 018 now connects T-CONT setup/removal to native queue closure, propagates
+control errors and prevents uncertain channel reuse. Indirect MAC commands
+are serialized and verified; timeout faults remain latched. Removal retains
+bindings and returns an error until physical retirement exists. All 24 host
+PON tests, a separate Linux UML T-CONT concurrency test and the r15 vendor
+package build pass. FE retirement, GEM mapping synchronization and complete
+ONU/OMCC transactions remain pending; see the
+[T-CONT checkpoint](XGSPON-INTEGRATION.q1000k.md#t-cont-command-and-setup-checkpoint-2026-09-13).
 No SSH access or device changes were made for this continuation.
 
 The reference loader was inspected at

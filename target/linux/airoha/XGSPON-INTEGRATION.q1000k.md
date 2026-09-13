@@ -305,15 +305,13 @@ The adapter exposes channel close/get helpers without taking its callback
 lock around the native call. Closed queues reject new submissions with
 `-ESHUTDOWN`, leaving the caller's skb unchanged and owned by the caller.
 
-**The T-CONT transaction and FE retirement are still incomplete.** The vendor's
-T-CONT handlers still call the legacy QDMA hook; they have not been connected
-to the new close/get helpers. That conversion needs ordered error handling,
-GEM mapping invalidation and physical retirement before channel reuse. Packets
-whose vendor metadata was prepared before admission also need coordination
-with those transactions. No queues are opened automatically, and neither
-provider-presence gate is removed. Queue closure cannot establish the fate of
-frames already submitted to DMA/FE/optical FIFOs, or replace physical RX/TX
-draining. GDM2 remains disabled and the service launcher remains unavailable.
+The T-CONT conversion in patch 018 now uses these native queue controls, as
+described below. GEM mapping synchronization and physical retirement remain
+incomplete. Packets whose vendor metadata was prepared before admission also
+need coordination with those transactions. Attachment opens no queues, and
+neither provider-presence gate is removed. Queue closure cannot establish the
+fate of frames already submitted to DMA/FE/optical FIFOs, or replace physical
+RX/TX draining. GDM2 remains disabled and the service launcher remains unavailable.
 
 Vendor patch 017 also fixes four AN7581-only control wrappers missed by patch
 008: general TRTCM set/get, channel closure and OAM forwarding selection now
@@ -331,6 +329,63 @@ kernel, RCU or locking diagnostics. These are synthetic register/DMA tests,
 not measurements of physical queue or optical behavior. The complete AN7581
 kernel and experimental r14 module package build locally. No device access,
 module loading, installation or flashing was performed.
+
+## T-CONT command and setup checkpoint (2026-09-13)
+
+Vendor patch 018 replaces the Q1000K indirect T-CONT table operations with
+`q1000k_tcont.c`. One IRQ-safe lock covers each complete scan, command and
+readback sequence. Commands explicitly encode the channel, valid bit and
+14-bit register Alloc-ID field, leaving reserved bits zero. Lookups ignore
+invalid entries with stale IDs; duplicate allocation returns `-EEXIST` without
+deleting the existing binding. Ordinary allocation uses slots 1 through 31.
+Slot zero belongs to ONU-ID assignment and cannot be written by this helper;
+the old DVT setter also rejects Q1000K writes.
+
+Every write receives a separate readback check. A command timeout or mismatched
+verification latches a fault; later commands return `-EIO` without touching
+MMIO, so a late completion cannot satisfy another command. Uncertain or
+invalidated slots are permanently quarantined for that MAC module instance.
+There is no software clear/reuse operation. Recovery requires a verified
+hardware reset before a subsequent module instance; unloading/reloading alone
+does not prove safe hardware state. The field-width check is not a complete
+protocol policy for reserved Alloc-IDs.
+
+T-CONT create/remove requests use a separate nonblocking transaction guard.
+Concurrent or reentrant requests return `-EBUSY`; native/FE callbacks run
+without the table spinlock held. Setup allocates the MAC entry, verifies native
+queue closure, enables the FE channel and opens its queues before publishing
+the software allocation and incrementing its count. Failures preserve the
+original error and software bindings, quarantine the slot, and attempt queue
+closure, FE disable and MAC invalidation. Cleanup errors are logged rather
+than reported as successful rollback. PLOAM allocation and XMCS callers now
+propagate errors and update counts only on successful setup; they no longer
+invoke the shared legacy QDMA buffer reset for these operations.
+
+**Removal is deliberately incomplete.** It quarantines the slot and attempts
+native queue closure, preserving bindings and counts. Successful closure
+returns `-EOPNOTSUPP`, because neither per-channel native descriptor drain nor
+FE/optical FIFO retirement exists yet. Bulk removal attempts every assigned
+channel and preserves the first control failure. It does not use the vendor's
+global `G_TX_FCS_TBL_INIT` write as a per-channel retirement mechanism. The
+`gpon_disable()` and inconsistent ONU-ID reassignment paths stop before clearing
+identity or resetting the MAC when bulk retirement is incomplete. Other legacy
+reset paths and ONU/OMCC assignment still need their own lifecycle audit.
+
+GEM mutation and packet metadata preparation are not yet synchronized with
+these transactions. The setup success path is tested with a synthetic FE
+provider; a native FE implementation is still absent. These changes therefore
+retain both readiness gates, disabled board nodes, the `BROKEN` package marker
+and explicit service-start failure.
+
+Validation: all 24 host PON tests pass against the prepared r15 package tree.
+New fixtures cover every one of 33 scan/write/readback timeout points, reserved
+bits, stale/duplicate IDs, all slots, rollback failures, caller errors, reset
+guards and concurrent allocation. An isolated Linux 6.18.44 UML guest executes
+the production helper with real spinlocks, IRQ handling and 64 racing callers;
+it passes command, verification and quarantine checks without kernel/locking
+diagnostics. Register behavior is emulated, not measured on hardware. All six
+vendor modules pass modpost and the experimental r15 APK builds. No SSH,
+device writes, module installation or flashing was performed.
 
 ## Vendor packet adapter findings
 
@@ -583,7 +638,8 @@ DMA/RX fixtures, and real Linux attachment/RCU tests in UML. The normal builder 
 protected source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
-resource ownership, native QDMA/FE control and QoS providers, identity handoff from the launcher, required flow
+resource ownership, native FE/QoS providers, per-channel retirement and GEM
+transaction synchronization, identity handoff from the launcher, required flow
 operations, AN7581 OMCC transport, OMCI service support, and the actual
 procd/netifd lifecycle. Do not install an init script that merely reports
 success while these components are absent. CLI `start`/`restart`/`reload`
