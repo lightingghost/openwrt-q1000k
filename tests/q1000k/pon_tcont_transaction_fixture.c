@@ -13,6 +13,7 @@ typedef unsigned int uint;
 #define CONFIG_GPON_10G_MAX_TCONT 32
 #define CONFIG_GPON_10G_MAX_GEMPORT 4
 #define GPON_10G_UNASSIGN_ALLOC_ID 0xffff
+#define GPON_UNKNOWN_CHANNEL 33
 #define GPON_UNASSIGN_ONU_ID 0x3ff
 #define GPON_ONU_ID 17
 #define FE_GDM_SEL_GDMA2 2
@@ -45,14 +46,20 @@ static uint32_t quarantined, retiring;
 static u8 queue_closed[32];
 static bool mac_valid[32], fe_enabled[32];
 static struct { char op; int channel,value; } trace[32];
-static u8 recovered[4];
+typedef struct info GWAN_GemInfo_T;
+static unsigned int q1000k_gwan_retiring_channels;
+static bool q1000k_gwan_retiring_gems[4];
+static bool state_held;
+#define BIT(n) (1u<<(n))
+#define spin_lock_irqsave(l,f) do { (f)=0; assert(!state_held); state_held=true; } while(0)
+#define spin_unlock_irqrestore(l,f) do { (void)(f); assert(state_held); state_held=false; } while(0)
 int gwan_create_new_tcont(ushort id);
 int gwan_remove_tcont(ushort id);
 int gwan_remove_all_tcont(void);
 
 static void record(char op,int channel,int value)
 {
-    assert(q1000k_tcont_config_busy.value==1 && calls<32);
+    assert(q1000k_tcont_config_busy.value==1 && calls<32 && !state_held);
     trace[calls].op=op; trace[calls].channel=channel; trace[calls++].value=value;
     if(reenter) {
         reenter=false;
@@ -107,13 +114,6 @@ static void q1000k_tcont_quarantine(unsigned int channel)
     assert(channel<32);
     if(channel) quarantined |= 1u<<channel;
 }
-static int gpon_recovery_set_channel(unsigned int port,unsigned int channel)
-{
-    assert(port<4 && wan.gpon.allocId[channel]==0xffff);
-    assert(mac_valid[channel] && fe_enabled[channel] && !queue_closed[channel]);
-    record('R',channel,port); recovered[port]=channel;
-    return 0;
-}
 static void xmcs_report_event(int type,int event,unsigned int id)
 {
     assert(type==1 && event==2 && wan.gpon.allocId[selected_channel]==id);
@@ -132,9 +132,10 @@ static void reset_model(void)
     wan.gpon.gemPort[2].info=(struct info){.portId=2,.allocId=200,.valid=1,.channel=33};
     memset(queue_closed,255,sizeof(queue_closed));
     memset(fe_enabled,0,sizeof(fe_enabled)); memset(mac_valid,0,sizeof(mac_valid));
-    memset(fault,0,sizeof(fault)); memset(trace,0,sizeof(trace)); memset(recovered,33,sizeof(recovered));
+    memset(fault,0,sizeof(fault)); memset(trace,0,sizeof(trace));
     selected_channel=4; backend_step=calls=events=errors_logged=0;
-    quarantined=retiring=0; reenter=false; q1000k_tcont_config_busy.value=0;
+    quarantined=retiring=q1000k_gwan_retiring_channels=0;
+    memset(q1000k_gwan_retiring_gems,0,sizeof(q1000k_gwan_retiring_gems)); reenter=false; q1000k_tcont_config_busy.value=0;
 }
 static void reset_trace(void) { calls=backend_step=0; memset(fault,0,sizeof(fault)); }
 int main(void)
@@ -156,11 +157,10 @@ int main(void)
     assert(!q1000k_tcont_config_busy.value && wan.activeChannelNum==2 && !events);
     assert(wan.gpon.allocId[4]==200 && wan.gpon.allocId[0]==17);
     assert(wan.gpon.gemPort[0].info.channel==4 && wan.gpon.gemPort[2].info.channel==4);
-    assert(wan.gpon.gemPort[1].info.channel==33 && recovered[0]==4 && recovered[2]==4);
-    assert(calls==6 && backend_step==4);
+    assert(wan.gpon.gemPort[1].info.channel==33);
+    assert(calls==4 && backend_step==4);
     assert(trace[0].op=='C' && trace[1].op=='Q' && trace[1].value==255);
     assert(trace[2].op=='F' && trace[2].value==1 && trace[3].op=='Q' && !trace[3].value);
-    assert(trace[4].op=='R' && trace[5].op=='R');
     before=wan; reset_trace();
     assert(gwan_create_new_tcont(200)==-EEXIST && !calls && !memcmp(&wan,&before,sizeof(wan)));
     assert(gwan_remove_tcont(200)==-EOPNOTSUPP);
@@ -171,7 +171,7 @@ int main(void)
     for(unsigned int failure=1;failure<=4;failure++) {
         reset_model(); before=wan; fault[failure]=-ETIMEDOUT; reenter=true;
         assert(gwan_create_new_tcont(200)==-ETIMEDOUT);
-        assert(!memcmp(&wan,&before,sizeof(wan)) && recovered[0]==33 && recovered[2]==33);
+        assert(!memcmp(&wan,&before,sizeof(wan)));
         assert(!q1000k_tcont_config_busy.value && !events);
         if(failure==1) assert(calls==1 && !quarantined);
         else {

@@ -97,8 +97,14 @@ static int q1000k_transport_xmit(struct sk_buff *s,uint word0,uint word1) {
     assert(word0==(5u<<14 | (s->dev->priv.netIdx==PWAN_IF_OMCI?1u<<8:0)));
     assert(word1==(0x7f2007dfu | (s->dev->priv.netIdx==PWAN_IF_OMCI?1u<<31:0)));
     submitted_len=s->len; submits++;
+    s->cb.gem_port=0xffff; /* Post-submit accounting must use descriptor metadata. */
     if(!submit_error) dev_kfree_skb_any(s); /* Can complete before ndo returns. */
     return submit_error;
+}
+static void q1000k_gwan_account(u16 gem,bool tx,unsigned int bytes) {
+    assert(gem==5 && tx && bytes==60);
+    wan.gpon.gemPort[3].stats.tx_packets++;
+    wan.gpon.gemPort[3].stats.tx_bytes+=bytes;
 }
 /* PRODUCTION */
 static void setup(struct sk_buff *s,struct net_device *d,int index) {

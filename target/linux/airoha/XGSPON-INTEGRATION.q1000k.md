@@ -306,8 +306,8 @@ lock around the native call. Closed queues reject new submissions with
 `-ESHUTDOWN`, leaving the caller's skb unchanged and owned by the caller.
 
 The T-CONT conversion in patch 018 now uses these native queue controls, as
-described below. GEM mapping synchronization and physical retirement remain
-incomplete. Packets whose vendor metadata was prepared before admission also
+described below. Patch 020 subsequently synchronizes data GEM mappings;
+physical retirement remains incomplete. Packets whose vendor metadata was prepared before admission also
 need coordination with those transactions. Attachment opens no queues, and
 neither provider-presence gate is removed. Queue closure cannot establish the
 fate of frames already submitted to DMA/FE/optical FIFOs, or replace physical
@@ -374,8 +374,8 @@ global `G_TX_FCS_TBL_INIT` write as a per-channel retirement mechanism. The
 identity or resetting the MAC when bulk retirement is incomplete. Other legacy
 reset paths and ONU/OMCC assignment still need their own lifecycle audit.
 
-GEM mutation and packet metadata preparation are not yet synchronized with
-these transactions. The setup success path is tested with a synthetic FE
+Patch 020 below subsequently synchronizes data GEM mutation and packet
+metadata preparation with these transactions. The setup success path is tested with a synthetic FE
 provider; a native FE implementation is still absent. These changes therefore
 retain both readiness gates, disabled board nodes, the `BROKEN` package marker
 and explicit service-start failure.
@@ -467,6 +467,81 @@ Patches 014 and 016 address the following original findings on Q1000K:
 These findings are from the prepared imported source, not from device tests.
 The native packet adapter below replaces those interfaces. It does not provide
 the remaining FE/QoS control operations or establish physical PON service.
+
+## GEM command and binding checkpoint (2026-09-13)
+
+Vendor patch 020 adds serialized AN7581 GEM commands and one software binding
+lock shared by data GEM and T-CONT publication. `q1000k_gem.c` uses the imported
+AN7581 register layout: command `0x5274`, status `0x5278`, a 16-bit ID, and
+separate valid/unicast/encryption bits. In particular, the hardware type bit
+is **unicast**, the inverse of the vendor multicast enumeration. Reserved
+command bits remain zero. Reads, compare-and-replace and separate write
+verification run under one IRQ-safe command lock. A timeout or readback
+mismatch latches a fault for the module instance, with no software clear.
+Invalid entries' stale type/encryption bits do not imply an existing binding.
+A valid entry that differs from the expected value is never overwritten.
+
+The old setter incorrectly treated matching type/encryption as success even
+when asked to invalidate a valid GEM. The new helper includes validity in its
+comparison. The legacy raw setters/reset, debug write handler, destructive
+register tests and reset test are rejected on Q1000K so they cannot bypass
+binding ownership. The getter delegates to the serialized helper and preserves
+output values on failure. This does not complete the other PHY/OMCC/reset
+lifecycle paths or make the vendor module safe to load.
+
+A nonblocking control guard now covers both GEM and T-CONT transactions. GEM
+creation validates the ID, type, channel and allocation; reserves no public
+slot until the hardware write/readback succeeds; then publishes the entire
+record, ID-to-index mapping and count under a separate state lock. An existing
+hardware or software binding returns `-EEXIST`. The 256-entry software table
+uses a full-width index; XMCS no longer truncates the `0x7fff` sentinel to 255
+or dereferences it before validation. IDs through 65534 are supported; 65535
+is invalid. Ordinary creation rejects zero (the classifier's unset value),
+channel zero and the assigned OMCC ID. ONU/OMCC assignment needs a separate
+protocol transaction.
+
+A unicast GEM can wait for its T-CONT or ANI assignment. T-CONT publication
+updates matching pending GEMs and the allocation atomically, making packet
+snapshots usable only once both are present. Data TX/RX use one bounded
+snapshot of GEM, ANI, channel and Alloc-ID; there are no mutable table reads
+across later hooks. TX rejects a hook that changes its selected GEM/ANI after
+the snapshot. Accounting validates the mapping and uses accepted descriptor
+metadata, including when native TX frees the skb before returning. Multicast
+supports an assigned receive binding; multicast TX remains unsupported.
+
+Active ANI/channel reassignment and nonzero encryption/loopback requests return
+`-EOPNOTSUPP`. Removal or ANI unassignment marks the binding and its associated
+channel retiring, permanently closes native TX admission and quarantines the
+T-CONT. Other GEMs sharing that channel also become unusable. Native mappings
+still pending return `-EAGAIN`; after reclamation, removal still returns
+`-EOPNOTSUPP` because FE/RX/optical retirement is absent. Hardware entries,
+software records, counts and IDs are retained, with no slot reuse. In-flight
+snapshots therefore cannot become a different service binding. Reset attempts
+retire both T-CONTs and GEMs, including pending/multicast GEMs even if T-CONT
+retirement fails. Empty software tables are not proof of physical quiescence
+and can change before identity reset. These legacy reset/reassignment paths
+therefore stop even when both retirement calls return zero, until a coordinated
+MAC/PHY/identity reset lifecycle exists.
+
+Legacy automatic GEM replay is blocked. Creation emits no service-up event or
+backup/replay state, and does not schedule the legacy GEM MIB timer. Key
+selection, encrypted activation, live replacement, protocol-reserved ID policy,
+initial hardware table reset and physical retirement remain integration work.
+Readiness/provider gates, disabled PON board nodes, `BROKEN`, no autoload and
+explicit service-start failure remain in place.
+
+Validation: all 27 host PON tests pass, including actual command/ABI callers,
+every 16-bit GEM ID, all three command timeout stages, verification faults,
+concurrent creation, index 255, malformed channels, coherent snapshots,
+reentrant callbacks, staged allocation, immutable bindings and reset gates.
+Production TX/RX consumers are tested across mutating/retiring filter hooks,
+with UBSan and bounded metadata checks. A separate Linux 6.18.44 UML guest
+runs the actual helper and registry with real spinlocks, kthreads and hard-IRQ
+control. It passes with all 256 slots and 111,936 packet snapshots, with no
+kernel locking diagnostics. The six AN7581 vendor modules pass modpost and the
+r17 APK builds locally. No SSH, device command, module installation or flash
+operation was performed. These tests model registers and native drain; they
+do not establish physical command timing or working optical service.
 
 ## Q1000K RX framing checkpoint (2026-09-13)
 
@@ -691,8 +766,8 @@ DMA/RX fixtures, and real Linux attachment/RCU tests in UML. The normal builder 
 protected source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
-resource ownership, native FE/QoS providers, per-channel retirement and GEM
-transaction synchronization, identity handoff from the launcher, required flow
+resource ownership, native FE/QoS providers, physical per-channel/GEM retirement,
+encrypted GEM activation and ONU/OMCC transactions, identity handoff from the launcher, required flow
 operations, AN7581 OMCC transport, OMCI service support, and the actual
 procd/netifd lifecycle. Do not install an init script that merely reports
 success while these components are absent. CLI `start`/`restart`/`reload`

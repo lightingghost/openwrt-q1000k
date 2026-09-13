@@ -20,7 +20,8 @@ class PonTcontTests(unittest.TestCase):
         run_c(fixture.replace('/* PRODUCTION */', source), flags=['-pthread'])
 
     def test_setup_rollback_removal_and_caller_errors(self):
-        names = ['q1000k_gwan_create_tcont', 'q1000k_gwan_remove_tcont',
+        names = ['q1000k_gwan_publish_tcont', 'q1000k_gwan_retire_channel',
+                 'q1000k_gwan_create_tcont', 'q1000k_gwan_remove_tcont',
                  'q1000k_gwan_remove_all_tcont', 'gwan_create_new_tcont',
                  'gwan_remove_tcont', 'gwan_remove_all_tcont']
         source = ''.join(function('pwan/gpon_wan.c', n) for n in names)
@@ -49,19 +50,26 @@ class PonTcontTests(unittest.TestCase):
 #define pr_err(...) ((void)0)
 typedef int PON_PHY_Event_data_t;
 typedef int GPON_RESET_TYPE_t;
-static int retirement_result, reset_calls;
+static int retirement_result, gem_retirement_result, gem_calls, reset_calls;
 static int gwan_remove_all_tcont(void) { return retirement_result; }
+static int gwan_remove_all_gemport_for_disable(void) { gem_calls++; return gem_retirement_result; }
 ''' + prefix + r'''
 int main(void) {
     int errors[]={-EOPNOTSUPP,-EIO,-EBUSY,-ENODEV};
     for(unsigned int i=0;i<sizeof(errors)/sizeof(errors[0]);i++) {
-        retirement_result=errors[i];
+        retirement_result=errors[i]; gem_calls=0;
+        gpon_disable(0); assert(!reset_calls && gem_calls==1);
+        assert(reassign()==errors[i] && !reset_calls && gem_calls==2);
+    }
+    retirement_result=0;
+    for(unsigned int i=0;i<sizeof(errors)/sizeof(errors[0]);i++) {
+        gem_retirement_result=errors[i];
         gpon_disable(0); assert(!reset_calls);
         assert(reassign()==errors[i] && !reset_calls);
     }
-    retirement_result=0;
-    gpon_disable(0); assert(reset_calls==1);
-    assert(!reassign() && reset_calls==2);
+    gem_retirement_result=0;
+    gpon_disable(0); assert(!reset_calls);
+    assert(reassign()==-EOPNOTSUPP && !reset_calls);
     return 0;
 }
 ''')

@@ -1,6 +1,6 @@
 # Q1000K XGS-PON implementation checkpoint
 
-2026-09-12, branch `q1000k-xgspon`, based on `q1000k-dev` at
+2026-09-13, branch `q1000k-xgspon`, based on `q1000k-dev` at
 `c526db0e25fa159ca79b60125741afd4e08440c9` after the support/profile rebase.
 
 **Both controller paths detect and XGS-PON MD32 bring-up works; optical
@@ -48,7 +48,8 @@ OMCI daemon and unrelated PR changes were not imported.
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
 | PON MAC | Runtime state/event dispatch and native packet attachment are integrated; startup/teardown fault fixtures and module modpost pass. | Complete native control/QoS/FE operations, physical interrupt/drain/PHY coordination and service-level management traffic. |
 | Native packet transport | Native metadata/raw RX, bounded vendor TX retries, startup/teardown and callback attachment are implemented; host and UML concurrency tests pass. GDM2 stays disabled. | Native QDMA/FE control/QoS providers, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
-| T-CONTs | Serialized table commands, verified writes, duplicate preservation, setup rollback and per-channel native TX drain are implemented. Removal preserves bindings and reports incomplete retirement. | FE/optical FIFO drain, GEM transaction synchronization and ONU/OMCC assignment. |
+| T-CONTs | Serialized table commands, verified writes, duplicate preservation, setup rollback and per-channel native TX drain are implemented. Removal preserves bindings and reports incomplete retirement. | FE/optical FIFO drain and ONU/OMCC assignment. |
+| GEM bindings | Serialized verified commands, shared GEM/T-CONT publication, bounded packet snapshots and retirement containment pass host/UML tests. | Physical retirement, encrypted activation, ONU/OMCC identity, live replacement and recovery. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -76,6 +77,14 @@ The final Linux 6.18.44 AN7581 kernel and r16 vendor APK build successfully;
 all six vendor modules pass modpost against the eight native API exports.
 All 24 host PON tests also pass against the final prepared kernel/package tree.
 See the [channel drain checkpoint](XGSPON-INTEGRATION.q1000k.md#per-channel-tx-drain-checkpoint-2026-09-13).
+Vendor patch 020 now publishes data GEM bindings only after verified hardware
+commands and snapshots complete GEM/ANI/T-CONT mappings for TX/RX. It fixes
+unchecked/truncated indices and preserves retiring mappings without reuse.
+Raw/debug writes and legacy replay are blocked; encrypted activation and live
+replacement remain unsupported. All 27 host PON tests and the real-kernel GEM
+concurrency/interrupt test pass; all six vendor modules pass modpost and the
+r17 package builds. See the
+[GEM checkpoint](XGSPON-INTEGRATION.q1000k.md#gem-command-and-binding-checkpoint-2026-09-13).
 No SSH access or device changes were made for this continuation.
 
 The reference loader was inspected at

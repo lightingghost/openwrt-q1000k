@@ -36,6 +36,7 @@ python3 tests/q1000k/test_pon_packet.py
 python3 tests/q1000k/test_pon_omci_tx.py
 python3 tests/q1000k/test_pon_adapter.py
 python3 tests/q1000k/test_pon_tcont.py
+python3 tests/q1000k/test_pon_gem.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -208,6 +209,27 @@ lockdep/atomic-sleep diagnostics and accepts `Q1000K_UML_BASE` as a build cache.
 Never execute its generated init script on the host. These tests establish
 software behavior only; they do not validate physical command completion,
 FIFO emptiness, channel retirement or optical service.
+
+The GEM tests execute the production command helper, raw ABI callers, binding
+registry, XMCS entry points and TX/RX mapping consumers. They cover the complete
+ID field, all 256 software slots, type-bit polarity, reserved bits, compare
+failures, all three timeout stages, readback faults, output preservation,
+concurrent publication, staged T-CONT/ANI setup, malformed channels and permanent
+retirement. Hook fixtures change packet metadata or retire a binding between
+lookup and transmission to verify snapshot ownership and rejection. Reset
+fixtures also require pending/multicast GEM retirement before identity reset.
+
+For the GEM commands and binding registry with real Linux locks and IRQs:
+
+```sh
+tests/q1000k/run_pon_gem_uml.sh
+```
+
+This guest runs concurrent creators/readers, all 256 GEM slots and control from
+real hard-IRQ context. MAC registers and native drain are modeled; Linux
+provides spinlocks, atomics, kthreads, IRQ work and lockdep. It uses read-only
+hostfs, supports `Q1000K_UML_BASE`, and rejects kernel diagnostics. Never execute
+its generated init script on the host. No physical device is contacted.
 
 To execute the same cryptographic helpers with the real Linux crypto API:
 

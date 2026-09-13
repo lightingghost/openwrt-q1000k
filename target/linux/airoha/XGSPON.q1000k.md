@@ -157,7 +157,12 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    per-channel TX reclamation and prevents reopening a retiring channel.
    Vendor patches 018/019 serialize and verify T-CONT commands, propagate setup
    errors and preserve bindings until physical retirement is implemented.
-   Native FE/QoS providers, GEM transaction synchronization, physical FIFO/RX
+   Vendor patch 020 adds verified GEM compare/update commands, coherent
+   GEM/ANI/T-CONT publication and packet snapshots, bounded XMCS indices and
+   retained retirement state. Host fault/caller/packet tests and Linux UML
+   interrupt/concurrency tests pass. Active rebinding, encryption activation
+   and legacy recovery remain unsupported.
+   Native FE/QoS providers, physical FIFO/RX
    drain, FE flow operations and the PHY/phylink
    connection remain outstanding; the board's PON nodes stay disabled.
 
