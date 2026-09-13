@@ -370,6 +370,24 @@ hardware. The [adapter findings](XGSPON-INTEGRATION.q1000k.md#vendor-packet-adap
 record the remaining vendor RX length, management framing, TX ownership and
 NAPI mismatches. PON stays disabled.
 
+## RX framing checkpoint (2026-09-13)
+
+Vendor patch 014 adapts the Q1000K callback to populated native skbs. It validates
+metadata and lengths before parser access, linearizes page fragments, bounds
+OMCI reads, removes duplicate skb growth and preserves the raw management
+header. Descriptor metadata determines management versus Ethernet traffic;
+Ethernet-looking bytes in an OMCI payload no longer select the protocol.
+Unknown checksums remain unverified, and missing/down upper interfaces drop
+safely. Other vendor targets retain their existing receive contract.
+
+All 18 host tests pass, including the actual vendor callback and all extended
+length values. A real Linux UML packet-socket test preserves complete bytes
+for three OMCI cases and one Ethernet frame, including fragmented input. The
+six-module vendor package builds as release 11 without unresolved symbols or
+autoload. These are framing/bounds checks; the native adapter, MIC/authentication,
+PHY sequencing and optical/OMCI service are still pending. Device access remained
+read-only; this continuation made no device connection.
+
 ## Validation and remaining acceptance gates
 
 - Eleven Python tests pass for the production C reader, shell backend, CLI and

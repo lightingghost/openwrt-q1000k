@@ -278,14 +278,16 @@ checks remain separate. GDM2, the MAC and PON PCS remain disabled.
 
 ## Vendor packet adapter findings
 
-The native API cannot be connected to the existing vendor callbacks unchanged:
+The native API cannot be connected to the original vendor callbacks unchanged.
+Patch 014 now addresses the first two findings on Q1000K; TX ownership and
+event/poll integration remain outstanding:
 
-- `pwan_cb_rx_packet()` expects DMA-written data in an skb whose logical length
+- The original `pwan_cb_rx_packet()` expects DMA-written data in an skb whose logical length
   is still zero; it later calls `skb_put(pktLen)`. Native RX already sets the
   length and may assemble page fragments. The adapter must normalize that
   contract once, linearize before vendor direct-pointer parsers where needed,
   and avoid double growth or copying past a linear buffer.
-- The callback reads Ethernet bytes 12/13 before checking packet length and
+- The original callback reads Ethernet bytes 12/13 before checking packet length and
   can reinterpret those bytes as an EAPOL marker even in an OMCI frame. Raw
   management frames must be selected from validated descriptor metadata and
   handled separately from Ethernet parsing. Merely setting protocol zero
@@ -302,6 +304,47 @@ The native API cannot be connected to the existing vendor callbacks unchanged:
 These findings are from the prepared imported source, not from device tests.
 The vendor adapter remains unwired; a success-only hook shim would hide these
 incompatibilities and does not satisfy the integration plan.
+
+## Q1000K RX framing checkpoint (2026-09-13)
+
+Vendor patch 014 and the new `q1000k_packet.c` helpers establish the populated-skb
+contract at the Q1000K receive callback. It rejects absent/short metadata,
+zero/oversized or mismatched packet lengths, descriptor errors and aggregation
+before copying metadata or inspecting the payload. It linearizes assembled
+page fragments before the imported direct-pointer parsers. The Q1000K path
+removes both late `skb_put(pktLen)` calls and the management-frame recopy;
+loopback also receives the existing length. Missing/down upper interfaces drop
+the packet before accessing their private data.
+
+Management selection uses the descriptor OAM flag. Q1000K no longer reclassifies
+arbitrary bytes 12/13 as EAPOL, and its OMCI path does not call
+`eth_type_trans()`. It preserves the entire raw frame, sets the packet type and
+header offsets, and leaves checksum status unverified. Ethernet data still has
+its Ethernet header parsed normally. The legacy targets retain their previous
+receive contract; only AN7581/Q1000K compiles the new helper object.
+
+OMCI validation here bounds reads made by the imported parser: its baseline
+CMAC input is 44 bytes, while extended content length is the 16-bit field at
+bytes 8/9 after a 10-byte header. If the descriptor selects the existing software
+MIC verifier, four further bytes must be present. Length arithmetic uses an
+unsigned value large enough to reject overflow/truncation. These checks do not
+verify MICs or certify the descriptor's authentication semantics; key management,
+MIC enforcement and service interoperability remain unimplemented.
+
+A host fixture runs the actual prepared vendor callback with its native packet
+helpers. It verifies unchanged raw management bytes, Ethernet delivery,
+loopback length, missing/down interfaces, one owner on drops, metadata errors,
+allocation failure and every possible extended length with both MIC-flag values.
+All 18 host PON tests pass. A separate UML test executes the production helpers
+with real Linux skbs, page fragments, receive backlog and an AF_PACKET socket:
+three raw OMCI cases and one Ethernet case arrive byte-for-byte unchanged at
+the raw socket, with no kernel diagnostics. This tests framing, not physical
+optical transport or an OMCI daemon.
+
+The complete six-module vendor package builds and passes modpost as
+`kmod-airoha-xpon-en757x-6.18.44-r11.apk`; the real receive object references both
+new helpers. It remains `BROKEN`, unselected and without autoload. No module,
+package or firmware has been loaded on the device in this continuation.
 
 ## MAC identity handoff
 

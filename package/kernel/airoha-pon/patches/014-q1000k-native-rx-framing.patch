@@ -1,0 +1,100 @@
+Subject: [PATCH] xpon: validate Q1000K native RX framing before vendor parsers
+
+Validate native RX lengths before vendor packet parsing.
+Linearize fragments and preserve raw OMCI headers.
+Keep other targets on their existing RX contract.
+The native provider and MIC verification remain separate work.
+
+---
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -65,6 +65,9 @@
+ #include <ecnt_hook/ecnt_hook_multicast_general.h>
+ #include "common/xpon_global.h"
+ #include "common/xpon_api.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_packet.h"
++#endif
+ 
+ #include <ecnt_hook/ecnt_hook_vlan.h>
+ #include <ecnt_hook/ecnt_hook_bbf247.h>
+@@ -642,7 +645,17 @@
+ 	unsigned char traffic_classify_flag = E_ECNT_FORWARD;
+ #endif/*TCSUPPORT_COMPILE*/
+ 
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_pwan_rx_prepare(skb, pMsg, msgLen, pktLen);
++	if (ret) {
++		dev_kfree_skb_any(skb);
++		gpWanPriv->dropUnknownPackets++;
++		return ret;
++	}
++#endif
+ 	memcpy(pRxBmMsg, pRxBmMsg_tmp, sizeof(PWAN_FERxMsg_T));
++
++#ifndef Q1000K_PON_IDENTITY
+ 
+     if(is_8021x_packet(skb->data)){
+         pRxBmMsg->raw.oam = 1;
+@@ -650,6 +663,7 @@
+ 
+ 	if( pRxBmMsg->raw.oam )
+ 		skb = replace_oam_pkt(skb, pktLen);
++#endif
+ #ifdef XPON_MAC_CONFIG_DEBUG	
+ 	if(gpPonSysData->debugLevel & MSG_CONTENT) {
+ 			PON_MSG(MSG_CONTENT, "RX PKT LEN: %d, Rx Msg: %.8x, %.8x", pktLen, pRxBmMsg->word[0], pRxBmMsg->word[1]) ;
+@@ -704,15 +718,23 @@
+ 	}
+ 	PON_MSG(MSG_TRACE, "%s %d receive OAM packet.\n",__FUNCTION__,__LINE__) ;
+ 	dev = gpWanPriv->pPonNetDev[(PWAN_IfType_t)netIdx] ;
++#ifdef Q1000K_PON_IDENTITY
++	if (!dev || !netif_running(dev))
++		goto drop;
++#endif
+ 	pNetPriv = (PWAN_NetPriv_T *)netdev_priv(dev) ;
+ 
+ 	if(LbFlag) {   	
++#ifndef Q1000K_PON_IDENTITY
+ 		skb_put(skb, pktLen) ;
++#endif
+ 		pwan_net_start_xmit(skb, dev) ;
+ 	} 
+ 	else {
+ 		/* process the packet data to high layer */
+-		skb_put(skb, pktLen) ;		
++#ifndef Q1000K_PON_IDENTITY
++		skb_put(skb, pktLen);
++#endif
+ #if defined(WAN2LAN)
+ 		/* do wan2lan after skb_put, 
+ 		 * because skb->len starts to have value from it */ 	
+@@ -754,6 +776,9 @@
+ 
+ #endif		
+ 
++#ifdef Q1000K_PON_IDENTITY
++		q1000k_pwan_rx_protocol(skb, dev, netIdx == PWAN_IF_OMCI);
++#else
+ 		skb->dev = dev ;
+ 		skb->protocol = eth_type_trans(skb, dev) ;
+ 		skb->ip_summed = CHECKSUM_UNNECESSARY ;
+@@ -761,6 +786,7 @@
+ 			skb->protocol = 0;
+ 		}
+ 
++#endif
+ #ifndef Q1000K_PON_IDENTITY
+ 		if(wan_speed_test_hook)
+ 		{

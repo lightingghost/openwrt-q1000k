@@ -32,6 +32,7 @@ python3 tests/q1000k/test_pon_identity.py
 python3 tests/q1000k/test_pon_unsupported.py
 python3 tests/q1000k/test_pon_crypto.py
 python3 tests/q1000k/test_pon_lifecycle.py
+python3 tests/q1000k/test_pon_packet.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -110,6 +111,23 @@ only a synthetic netdevice exists, with no attached NIC or optical hardware.
 `Q1000K_UML_BASE` reuses a UML build cache. When overriding `Q1000K_PON_ETH`,
 `Q1000K_PON_HEADER` may select the matching public header. These tests do not
 prove physical DMA drain, padding/CRC, MIC authentication or optical operation.
+
+The packet fixture runs the actual prepared vendor RX callback with the new
+Q1000K framing helpers. It covers populated lengths, fragmented input, raw OMCI
+versus Ethernet parsing, loopback, missing/down interfaces, ownership on failure
+and all 65,536 extended length values with each MIC flag. VLAN/flow hooks and
+GEM selection are fixtures; no crypto/MMIO or optical operation is invoked.
+
+```sh
+tests/q1000k/run_pon_packet_uml.sh
+```
+
+This separate UML test executes the production framing helpers through real
+Linux skbs, page-fragment linearization, receive backlog and an AF_PACKET
+socket on a synthetic netdevice. It checks exact raw bytes for baseline and
+extended OMCI plus Ethernet, including fragmented input. It accepts the same
+`Q1000K_UML_BASE` cache option, mounts hostfs read-only and attaches no physical
+NIC. It does not validate MIC/authentication, OMCI provisioning or hardware.
 
 To execute the same cryptographic helpers with the real Linux crypto API:
 

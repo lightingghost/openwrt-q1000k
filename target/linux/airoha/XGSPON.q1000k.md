@@ -146,7 +146,9 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    explicit PON descriptor metadata, raw RX, packet ownership and RTNL/RCU
    detachment. DMA/RX fault fixtures and a real-kernel UML lifetime test pass.
    Patch 9998 adds per-descriptor ownership and bounded TX reclamation waits,
-   with timeout/retry and late-completion tests. The vendor adapter, physical
+   with timeout/retry and late-completion tests. Vendor patch 014 normalizes
+   Q1000K RX lengths and preserves raw OMCI framing; host callback fixtures and
+   Linux packet-socket tests pass. The vendor adapter, physical
    FIFO/RX drain, FE flow operations and PHY/phylink connection remain outstanding; the board's PON nodes stay disabled.
 
    Acceptance: one coherent optical data path with working management
