@@ -1,0 +1,5459 @@
+Reject missing providers and unhandled QDMA/FE operations.
+
+Keep request outputs unchanged on errors and validate hook indices before
+accessing the RCU lists. A readiness snapshot does not pin a provider.
+
+--- a/bsp/core/ecnt_hook.c
++++ b/bsp/core/ecnt_hook.c
+@@ -118,7 +118,7 @@
+ //static inline ecnt_ret_val ecnt_iterate(struct list_head *head, struct list_head **i, struct ecnt_data *in_data)
+ static inline ecnt_ret_val ecnt_iterate(struct list_head *head, struct ecnt_hook_ops **elemp, struct ecnt_data *in_data)
+ {
+-	ecnt_ret_val verdict = ECNT_CONTINUE;
++	ecnt_ret_val verdict = ECNT_HOOK_ERROR;
+ 
+ 	/*
+ 	 * The caller must not block between calls to this
+@@ -126,13 +126,13 @@
+ 	 */
+ 	//list_for_each_continue_rcu(*i, head) {
+ 	list_for_each_entry_continue_rcu((*elemp), head, list){
+-		if((*elemp)->is_execute){
++		if (READ_ONCE((*elemp)->is_execute)) {
+ 			verdict = (*elemp)->hookfn(in_data);
+ 			if (verdict == ECNT_RETURN_DROP) {
+ 					(*elemp)->info.drop_num++;
+ 					return verdict;
+ 			}
+-			if(verdict == ECNT_RETURN)
++			if (verdict < 0 || verdict == ECNT_RETURN)
+ 				return verdict;
+ 		}
+ 	}
+@@ -154,31 +154,44 @@
+ //		ECNT_CONTINUE		1
+ ******************************************************************************/
+ 
+-__IMEM int __ECNT_HOOK(unsigned int maintype, unsigned int subtype,struct ecnt_data *in_data)
+-{
++__IMEM int __ECNT_HOOK(unsigned int maintype, unsigned int subtype,
++		       struct ecnt_data *in_data)
++{
++	struct ecnt_hook_ops *elem;
++	struct list_head *head;
+ 	ecnt_ret_val ret;
+-	struct ecnt_hook_ops *elem;
+-	struct list_head* ptr = &ecnt_hooks[maintype][subtype];
+-	
+-	if((maintype >= ECNT_NUM_MAINTYPE) || (subtype >= ECNT_MAX_SUBTYPE)){
+-		printk("__ECNT_HOOK fail, max maintype %d, max subtype %d\n", ECNT_NUM_MAINTYPE, ECNT_MAX_SUBTYPE);
++
++	/* Validate before indexing; all list inspection belongs inside RCU. */
++	if (maintype >= ECNT_NUM_MAINTYPE || subtype >= ECNT_MAX_SUBTYPE)
+ 		return ECNT_HOOK_ERROR;
+-	}
+-	if (list_empty(&ecnt_hooks[maintype][subtype])){
+-		return ECNT_HOOK_ERROR;
+-	}
+-	
+-	/* We may already have this, but read-locks nest anyway */
+-	rcu_read_lock();
+-
+-	elem = list_entry_rcu(ptr, struct ecnt_hook_ops, list);	
+-	/* We may already have this, but read-locks nest anyway */
+-	ret = ecnt_iterate(&ecnt_hooks[maintype][subtype], &elem, in_data);
+-	rcu_read_unlock();
+-	
++	head = &ecnt_hooks[maintype][subtype];
++	rcu_read_lock();
++	elem = list_entry_rcu(head, struct ecnt_hook_ops, list);
++	ret = ecnt_iterate(head, &elem, in_data);
++	rcu_read_unlock();
+ 	return ret;
+ }
+ EXPORT_SYMBOL(__ECNT_HOOK);
++
++/* A readiness snapshot, not a lifetime reference or capability guarantee. */
++int ecnt_hook_is_registered(unsigned int maintype, unsigned int subtype)
++{
++	struct ecnt_hook_ops *ops;
++	int found = 0;
++
++	if (maintype >= ECNT_NUM_MAINTYPE || subtype >= ECNT_MAX_SUBTYPE)
++		return 0;
++	rcu_read_lock();
++	list_for_each_entry_rcu(ops, &ecnt_hooks[maintype][subtype], list) {
++		if (READ_ONCE(ops->is_execute)) {
++			found = 1;
++			break;
++		}
++	}
++	rcu_read_unlock();
++	return found;
++}
++EXPORT_SYMBOL(ecnt_hook_is_registered);
+ 
+ /*****************************************************************************
+ //function :
+@@ -208,7 +221,7 @@
+ 	//list_for_each_continue_rcu(pos, &ecnt_hooks[maintype][subtype]){
+ 	list_for_each_entry_continue_rcu(elem, &ecnt_hooks[maintype][subtype], list){
+ 		if(elem->hook_id == hook_id){
+-			elem->is_execute = is_execute;
++			WRITE_ONCE(elem->is_execute, is_execute);
+ 			rcu_read_unlock();
+ 			return 1;
+ 		}
+@@ -309,8 +322,8 @@
+ {
+ 	struct ecnt_hook_ops *elem;
+ 
+-	if(!reg){
+-		printk("ecnt_register_hook fail, reg is NULL\n");
++	if (!reg || !reg->hookfn) {
++		printk("ecnt_register_hook fail, missing hook or callback\n");
+ 		return ECNT_REGISTER_FAIL;
+ 	}
+ 	if((reg->maintype >= ECNT_NUM_MAINTYPE) || (reg->subtype >= ECNT_MAX_SUBTYPE)){
+--- a/bsp/include/ecnt_hook/ecnt_hook.h
++++ b/bsp/include/ecnt_hook/ecnt_hook.h
+@@ -209,6 +209,7 @@
+ */
+ extern void ecnt_hook_init(void);
+ extern int __ECNT_HOOK(unsigned int maintype, unsigned int subtype,struct ecnt_data *in_data);
++extern int ecnt_hook_is_registered(unsigned int maintype, unsigned int subtype);
+ extern int ecnt_register_hook(struct ecnt_hook_ops *reg);
+ extern void ecnt_unregister_hook(struct ecnt_hook_ops *reg);
+ extern int show_all_ecnt_hookfn(void);
+--- a/bsp/include/ecnt_hook/ecnt_hook_fe.h
++++ b/bsp/include/ecnt_hook/ecnt_hook_fe.h
+@@ -42,6 +42,7 @@
+ *                  I N C L U D E S
+ *************************************************************************
+ */
++#include <linux/errno.h>
+ #include "ecnt_hook.h"
+ #include "ecnt_hook_fe_type.h"
+ 
+@@ -75,7 +76,7 @@
+ *************************************************************************
+ */
+ static inline int FE_API_SET_PACKET_LENGTH(FE_Gdma_Sel_t _gdm_sel, uint _length_long, uint _length_short) {
+-	struct ecnt_fe_data in_data; 
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_PACKET_LENGTH; 
+@@ -83,14 +84,14 @@
+ 	in_data.api_data.pkt_len.length_long = _length_long; 
+ 	in_data.api_data.pkt_len.length_short = _length_short;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CHANNEL_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_TXRX_Sel_t _txrx_sel, unchar _channel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_CHANNEL_ENABLE;
+@@ -99,14 +100,14 @@
+ 	in_data.channel = _channel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MAC_ADDR(FE_Gdma_Sel_t _gdm_sel, unchar *_mac, ushort _mask) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_MAC_ADDR;
+@@ -114,14 +115,14 @@
+ 	in_data.api_data.mac_addr.mac = _mac;
+ 	in_data.api_data.mac_addr.mask = _mask;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MAC_ADDR_7516(FE_MacSet_Sel_t _macSet_sel, unsigned int _mac_h, unsigned int  _mac_lmin,unsigned int  _mac_lmax) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_MAC_ADDR_7516;
+@@ -130,14 +131,14 @@
+ 	in_data.api_data.mac_addr_7516.mac_lmin = _mac_lmin;
+ 	in_data.api_data.mac_addr_7516.mac_lmax = _mac_lmax;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_WAN_PORT_7516(FE_Enable_t wan1_en, FE_WanPort_Sel_t wan1_port, FE_WanPort_Sel_t wan0_port) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_WAN_PORT_7516;
+@@ -145,14 +146,14 @@
+ 	in_data.api_data.wan_port_7516.wan1_port = wan1_port;
+ 	in_data.api_data.wan_port_7516.wan0_port = wan0_port;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_HWFWD_CHANNEL(FE_Cdma_Sel_t _cdm_sel, unchar _channel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_HWFWD_CHANNEL;
+@@ -160,14 +161,14 @@
+ 	in_data.channel = _channel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CHANNEL_RETIRE(FE_Gdma_Sel_t _gdm_sel, unchar _channel, FE_Linkup_t _mode) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_CHANNEL_RETIRE;
+@@ -175,67 +176,69 @@
+ 	in_data.channel = _channel;
+ 	in_data.api_data.link_mode = _mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CRC_STRIP(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_CRC_STRIP;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_PADDING(FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_PADDING;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_EXT_TPID(uint _tpid) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_EXT_TPID;
+ 	in_data.reg_val = _tpid;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_EXT_TPID(uint *_tpid) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_EXT_TPID;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_tpid = in_data.reg_val;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_tpid = in_data.reg_val;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_FW_CFG(FE_Gdma_Sel_t _gdm_sel, FE_Frame_type_t _dp_sel, FE_Frame_dp_t _dp_type) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_FW_CFG;
+@@ -243,289 +246,307 @@
+ 	in_data.api_data.fw_cfg.dp_sel = _dp_sel;
+ 	in_data.api_data.fw_cfg.dp_val = _dp_type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_FW_CFG(FE_Gdma_Sel_t _gdm_sel, uint* pval) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_FW_CFG;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*pval = in_data.reg_val;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*pval = in_data.reg_val;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_DROP_UDP_CHKSUM_ERR_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_DROP_UDP_CHKSUM_ERR_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_DROP_TCP_CHKSUM_ERR_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_DROP_TCP_CHKSUM_ERR_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ static inline int FE_API_SET_DROP_IP_CHKSUM_ERR_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_DROP_IP_CHKSUM_ERR_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_DROP_CRC_ERR_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_DROP_CRC_ERR_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_DROP_RUNT_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_DROP_RUNT_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_DROP_LONG_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_DROP_LONG_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_VLAN_CHECK(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_VLAN_CHECK;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_OK_CNT(FE_Gdma_Sel_t _gdm_sel, FE_TXRX_Sel_t _txrx_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_OK_CNT;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.txrx_sel = _txrx_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_RX_CRC_ERR_CNT(uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_RX_CRC_ERR_CNT;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_RX_DROP_FIFO_CNT(FE_Gdma_Sel_t _gdm_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_RX_DROP_FIFO_CNT;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ static inline int FE_API_GET_RX_DROP_ERR_CNT(FE_Gdma_Sel_t _gdm_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_RX_DROP_ERR_CNT;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ static inline int FE_API_GET_OK_BYTE_CNT(FE_Gdma_Sel_t _gdm_sel, FE_TXRX_Sel_t _txrx_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_OK_BYTE_CNT;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.txrx_sel = _txrx_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_TX_GET_CNT(FE_Gdma_Sel_t _gdm_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_TX_GET_CNT;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_TX_DROP_CNT(FE_Gdma_Sel_t _gdm_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_TX_DROP_CNT;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_TIEM_STAMP(uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_TIEM_STAMP;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_TIME_STAMP(uint ts) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_TIEM_STAMP;
+     in_data.timeStamp = ts & 0xffff;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+ 	
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_INS_VLAN_TPID(FE_Gdma_Sel_t _gdm_sel, uint _tpid) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_INS_VLAN_TPID;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.reg_val = _tpid;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ static inline int FE_API_SET_VLAN_ENABLE(FE_Gdma_Sel_t _gdm_sel, FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_VLAN_ENABLE;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_BLACK_LIST(FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_BLACK_LIST;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_ETHER_TYEP(uint _index, FE_Enable_t _enable, FE_PPPOE_t _is_pppoe, uint _value) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 
+ 	in_data.function_id = FE_SET_ETHER_TYEP;
+@@ -534,14 +555,14 @@
+ 	in_data.api_data.eth_cfg.is_pppoe = _is_pppoe;
+ 	in_data.api_data.eth_cfg.value = _value;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_L2U_KEY(uint _index, FE_L2U_KEY_t _key_sel, uint _key0, uint _key1) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_L2U_KEY;
+@@ -550,85 +571,89 @@
+ 	in_data.api_data.l2u_key.key0 = _key0;
+ 	in_data.api_data.l2u_key.key1 = _key1;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_AC_GROUP_PKT_CNT(uint _index, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_AC_GROUP_PKT_CNT;
+ 	in_data.index = _index;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_AC_GROUP_BYTE_CNT(uint _index, uint *_cnt, uint *_cnt_hi) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_AC_GROUP_BYTE_CNT;
+ 	in_data.index = _index;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	*_cnt_hi = in_data.cnt_hi;
+-	
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++		*_cnt_hi = in_data.cnt_hi;
++	}
++	
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ static inline int FE_API_CLR_AC_GROUP_PKT_CNT(uint _index) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_CLR_AC_GROUP_PKT_CNT;
+ 	in_data.index = _index;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_CLR_AC_GROUP_BYTE_CNT(uint _index) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_CLR_AC_GROUP_BYTE_CNT;
+ 	in_data.index = _index;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_METER_GROUP(uint _index, uint _value) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_METER_GROUP;
+ 	in_data.index = _index;
+ 	in_data.reg_val = _value;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_GDM_PCP_CODING(FE_Gdma_Sel_t _gdm_sel, FE_TXRX_Sel_t _txrx_sel, FE_PcpMode_t mode) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_GDM_PCP_CODING;
+@@ -636,14 +661,14 @@
+ 	in_data.txrx_sel = _txrx_sel;
+ 	in_data.api_data.coding_mode = mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CDM_PCP_CODING(FE_Gdma_Sel_t _gdm_sel, FE_TXRX_Sel_t _txrx_sel, FE_PcpMode_t mode) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_CDM_PCP_CODING;
+@@ -651,14 +676,14 @@
+ 	in_data.txrx_sel = _txrx_sel;
+ 	in_data.api_data.coding_mode = mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }	
+ 
+ static inline int FE_API_SET_VIP_ENABLE(uint _index, FE_Enable_t _enable, FE_Patn_type _patten_type, uint _patten) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_VIP_ENABLE;
+@@ -667,82 +692,90 @@
+ 	in_data.api_data.vip_cfg.patten_type = _patten_type;
+ 	in_data.api_data.vip_cfg.patten = _patten;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ETH_RX_CNT(FE_RxCnt_t *_rxCnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_ETH_RX_CNT;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_rxCnt = in_data.api_data.FE_RxCnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_rxCnt = in_data.api_data.FE_RxCnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ETH_TX_CNT(FE_TxCnt_t *_txCnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_ETH_TX_CNT;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_txCnt = in_data.api_data.FE_TxCnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_txCnt = in_data.api_data.FE_TxCnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ETH_FRAME_CNT(FE_TXRX_Sel_t _txrx_sel, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_ETH_FRAME_CNT;
+ 	in_data.txrx_sel = _txrx_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ETH_ERR_CNT(FE_Err_type_t _type, uint *_cnt) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_ETH_ERR_CNT;
+ 	in_data.err_type = _type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_cnt = in_data.cnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_cnt = in_data.cnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CLEAR_MIB(FE_Gdma_Sel_t _gdm_sel, FE_TXRX_Sel_t _txrx_sel) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_CLEAR_MIB;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.txrx_sel = _txrx_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CDM_RX_RED_DROP(FE_Cdma_Sel_t _cdm_sel, FE_RedDropQ_Sel_t _dropQ_sel, FE_RedDropMode_Sel_t _dropMode_sel) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_CDM_RX_RED_DROP;
+@@ -750,58 +783,60 @@
+ 	in_data.dropQ_sel = _dropQ_sel;
+ 	in_data.dropMode_sel = _dropMode_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_CDM_RX_RED_DROP(FE_Cdma_Sel_t _cdm_sel, FE_RedDropQ_Sel_t _dropQ_sel, FE_RedDropMode_Sel_t *_dropMode_sel_p) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_CDM_RX_RED_DROP;
+ 	in_data.cdm_sel = _cdm_sel;
+ 	in_data.dropQ_sel = _dropQ_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *_dropMode_sel_p = in_data.dropMode_sel;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++	    *_dropMode_sel_p = in_data.dropMode_sel;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CHANNEL_RETIRE_ALL(FE_Gdma_Sel_t gdm_sel, unchar channel) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_CHANNEL_RETIRE_ALL;
+ 	in_data.gdm_sel = gdm_sel;
+ 	in_data.channel = channel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_CHANNEL_RETIRE_ONE(FE_Gdma_Sel_t gdm_sel, unchar channel) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_CHANNEL_RETIRE_ONE;
+ 	in_data.gdm_sel = gdm_sel;
+ 	in_data.channel = channel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_TX_RATE(uint rate,uint mode,uint maxBkSzie,uint tick)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_TX_RATE;
+@@ -810,117 +845,117 @@
+ 	in_data.api_data.rate_cfg.maxBkSize = maxBkSzie;
+ 	in_data.api_data.rate_cfg.tick = tick;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_RXUC_RATE(uint rate,uint mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_RXUC_RATE;
+ 	in_data.api_data.rate_cfg.rate = rate;
+ 	in_data.api_data.rate_cfg.mode = mode;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_RXBC_RATE(uint rate,uint mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_RXBC_RATE;
+ 	in_data.api_data.rate_cfg.rate = rate;
+ 	in_data.api_data.rate_cfg.mode = mode;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_RXMC_RATE(uint rate,uint mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_RXMC_RATE;
+ 	in_data.api_data.rate_cfg.rate = rate;
+ 	in_data.api_data.rate_cfg.mode = mode;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_RXOC_RATE(uint rate,uint mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_RXOC_RATE;
+ 	in_data.api_data.rate_cfg.rate = rate;
+ 	in_data.api_data.rate_cfg.mode = mode;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_VIP_ETHER(ushort type)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_VIP_ETHER;
+ 	in_data.api_data.vip.type = type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_VIP_PPP(ushort type)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_VIP_PPP;
+ 	in_data.api_data.vip.type = type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_VIP_IP(ushort type)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_VIP_IP;
+ 	in_data.api_data.vip.type = type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_VIP_TCP(ushort src,ushort dst,unchar mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_VIP_TCP;
+@@ -928,15 +963,15 @@
+ 	in_data.api_data.vip.dst = dst;	
+ 	in_data.api_data.vip.mode = mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_VIP_UDP(ushort src,ushort dst,unchar mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_VIP_UDP;
+@@ -944,58 +979,58 @@
+ 	in_data.api_data.vip.dst = dst;	
+ 	in_data.api_data.vip.mode = mode;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ static inline int FE_API_DEL_VIP_ETHER(ushort type)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_VIP_ETHER;
+ 	in_data.api_data.vip.type = type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEL_VIP_PPP(ushort type)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_VIP_PPP;
+ 	in_data.api_data.vip.type = type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEL_VIP_IP(ushort type)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_VIP_IP;
+ 	in_data.api_data.vip.type = type;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEL_VIP_TCP(ushort src,ushort dst,unchar mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_VIP_TCP;
+@@ -1003,15 +1038,15 @@
+ 	in_data.api_data.vip.dst = dst;	
+ 	in_data.api_data.vip.mode = mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEL_VIP_UDP(ushort src,ushort dst,unchar mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_VIP_UDP;
+@@ -1019,17 +1054,17 @@
+ 	in_data.api_data.vip.dst = dst;	
+ 	in_data.api_data.vip.mode = mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ 
+ static inline int FE_API_ADD_L2LU_VLAN_DSCP(ushort svlan,ushort cvlan,unchar dscp,unchar mask)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_L2LU_VLAN_DSCP;
+@@ -1038,15 +1073,15 @@
+ 	in_data.api_data.l2lu.dscp = dscp;
+ 	in_data.api_data.l2lu.mask = mask;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_L2LU_VLAN_TRFC(ushort svlan,ushort cvlan,unchar trfc,unchar mask)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_L2LU_VLAN_TRFC;
+@@ -1055,15 +1090,15 @@
+ 	in_data.api_data.l2lu.dscp = trfc;
+ 	in_data.api_data.l2lu.mask = mask;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEL_L2LU_VLAN_DSCP(ushort svlan,ushort cvlan,unchar dscp,unchar mask)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_L2LU_VLAN_DSCP;
+@@ -1072,15 +1107,15 @@
+ 	in_data.api_data.l2lu.dscp = dscp;
+ 	in_data.api_data.l2lu.mask = mask;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEL_L2LU_VLAN_TRFC(ushort svlan,ushort cvlan,unchar trfc,unchar mask)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_DEL_L2LU_VLAN_TRFC;
+@@ -1089,27 +1124,27 @@
+ 	in_data.api_data.l2lu.dscp = trfc;
+ 	in_data.api_data.l2lu.mask = mask;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_TX_FAVOR_OAM_ENABLE(FE_Enable_t _enable) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_TX_FAVOR_OAM_ENABLE;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_TLS_FORWARD(void* skb,FE_Tls_forward_direction_t dir) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_TLS_FORWARD;
+@@ -1117,29 +1152,29 @@
+ 	in_data.api_data.tls_forward.dir = dir;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DO_FE_RESET(FE_Reset_mode_t reset_mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_DO_RESET;
+ 	in_data.api_data.reset_mode = reset_mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_LOOPBACK_ENABLE(FE_Gdma_Sel_t _gdm_sel, uint channel, FE_Enable_t enable)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_LOOPBACK_ENABLE;
+@@ -1147,15 +1182,15 @@
+ 	in_data.channel = channel;
+ 	in_data.api_data.enable = enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_LOOPBACK_MODE(FE_Gdma_Sel_t _gdm_sel, FE_Random_mode_t channel_mode, FE_Random_mode_t length_mode, FE_Random_mode_t gap_mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_LOOPBACK_MODE;
+@@ -1164,17 +1199,16 @@
+ 	in_data.api_data.lpbp_mode.length_mode = length_mode;
+ 	in_data.api_data.lpbp_mode.gap_mode = gap_mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_METER_RATELIMIT(uint ratelimit, unchar idx, FE_Dir_t dir, FE_Meter_Mode_t mode, unchar enable)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_SET_METER_RATELIMIT;
+     in_data.api_data.meter_cfg.rate = ratelimit;
+@@ -1186,373 +1220,377 @@
+     in_data.api_data.meter_cfg.tick_sel = FAST_TICK;
+     in_data.api_data.meter_cfg.bucket_size = 0;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_METER_RATELIMIT(uint *ratelimit, unchar idx, FE_Dir_t dir, FE_Meter_Mode_t mode)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_GET_METER_RATELIMIT;
+     in_data.api_data.meter_cfg.idx = idx;
+     in_data.api_data.meter_cfg.dir = dir;
+     in_data.api_data.meter_cfg.mode = mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*ratelimit = in_data.api_data.meter_cfg.rate;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*ratelimit = in_data.api_data.meter_cfg.rate;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_METER_RATELIMIT_MODE(FE_Dir_t dir, FE_Meter_Mode_t mode)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_SET_RX_RATELIMIT_MODE;
+     in_data.api_data.meter_cfg.dir = dir;
+     in_data.api_data.meter_cfg.mode = mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_FlOW_CNT(unchar idx, FE_Dir_t dir, FE_ACNT_Mode_t mode, uint *cnt_lo, uint *cnt_hi)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_GET_FLOW_CNT;
+     in_data.api_data.meter_cfg.idx = idx;
+     in_data.api_data.meter_cfg.dir = dir;/*up or down stream*/
+     in_data.api_data.meter_cfg.acnt_mode = mode;/**/
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*cnt_lo = in_data.api_data.meter_cfg.byteCnt_L;
+-	*cnt_hi = in_data.api_data.meter_cfg.byteCnt_H;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*cnt_lo = in_data.api_data.meter_cfg.byteCnt_L;
++		*cnt_hi = in_data.api_data.meter_cfg.byteCnt_H;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_FlOW_PKT_CNT(unchar idx, FE_Dir_t dir, FE_ACNT_Mode_t mode, uint *pkt_cnt, uint *pkt_cnt_hi)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_GET_FLOW_CNT;
+     in_data.api_data.meter_cfg.idx = idx;
+     in_data.api_data.meter_cfg.dir = dir;
+     in_data.api_data.meter_cfg.acnt_mode = mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*pkt_cnt = in_data.api_data.meter_cfg.pktCnt;
+-	*pkt_cnt_hi = in_data.api_data.meter_cfg.pktCnt_H;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*pkt_cnt = in_data.api_data.meter_cfg.pktCnt;
++		*pkt_cnt_hi = in_data.api_data.meter_cfg.pktCnt_H;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_CLEAR_FlOW_CNT(unchar idx, FE_Dir_t dir, FE_ACNT_Mode_t mode)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_CLEAR_FLOW_CNT;
+     in_data.api_data.meter_cfg.idx = idx;
+     in_data.api_data.meter_cfg.dir = dir;
+     in_data.api_data.meter_cfg.acnt_mode = mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_WAN_ITF_INDEX(struct sk_buff *skb, unchar *wan_idx)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_WAN_ITF_INDEX;
+     in_data.api_data.meter_cfg.skb= skb;
+ 	memcpy(in_data.api_data.meter_cfg.itf_name, skb->dev->name, 16);
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *wan_idx = in_data.api_data.meter_cfg.idx;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*wan_idx = in_data.api_data.meter_cfg.idx;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_METER_IDX(struct sk_buff *skb, FE_Dir_t dir, unchar *meter_idx, unchar idx)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_METER_IDX;
+     in_data.api_data.meter_cfg.skb= skb;
+     in_data.api_data.meter_cfg.dir = dir;
+     in_data.api_data.meter_cfg.idx = idx;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *meter_idx = in_data.api_data.meter_cfg.meter_id;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*meter_idx = in_data.api_data.meter_cfg.meter_id;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ACNT2_IDX(struct sk_buff *skb, FE_Dir_t dir,unchar *acnt2_idx)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_ACNT2_IDX;
+     in_data.api_data.meter_cfg.skb= skb;
+     in_data.api_data.meter_cfg.dir = dir;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *acnt2_idx = in_data.api_data.meter_cfg.acnt2_id;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*acnt2_idx = in_data.api_data.meter_cfg.acnt2_id;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ACNT1_IDX(struct sk_buff *skb, FE_Dir_t dir,unchar *acnt1_idx)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_ACNT1_IDX;
+     in_data.api_data.meter_cfg.skb= skb;
+     in_data.api_data.meter_cfg.dir = dir;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *acnt1_idx = in_data.api_data.meter_cfg.acnt1_id;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*acnt1_idx = in_data.api_data.meter_cfg.acnt1_id;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ACNT0_IDX(struct sk_buff *skb, FE_Dir_t dir,unchar *acnt0_idx)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_ACNT0_IDX;
+     in_data.api_data.meter_cfg.skb= skb;
+     in_data.api_data.meter_cfg.dir = dir;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *acnt0_idx = in_data.api_data.meter_cfg.acnt0_id;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*acnt0_idx = in_data.api_data.meter_cfg.acnt0_id;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ACNT1_MODE(FE_Dir_t dir, unchar *acnt1_mode)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_ACNT1_MODE;
+     in_data.api_data.meter_cfg.dir = dir;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *acnt1_mode = in_data.api_data.meter_cfg.acnt_mode;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*acnt1_mode = in_data.api_data.meter_cfg.acnt_mode;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_ACNT0_MODE(FE_Dir_t dir,unchar *acnt0_mode)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_ACNT0_MODE;
+     in_data.api_data.meter_cfg.dir = dir;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    *acnt0_mode = in_data.api_data.meter_cfg.acnt_mode;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*acnt0_mode = in_data.api_data.meter_cfg.acnt_mode;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_ACNT1_MODE(FE_Dir_t dir, unchar acnt1_mode)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_SET_ACNT1_MODE;
+     in_data.api_data.meter_cfg.dir = dir;
+ 	in_data.api_data.meter_cfg.acnt_mode = acnt1_mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_ACNT0_MODE(FE_Dir_t dir,unchar acnt0_mode)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_SET_ACNT0_MODE;
+     in_data.api_data.meter_cfg.dir = dir;
+ 	in_data.api_data.meter_cfg.acnt_mode = acnt0_mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_METER_ENABLE(unchar *enable, unchar idx, FE_Dir_t dir)
+ {
+-    struct ecnt_fe_data in_data;
+-	int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+     in_data.function_id = FE_GET_METER_ENABLE;
+     in_data.api_data.meter_cfg.idx = idx;
+     in_data.api_data.meter_cfg.dir = dir;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*enable = in_data.api_data.meter_cfg.enable;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*enable = in_data.api_data.meter_cfg.enable;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_METER_CTL_BY_OLT(unchar enable)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_SET_METER_CTL_BY_OLT;
+     in_data.api_data.meter_cfg.idx= enable;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_DEV_MAC_INDEX(unchar *mac, unchar *mac_idx)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_GET_DEV_MAC_INDEX;
+     memcpy(in_data.api_data.meter_cfg.mac, mac, 6);
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*mac_idx = in_data.api_data.meter_cfg.idx;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*mac_idx = in_data.api_data.meter_cfg.idx;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_INIT_RESOURCE_MANAGE(void)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_INIT_RESOURCE_MANAGE;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_DEINIT_RESOURCE_MANAGE(void)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_DEINIT_RESOURCE_MANAGE;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_PSE_OQ_THRESHOLD(FE_PonMode_Sel_t pon_mode)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_SET_PSE_OQ_THR;
+     in_data.api_data.pon_mode = pon_mode;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ static inline int FE_API_GET_UNKNOWN_MUL_PKT(uint unknown_mul_pkt)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_UNKNOWN_MUL_PKT;
+ 	in_data.api_data.unknown_mul_pkt= unknown_mul_pkt;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ static inline int FE_API_SET_GLO_RATE_BYTE(FE_Rate_minus_t rate_minus, unchar rate_byte)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_GLO_RATE_BYTE;
+ 	in_data.api_data.glo_rate_byte.rate_minus = rate_minus;
+ 	in_data.api_data.glo_rate_byte.rate_byte = rate_byte;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_ADD_DEV_TO_TOTAL_ACCOUNT(unsigned char *mac) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_ADD_DEV_TO_TOTAL_ACCOUNT;
+@@ -1560,49 +1598,48 @@
+     
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+ 	
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MC_VLAN_GLOBAL(FE_Enable_t enable)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_MC_VLAN_GLOBAL;
+ 	in_data.api_data.enable = enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_MC_VLAN_GLOBAL(FE_Enable_t *enable)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_MC_VLAN_GLOBAL;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*enable = in_data.api_data.enable;
+-	
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*enable = in_data.api_data.enable;
++	}
++	
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MC_VLAN_TABLE_CFG(FE_McVlanTableCfg_t *mcVlanTableCfg)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_MC_VLAN_TABLE_CFG;
+ 	in_data.api_data.fe_mcvlan_table_cfg.mc_table_id = mcVlanTableCfg->mc_table_id;
+@@ -1610,17 +1647,16 @@
+ 	in_data.api_data.fe_mcvlan_table_cfg.ppe_entry_id = mcVlanTableCfg->ppe_entry_id;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_MC_VLAN_TABLE_CFG(FE_McVlanTableCfg_t *mcVlanTableCfg)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_MC_VLAN_TABLE_CFG;
+ 	in_data.api_data.fe_mcvlan_table_cfg.mc_table_id = mcVlanTableCfg->mc_table_id;
+@@ -1628,17 +1664,16 @@
+ 	mcVlanTableCfg->enable = in_data.api_data.fe_mcvlan_table_cfg.enable;
+ 	mcVlanTableCfg->ppe_entry_id = in_data.api_data.fe_mcvlan_table_cfg.ppe_entry_id;
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MC_VLAN_ACTION_CFG(FE_McVlanActionCfg_t *mcVlanActionCfg)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_MC_VLAN_ACTION_CFG;
+ 	in_data.api_data.fe_mcvlan_action_cfg.mc_table_id = mcVlanActionCfg->mc_table_id;
+@@ -1648,17 +1683,16 @@
+ 	in_data.api_data.fe_mcvlan_action_cfg.mc_vlan = mcVlanActionCfg->mc_vlan;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_MC_VLAN_ACTION_CFG(FE_McVlanActionCfg_t *mcVlanActionCfg)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_MC_VLAN_ACTION_CFG;
+ 	in_data.api_data.fe_mcvlan_action_cfg.mc_table_id = mcVlanActionCfg->mc_table_id;
+@@ -1668,92 +1702,94 @@
+ 	mcVlanActionCfg->mc_vlan_vpm = in_data.api_data.fe_mcvlan_action_cfg.mc_vlan_vpm;
+ 	mcVlanActionCfg->mc_vlan = in_data.api_data.fe_mcvlan_action_cfg.mc_vlan;
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MC_VLAN_CLEAR_ALL(unsigned char mc_table_id)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_MC_VLAN_CLEAR_ALL;
+ 	in_data.api_data.fe_mcvlan_table_cfg.mc_table_id = mc_table_id;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_XFI_PHY_LINK_CHANGE(XFI_LINK_STATUS_t status)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+ 	in_data.function_id = FE_XFI_PHY_LINK_CHANGE;
+ 	in_data.api_data.status = status;
+     
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API,(struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_GDMA_MISC_CONFIG(FE_Gdma_Sel_t _gdm_sel, FE_MISC_CONFIG_t  mode)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_GDMA_MISC_CONFIG;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	in_data.api_data.fe_misc_cfg  = mode;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ 
+ static inline int FE_API_GET_HSGMII_RX_CNT(FE_RxCnt_t *_rxCnt, int hsgmii_index) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_HSGMII_LAN_RX_CNT;
+ 	in_data.index = hsgmii_index;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_rxCnt = in_data.api_data.FE_RxCnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_rxCnt = in_data.api_data.FE_RxCnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_HSGMII_TX_CNT(FE_TxCnt_t *_txCnt, int hsgmii_index) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_HSGMII_LAN_TX_CNT;
+ 	in_data.index = hsgmii_index;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*_txCnt = in_data.api_data.FE_TxCnt;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*_txCnt = in_data.api_data.FE_TxCnt;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_AEWAN_FWDFQ(FE_Gdma_Sel_t _gdm_sel, uint aewan_fwdfq)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_AEWAN_FWDFQ;
+@@ -1761,41 +1797,40 @@
+ 	in_data.reg_val = aewan_fwdfq;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_AEWAN_IFCDISABLE(uint aewan_ifcdisable)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_AEWAN_IFCDISABLE;
+ 	in_data.reg_val = aewan_ifcdisable;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_GMD2_SPTAG_FOR_LOOPBACK(FE_Enable_t enable)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_GMD2_SPTAG_FOR_LOOPBACK;
+ 	in_data.api_data.enable = enable;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline void FE_API_SET_NPU_FORCE_TO_CPU_FLAG(char forceToCpu)
+@@ -1812,9 +1847,8 @@
+ 
+ static inline int FE_API_SET_TUNNEL_CFG(unsigned int tableIndex, unsigned int offset, unsigned int value0,unsigned int value1,unsigned int value2,unsigned int value3)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_TUNNEL_CFG;
+ 	in_data.api_data.fe_tunnel_cfg.tableIndex = tableIndex;
+@@ -1826,18 +1860,17 @@
+ 	
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ 
+ }
+ 
+ static inline int FE_API_SET_GDM_SPTAG_FOR_EXTSWITCH(FE_Enable_t enable, FE_Gdma_Sel_t gdm_sel, uint channel)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_GDM_SPTAG_FOR_EXTSWITCH;
+ 	in_data.api_data.enable = enable;
+@@ -1845,17 +1878,16 @@
+ 	in_data.channel = channel;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_PSE_OQ_RSV_ENABLE(FE_Frame_dp_t port, uint channel, FE_Enable_t enable)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_PSE_OQ_RSV_EN;
+ 	in_data.api_data.fe_oq_rsv_en.port = port;
+@@ -1863,33 +1895,31 @@
+     in_data.api_data.fe_oq_rsv_en.enable = enable;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_MBI_ARB_RST(FE_Gdma_Sel_t gdm_sel)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_MBI_ARB_RST;
+ 	in_data.gdm_sel= gdm_sel;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_RMBI_FRAG(FE_Gdma_Sel_t gdm_sel, uint channel, uint reg_val)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_RMBI_FRAG;
+ 	in_data.gdm_sel= gdm_sel;
+@@ -1897,31 +1927,32 @@
+ 	in_data.reg_val= reg_val;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_GET_CHN_RLS(FE_Gdma_Sel_t _gdm_sel, uint* pval) {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_GET_CHN_RLS;
+ 	in_data.gdm_sel = _gdm_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	*pval = in_data.reg_val;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*pval = in_data.reg_val;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_TMBI_FRAG(FE_Gdma_Sel_t gdm_sel, uint channel, uint reg_val)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	 
+ 	in_data.function_id = FE_SET_TMBI_FRAG;
+ 	in_data.gdm_sel= gdm_sel;
+@@ -1929,105 +1960,103 @@
+ 	in_data.reg_val= reg_val;
+ 	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_GDMA_ENABLE(FE_Gdma_Sel_t gdm_sel)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_GDMA_ENABLE;
+ 	in_data.gdm_sel= gdm_sel;
+ 
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_GDMA_DISABLE(FE_Gdma_Sel_t gdm_sel)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+ 
+ 	in_data.function_id = FE_SET_GDMA_DISABLE;
+ 	in_data.gdm_sel= gdm_sel;
+ 
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ static inline int FE_API_SET_CHN_RETIRE_ACTION(FE_Gdma_Sel_t gdm_sel, unchar channel)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+     
+     in_data.function_id = FE_SET_CHN_RETIRE_ACTION;
+     in_data.gdm_sel = gdm_sel;
+     in_data.channel = channel;
+     ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+         return in_data.retValue;
+     else
+-        return ECNT_HOOK_ERROR;
++        return ret;
+ }
+ 
+ static inline int FE_API_SET_CHN_RETIRE_DONE(FE_Gdma_Sel_t gdm_sel, unchar channel) 
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_CHN_RETIRE_DONE;
+ 	in_data.gdm_sel = gdm_sel;
+ 	in_data.channel = channel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_QBI_FTTR_CHN_DISABLE(void) 
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_QBI_FTTR_CHN_DISABLE;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_FORCE_SLOW_ENABLE(FE_Enable_t _enable) 
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_FORCE_SLOW_ENABLE;
+ 	in_data.api_data.enable = _enable;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_FORCE_SLOW_DUTY(FE_Enable_t fix_duty, uint fast_duty, uint slow_duty) 
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_FORCE_SLOW_DUTY;
+@@ -2035,30 +2064,29 @@
+ 	in_data.api_data.force_slow_cfg.fast_duty		 = fast_duty;
+ 	in_data.api_data.force_slow_cfg.slow_duty 		 = slow_duty;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_VIP_RXQ_SELECTION(unsigned char rxq_sel)
+ {
+-	struct ecnt_fe_data in_data;
+-	int ret = 0;
+-	memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
++	int ret = 0;
+     
+ 	in_data.function_id = FE_SET_VIP_RXQ_SELECTION;
+ 	in_data.channel = rxq_sel;
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_VIP_FOR_TCP_SPEEDTEST(ushort operation,ushort src_port,ushort dst_port)
+ {
+-	struct ecnt_fe_data in_data;
++	struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret = 0;
+ 	
+ 	in_data.function_id = FE_SET_VIP_FOR_TCP_SPEEDTEST;
+@@ -2066,26 +2094,25 @@
+ 	in_data.api_data.vip.src = src_port;
+ 	in_data.api_data.vip.dst = dst_port;	
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int FE_API_SET_DEV_STAT_RATELIMIT_MODE(unsigned int wan_conn_type, char *wan_itf_name)
+ {
+-    struct ecnt_fe_data in_data;
++    struct ecnt_fe_data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ecnt_fe_data)) ;
+ 
+     in_data.function_id = FE_SET_DEV_STAT_RATELIMIT_MODE;
+ 	in_data.api_data.dev_statistics_cfg.wan_conn_type = wan_conn_type;
+ 	memcpy(in_data.api_data.dev_statistics_cfg.wan_itf_name, wan_itf_name, 16);
+ 	ret = __ECNT_HOOK(ECNT_FE, ECNT_FE_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ #endif /* _ECNT_HOOK_FE_H_ */
+--- a/bsp/include/ecnt_hook/ecnt_hook_qdma.h
++++ b/bsp/include/ecnt_hook/ecnt_hook_qdma.h
+@@ -42,6 +42,7 @@
+ *                  I N C L U D E S
+ *************************************************************************
+ */	
++#include <linux/errno.h>
+ #include "ecnt_hook.h"
+ #include "ecnt_hook_qdma_type.h"
+ 
+@@ -64,135 +65,135 @@
+ */
+ 
+ static inline int QDMA_API_INIT(unsigned int mainType, QDMA_InitCfg_t *pInitCfg) {
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_INIT;
+ 	in_data.qdma_private.pInitCfg = pInitCfg;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-			return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++			return ret;
+ }
+ 
+ static inline int QDMA_API_DEINIT(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DEINIT;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-			return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++			return ret;
+ }
+ 
+ static inline int QDMA_API_TX_DMA_MODE(unsigned int mainType, QDMA_Mode_t txMode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_TX_DMA_MODE;
+ 	in_data.qdma_private.mode = txMode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-			return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++			return ret;
+ }
+ 
+ static inline int QDMA_API_RX_DMA_MODE(unsigned int mainType, QDMA_Mode_t rxMode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_RX_DMA_MODE;
+ 	in_data.qdma_private.mode = rxMode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-			return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++			return ret;
+ }
+ 
+ static inline int QDMA_API_LOOPBACK_MODE(unsigned int mainType, QDMA_LoopbackMode_t lbMode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_LOOPBACK_MODE;
+ 	in_data.qdma_private.lbMode = lbMode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_REGISTER_HOOKFUNC(unsigned int mainType, QDMA_CbType_t type, void *pCbFun){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_REGISTER;
+ 	in_data.qdma_private.qdma_reg_cb.type = type ;
+ 	in_data.qdma_private.qdma_reg_cb.pCbFun = pCbFun ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_UNREGISTER_HOOKFUNC(unsigned int mainType, QDMA_CbType_t type){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_UNREGISTER;
+ 	in_data.qdma_private.qdma_reg_cb.type = type ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_ENABLE_RXPKT_INT(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_ENABLE_RXPKT_INT;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_DISABLE_RXPKT_INT(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DISABLE_RXPKT_INT;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_RECEIVE_PACKETS(unsigned int mainType, int maxPkts){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_RECEIVE_PACKETS;
+ 	in_data.qdma_private.cnt = maxPkts ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_TRANSMIT_PACKETS(unsigned int mainType, struct sk_buff *skb, uint msg0, uint msg1, struct port_info *pMacInfo){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	QDMA_TxMsg_Ex_T txMsg;
+ 
+@@ -204,68 +205,70 @@
+ 	in_data.qdma_private.qdma_transmit.pTxMsg = &txMsg;
+ 	in_data.qdma_private.qdma_transmit.pMacInfo = pMacInfo ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TX_QOS_WEIGHT(unsigned int mainType, QDMA_TxQosWeightType_t weightBase, QDMA_TxQosWeightScale_t weightScale){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_QOS_WEIGHT;
+ 	in_data.qdma_private.qdma_tx_qos.weightBase = weightBase ;
+ 	in_data.qdma_private.qdma_tx_qos.weightScale = weightScale ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_QOS_WEIGHT(unsigned int mainType, QDMA_TxQosWeightType_t *pWeightBase, QDMA_TxQosWeightScale_t *pWeightScale){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_QOS_WEIGHT;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	*pWeightBase = in_data.qdma_private.qdma_tx_qos.weightBase ;
+-	*pWeightScale = in_data.qdma_private.qdma_tx_qos.weightScale ;
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*pWeightBase = in_data.qdma_private.qdma_tx_qos.weightBase ;
++		*pWeightScale = in_data.qdma_private.qdma_tx_qos.weightScale ;
++	}
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TX_QOS(unsigned int mainType, QDMA_TxQosScheduler_T *pTxQos){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_QOS;
+ 	in_data.qdma_private.qdma_tx_qos.pTxQos = pTxQos ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_QOS(unsigned int mainType, QDMA_TxQosScheduler_T *pTxQos){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_QOS;
+ 	in_data.qdma_private.qdma_tx_qos.pTxQos = pTxQos ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_MAC_LIMIT_THRESHOLD(unsigned int mainType, uint chnlThrh, uint queueThrh){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	QDMA_MacLimitThrh_T mac_limit_thrh;
+ 	int ret=0;
+ 
+@@ -274,14 +277,14 @@
+ 	mac_limit_thrh.queueThrh = queueThrh ;
+ 	in_data.qdma_private.qdma_mac_limit_thrh = &mac_limit_thrh ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_TRANSMIT_PACKETS_WIFI_FAST(unsigned int mainType, struct sk_buff *skb, int ringIdx){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_TRANSMIT_PACKET_WIFI_FAST;
+@@ -289,53 +292,53 @@
+ 	in_data.qdma_private.qdma_transmit_wifi_fast.ringIdx = ringIdx;
+ 
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_DSCP_CHNL_INFO(unsigned int mainType, QDMA_DscpChnlInfo_T *pDscpChnlInfo){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_DSCP_CHNL_INFO;
+ 	in_data.qdma_private.qdma_dscp_chnl_info = pDscpChnlInfo;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXBUF_THRESHOLD(unsigned int mainType, QDMA_TxBufCtrl_T *pTxBufCtrl){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXBUF_THRESHOLD;
+ 	in_data.qdma_private.pQdmaTxBufCtrl = pTxBufCtrl ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXBUF_THRESHOLD(unsigned int mainType, QDMA_TxBufCtrl_T *pTxBufCtrl){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXBUF_THRESHOLD;
+ 	in_data.qdma_private.pQdmaTxBufCtrl = pTxBufCtrl ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_PREFETCH_MODE(unsigned int mainType, QDMA_Mode_t prefecthMode, QDMA_Mode_t overDragMode, uint overDragCnt){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	QDMA_PrefetchMode_T qdma_prefetch;
+ 	int ret=0;
+ 
+@@ -345,442 +348,440 @@
+ 	qdma_prefetch.overDragCnt = overDragCnt ;	
+ 	in_data.qdma_private.qdma_prefetch = &qdma_prefetch ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_PKTSIZE_OVERHEAD_EN(unsigned int mainType, QDMA_Mode_t mode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_PKTSIZE_OVERHEAD_EN;
+ 	in_data.qdma_private.mode = mode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline QDMA_Mode_t QDMA_API_GET_PKTSIZE_OVERHEAD_EN(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_PKTSIZE_OVERHEAD_EN;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
++	if (ret >= 0)
+ 		return in_data.retValue;
+ 	else
+ 			return (QDMA_Mode_t)ECNT_HOOK_ERROR;
+ }
+ 
+ static inline int QDMA_API_SET_PKTSIZE_OVERHEAD_VALUE(unsigned int mainType, int cnt){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_PKTSIZE_OVERHEAD_VALUE;
+ 	in_data.qdma_private.cnt = cnt ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline uint QDMA_API_GET_PKTSIZE_OVERHEAD_VALUE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_PKTSIZE_OVERHEAD_VALUE;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_LMGR_LOW_THRESHOLD(unsigned int mainType, uint lowThrh){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_LMGR_LOW_THRESHOLD;
+ 	in_data.qdma_private.threshold = lowThrh ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline uint QDMA_API_GET_LMGR_LOW_THRESHOLD(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_LMGR_LOW_THRESHOLD;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ #if defined(TCSUPPORT_CPU_EN7580)
+ static inline int QDMA_API_ENABLE_RXPKT_INT2(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_ENABLE_RXPKT_INT2;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_DISABLE_RXPKT_INT2(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DISABLE_RXPKT_INT2;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_RECEIVE_PACKETS_INT2(unsigned int mainType, int maxPkts){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_RECEIVE_PACKETS_INT2;
+ 	in_data.qdma_private.cnt = maxPkts ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_TRTCM_INIT(unsigned int mainType, GENERAL_TrtcmCfg_T *generalTrtcmCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_TRTCM_CFG;
+ 	in_data.qdma_private.generalTrtcmCfgPtr = generalTrtcmCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_GENERAL_TRTCM_INIT(unsigned int mainType, GENERAL_TrtcmCfg_T *generalTrtcmCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_GET_TRTCM_CFG;
+ 	in_data.qdma_private.generalTrtcmCfgPtr = generalTrtcmCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_RATELIMIT_CFG(unsigned int mainType, GENERAL_TrtcmRatelimitCfg_T *generalTrtcmRatelimitCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_RATELIMIT_MODE_CFG;
+ 	in_data.qdma_private.generalTrtcmRatelimitCfgPtr = generalTrtcmRatelimitCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_GENERAL_RATELIMIT_CFG(unsigned int mainType, GENERAL_TrtcmRatelimitCfg_T *generalTrtcmRatelimitCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_GET_RATELIMIT_MODE_CFG;
+ 	in_data.qdma_private.generalTrtcmRatelimitCfgPtr = generalTrtcmRatelimitCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_RATELIMIT_VALUE(unsigned int mainType, GENERAL_TrtcmRatelimitSet_T *generalTrtcmRatelimitSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_RATELIMIT_MODE_VALUE;
+ 	in_data.qdma_private.generalTrtcmRatelimitSetPtr = generalTrtcmRatelimitSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_GENERAL_RATELIMIT_VALUE(unsigned int mainType, GENERAL_TrtcmRatelimitSet_T *generalTrtcmRatelimitSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_GET_RATELIMIT_MODE_VALUE;
+ 	in_data.qdma_private.generalTrtcmRatelimitSetPtr = generalTrtcmRatelimitSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_RATELIMIT_BUCKET_SIZE(unsigned int mainType, GENERAL_TrtcmRatelimitSet_T *generalTrtcmRatelimitSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_RATELIMIT_BUCKET_SIZE;
+ 	in_data.qdma_private.generalTrtcmRatelimitSetPtr = generalTrtcmRatelimitSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_TRTCM_CFG(unsigned int mainType, GENERAL_TrtcmCbsPbsCfg_T *generalTrtcmCbsPbsCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_TRTCM_MODE_CFG;
+ 	in_data.qdma_private.generalTrtcmCbsPbsCfgPtr = generalTrtcmCbsPbsCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_GENERAL_TRTCM_CFG(unsigned int mainType, GENERAL_TrtcmCbsPbsCfg_T *generalTrtcmCbsPbsCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_GET_TRTCM_MODE_CFG;
+ 	in_data.qdma_private.generalTrtcmCbsPbsCfgPtr = generalTrtcmCbsPbsCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_TRTCM_VALUE(unsigned int mainType, GENERAL_TrtcmCbsPbsSet_T *generalTrtcmCbsPbsSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_TRTCM_MODE_VALUE;
+ 	in_data.qdma_private.generalTrtcmCbsPbsSetPtr = generalTrtcmCbsPbsSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_GENERAL_TRTCM_VALUE(unsigned int mainType, GENERAL_TrtcmCbsPbsSet_T *generalTrtcmCbsPbsSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_GET_TRTCM_MODE_VALUE;
+ 	in_data.qdma_private.generalTrtcmCbsPbsSetPtr = generalTrtcmCbsPbsSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_GENERAL_TRTCM_BUCKET_SIZE(unsigned int mainType, GENERAL_TrtcmCbsPbsSet_T *generalTrtcmCbsPbsSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_TRTCM_BUCKET_SIZE;
+ 	in_data.qdma_private.generalTrtcmCbsPbsSetPtr = generalTrtcmCbsPbsSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_FLOW_CNTR_CFG(unsigned int mainType, QDMA_FlowCntIncDropCfg_T *flowCntIncDropCfg){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_FLOW_CNTR_CFG;
+ 	in_data.qdma_private.flowCntIncDropCfg = flowCntIncDropCfg ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_FLOW_CNTR_CFG(unsigned int mainType, QDMA_FlowCntIncDropCfg_T *flowCntIncDropCfg){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_FLOW_CNTR_CFG;
+ 	in_data.qdma_private.flowCntIncDropCfg = flowCntIncDropCfg ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_FLOW_CNTR_VALUE(unsigned int mainType, QDMA_FlowCntValueGet_T *flowCntValueGet){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_FLOW_CNTR_VALUE;
+ 	in_data.qdma_private.flowCntValueGet = flowCntValueGet ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_CLEAR_FLOW_CNTR_VALUE(unsigned int mainType, QDMA_FlowCntValueClear_T *flowCntValueClear){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_CLEAR_FLOW_CNTR_VALUE;
+ 	in_data.qdma_private.flowCntValueClear = flowCntValueClear ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_CHANNEL_CLOSE_STATUS(unsigned int mainType, QDMA_ChannelStatus_T *chnlCloseStatusSet){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_CHANNEL_CLOSE_STATUS;
+ 	in_data.qdma_private.chnlCloseStatusSet = chnlCloseStatusSet ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_CHANNEL_CLOSE_STATUS(unsigned int mainType, QDMA_ChannelStatus_T *chnlCloseStatusGet){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_CHANNEL_CLOSE_STATUS;
+ 	in_data.qdma_private.chnlCloseStatusGet = chnlCloseStatusGet ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_CHANNEL_EMPTY_STATUS(unsigned int mainType, QDMA_ChannelStatus_T *chnlEmptyStatusGet){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_CHANNEL_EMPTY_STATUS;
+ 	in_data.qdma_private.chnlEmptyStatusGet = chnlEmptyStatusGet ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_OAM_MODIFY_FP_EN(unsigned int mainType, QDMA_Mode_t mode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_OAM_MODIFY_FP_EN;
+ 	in_data.qdma_private.mode = mode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_OAM_MODIFY_FP_EN(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_OAM_MODIFY_FP_EN;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_MULTICAST_EN(unsigned int mainType, QDMA_Mode_t mode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_MULTICAST_EN;
+ 	in_data.qdma_private.mode = mode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_MULTICAST_EN(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_MULTICAST_EN;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_ALLOCATE_METER(unsigned int mainType, QDMA_MeterManage_T *meterManage){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_ALLOCATE_METER;
+     in_data.qdma_private.meterManage = meterManage ;  
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_FREE_METER(unsigned int mainType, int meter_idx){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     QDMA_MeterManage_T meterManage;
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+     memset(&meterManage, 0, sizeof(QDMA_MeterManage_T)) ;
+ 
+     meterManage.meter_id = (meter_idx&0xff);
+@@ -788,238 +789,225 @@
+     in_data.function_id = QDMA_FUNCTION_FREE_METER;
+     in_data.qdma_private.meterManage = &meterManage ;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_QOS_FLAG(unsigned int mainType, int *qos_flag_num){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     QDMA_MeterManage_T meterManage;
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+     memset(&meterManage, 0, sizeof(QDMA_MeterManage_T)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_QOS_FLAG;
+     in_data.qdma_private.meterManage = &meterManage ;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-    *qos_flag_num = meterManage.Qos_flag;
+-    if(ret != ECNT_HOOK_ERROR)
++	if (ret >= 0 && in_data.retValue >= 0) {
++		*qos_flag_num = meterManage.Qos_flag;
++	}
++    if (ret >= 0)
+         return in_data.retValue;
+     else
+-        return ECNT_HOOK_ERROR;
++        return ret;
+ }
+ 
+ static inline int QDMA_API_ALLOCATE_ACNT(unsigned int mainType, QDMA_AcntManage_T *acntManage){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_ALLOCATE_ACNT;
+     in_data.qdma_private.acntManage = acntManage;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_FREE_ACNT(unsigned int mainType, QDMA_AcntManage_T *acntManage){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_FREE_ACNT;
+     in_data.qdma_private.acntManage = acntManage;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ #if defined(TCSUPPORT_CPU_EN7581) || defined(TCSUPPORT_CPU_EN7523)
+ static inline int QDMA_API_SET_SLA_CHANNEL_CFG(unsigned int mainType, QDMA_SlaChnlCfg_T *slaChnlCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_SLA_CHANNEL_CFG;
+     in_data.qdma_private.slaChnlCfgPtr = slaChnlCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_SLA_CHANNEL_CFG(unsigned int mainType, QDMA_SlaChnlCfg_T *slaChnlCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_SLA_CHANNEL_CFG;
+     in_data.qdma_private.slaChnlCfgPtr = slaChnlCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_QOS_AGING_CFG(unsigned int mainType, QDMA_QoSAgingCfg_T *qosAgingCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_QOS_AGING_CFG;
+     in_data.qdma_private.qosAgingCfgPtr = qosAgingCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_QOS_AGING_CFG(unsigned int mainType, QDMA_QoSAgingCfg_T *qosAgingCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_QOS_AGING_CFG;
+     in_data.qdma_private.qosAgingCfgPtr = qosAgingCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_PER_QUEUE_AGING_CFG(unsigned int mainType, QDMA_TxQAgingCfg_T *txqAgingCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_PER_QUEUE_AGING_CFG;
+     in_data.qdma_private.txqAgingCfgPtr = txqAgingCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_PER_QUEUE_AGING_CFG(unsigned int mainType, QDMA_TxQAgingCfg_T *txqAgingCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_PER_QUEUE_AGING_CFG;
+     in_data.qdma_private.txqAgingCfgPtr = txqAgingCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_MULTICAST_SPTAG_CFG(unsigned int mainType, QDMA_MulticastSptagCfg_T *multicastSptagCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_MULTICAST_SPTAG_CFG;
+     in_data.qdma_private.multicastSptagCfgPtr = multicastSptagCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_MULTICAST_SPTAG_CFG(unsigned int mainType, QDMA_MulticastSptagCfg_T *multicastSptagCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_MULTICAST_SPTAG_CFG;
+     in_data.qdma_private.multicastSptagCfgPtr = multicastSptagCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_MULTICAST_FPORT_CFG(unsigned int mainType, QDMA_MulticastFportCfg_T *multicastFportCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_MULTICAST_FPORT_CFG;
+     in_data.qdma_private.multicastFportCfgPtr = multicastFportCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_MULTICAST_FPORT_CFG(unsigned int mainType, QDMA_MulticastFportCfg_T *multicastFportCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_MULTICAST_FPORT_CFG;
+     in_data.qdma_private.multicastFportCfgPtr = multicastFportCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_STATIC_CHANNEL_EN(unsigned int mainType, QDMA_TxQStaticCfg_T *staticThrhCfg){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_TXQ_STATIC_CHANNEL_EN;
+     in_data.qdma_private.staticThrhCfgPtr = staticThrhCfg;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_STATIC_QUEUE_RATIO(unsigned int mainType, QDMA_TxQStaticThrRatio_T *staticThrhRatio){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_TXQ_STATIC_QUEUE_RATIO;
+     in_data.qdma_private.staticThrhRatioPtr = staticThrhRatio;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ 
+ 
+ static inline int QDMA_API_GET_HQOS_EN(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_HQOS_EN;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ #else
+ static inline int QDMA_API_GET_HQOS_EN(unsigned int mainType){
+@@ -1048,808 +1036,806 @@
+ #endif
+ 
+ static inline int QDMA_API_SET_MULTICAST_1TON_CFG(unsigned int mainType){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_SET_MULTICAST_1TON_CFG;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_GET_CHANNEL_CFG(unsigned int mainType, unsigned int channel){
+-    struct ECNT_QDMA_Data in_data;
++    struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+     int ret = 0;
+-    memset(&in_data, 0, sizeof(struct ECNT_QDMA_Data)) ;
+ 
+     in_data.function_id = QDMA_FUNCTION_GET_CHANNEL_CFG;
+ 	in_data.qdma_private.channel= channel;
+     ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);   
+-    if(ret != ECNT_HOOK_ERROR)
++    if (ret >= 0)
+     	return in_data.retValue;
+     else
+-    	return ECNT_HOOK_ERROR;
++    	return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TX_DROP_EN(unsigned int mainType, QDMA_Mode_t mode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_DROP_EN;
+ 	in_data.qdma_private.mode = mode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_DROP_EN(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_DROP_EN;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TX_RATEMETER(unsigned int mainType, QDMA_TxRateMeter_T *txRateMeterPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_RATEMETER;
+ 	in_data.qdma_private.txRateMeterPtr = txRateMeterPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_RATEMETER(unsigned int mainType, QDMA_TxRateMeter_T *txRateMeterPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_RATEMETER;
+ 	in_data.qdma_private.txRateMeterPtr = txRateMeterPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_ENABLE_TX_RATELIMIT(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_ENABLE_TX_RATELIMIT;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ #if 0
+ static inline int QDMA_API_SET_TX_RATELIMIT_CFG(unsigned int mainType, QDMA_TxRateLimitCfg_T *txRateLimitCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_RATELIMIT_CFG;
+ 	in_data.qdma_private.txRateLimitCfgPtr = txRateLimitCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_RATELIMIT_CFG(unsigned int mainType, QDMA_TxRateLimitCfg_T *txRateLimitCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_RATELIMIT_CFG;
+ 	in_data.qdma_private.txRateLimitCfgPtr = txRateLimitCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ #endif
+ 
+ static inline int QDMA_API_SET_TX_RATELIMIT(unsigned int mainType, QDMA_TxRateLimitSet_T *txRateLimitSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_RATELIMIT;
+ 	in_data.qdma_private.txRateLimitSetPtr = txRateLimitSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_RATELIMIT(unsigned int mainType, QDMA_TxRateLimitGet_T *txRateLimitGetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_RATELIMIT;
+ 	in_data.qdma_private.txRateLimitGetPtr = txRateLimitGetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TX_DBA_REPORT(unsigned int mainType, QDMA_TxDbaReport_T *txDbaReportPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TX_DBAREPORT;
+ 	in_data.qdma_private.txDbaReportPtr = txDbaReportPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TX_DBA_REPORT(unsigned int mainType, QDMA_TxDbaReport_T *txDbaReportPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TX_DBAREPORT;
+ 	in_data.qdma_private.txDbaReportPtr = txDbaReportPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_RX_PROTECT_EN(unsigned int mainType, QDMA_Mode_t mode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_RX_PROTECT_EN;
+ 	in_data.qdma_private.mode = mode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_RX_PROTECT_EN(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_RX_PROTECT_EN;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_RX_LOW_THRESHOLD(unsigned int mainType, QDMA_RxLowThreshold_T *rxLowThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_RX_LOW_THRESHOLD;
+ 	in_data.qdma_private.rxLowThresholdPtr = rxLowThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_RX_LOW_THRESHOLD(unsigned int mainType, QDMA_RxLowThreshold_T *rxLowThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_RX_LOW_THRESHOLD;
+ 	in_data.qdma_private.rxLowThresholdPtr = rxLowThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_RX_RATELIMIT_EN(unsigned int mainType, QDMA_Mode_t mode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_RX_RATELIMIT_EN;
+ 	in_data.qdma_private.mode = mode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_RX_RATELIMIT_PKT_MODE(unsigned int mainType, QDMA_RxPktMode_t pktMode )
+ {
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_RX_RATELIMIT_PKT_MODE;
+ 	in_data.qdma_private.pktMode = pktMode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_RX_RATELIMIT_CFG(unsigned int mainType, QDMA_RxRateLimitCfg_T *rxRateLimitCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_RX_RATELIMIT_CFG;
+ 	in_data.qdma_private.rxRateLimitCfgPtr = rxRateLimitCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_RX_RATELIMIT(unsigned int mainType, QDMA_RxRateLimitSet_T *rxRateLimitSetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_RX_RATELIMIT;
+ 	in_data.qdma_private.rxRateLimitSetPtr = rxRateLimitSetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_RX_RATELIMIT(unsigned int mainType, QDMA_RxRateLimitGet_T *rxRateLimitGetPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_RX_RATELIMIT;
+ 	in_data.qdma_private.rxRateLimitGetPtr = rxRateLimitGetPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_DEI_DROP_MODE(unsigned int mainType, QDMA_Mode_t deiDropMode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_DEI_DROP_MODE;
+ 	in_data.qdma_private.mode = deiDropMode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline QDMA_Mode_t QDMA_API_GET_TXQ_DEI_DROP_MODE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_DEI_DROP_MODE;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
++	if (ret >= 0)
+ 		return in_data.retValue;
+ 	else
+ 			return (QDMA_Mode_t)ECNT_HOOK_ERROR;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_MODE(unsigned int mainType, QDMA_Mode_t dynCngstEn){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_MODE;
+ 	in_data.qdma_private.mode = dynCngstEn ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline QDMA_Mode_t QDMA_API_GET_TXQ_CNGST_MODE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_MODE;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
++	if (ret >= 0)
+ 		return in_data.retValue;
+ 	else
+ 			return (QDMA_Mode_t)ECNT_HOOK_ERROR;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_DEI_THRESHOLD_SCALE(unsigned int mainType, QDMA_TxDynCngstDeiThrhScale_t deiThrhScale){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_DEI_THRH_SCALE;
+ 	in_data.qdma_private.threshold = deiThrhScale ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline QDMA_TxDynCngstDeiThrhScale_t QDMA_API_GET_TXQ_DEI_THRESHOLD_SCALE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_DEI_THRH_SCALE;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
++	if (ret >= 0)
+ 		return in_data.retValue;
+ 	else
+ 			return (QDMA_TxDynCngstDeiThrhScale_t)ECNT_HOOK_ERROR;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_AUTO_CONFIG(unsigned int mainType, QDMA_txCngstCfg_t *pTxCngstCfg){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_AUTO_CONFIG;
+ 	in_data.qdma_private.pTxCngstCfg = pTxCngstCfg ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_AUTO_CONFIG(unsigned int mainType, QDMA_txCngstCfg_t *pTxCngstCfg){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_AUTO_CONFIG;
+ 	in_data.qdma_private.pTxCngstCfg = pTxCngstCfg ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_DYNAMIC_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstThrh_T *txqCngstThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_DYNAMIC_THRESHOLD;
+ 	in_data.qdma_private.dynCngstThrhPtr = txqCngstThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_DYNAMIC_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstThrh_T *txqCngstThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_DYNAMIC_THRESHOLD;
+ 	in_data.qdma_private.dynCngstThrhPtr = txqCngstThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_TOTAL_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstTotalThrh_T *totalThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_TOTAL_THRESHOLD;
+ 	in_data.qdma_private.totalThrhPtr = totalThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_TOTAL_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstTotalThrh_T *totalThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_TOTAL_THRESHOLD;
+ 	in_data.qdma_private.totalThrhPtr = totalThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_CHANNEL_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstChnlThrh_T *chnlThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_CHANNEL_THRESHOLD;
+ 	in_data.qdma_private.chnlThrhPtr = chnlThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_CHANNEL_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstChnlThrh_T *chnlThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_CHANNEL_THRESHOLD;
+ 	in_data.qdma_private.chnlThrhPtr = chnlThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_QUEUE_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstQueueThrh_T *queueThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_QUEUE_THRESHOLD;
+ 	in_data.qdma_private.queueThrhPtr = queueThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_QUEUE_THRESHOLD(unsigned int mainType, QDMA_TxQDynCngstQueueThrh_T *queueThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_QUEUE_THRESHOLD;
+ 	in_data.qdma_private.queueThrhPtr = queueThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_QUEUE_NONBLOCKING(unsigned int mainType, QDMA_TxQCngstQueueCfg_T *txqCngstQueueCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_QUEUE_NONBLOCKING;
+ 	in_data.qdma_private.txqCngstQueueCfgPtr = txqCngstQueueCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_QUEUE_NONBLOCKING(unsigned int mainType, QDMA_TxQCngstQueueCfg_T *txqCngstQueueCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_QUEUE_NONBLOCKING;
+ 	in_data.qdma_private.txqCngstQueueCfgPtr = txqCngstQueueCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_CNGST_CHANNEL_NONBLOCKING(unsigned int mainType, QDMA_TxQCngstChannelCfg_T *txqCngstChannelCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_CNGST_CHANNEL_NONBLOCKING;
+ 	in_data.qdma_private.txqCngstChannelCfgPtr = txqCngstChannelCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_CHANNEL_NONBLOCKING(unsigned int mainType, QDMA_TxQCngstChannelCfg_T *txqCngstChannelCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_CHANNEL_NONBLOCKING;
+ 	in_data.qdma_private.txqCngstChannelCfgPtr = txqCngstChannelCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ 
+ static inline int QDMA_API_SET_TXQ_PEEKRATE_PARAMS(unsigned int mainType, QDMA_PeekRateCfg_t *peekrateCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_PEEKRATE_PARAMS;
+ 	in_data.qdma_private.peekrateCfgPtr = peekrateCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_PEEKRATE_PARAMS(unsigned int mainType, QDMA_PeekRateCfg_t *peekrateCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_PEEKRATE_PARAMS;
+ 	in_data.qdma_private.peekrateCfgPtr = peekrateCfgPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_STATIC_QUEUE_NORMAL_THRESHOLD(unsigned int mainType, QDMA_TxQStaticNormalCfg_T *normThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_STATIC_QUEUE_NORMAL_THRESHOLD;
+ 	in_data.qdma_private.normThrhPtr = normThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_TXQ_STATIC_QUEUE_DEI_THRESHOLD(unsigned int mainType, QDMA_TxQStaticDeiCfg_T *deiThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXQ_STATIC_QUEUE_DEI_THRESHOLD;
+ 	in_data.qdma_private.deiThrhPtr = deiThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_DYNAMIC_INFO(unsigned int mainType, QDMA_TxQDynamicCngstInfo_T *allThrhPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_DYNAMIC_INFO;
+ 	in_data.qdma_private.dynCfgPtr = allThrhPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_TXQ_CNGST_STATIC_INFO(unsigned int mainType, QDMA_TxQStaticCngstInfo_T *staticInfoPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_TXQ_CNGST_STATIC_INFO;
+ 	in_data.qdma_private.staticCfgPtr = staticInfoPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_VIRTUAL_CHANNEL_MODE(unsigned int mainType, QDMA_VirtualChannelMode_T *virChnlModePtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_VIRTUAL_CHANNEL_MODE;
+ 	in_data.qdma_private.virChnlModePtr = virChnlModePtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_VIRTUAL_CHANNEL_MODE(unsigned int mainType, QDMA_VirtualChannelMode_T *virChnlModePtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_VIRTUAL_CHANNEL_MODE;
+ 	in_data.qdma_private.virChnlModePtr = virChnlModePtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_VIRTUAL_CHANNEL_QOS(unsigned int mainType, QDMA_VirtualChannelQoS_T *virChnlQoSPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_VIRTUAL_CHANNEL_QOS;
+ 	in_data.qdma_private.virChnlQoSPtr = virChnlQoSPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_VIRTUAL_CHANNEL_QOS(unsigned int mainType, QDMA_VirtualChannelQoS_T *virChnlQoSPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_VIRTUAL_CHANNEL_QOS;
+ 	in_data.qdma_private.virChnlQoSPtr = virChnlQoSPtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_READ_VIP_INFO(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	in_data.function_id = QDMA_FUNCTION_READ_VIP_INFO;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_SET_CNTR_CHANNEL(unsigned int mainType,unsigned channel_id){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	in_data.function_id = QDMA_FUNCTION_SET_CHANNEL;
+ 	in_data.qdma_private.channel = channel_id;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_DUMP_CNTR_CHANNEL(unsigned int mainType,unsigned channel_id){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	in_data.function_id = QDMA_FUNCTION_DUMP_CHANNEL;
+ 	in_data.qdma_private.channel = channel_id;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_SET_MAC_QOS_CONFIG(unsigned int mainType, QDMA_MacQoSCfg_T *macQosCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	in_data.function_id = QDMA_FUNCTION_SET_MAC_QOS_CONFIG;
+ 	in_data.qdma_private.macQosCfg = macQosCfgPtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_RESET(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	in_data.function_id = QDMA_FUNCTION_RESET;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_DBG_CNTR_ALL_QUEUE_COUNTER(unsigned int mainType, QDMA_TxQCngstAllQueueValue_T *txqCngstAllQueueValuePtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 	in_data.function_id = QDMA_FUNCTION_GET_ALL_QUEUE_DBGCNTR;
+ 	in_data.qdma_private.txqCngstAllQueueValuePtr = txqCngstAllQueueValuePtr ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_DRAM_TEST_DMA_CONFIG(unsigned int mainType, QDMA_DramTestCfg_T *dramTestCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DRAM_TEST_DMA_CONFIG;
+ 	in_data.qdma_private.dramTestCfgPtr = dramTestCfgPtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_DRAM_TEST_DMA_ENABLE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DRAM_TEST_DMA_ENABLE;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_DRAM_TEST_RX_DONE(unsigned int mainType, QDMA_DramTestCfg_T *dramTestCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DRAM_TEST_RX_DONE;
+ 	in_data.qdma_private.dramTestCfgPtr = dramTestCfgPtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
++	if (ret >= 0)
+ 		return dramTestCfgPtr->rxDone;
+ 	else
+-		return ECNT_HOOK_ERROR;
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_DRAM_TEST_DST_GET(unsigned int mainType, QDMA_DramTestCfg_T *dramTestCfgPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_DRAM_TEST_DST_GET;
+ 	in_data.qdma_private.dramTestCfgPtr = dramTestCfgPtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ 
+ static inline int QDMA_API_GET_DBG_CNTR_RX_RING_COUNTER(unsigned int mainType, QDMA_RX_Ring_Cnt_T *rxRingPtr){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	if(QDMA_FUNCTION_DUMP_TX_QOS - QDMA_FUNCTION_GET_ALL_QUEUE_DBGCNTR < 2)
+@@ -1863,14 +1849,14 @@
+ 	in_data.qdma_private.rxRingCntPtr = rxRingPtr;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_SET_TXMSG(unsigned int mainType, QDMA_TxMsg_Ex_T* pTxMsg,QDMA_SET_TXMSG_FIELD_t field,unsigned int value){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_TXMSG;
+@@ -1880,14 +1866,14 @@
+ 
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_TRANSMIT_PACKETS_FULLMSG(unsigned int mainType, struct sk_buff *skb,QDMA_TxMsg_Ex_T* pTxMsg, struct port_info *pMacInfo){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_TRANSMIT_PACKETS;
+@@ -1895,14 +1881,14 @@
+ 	in_data.qdma_private.qdma_transmit.pTxMsg = pTxMsg ;
+ 	in_data.qdma_private.qdma_transmit.pMacInfo = pMacInfo ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ }
+ 
+ static inline int QDMA_API_GET_RXMSG(unsigned int mainType, void* pRxMsg,QDMA_GET_RXMSG_FIELD_t field,unsigned int* pValue){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_RXMSG;
+@@ -1912,14 +1898,14 @@
+ 
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_GET_RXMSG_ETHER(unsigned int mainType, void* pRxMsg,QDMA_RxMsg_Ether_T* p_rxmsg_eth){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_RXMSG_ETH;
+@@ -1928,50 +1914,50 @@
+ 
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_CHECK_DSCP_IS_FREE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_CHECK_DSCP_IS_FREE;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_SET_DOWNSTREAM_QOS_MODE(unsigned int mainType){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_DOWNSTREAM_QOS;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ static inline int QDMA_API_GET_DOWNSTREAM_QOS_MODE(unsigned int mainType, QDMA_Mode_t dnStreamQosMode){
+-	struct ECNT_QDMA_Data in_data;
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret=0;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GET_DOWNSTREAM_QOS;
+ 	in_data.qdma_private.mode = dnStreamQosMode ;
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API, (struct ecnt_data *)&in_data);
+ 
+-	if(ret != ECNT_HOOK_ERROR)
+-		return in_data.retValue;
+-	else
+-		return ECNT_HOOK_ERROR;
++	if (ret >= 0)
++		return in_data.retValue;
++	else
++		return ret;
+ } 
+ 
+ /************************************************************************
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1178,6 +1178,10 @@
+ 	/* A platform driver can register successfully without binding a device. */
+ 	if (!get_xpon_dev() || get_xpon_irq(0) < 0 || get_xpon_irq(1) < 0)
+ 		return -ENODEV;
++	/* Missing dynamic hooks are not reported by the module linker. */
++	if (!ecnt_hook_is_registered(ECNT_QDMA_WAN, ECNT_DRIVER_API) ||
++	    !ecnt_hook_is_registered(ECNT_FE, ECNT_FE_API))
++		return -ENODEV;
+ #endif
+ 
+ 	printk("xPON driver initialing.\n");

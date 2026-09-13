@@ -117,6 +117,17 @@ so most missing providers do **not** appear as unresolved linker symbols.
 The [15-symbol list](XGSPON-STATUS.q1000k.md#kernel-audit) is only the linker
 boundary, not the complete runtime dependency list.
 
+The API wrappers now initialize every request with an unsupported error and
+zero the other fields. A missing/inactive hook returns the legacy hook error;
+an unhandled request returns `-EOPNOTSUPP`. Negative dispatcher/provider
+errors propagate. Getter fields copied from request storage are published
+only after success (direct output pointers remain the provider's contract).
+The MAC rejects absent QDMA WAN/FE providers before initializing hardware.
+This is only a readiness snapshot: it neither pins callback registration nor
+proves that all required operations exist. Many old callers still ignore API
+errors, and shared DMA start/stop plus partial-initialization cleanup must be
+replaced by a proper consumer lifecycle before the vendor stack is enabled.
+
 ## OMCI implementation decision
 
 The two candidates were compiled locally, without installation or execution on

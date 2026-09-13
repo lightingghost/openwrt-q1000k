@@ -150,6 +150,16 @@ semantics for strobes. PHY/MAC initialization rejects absent resource providers.
 This does not establish reset/clock sequencing or error propagation through
 legacy void/value-only register APIs. See the integration audit for limits.
 
+Patch 008 initializes every QDMA/FE request with `-EOPNOTSUPP`, propagates
+negative dispatcher errors, and publishes copied getter fields only on
+success. Hook dispatch checks indices before indexing and inspects lists
+under RCU; inactive providers count as absent. The MAC checks for QDMA WAN
+and FE providers before initialization. Host fixtures cover missing/inactive
+providers, unhandled requests, error propagation, copied outputs and packet
+ownership at the wrapper boundary. The checks do not pin a provider or
+implement the shared Ethernet adapter; caller error handling and teardown
+still need work.
+
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
 type/format errors and unresolved symbols remain fatal. The imported MAC's
