@@ -138,6 +138,8 @@ partial registration rollback are supported. Hook descriptors and callback
 code must remain valid until unregister returns; readiness and enable queries
 still provide no reference or capability guarantee. The raw QDMA callbacks
 installed by `QDMA_API_INIT` are outside this registry's lifetime contract.
+Patch 016 removes that packet callback path from Q1000K; other vendor targets
+still use it. ECNT remains required for the outstanding control/QoS operations.
 
 Patch 012 tracks completed MAC startup stages and preserves failure codes.
 Netdev open and hook/RX/event dispatch remain closed until the worker and all
@@ -174,8 +176,8 @@ Kernel patch `9997-net-airoha-q1000k-pon-consumer.patch` implements the native
 packet attachment API in `include/linux/soc/airoha/airoha_pon.h`. The disabled
 Q1000K GDM2 node now declares `airoha,pon-port`, with a matching binding. Probe
 rejects this role on other boards, SoCs, GDM ports or nonzero NBOQ. Neither
-GDM2 nor the PON PCS/MAC is enabled; no vendor hook adapter consumes this API
-in this checkpoint.
+GDM2 nor the PON PCS/MAC is enabled. Vendor patch 016 now consumes this API
+directly for Q1000K packets, as described below.
 
 The native Ethernet driver keeps ownership of QDMA rings, IRQs, NAPI, DMA
 mapping, completion and shared LAN resources. The consumer passes explicit
@@ -195,8 +197,8 @@ After the ring-capacity check, `skb_orphan()` releases a consumer/socket
 destructor before the native driver retains the packet for DMA completion.
 Both ring-space recovery and BQL completions notify the consumer to schedule
 another TX attempt. The wake callback must not submit inline under the native
-queue lock; an eventual adapter must implement deferred retry and prevent lost
-wakeup races around upper-queue stopping.
+queue lock. Patch 016 uses a deferred retry queue with a timer fallback so a
+wakeup racing a busy return cannot strand a packet.
 
 RX delivers complete raw frames before Ethernet header parsing, DSA, PPE,
 hashing or GRO. It preserves the first descriptor's four host-endian metadata
@@ -221,7 +223,7 @@ descriptor reclamation. Neither is an optical-off operation.** Already-submitted
 DMA can complete after release, and a generation does not flush descriptors
 received in hardware before a new attachment. Physical TX/RX gating, FE/optical
 FIFO draining, actual GDM padding/CRC behavior,
-reset/clock coordination, FE flow programming and the vendor adapter remain
+reset/clock coordination, FE flow programming and control/QoS integration remain
 necessary before activation. The lower phylink/optical connection is also not
 established by this patch. The vendor package stays `BROKEN`, unselected and
 without autoload; service start continues to fail explicitly.
@@ -279,8 +281,7 @@ checks remain separate. GDM2, the MAC and PON PCS remain disabled.
 ## Vendor packet adapter findings
 
 The native API cannot be connected to the original vendor callbacks unchanged.
-Patch 014 now addresses the first two findings on Q1000K; TX ownership and
-event/poll integration remain outstanding:
+Patches 014 and 016 address the following original findings on Q1000K:
 
 - The original `pwan_cb_rx_packet()` expects DMA-written data in an skb whose logical length
   is still zero; it later calls `skb_put(pktLen)`. Native RX already sets the
@@ -292,18 +293,18 @@ event/poll integration remain outstanding:
   management frames must be selected from validated descriptor metadata and
   handled separately from Ethernet parsing. Merely setting protocol zero
   after `eth_type_trans()` does not restore the header bytes it removed.
-- The TX caller frees the skb again for nonzero QDMA results even though its
+- The original TX caller frees the skb again for nonzero QDMA results even though its
   comment says the QDMA call consumed it. Native `NETDEV_TX_BUSY` instead
   retains an unchanged skb; native `NETDEV_TX_OK` consumes it on success or
   failure. The adapter must define one ownership contract and deferred retry,
   and the vendor caller must use it consistently.
-- The vendor receive-event path schedules its own NAPI and changes QDMA RX
+- The legacy receive-event path schedules its own NAPI and changes QDMA RX
   interrupts. Native NAPI already owns receive delivery; those event/poll hooks
   cannot control the same ring a second time.
 
 These findings are from the prepared imported source, not from device tests.
-The vendor adapter remains unwired; a success-only hook shim would hide these
-incompatibilities and does not satisfy the integration plan.
+The native packet adapter below replaces those interfaces. It does not provide
+the remaining FE/QoS control operations or establish physical PON service.
 
 ## Q1000K RX framing checkpoint (2026-09-13)
 
@@ -373,6 +374,63 @@ vendor APK builds as release 12 without unresolved symbols or autoload.
 
 This checkpoint does not establish hardware CMAC/key selection, authenticate
 incoming MICs, connect the native TX adapter or validate an OMCI service.
+
+## Native vendor packet adapter checkpoint (2026-09-13)
+
+Vendor patch 016 connects the MAC's Q1000K packet path to the native Ethernet
+consumer API. An explicit read-only `pon_lower` module parameter selects the
+lower netdevice; there is no guessed interface name or automatic device open.
+Native attach validates the board/port/role and requires an already running
+lower. Attachment occurs before MAC state/PHY initialization. The MAC readiness
+predicate also checks the attachment, so a lower detach closes runtime packet,
+hook and netdev-open entry points even if the module remains loaded.
+
+The adapter preserves the callback's populated raw RX skb and copies the four
+native descriptor words into call-local storage. Q1000K no longer installs
+legacy QDMA RX/event callbacks, enables/disables shared DMA or interrupts during
+packet attachment, or compiles the vendor NAPI controller. Legacy packet events
+return `-EOPNOTSUPP`. The Ethernet owner retains the actual rings, IRQs and NAPI.
+
+TX has an explicit ownership boundary: zero means the adapter accepted the skb;
+negative errno leaves it unchanged with the vendor caller. The caller frees
+rejected packets once and always returns `NETDEV_TX_OK` after consuming them.
+Accepted packets enter a FIFO limited to 128 entries, including the worker's
+in-flight entry, with a one-second expiry. A deferred worker retries native
+`NETDEV_TX_BUSY` without re-running packet/OMCI preparation. It holds no adapter
+lock across native submission, and always arms a one-jiffy fallback after BUSY;
+the native wake callback only expedites work. Per-entry metadata is independent
+of `skb->cb`. A submitting netdevice reference keeps `skb->dev` valid until native
+consumption or a software drop, including upper unregister during backpressure.
+
+Translation keeps GEM, optical channel, queue and MIC index, while the native
+CPU ring/group remains zero. It accepts the vendor's channel-to-NBOQ convention
+and disabled meter/account defaults; custom DMA groups, offload/PPE, checksum,
+metering and accounting requests are rejected. Kernel patch 9999 preserves
+the descriptor's OMCI no-drop hint, without changing data/Ethernet policy.
+The hint does not guarantee delivery or bypass the software queue's limits.
+
+Stop removes producer publication, drains RCU readers, cancels retry work,
+quiesces native TX with a one-second reclamation bound, releases the handle and
+purges unsent packets. A timeout is returned and logged, while callbacks and
+consumer storage are still safely released under the native handle contract.
+This neither gates physical TX nor drains FE/optical FIFOs. Unsolicited native
+detach closes ingress and lets already scheduled work purge its software queue.
+
+All 20 host PON tests pass, including the actual vendor TX caller, native
+descriptor emission for management/data, and failure injection at every MAC
+startup stage. The real Linux UML adapter test passes queue saturation, FIFO
+ordering, a wake racing BUSY, recovery with no new wake, expiry, upper unregister,
+early callbacks, failed attach/allocation, lower detach and quiesce timeout.
+Fifty concurrent producer/RX lifecycle cycles processed more than 800,000 skbs
+with balanced allocation/destruction counts and no kernel diagnostics. UML uses
+real workqueues, RCU, netdevices and skbs, with a synthetic native DMA provider;
+the native owner's implementation is covered by its separate existing fixtures.
+
+The full Linux 6.18.44 build and release-13 vendor APK pass compilation/modpost.
+No device connection, module loading or firmware flash was used. PON nodes remain
+disabled and packages remain optional with no autoload. ECNT QDMA control and FE
+providers are still mandatory: this packet adapter does not implement flow,
+T-CONT provisioning, queue retirement, physical drain or PHY/OMCI service.
 
 ## MAC identity handoff
 
@@ -471,7 +529,7 @@ DMA/RX fixtures, and real Linux attachment/RCU tests in UML. The normal builder 
 protected source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
-resource ownership, the vendor-to-native QDMA/FE packet adapter, identity handoff from the launcher, required flow
+resource ownership, native QDMA/FE control and QoS providers, identity handoff from the launcher, required flow
 operations, AN7581 OMCC transport, OMCI service support, and the actual
 procd/netifd lifecycle. Do not install an init script that merely reports
 success while these components are absent. CLI `start`/`restart`/`reload`

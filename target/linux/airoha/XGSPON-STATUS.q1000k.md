@@ -11,8 +11,9 @@ complete PM/DM/calibration readback, MCU enable and asserted TX-disable.
 The new controller module was loaded only from RAM for testing, then
 powered off and removed; the temporary harness restored GPIO/mux state.
 No firmware image was flashed or package persistently installed. The
-vendor PHY/MAC runtime integration and OMCI/service provisioning remain
-unimplemented. BSP, PHY and MAC now compile and pass modpost, and the
+vendor packet adapter now builds and passes host/UML lifetime tests; physical
+PHY/MAC integration and OMCI/service provisioning remain unimplemented.
+BSP, PHY and MAC compile and pass modpost, and the
 experimental vendor package builds with no unresolved symbols.
 
 **Current device restriction: read-only access, never flash firmware.**
@@ -45,8 +46,8 @@ OMCI daemon and unrelated PR changes were not imported.
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
-| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects and the complete MAC module compile and pass modpost. | Integrate interrupt consumers, QDMA/FE, packet metadata, management traffic and complete callback/startup teardown. |
-| Native packet transport | Explicit PON metadata, raw RX, packet ownership and callback attachment are implemented in the existing Ethernet owner; local fixtures and UML RTNL/RCU tests pass. GDM2 stays disabled. | Wire the vendor adapter, physical FIFO/RX drain and FE provisioning; verify descriptor/padding behavior on hardware. |
+| PON MAC | Runtime state/event dispatch and native packet attachment are integrated; startup/teardown fault fixtures and module modpost pass. | Complete native control/QoS/FE operations, physical interrupt/drain/PHY coordination and service-level management traffic. |
+| Native packet transport | Native metadata/raw RX, bounded vendor TX retries, startup/teardown and callback attachment are implemented; host and UML concurrency tests pass. GDM2 stays disabled. | Native QDMA/FE control/QoS providers, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -401,6 +402,30 @@ provider/allocation/CMAC failures. Hardware DMA/CMAC are fixtures, so this does
 not prove authentication or optical operation. The complete optional package
 builds as release 12. Native TX/FE integration, PHY and OMCI service remain
 pending. No device connection or firmware flash was performed.
+
+## Native packet adapter checkpoint (2026-09-13)
+
+Vendor patch 016 attaches to an explicitly named native PON lower before MAC
+initialization. It replaces Q1000K legacy packet callbacks, shared DMA/IRQ
+enable operations and vendor NAPI with the native consumer API. Lower detach
+closes runtime readiness. Control/QoS and FE providers remain required.
+
+TX uses a 128-packet FIFO, a one-second expiry and deferred BUSY retry with a
+timer fallback. Metadata is copied separately from the skb control area, and
+queued packets hold the submitting netdevice until consumed or dropped.
+Unsupported offload/meter/account requests fail explicitly. Stop drains readers
+and work before native quiesce/release and queue cleanup; timeout is reported.
+Kernel patch 9999 retains the OMCI descriptor no-drop hint.
+
+The full kernel and release-13 vendor package build. All 20 host PON tests pass.
+A real Linux UML test covers backpressure, racing/missing wakeups, expiry,
+upper unregister, lower detach, allocation failures and reclamation timeout.
+Fifty producer/RX lifecycle cycles process over 800,000 packets with balanced
+allocation/destruction counts and no kernel diagnostics. DMA is a fixture;
+these tests do not establish optical traffic or hardware drain.
+
+No SSH or device changes were needed. PON remains disabled pending native
+control/FE, PHY, physical drain and OMCI service integration and hardware tests.
 
 ## Validation and remaining acceptance gates
 

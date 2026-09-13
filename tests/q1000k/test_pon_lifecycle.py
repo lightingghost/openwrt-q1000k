@@ -324,8 +324,7 @@ struct system {
 static struct phy *gpPhyData;
 static void *gpWanPriv,*gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
-enum { ID=1, UNION, ALLOC, GLOBALS, WAN, MCI, GPON, ATTACH, RXINT,
-       TXDMA, RXDMA, LOOPBACK, GASP, PROC, HOOK, API, WORKER, STEPS };
+enum { ID=1, UNION, ALLOC, ATTACH, GLOBALS, WAN, MCI, GPON, GASP, PROC, HOOK, API, WORKER, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
 static int ready_published,rcu_drained,tx_stopped;
 static bool xpon_is_ready(void); /* production definition is non-static */
@@ -362,23 +361,13 @@ static int gpon_init(void) { return acquire(GPON); }
 static void gpon_quiesce(void) { assert(live[GPON] && !xpon_ready); }
 static void gpon_stop_work(void) { assert(live[GPON] && live[WAN] && rcu_drained); }
 static int xpondrv_rx_packet(void) { return 0; }
-static int xpondrv_qdma_event(void) { return 0; }
-typedef struct { int (*cbRecvPkts)(void),(*cbEventHandler)(void); } QDMA_InitCfg_t;
-static int QDMA_API_INIT(int id,QDMA_InitCfg_t *cfg) {
-    if(cfg->cbRecvPkts) {
-        assert(cfg->cbRecvPkts==xpondrv_rx_packet && cfg->cbEventHandler==xpondrv_qdma_event);
-        return acquire(ATTACH);
-    }
-    assert(!xpon_ready);
-    release(ATTACH);
-    for(int i=RXINT;i<=LOOPBACK;i++) live[i]=0;
-    return 0;
+static const char *pon_lower="qpon0";
+static bool q1000k_transport_running(void) { return live[ATTACH]; }
+static int q1000k_transport_start(const char *lower,int (*receive)(void)) {
+    assert(!strcmp(lower,"qpon0") && receive==xpondrv_rx_packet);
+    return acquire(ATTACH);
 }
-static int QDMA_API_ENABLE_RXPKT_INT(int i) { return acquire(RXINT); }
-static int QDMA_API_TX_DMA_MODE(int i,int m) { return acquire(TXDMA); }
-static int QDMA_API_RX_DMA_MODE(int i,int m) { return acquire(RXDMA); }
-static int QDMA_API_LOOPBACK_MODE(int i,int m) { return acquire(LOOPBACK); }
-static int QDMA_API_DISABLE_RXPKT_INT(int i) { assert(live[ATTACH]); return 0; }
+static int q1000k_transport_stop(void) { assert(!xpon_ready); release(ATTACH); return 0; }
 static int xpon_dying_gasp_init(void) { return acquire(GASP); }
 static int xpon_proc_init(void) { return acquire(PROC); }
 static int ecnt_register_hook(void *p) { return acquire(HOOK); }

@@ -1,0 +1,259 @@
+Subject: [PATCH] xpon: attach Q1000K to the native PON packet consumer
+
+Use bounded deferred TX with explicit skb ownership and raw native RX.
+Attach before MAC initialization and drain callbacks/work before teardown.
+Never initialize shared DMA, register legacy RX events or poll native NAPI.
+FE/QoS/PHY providers remain mandatory and are not supplied by this adapter.
+
+---
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/inc/common/xpon_compat.h
++++ b/xpon-en757x/xpon_10g/inc/common/xpon_compat.h
+@@ -5,6 +5,10 @@
+ #include <linux/skbuff.h>
+ #include <linux/types.h>
+ #include "q1000k_identity.h"
++#ifdef Q1000K_PON_IDENTITY
++/* Native Ethernet owns receive polling; no second NAPI/IRQ controller. */
++#undef CONFIG_USE_RX_NAPI
++#endif
+ #include <linux/version.h>
+ 
+ bool xpon_is_ready(void);
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -55,6 +55,9 @@
+ #include "common/xpon_led.h"
+ #include "tcversion.h"
+ #include "common/xpon_api.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_transport.h"
++#endif
+ #include "common/xpon_daemon.h"
+ #include "epon/epon_act.h"
+ #include <ecnt_hook/ecnt_hook_dgasp.h>
+@@ -133,6 +136,12 @@
+ 	
+ module_param(mode, int, 0);
+ 
++#ifdef Q1000K_PON_IDENTITY
++static char *pon_lower;
++module_param(pon_lower, charp, 0400);
++MODULE_PARM_DESC(pon_lower, "Explicit running native Q1000K PON lower netdevice");
++#endif
++
+ static bool xpon_ready;
+ static struct {
+ 	bool globals, monitor, wan, mci, epon, gpon, qdma, gasp, proc, hook, api;
+@@ -140,7 +149,14 @@
+ 
+ bool xpon_is_ready(void)
+ {
+-	return smp_load_acquire(&xpon_ready);
++	/* Acquire initialized MAC/worker state before exposing any callback. */
++	if (!smp_load_acquire(&xpon_ready))
++		return false;
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_transport_running();
++#else
++	return true;
++#endif
+ }
+ /************************************************************************
+ *                  P R I V A T E   D A T A
+@@ -424,6 +440,7 @@
+ 	return ret;
+ }
+ 
++#ifndef Q1000K_PON_IDENTITY
+ static int xpondrv_qdma_event(QDMA_EventType_t event)
+ {
+ 	int ret = -ENODEV;
+@@ -434,11 +451,19 @@
+ 	rcu_read_unlock();
+ 	return ret;
+ }
++#endif
+ 
+ static void xpondrv_qdma_deinit(void);
+ 
+ static int xpondrv_qdma_init(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int ret = q1000k_transport_start(pon_lower, xpondrv_rx_packet);
++
++	if (!ret)
++		xpon_owned.qdma = true;
++	return ret;
++#else
+ 	QDMA_InitCfg_t cfg = {0};
+ 	int ret;
+ 
+@@ -463,10 +488,21 @@
+ detach:
+ 	xpondrv_qdma_deinit();
+ 	return ret;
++#endif
+ }
+ 
+ static void xpondrv_qdma_deinit(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int ret;
++
++	if (!xpon_owned.qdma)
++		return;
++	ret = q1000k_transport_stop();
++	if (ret)
++		pr_err("xpon: native TX reclamation incomplete: %d\n", ret);
++	xpon_owned.qdma = false;
++#else
+ 	QDMA_InitCfg_t cfg = {0};
+ 	int ret;
+ 
+@@ -483,6 +519,7 @@
+ 	if (ret)
+ 		pr_err("xpon: QDMA callback detach failed: %d\n", ret);
+ 	xpon_owned.qdma = false;
++#endif
+ }
+ 
+ /*______________________________________________________________________________
+@@ -1282,6 +1319,7 @@
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ 	if (!get_xpon_dev() || get_xpon_irq(0) < 0 || get_xpon_irq(1) < 0)
+ 		return -ENODEV;
++	/* ECNT still supplies control/QoS operations, never native packet DMA. */
+ 	if (!ecnt_hook_is_registered(ECNT_QDMA_WAN, ECNT_DRIVER_API) ||
+ 	    !ecnt_hook_is_registered(ECNT_FE, ECNT_FE_API))
+ 		return -ENODEV;
+@@ -1293,6 +1331,12 @@
+ 	gpPonSysData = kzalloc(sizeof(*gpPonSysData), GFP_KERNEL);
+ 	if (!gpPonSysData)
+ 		return -ENOMEM;
++	/* Reject a missing/wrong/down lower before MAC/PHY initialization. */
++#ifdef Q1000K_PON_IDENTITY
++	ret = xpondrv_qdma_init();
++	if (ret)
++		goto fail;
++#endif
+ 	ret = xpondrv_init_global_data();
+ 	if (ret)
+ 		goto fail;
+@@ -1317,9 +1361,11 @@
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.gpon = true;
++#ifndef Q1000K_PON_IDENTITY
+ 	ret = xpondrv_qdma_init();
+ 	if (ret)
+ 		goto fail;
++#endif
+ 	ret = xpon_dying_gasp_init();
+ 	if (ret)
+ 		goto fail;
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -67,6 +67,7 @@
+ #include "common/xpon_api.h"
+ #ifdef Q1000K_PON_IDENTITY
+ #include "common/q1000k_packet.h"
++#include "common/q1000k_transport.h"
+ #endif
+ 
+ #include <ecnt_hook/ecnt_hook_vlan.h>
+@@ -307,6 +308,10 @@
+ 	PON_MSG(MSG_TRACE, "Start to transmit a packets.\n") ;
+     
+ 	pNetPriv = (PWAN_NetPriv_T *)netdev_priv(dev) ;
++#ifdef Q1000K_PON_IDENTITY
++	if (!xpon_is_ready() || !skb->len || skb->len > 16128)
++		GOTO_DROP(2);
++#endif
+ 	skb->dev = dev ; /* Use for tx DSCP recycle. */
+ 
+ 	unshared_skb = skb_unshare(skb, GFP_ATOMIC);
+@@ -316,6 +321,13 @@
+ 		printk("ERR %s skb_unshare failed! \n",__FUNCTION__);
+ 		GOTO_DROP(2);
+ 	}
++
++#ifdef Q1000K_PON_IDENTITY
++	/* The imported flow parsers use direct data pointers. */
++	if (skb_linearize(skb) ||
++	    (pNetPriv->netIdx == PWAN_IF_DATA && skb->len < ETH_HLEN))
++		GOTO_DROP(2);
++#endif
+ 
+ #ifdef WAN2LAN
+ 	if(mirror_pre_tx_prepare() && (skb_mirror = copy_pwan_skb(skb, pNetPriv->netIdx) ) ){
+@@ -434,7 +446,13 @@
+     }
+ 
+ 	/* call QDMA API to transmit the packet */
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_transport_xmit(skb, txBmMsg.word[0], txBmMsg.word[1]);
++	if (!ret)
++		skb = NULL; /* Queue owns it; rejection leaves it for the drop path. */
++#else
+ 	ret = QDMA_API_TRANSMIT_PACKETS(ECNT_QDMA_WAN, skb, txBmMsg.word[0], txBmMsg.word[1], &xpon_info) ;
++#endif
+ 	/* 
+ 	   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ 		skb should not be used blow this line !!!
+@@ -483,7 +501,12 @@
+ #endif
+ 
+ 	netif_trans_update(dev);
+-	return ret ;
++#ifdef Q1000K_PON_IDENTITY
++	/* This ndo has consumed or freed the already-prepared packet. */
++	return NETDEV_TX_OK;
++#else
++	return ret;
++#endif
+ 	
+ drop1:
+ 	dec_pwan_tx_data_cnt();
+@@ -495,7 +518,12 @@
+ 
+ 
+ 	if(skb_mirror) dev_kfree_skb_any(skb_mirror);
+-	return ret ;
++#ifdef Q1000K_PON_IDENTITY
++	/* This ndo has consumed or freed the already-prepared packet. */
++	return NETDEV_TX_OK;
++#else
++	return ret;
++#endif
+ #undef GOTO_DROP
+ }
+ 
+@@ -1102,6 +1130,9 @@
+ 
+ int pwan_cb_event_handler(QDMA_EventType_t event)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 
+ 	switch(event) {
+ 		case QDMA_EVENT_RECV_PKTS:
+@@ -1140,6 +1171,7 @@
+ 	}
+ 	
+ return 0 ;
++#endif
+ }
+ 
+ /*****************************************************************************

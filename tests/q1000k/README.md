@@ -34,6 +34,7 @@ python3 tests/q1000k/test_pon_crypto.py
 python3 tests/q1000k/test_pon_lifecycle.py
 python3 tests/q1000k/test_pon_packet.py
 python3 tests/q1000k/test_pon_omci_tx.py
+python3 tests/q1000k/test_pon_adapter.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -145,6 +146,25 @@ a trailer, success, and missing-provider/allocation/CMAC failures. DMA and
 hardware CMAC are fixtures; the test validates ownership, framing and error
 propagation, not a cryptographic result, key selection or optical operation.
 It accepts `Q1000K_UML_BASE` and uses the same read-only hostfs/UML guards.
+
+The vendor adapter TX fixture runs the actual prepared `pwan_net_start_xmit()`.
+It checks one free/consumer per packet, native queue rejection, padding and
+early failures; accepted or dropped packets never return Linux BUSY or errno
+from the ndo after their contents have been modified.
+
+```sh
+tests/q1000k/run_pon_adapter_uml.sh
+```
+
+This UML test runs the production adapter with real workqueues, RTNL/RCU,
+netdevices and skbs against a synthetic native provider. It covers metadata
+translation, a full 128-packet FIFO, wakeup/BUSY races, retry without a new wake,
+expiry, upper unregister while queued, early callbacks, allocation/attach
+failures, lower detach, and release following quiesce timeout. Concurrent TX/RX
+exercise 50 attachment lifecycles; allocation/destruction counts must balance
+with no kernel diagnostics. Native DMA is a fixture and has no physical NIC.
+The existing transport/DMA fixtures separately exercise the native owner's
+implementation. Use `Q1000K_UML_BASE` for the same optional build cache.
 
 To execute the same cryptographic helpers with the real Linux crypto API:
 

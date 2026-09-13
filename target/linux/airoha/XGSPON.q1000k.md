@@ -150,8 +150,11 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    Q1000K RX lengths and preserves raw OMCI framing; host callback fixtures and
    Linux packet-socket tests pass. Patch 015 bounds outgoing OMCI frames,
    fixes skb tail handling and propagates MIC-generation failures; real-skb
-   UML fault tests pass. The vendor adapter, physical
-   FIFO/RX drain, FE flow operations and PHY/phylink connection remain outstanding; the board's PON nodes stay disabled.
+   UML fault tests pass. Patch 016 connects the vendor packet path through
+   bounded deferred TX and native RX, with startup/teardown and concurrency
+   tests. Patch 9999 preserves the management no-drop hint. Native control/QoS
+   providers, physical FIFO/RX drain, FE flow operations and the PHY/phylink
+   connection remain outstanding; the board's PON nodes stay disabled.
 
    Acceptance: one coherent optical data path with working management
    frame TX/RX, valid packet ownership and no regressions on `lan1` or
