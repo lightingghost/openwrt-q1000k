@@ -1,5 +1,27 @@
 # Q1000K app checks
 
+## XGS-PON development
+
+```sh
+python3 tests/q1000k/test_xgspon.py
+node tests/q1000k/test_xgspon_views.cjs
+```
+
+These require a C compiler, Python 3, Node.js, BusyBox and the OpenWrt host
+`jshn` tool/library. The tests compile the production factory reader and
+exercise the production shell backend and CLI. They cover exact factory/DSD
+fields, 513-byte calibration preservation, malformed/truncated/duplicate
+records, read-only inputs, symlink rejection, identity overrides, unknown
+optical states, firmware integrity, private RAM staging and cleanup on a
+failed read. Extraction tests check complete publication and rejection of
+wrong firmware; synthetic firmware hashes replace the OEM hashes only inside
+fixtures. No OEM firmware or device-specific calibration is part of the tests.
+
+The LuCI fixtures exercise unavailable/LOS states, failed refreshes, schema
+validation and identity validation. They do not establish optical service or
+replace browser testing. See the [implementation report](../../target/linux/airoha/XGSPON-STATUS.q1000k.md)
+for package builds and the live read-only Q1000K checks.
+
 From the OpenWrt repository, after building its host tools:
 
 ```sh

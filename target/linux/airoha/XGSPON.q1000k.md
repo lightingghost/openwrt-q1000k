@@ -7,6 +7,11 @@ Hardware baseline supplied by the user: **AN7581SIT SoC and
 two EN7573AN devices**. This document plans the implementation; it does not
 claim functioning optical service.
 
+Implementation has started. See the [current implementation checkpoint](XGSPON-STATUS.q1000k.md)
+for the completed imports, working factory/RPC/LuCI foundation, live checks,
+dependency matrix and concrete kernel/optical blockers. The numbered steps
+below remain the full acceptance plan; they are not all complete.
+
 The reference is [coolsnowwolf/lede commit f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358).
 Its relevant package is `kmod-airoha-xpon-en757x`, variant `v2`, containing
 the BSP modules, `phy_10g.ko` and `xpon_10g.ko`. The package permits unresolved
@@ -221,9 +226,9 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    support, OMCI/userspace and builder configuration. Update the Q1000K
    README's PON status only to the level actually demonstrated on hardware.
 
-The immediate next deliverable is step 1's dependency matrix, focusing on
-the EN7573 loader/firmware and the OMCI path. Those are the largest known
-gaps; board-level DTS work follows their resolution.
+Step 1's dependency matrix is now recorded in the implementation checkpoint.
+The EN7573 loader, board selection/power wiring and AN7581 datapath remain
+the largest gaps; board-level DTS enablement follows their resolution.
 
 Evidence available locally: [PON data inventory](../../../../http-uboot-q1000k/doc/board/airoha/q1000k-pon-data.md),
 [current Q1000K DTS](dts/an7581-q1000k.dts),

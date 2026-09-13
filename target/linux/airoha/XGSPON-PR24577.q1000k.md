@@ -7,6 +7,13 @@ Source: [OpenWrt PR #24577](https://github.com/openwrt/openwrt/pull/24577),
 unmerged and not draft; the PR body's older draft wording is stale.
 This is a source review, not an import or a hardware test.
 
+Implementation update: the LuCI commit has since been imported separately
+and adapted for Q1000K. Its packages build and the new backend passed a live
+RAM-only check. The OMCI prototype cross-compiles for AArch64 but remains
+unimported. See the [implementation checkpoint](XGSPON-STATUS.q1000k.md)
+for those results and the subsequent alternative-kernel review. The rest
+of this document records the original upstream review and reuse decisions.
+
 The PR targets EN7528 with an EN7571 optical frontend and reports GPON
 service on a DASAN H660GM-A. Q1000K has AN7581SIT and two EN7573AN devices.
 The LuCI views and portions of the userspace design are reusable, but the
