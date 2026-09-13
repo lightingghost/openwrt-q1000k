@@ -769,6 +769,48 @@ tests against the actual Linux 6.18.44 crypto API in an isolated UML guest,
 including transform allocation. On-device key transitions, MIC enforcement
 and complete callback teardown remain hardware/runtime acceptance work.
 
+## Native scheduler integration (2026-09-13)
+
+Kernel patch `9999d-net-airoha-pon-qos.patch` implements checked per-channel
+scheduler access through the QDMA1 owner. All 32 channels and eight queues
+are addressable. Supported modes are WRR8, strict priority, and WRR7 through
+WRR2 with the remaining queues assigned higher strict priority. The channel
+position within a scheduler word is masked to 0..7 before shifting; using the
+full PON channel index would shift past the 32-bit word for channels 8..31.
+
+Both set and get are process-context operations serialized under RTNL. The
+attachment remains owned across indirect-command polling, and that channel's
+queues must already be closed with native mappings reclaimed. Configuration
+marks the channel busy so IRQ-side queue/FE controls cannot reopen it during
+programming. Set verifies all eight weights through explicit read commands,
+then verifies the complete scheduler mode word to detect changes to peers.
+The global weight unit/scaling is preserved and checked, never silently changed.
+Timeout or mismatched completion/readback latches a control fault. Get publishes
+its output only after the entire operation succeeds. Get itself issues MMIO
+commands and is not a permitted read-only device diagnostic.
+
+The packet adapter pins these sleepable operations with its lifecycle mutex,
+without holding RCU. Vendor patch 022 routes XMCS channel scheduler set/get
+through those APIs. The ECNT RCU callback rejects the sleepable operation with
+`-EWOULDBLOCK`; the process-context interface remains available. Native 16-bit
+weights that cannot fit the legacy eight-bit XMCS ABI return `-ERANGE` rather
+than being truncated. Scheduler programming does not open queues, retire
+hardware traffic, implement rate shaping, or supply the remaining FE provider.
+
+Host fixtures exercise every channel/mode/unit combination, preserve unrelated
+register bits and QDMA0 storage, inject failure at every indirect command,
+and check timeout, mismatched readback, ignored writes, stale ownership,
+retirement and unchanged outputs. The complete native transport passes UML
+with 32-channel QoS programming plus 100 attachment/packet/IRQ cycles. The
+adapter passes 50 UML cycles, including sleepable wrapper calls, error
+forwarding, real workqueues and RCU. These tests model registers; physical
+scheduler behavior remains untested.
+
+All 29 PON host tests pass. The Linux 6.18.44 AArch64 kernel and vendor
+package build successfully; the r19 vendor APK is 335,048 bytes. All six
+vendor modules resolve against the kernel and package symbol tables,
+including the two new scheduler exports.
+
 ## OMCI implementation decision
 
 The two candidates were compiled locally, without installation or execution on

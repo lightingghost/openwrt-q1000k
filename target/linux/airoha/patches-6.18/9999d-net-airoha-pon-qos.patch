@@ -1,0 +1,231 @@
+Subject: [PATCH] net: airoha: serialize and verify PON channel scheduling
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Q1000K PON transport using the native Ethernet/QDMA owner. */
+ #include <linux/of.h>
++#include <linux/iopoll.h>
+ #include <linux/refcount.h>
+ #include <linux/wait.h>
+ #include <linux/rtnetlink.h>
+@@ -23,6 +24,7 @@
+ 	u8 closed[32];
+ 	u32 retiring;
+ 	u32 tx_enabled;
++	u32 configuring;
+ 	atomic_t channel_pending[32];
+ 	bool control_fault;
+ 	/* Native DMA owns the lower storage until its descriptors are reaped. */
+@@ -328,6 +330,8 @@
+ 		return -ENODEV;
+ 	if (pon->control_fault)
+ 		return -EIO;
++	if (pon->configuring & BIT(channel))
++		return -EBUSY;
+ 	if (closed != 0xff && ((pon->retiring & BIT(channel)) ||
+ 	    !(pon->tx_enabled & BIT(channel))))
+ 		return -ESHUTDOWN;
+@@ -368,6 +372,10 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_dereference(pon->netdev)) {
+ 		ret = -ENODEV;
++		goto out;
++	}
++	if (pon->configuring & BIT(channel)) {
++		ret = -EBUSY;
+ 		goto out;
+ 	}
+ 	if (enabled) {
+@@ -420,6 +428,154 @@
+ }
+ EXPORT_SYMBOL_GPL(airoha_pon_set_tx_channel);
+ 
++/* RTNL serializes the indirect QDMA1 scheduler command and pins its owner.
++ * IRQ-side queue controls remain usable for other channels while it polls.
++ */
++static int airoha_pon_qos_weight(struct airoha_qdma *qdma, u8 channel,
++			       u8 queue, u16 *weight, bool write)
++{
++	u32 cmd = FIELD_PREP(TWRR_CHAN_IDX_MASK, channel) |
++		  FIELD_PREP(TWRR_QUEUE_IDX_MASK, queue);
++	u32 status;
++	int ret;
++
++	if (write)
++		cmd |= TWRR_RW_CMD_MASK | FIELD_PREP(TWRR_VALUE_MASK, *weight);
++	airoha_qdma_wr(qdma, REG_TXWRR_WEIGHT_CFG, cmd);
++	ret = read_poll_timeout(airoha_qdma_rr, status,
++				status & TWRR_RW_CMD_DONE, 10, 10000, false,
++				qdma, REG_TXWRR_WEIGHT_CFG);
++	if (ret)
++		return ret;
++	if ((status & (TWRR_CHAN_IDX_MASK | TWRR_QUEUE_IDX_MASK)) !=
++	    (cmd & (TWRR_CHAN_IDX_MASK | TWRR_QUEUE_IDX_MASK)))
++		return -EIO;
++	if (!write)
++		*weight = FIELD_GET(TWRR_VALUE_MASK, status);
++	return 0;
++}
++
++static int airoha_pon_qos_access(struct airoha_pon *pon, u8 channel,
++			       struct airoha_pon_qos *qos, bool write)
++{
++	struct airoha_pon_qos actual = {};
++	struct airoha_qdma *qdma;
++	unsigned long flags;
++	u32 mode, mask, value;
++	int i, ret = 0;
++
++	/* These commands poll and therefore cannot run from MAC IRQ/tasklets. */
++	if (!pon || !qos || channel >= 32)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	if (write) {
++		int wrr;
++
++		if (qos->mode > 7)
++			return -EINVAL;
++		wrr = qos->mode == 0 ? 8 : qos->mode == 1 ? 0 : 9 - qos->mode;
++		for (i = 0; i < 8; i++)
++			if ((i < wrr) != !!qos->weights[i])
++				return -EINVAL;
++	}
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->retiring & BIT(channel))
++		ret = -ESHUTDOWN;
++	else if (pon->closed[channel] != 0xff)
++		ret = -EBUSY;
++	else if (atomic_read_acquire(&pon->channel_pending[channel]))
++		ret = -EAGAIN;
++	if (ret) {
++		spin_unlock_irqrestore(&pon->admission_lock, flags);
++		goto out;
++	}
++	pon->configuring |= BIT(channel);
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	qdma = &pon->dma_dev->eth->qdma[1];
++	mode = airoha_qdma_rr(qdma, REG_TXWRR_MODE_CFG);
++	actual.byte_mode = !!(mode & TWRR_WEIGHT_BASE_MASK);
++	actual.scale16 = !!(mode & TWRR_WEIGHT_SCALE_MASK);
++	/* The unit is shared by every channel. Never silently change peers. */
++	if (write && (actual.byte_mode != qos->byte_mode ||
++		      actual.scale16 != qos->scale16)) {
++		ret = -EOPNOTSUPP;
++		goto complete;
++	}
++	for (i = 0; i < 8; i++) {
++		if (write) {
++			u16 requested = qos->weights[i];
++
++			ret = airoha_pon_qos_weight(qdma, channel, i, &requested, true);
++			if (ret)
++				goto fault;
++		}
++		ret = airoha_pon_qos_weight(qdma, channel, i, &actual.weights[i], false);
++		if (ret)
++			goto fault;
++		if (write && actual.weights[i] != qos->weights[i]) {
++			ret = -EIO;
++			goto fault;
++		}
++	}
++	/* Each word holds eight channels; masking the index avoids shifts >=32. */
++	mask = 7U << ((channel & 7) * 4);
++	value = airoha_qdma_rr(qdma, REG_CHAN_QOS_MODE(channel >> 3));
++	if (write) {
++		value = (value & ~mask) | ((u32)qos->mode << ((channel & 7) * 4));
++		airoha_qdma_wr(qdma, REG_CHAN_QOS_MODE(channel >> 3), value);
++		if (airoha_qdma_rr(qdma, REG_CHAN_QOS_MODE(channel >> 3)) != value) {
++			ret = -EIO;
++			goto fault;
++		}
++	}
++	actual.mode = (value & mask) >> ((channel & 7) * 4);
++	goto complete;
++fault:
++	/* A partially written scheduler cannot be published or reopened. */
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	pon->control_fault = true;
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++complete:
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	pon->configuring &= ~BIT(channel);
++	/* An unrelated concurrent IRQ control failure also invalidates this result. */
++	if (!ret && pon->control_fault)
++		ret = -EIO;
++	if (!ret && (pon->retiring & BIT(channel)))
++		ret = -ESHUTDOWN;
++	if (!ret && !write)
++		*qos = actual;
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++out:
++	rtnl_unlock();
++	return ret;
++}
++
++int airoha_pon_set_qos(struct airoha_pon *pon, u8 channel,
++		       const struct airoha_pon_qos *qos)
++{
++	struct airoha_pon_qos copy;
++
++	if (!qos)
++		return -EINVAL;
++	copy = *qos;
++	return airoha_pon_qos_access(pon, channel, &copy, true);
++}
++EXPORT_SYMBOL_GPL(airoha_pon_set_qos);
++
++int airoha_pon_get_qos(struct airoha_pon *pon, u8 channel,
++		       struct airoha_pon_qos *qos)
++{
++	return airoha_pon_qos_access(pon, channel, qos, false);
++}
++EXPORT_SYMBOL_GPL(airoha_pon_get_qos);
++
+ int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed)
+ {
+ 	unsigned long flags;
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -107,6 +107,32 @@
+  */
+ int airoha_pon_set_tx_channel(struct airoha_pon *pon, u8 channel, bool enabled);
+ 
++/* QDMA1 scheduler mode: 0 WRR8, 1 strict priority, 2..7 WRR7..WRR2
++ * followed by the remaining higher-priority strict queues. WRR weights must
++ * be nonzero; strict queue weights must be zero. The global byte/packet unit
++ * and scaling flags are reported and checked, never changed by these calls.
++ */
++struct airoha_pon_qos {
++	u16 weights[8];
++	u8 mode;
++	bool byte_mode;
++	bool scale16;
++};
++
++/* Process context only, without RTNL or consumer callback locks. Retain the
++ * attachment handle. Both operations require all channel queues closed and
++ * native mappings reclaimed. The indirect hardware command is serialized
++ * under RTNL; concurrent controls of that channel return -EBUSY. Polling or
++ * readback failure latches a control fault, preventing TX/queue reopening.
++ * get writes its output only on complete success. These calls neither open
++ * queues nor establish FE/optical FIFO emptiness. Get issues MMIO commands;
++ * it is not suitable for a read-only on-device diagnostic.
++ */
++int airoha_pon_set_qos(struct airoha_pon *pon, u8 channel,
++		       const struct airoha_pon_qos *qos);
++int airoha_pon_get_qos(struct airoha_pon *pon, u8 channel,
++		       struct airoha_pon_qos *qos);
++
+ /* Capture admission for a fully prepared frame BEFORE enqueueing it. Returns
+  * -ESHUTDOWN for a closed queue. xmit drops stale epochs even after reopen;
+  * never call prepare_tx again for a frame returned as NETDEV_TX_BUSY. A new

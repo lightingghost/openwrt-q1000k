@@ -15,6 +15,9 @@ class PonTransportTests(unittest.TestCase):
     def test_attachment_generations_metadata_and_skb_ownership(self):
         source = (ETH / 'airoha_pon.c').read_text()
         source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
+        # The sleepable scheduler API has its own complete command/fault fixture.
+        source = re.sub(r'/\* RTNL serializes the indirect QDMA1.*?(?=int airoha_pon_set_queue_close\(struct)',
+                        '', source, flags=re.S)
         # Keep the wire masks from the real driver; numeric expectations below
         # are independent of FIELD_PREP and the production encode/decode code.
         regs = (ETH / 'airoha_regs.h').read_text()

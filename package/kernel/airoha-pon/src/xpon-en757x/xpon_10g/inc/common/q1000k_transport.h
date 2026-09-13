@@ -30,6 +30,13 @@ int q1000k_transport_get_queue_close(u8 channel, u8 *closed);
  */
 int q1000k_transport_set_tx_channel(u8 channel, bool enabled);
 
+/* Process context only, outside RTNL and RCU. Native scheduler commands may
+ * sleep; the adapter mutex pins the attachment across the entire operation.
+ * Both operations require closed queues and reclaimed native mappings.
+ */
+int q1000k_transport_set_qos(u8 channel, const struct airoha_pon_qos *qos);
+int q1000k_transport_get_qos(u8 channel, struct airoha_pon_qos *qos);
+
 /* Permanently close this attachment's channel and poll native TX mappings.
  * IRQ-safe; -EAGAIN means mappings remain. Zero does not prove FE/optical
  * FIFO retirement. No queue reopening is available after this operation.

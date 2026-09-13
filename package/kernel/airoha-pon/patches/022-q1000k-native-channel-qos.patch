@@ -1,0 +1,83 @@
+Subject: [PATCH] q1000k: route process-context channel QoS through native owner
+
+---
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
+@@ -51,6 +51,9 @@
+ #include "epon/epon_act.h"
+ #include "common/phy_if_wrapper.h"
+ #include "common/xpon_api.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_transport.h"
++#endif
+ 
+ /************************************************************************
+ *                  D E F I N E S   &   C O N S T A N T S
+@@ -392,7 +395,21 @@
+ 		qosScheduler.queue[i].weight = pScheduler->queue[i].weight ;
+ 	}
+ 	
++#ifdef Q1000K_PON_IDENTITY
++	{
++		struct airoha_pon_qos native;
++		int ret = q1000k_transport_get_qos(pScheduler->channel, &native);
++
++		if (ret)
++			return ret;
++		native.mode = qosScheduler.qosType;
++		for (i = 0; i < 8; i++)
++			native.weights[i] = qosScheduler.queue[i].weight;
++		return q1000k_transport_set_qos(pScheduler->channel, &native);
++	}
++#else
+ 	return QDMA_API_SET_TX_QOS(ECNT_QDMA_WAN, &qosScheduler);
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -421,7 +438,23 @@
+ 	}
+ 	qosScheduler.channel = pScheduler->channel ;
+ 	
++#ifdef Q1000K_PON_IDENTITY
++	{
++		struct airoha_pon_qos native;
++
++		ret = q1000k_transport_get_qos(pScheduler->channel, &native);
++		if (ret)
++			return ret;
++		for (i = 0; i < 8; i++)
++			if (native.weights[i] > 255)
++				return -ERANGE;
++		qosScheduler.qosType = native.mode;
++		for (i = 0; i < 8; i++)
++			qosScheduler.queue[i].weight = native.weights[i];
++	}
++#else
+ 	ret = QDMA_API_GET_TX_QOS(ECNT_QDMA_WAN, &qosScheduler);
++#endif
+ 
+ 	if(ret != 0) {
+ 		return ret ;
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -955,12 +955,19 @@
+         }
+ 	    case XPON_CHANNEL_QOS_SET:
+         {
++#ifdef Q1000K_PON_IDENTITY
++            /* ECNT invokes this hook inside RCU. Use the process-context
++             * ioctl/provider API for sleepable native scheduler commands.
++             */
++            return -EWOULDBLOCK;
++#else
+             if (0 != xmcs_set_channel_scheduler(data->pub_info.pScheduler))
+             {
+                 PON_MSG(MSG_ERR, "XPON_CHANNEL_QOS_SET failed!\n");
+                 return ECNT_HOOK_ERROR;
+             }
+             break;
++#endif
+         }
+ 	    case XPON_WANLINK_CONFIG_GET:
+         {

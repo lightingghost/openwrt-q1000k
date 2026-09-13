@@ -199,6 +199,28 @@ int airoha_pon_set_tx_channel(struct airoha_pon *pon,u8 channel,bool enabled)
     WARN_ON(channel!=29 || !enabled);
     return tx_channel_error;
 }
+int airoha_pon_set_qos(struct airoha_pon *pon,u8 channel,const struct airoha_pon_qos *qos)
+{
+    RCU_LOCKDEP_WARN(rcu_read_lock_held(), "Sleepable QoS wrapper inside RCU");
+    WARN_ON(irqs_disabled() || in_interrupt());
+    if(channel>31 || !qos) return -EINVAL;
+    if(!pon->connected) return -ENODEV;
+    WARN_ON(channel!=29 || qos->mode!=1);
+    msleep(1);
+    return tx_channel_error;
+}
+int airoha_pon_get_qos(struct airoha_pon *pon,u8 channel,struct airoha_pon_qos *qos)
+{
+    RCU_LOCKDEP_WARN(rcu_read_lock_held(), "Sleepable QoS wrapper inside RCU");
+    WARN_ON(irqs_disabled() || in_interrupt());
+    if(channel>31 || !qos) return -EINVAL;
+    if(!pon->connected) return -ENODEV;
+    WARN_ON(channel!=29);
+    msleep(1);
+    if(tx_channel_error) return tx_channel_error;
+    memset(qos,0,sizeof(*qos)); qos->mode=1; qos->byte_mode=true;
+    return 0;
+}
 int airoha_pon_quiesce_channel(struct airoha_pon *pon,u8 channel)
 {
     if(channel>31) return -EINVAL;
@@ -392,6 +414,7 @@ static int run_tests(void)
     struct airoha_pon *pon;
     int i, ret, count, rx;
     u8 closed=0xa5;
+    struct airoha_pon_qos qos={.mode=1},saved;
 
     CHECK(!metadata_test());
     CHECK(!q1000k_transport_stop());
@@ -399,6 +422,8 @@ static int run_tests(void)
     CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
     CHECK(q1000k_transport_quiesce_channel(27)==-ENODEV);
     CHECK(q1000k_transport_set_tx_channel(29,true)==-ENODEV);
+    CHECK(q1000k_transport_set_qos(29,&qos)==-ENODEV);
+    CHECK(q1000k_transport_get_qos(29,&qos)==-ENODEV);
     CHECK(q1000k_transport_start(NULL, receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("", receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("bad/name", receive_packet) == -EINVAL);
@@ -423,6 +448,10 @@ static int run_tests(void)
         const int errors[]={0,-EAGAIN,-ESHUTDOWN,-EIO};
         tx_channel_error=errors[i];
         CHECK(q1000k_transport_set_tx_channel(29,true)==errors[i]);
+        CHECK(q1000k_transport_set_qos(29,&qos)==errors[i]);
+        saved=qos;
+        CHECK(q1000k_transport_get_qos(29,&qos)==errors[i]);
+        CHECK(errors[i] ? !memcmp(&saved,&qos,sizeof(qos)) : qos.mode==1);
     }
     tx_channel_error=0;
     CHECK(q1000k_transport_quiesce_channel(32)==-EINVAL);

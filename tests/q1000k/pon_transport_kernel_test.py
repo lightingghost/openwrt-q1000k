@@ -20,6 +20,7 @@ print(r'''
 #include <linux/kthread.h>
 #include <linux/irq_work.h>
 #include <linux/delay.h>
+#include <linux/iopoll.h>
 #include <linux/utsname.h>
 #include <linux/refcount.h>
 #include <linux/wait.h>
@@ -40,15 +41,30 @@ struct airoha_eth;
 struct airoha_qdma {
     struct airoha_eth *eth;
     DECLARE_BITMAP(qos_channel_map,AIROHA_NUM_QOS_CHANNELS);
-    u32 regs[8];
+    u32 regs[8],qos_cmd,qos_modes[4];
+    u16 qos_weights[32][8];
 };
 static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
 {
+    if (offset==0x1020) return BIT(3); /* Native byte-weight mode. */
+    if (offset==0x1024) return qdma->qos_cmd;
+    if (offset>=0x1040 && offset<=0x104c && !(offset&3))
+        return qdma->qos_modes[(offset-0x1040)/4];
     if (WARN_ON(offset<0xa0 || offset>0xbc || (offset&3))) return 0;
     return qdma->regs[(offset-0xa0)/4];
 }
 static void airoha_qdma_wr(struct airoha_qdma *qdma,u32 offset,u32 value)
 {
+    if (offset==0x1024) {
+        unsigned int channel=(value>>19)&31,queue=(value>>16)&7;
+        ASSERT_RTNL();
+        if (value&BIT(31)) qdma->qos_weights[channel][queue]=value&0xffff;
+        qdma->qos_cmd=(value&~0xffffU)|BIT(30)|qdma->qos_weights[channel][queue];
+        return;
+    }
+    if (offset>=0x1040 && offset<=0x104c && !(offset&3)) {
+        ASSERT_RTNL(); qdma->qos_modes[(offset-0x1040)/4]=value; return;
+    }
     if (WARN_ON(offset<0xa0 || offset>0xbc || (offset&3))) return;
     qdma->regs[(offset-0xa0)/4]=value;
 }
@@ -135,6 +151,8 @@ static int dma_worker(void *unused)
 print('\n'.join(line for line in (eth / 'airoha_regs.h').read_text().splitlines()
                 if re.match(r'#define (?:QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)|REG_QUEUE_CLOSE_CFG)', line)))
 regs = (eth / 'airoha_regs.h').read_text()
+print('\n'.join(line for line in regs.splitlines() if re.match(
+    r'#define (?:REG_TXWRR_|TWRR_|REG_CHAN_QOS_MODE)', line)))
 print(re.search(r'#define GDM_BASE\(_n\).*?(?=\n\n)', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK)', line)))
@@ -157,6 +175,19 @@ static void check_admission(struct airoha_pon *pon,u32 msg)
     lockdep_assert_held(&pon->admission_lock);
     WARN_ON(pon->control_fault || !(pon->tx_enabled & BIT(channel)) ||
         (pon->closed[channel] & BIT(queue)));
+}
+static int check_qos(struct airoha_pon *pon)
+{
+    unsigned int c,q;
+    for(c=0;c<32;c++) {
+        struct airoha_pon_qos cfg={.mode=0,.byte_mode=true},actual={};
+        for(q=0;q<8;q++) cfg.weights[q]=c*8+q+1;
+        if(airoha_pon_set_qos(pon,c,&cfg) || airoha_pon_get_qos(pon,c,&actual) ||
+           memcmp(cfg.weights,actual.weights,sizeof(cfg.weights)) ||
+           actual.mode!=cfg.mode || actual.byte_mode!=cfg.byte_mode || actual.scale16)
+            return -EINVAL;
+    }
+    return 0;
 }
 static struct airoha_pon *irq_test_pon;
 static int irq_control_result;
@@ -281,6 +312,7 @@ static int __init pon_transport_test_init(void)
     atomic_set(&hold_dma,1); atomic_set(&live,1);
     pon=airoha_pon_attach(lower,&ops,NULL);
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
+    CHECK(!check_qos(pon));
     skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
     CHECK(!airoha_pon_set_tx_channel(pon,tx.channel,true));
     CHECK(!airoha_pon_set_queue_close(pon,tx.channel,0));
