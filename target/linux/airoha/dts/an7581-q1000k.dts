@@ -108,6 +108,25 @@
 &en7581_pinctrl {
 	gpio-ranges = <&en7581_pinctrl 0 13 50>;
 
+	pon_control_pins: pon-control-pins {
+		/* Establish inactive enables before switching the pins to GPIO. */
+		power {
+			pins = "gpio8", "gpio9";
+			output-high;
+		};
+
+		los {
+			pins = "gpio10", "gpio11";
+			input-enable;
+		};
+
+		mux {
+			function = "gpio";
+			groups = "gpio8", "gpio9", "gpio10", "gpio11",
+				 "gpio45", "gpio46";
+		};
+	};
+
 	mdio_pins: mdio-pins {
 		mux {
 			function = "mdio";
@@ -193,6 +212,27 @@
 			reg = <0x1c000000 0x04000000>;
 			read-only;
 		};
+	};
+};
+
+&i2c0 {
+	status = "okay";
+
+	/*
+	 * Both EN7573AN devices share the selected I2C bus and address pair.
+	 * The optional control module owns 0x51 and reserves memory port 0x50.
+	 */
+	pon-control@51 {
+		compatible = "quantum,q1000k-pon-control";
+		reg = <0x51>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pon_control_pins>;
+		gpon-enable-gpios = <&en7581_pinctrl 9 GPIO_ACTIVE_LOW>;
+		xgspon-enable-gpios = <&en7581_pinctrl 8 GPIO_ACTIVE_LOW>;
+		select-gpios = <&en7581_pinctrl 45 GPIO_ACTIVE_HIGH>,
+			       <&en7581_pinctrl 46 GPIO_ACTIVE_HIGH>;
+		gpon-los-gpios = <&en7581_pinctrl 10 GPIO_ACTIVE_HIGH>;
+		xgspon-los-gpios = <&en7581_pinctrl 11 GPIO_ACTIVE_HIGH>;
 	};
 };
 

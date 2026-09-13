@@ -1,0 +1,104 @@
+Subject: [PATCH] pinctrl: airoha: support Q1000K optical GPIO muxing
+
+Force the six AN7581 optical control/status pins to GPIO mode. Preload
+output latches before enabling output, including pinconf output levels,
+to avoid asserting active-low controller enables during acquisition.
+
+--- a/drivers/pinctrl/airoha/pinctrl-an7581.c
++++ b/drivers/pinctrl/airoha/pinctrl-an7581.c
+@@ -579,7 +579,10 @@
+ static const char *const i2s_groups[] = { "i2s" };
+ static const char *const emmc_groups[] = { "emmc" };
+ static const char *const pnand_groups[] = { "pnand" };
+-static const char *const gpio_groups[] = { "gpio47", "gpio48", "gpio49" };
++static const char *const gpio_groups[] = {
++	"gpio8", "gpio9", "gpio10", "gpio11", "gpio45", "gpio46",
++	"gpio47", "gpio48", "gpio49"
++};
+ static const char *const pcie_reset_groups[] = {
+ 	"pcie_reset0", "pcie_reset1", "pcie_reset2"
+ };
+@@ -979,6 +982,42 @@
+ };
+ 
+ static const struct airoha_pinctrl_func_group gpio_func_group[] = {
++	{
++		.name = "gpio8",
++		.regmap[0] = { AIROHA_FUNC_MUX, REG_FORCE_GPIO_EN,
++				FORCE_GPIO_EN(8), FORCE_GPIO_EN(8) },
++		.regmap_size = 1,
++	},
++	{
++		.name = "gpio9",
++		.regmap[0] = { AIROHA_FUNC_MUX, REG_FORCE_GPIO_EN,
++				FORCE_GPIO_EN(9), FORCE_GPIO_EN(9) },
++		.regmap_size = 1,
++	},
++	{
++		.name = "gpio10",
++		.regmap[0] = { AIROHA_FUNC_MUX, REG_FORCE_GPIO_EN,
++				FORCE_GPIO_EN(10), FORCE_GPIO_EN(10) },
++		.regmap_size = 1,
++	},
++	{
++		.name = "gpio11",
++		.regmap[0] = { AIROHA_FUNC_MUX, REG_FORCE_GPIO_EN,
++				FORCE_GPIO_EN(11), FORCE_GPIO_EN(11) },
++		.regmap_size = 1,
++	},
++	{
++		.name = "gpio45",
++		.regmap[0] = { AIROHA_FUNC_MUX, REG_FORCE_GPIO_EN + 4,
++				FORCE_GPIO_EN(13), FORCE_GPIO_EN(13) },
++		.regmap_size = 1,
++	},
++	{
++		.name = "gpio46",
++		.regmap[0] = { AIROHA_FUNC_MUX, REG_FORCE_GPIO_EN + 4,
++				FORCE_GPIO_EN(14), FORCE_GPIO_EN(14) },
++		.regmap_size = 1,
++	},
+ 	AIROHA_PINCTRL_GPIO_EXT("gpio47", GPIO47_FLASH_MODE_CFG,
+ 				GPIO_PCIE_RESET0_MASK),
+ 	AIROHA_PINCTRL_GPIO_EXT("gpio48", GPIO48_FLASH_MODE_CFG,
+--- a/drivers/pinctrl/airoha/pinctrl-airoha.c
++++ b/drivers/pinctrl/airoha/pinctrl-airoha.c
+@@ -196,11 +196,12 @@
+ {
+ 	int err;
+ 
+-	err = airoha_gpio_set_direction(chip, gpio, false);
++	/* Set the latch before enabling output to avoid an opposite-level pulse. */
++	err = airoha_gpio_set(chip, gpio, value);
+ 	if (err)
+ 		return err;
+ 
+-	return airoha_gpio_set(chip, gpio, value);
++	return airoha_gpio_set_direction(chip, gpio, false);
+ }
+ 
+ /* irq callbacks */
+@@ -693,17 +694,18 @@
+ 		case PIN_CONFIG_LEVEL: {
+ 			bool input = param == PIN_CONFIG_INPUT_ENABLE;
+ 
+-			err = airoha_pinmux_set_direction(pctrl_dev, NULL, pin,
+-							  input);
+-			if (err)
+-				return err;
+-
+ 			if (param == PIN_CONFIG_LEVEL) {
+ 				err = airoha_pinconf_set_pin_value(pctrl_dev,
+ 								   pin, !!arg);
+ 				if (err)
+ 					return err;
+ 			}
++
++			err = airoha_pinmux_set_direction(pctrl_dev, NULL, pin,
++							  input);
++			if (err)
++				return err;
++
+ 			break;
+ 		}
+ 		default:
