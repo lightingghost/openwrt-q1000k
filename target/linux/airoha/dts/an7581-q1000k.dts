@@ -250,6 +250,18 @@
 
 /* Optical uplink; enable once the PON data path is supported. */
 &{/soc} {
+	pon_phy: phy@1faf0000 {
+		compatible = "quantum,q1000k-pon-phy";
+		reg = <0 0x1faf0000 0 0x1fff>,
+		      <0 0x1fa8a000 0 0x1000>,
+		      <0 0x1fa8b000 0 0x1000>;
+		reg-names = "digital", "ana", "pma";
+		interrupts = <GIC_SPI 43 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "phy";
+		/* Shares analog resources with pon_pcs: only one may bind. */
+		status = "disabled";
+	};
+
 	pon_mac: pon@1fb64000 {
 		compatible = "quantum,q1000k-pon-mac";
 		reg = <0 0x1fb64000 0 0x3e8>,

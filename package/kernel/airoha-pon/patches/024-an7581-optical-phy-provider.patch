@@ -1,0 +1,111 @@
+Use explicit AN7581 optical PHY resources and the verified SerDes IRQ.
+
+Keep AN7583 on its original provider. Map neither copper XFI nor shared SCU,
+and serialize PHY bitfield updates without signed-shift overflow.
+
+--- a/bsp/Makefile
++++ b/bsp/Makefile
+@@ -10,6 +10,7 @@
+ airoha_ecnt_pon_phy-y := core/ecnt_pon_phy.o core/legacy_api.o module/ecnt_pon_phy_meta.o
+ 
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
++airoha_ecnt_pon_phy-y := core/an7581_pon_phy.o core/legacy_api.o module/ecnt_pon_phy_meta.o
+ obj-m += airoha_ecnt_xpon.o
+ airoha_ecnt_xpon-y := core/an7581_xpon.o
+ endif
+--- a/xpon-en757x/xpon_phy_10g/src/phy.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy.c
+@@ -5,6 +5,9 @@
+ ******************************************************************/
+ #include <linux/version.h>
+ #include <linux/kernel.h>
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++#include <an7581_pon_phy.h>
++#endif
+ #include <linux/slab.h>
+ #include <linux/delay.h>
+ #include <linux/timer.h>
+@@ -2452,7 +2455,7 @@
+ 		}
+ 		else
+ 		{
+-			return ((IO_GPHYREG(reg_name)>>start_index) & ((1<<(end_index-start_index+1))-1)) ;
++			return ((IO_GPHYREG(reg_name)>>start_index) & ((1U<<(end_index-start_index+1))-1)) ;
+ 		}
+ 	}
+ 	else
+@@ -2464,6 +2467,10 @@
+ 
+ void IO_SPHYA_REG_BITS(UINT32 reg_name,UINT32 end_index,UINT32 start_index,UINT32 value) 	// for EN7580 ASIC
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	/* The provider serializes the complete RMW and records failed access. */
++	an7581_pon_phy_update(reg_name, end_index, start_index, value);
++#else
+ 	uint data;
+ 	data=IO_GPHYREG(reg_name);
+ 	
+@@ -2481,10 +2488,10 @@
+ 		}
+ 		else
+ 		{
+-			IO_SPHYREG(reg_name,((data & ~(((1<<(end_index-start_index+1))-1)<<start_index)) | ((value&((1<<(end_index-start_index+1))-1))<<start_index))) ;
++			IO_SPHYREG(reg_name,((data & ~(((1U<<(end_index-start_index+1))-1)<<start_index)) | ((value&((1U<<(end_index-start_index+1))-1))<<start_index))) ;
+ 			if(0xF1FA==reg_name)
+ 			{
+-				PON_PHY_PRINT(PHY_MSG_TRACE,"[%s:%d] Set REG 0x%x[%d:%d] to value 0x%x\r\n",__FUNCTION__,__LINE__,reg_name,end_index,start_index,((data & ~(((1<<(end_index-start_index+1))-1)<<start_index)) | ((value&((1<<(end_index-start_index+1))-1))<<start_index)));
++				PON_PHY_PRINT(PHY_MSG_TRACE,"[%s:%d] Set REG 0x%x[%d:%d] to value 0x%x\r\n",__FUNCTION__,__LINE__,reg_name,end_index,start_index,((data & ~(((1U<<(end_index-start_index+1))-1)<<start_index)) | ((value&((1U<<(end_index-start_index+1))-1))<<start_index)));
+ 				PON_PHY_PRINT(PHY_MSG_TRACE,"[%s:%d] Get REG 0x%x[%d:%d] = 0x%x\r\n",__FUNCTION__,__LINE__,reg_name,end_index,start_index,IO_GPHYREG(reg_name));
+ 			}
+ 		}
+@@ -2493,5 +2500,6 @@
+ 	{
+ 		PON_PHY_PRINT(PHY_MSG_ERR,"%s end_index=%d	start_index=%d Error!\r\n",__FUNCTION__,end_index,start_index);
+ 	}
+-}
+-#endif
++#endif
++}
++#endif
+--- a/xpon-en757x/xpon_phy_10g/src/phy_init.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy_init.c
+@@ -27,6 +27,9 @@
+ #include "phy_debug.h"
+ #include "phy_init.h"
+ #include <ecnt_pon_phy_api.h>
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++#include <an7581_pon_phy.h>
++#endif
+ #include "phy_tx.h"
+ #include "phy_reg.h"
+ #include "a60972.h"
+@@ -420,7 +423,7 @@
+ 	uint phyIntStatus;	 //david 20170124
+ 
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+-	if (!get_pon_phy_dev())
++	if (!get_pon_phy_dev() || get_pon_phy_irq() < 0)
+ 		return -ENODEV;
+ #endif
+ 
+@@ -914,7 +917,7 @@
+ 	uint phyIntStatus;	 //david 20170124
+ 
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+-	if (!get_pon_phy_dev())
++	if (!get_pon_phy_dev() || get_pon_phy_irq() < 0)
+ 		return -ENODEV;
+ #endif
+ 
+@@ -1048,6 +1051,11 @@
+ 	gpPhyPriv->phyCfg.flags.txLongFlag = FALSE;
+ 
+ 	
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	ret = an7581_pon_phy_status();
++	if (ret)
++		return ret;
++#endif
+ 	gpPhyPriv->phy_init_done = TRUE;
+ 
+ 	PON_PHY_PRINT(PHY_MSG_ERR,"_______ PHY init step 1 _______ (done)\r\n\r\n");

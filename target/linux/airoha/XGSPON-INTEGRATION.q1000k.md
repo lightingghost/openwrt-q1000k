@@ -49,11 +49,14 @@ All four BSP modules and the PHY pass kernel modpost; the board DTS compiles.
 No new provider or DT has been executed on the device. Absence of a region
 from `/proc/iomem` does not establish clocking or initialization.
 
-The SoC PON PHY uses the OEM `1faf0000`, `1faf3000` and `1faf4000` regions.
-The existing `pon_pcs` node instead describes the `1fa08xxx`/`1fa8xxxx`
-serial-interface PCS/PMA and shares XPON reset IDs. Enabling that PCS is not
-proof of the internal optical path. The board keeps both `pon_pcs` and `gdm2`
-disabled pending the correct connection/reset sequence.
+The AN7581 optical PHY uses digital registers at `1faf0000` and the PON
+analog/PMA windows at `1fa8a000`/`1fa8b000`. The earlier generic provider also
+listed `1faf3000`/`1faf4000`, but the AN7581 tuning source uses the `1fa8xxxx`
+windows. The existing `pon_pcs` node overlaps those analog resources and
+shares XPON reset IDs. Its disabled state is deliberate: the optical PHY
+provider and PON PCS must not bind concurrently. Copper `eth_pcs` uses the
+separate `1fa7a000`/`1fa7b000` windows, which the optical provider rejects.
+See [PHY evidence and integration](XGSPON-PHY.q1000k.md).
 
 The old `READ_FE_REG` abstraction is especially misleading:
 
