@@ -90,9 +90,10 @@ tests/q1000k/run_pon_transport_uml.sh
 
 The transport fixture covers real attachment, metadata encode/decode, callback
 ownership, generations and BUSY behavior. The DMA fixtures compile the actual
-native TX/RX functions and TX cleanup against DMA/page/ring fixtures. They
+native TX/RX functions, TX completion and cleanup against DMA/page/ring fixtures. They
 exercise descriptor fields, all mapping failures for zero through three
-fragments, doorbell publication, cleanup, raw frame lengths, ordinary Ethernet
+fragments, doorbell publication, cleanup, out-of-order/duplicate completion,
+mixed Ethernet/PON ownership, raw frame lengths, ordinary Ethernet
 behavior, damaged fragment chains, allocation failure and an all-invalid ring.
 `Q1000K_PON_ETH` can select a stable prepared Ethernet source directory. Do not
 run against a kernel tree while a build is cleaning/reapplying its patches.
@@ -101,7 +102,9 @@ The UML transport test uses real Linux netdevice registration/stop/unregister,
 RTNL, RCU and skb/queue APIs; its hardware-owner storage and DMA submission are
 fixtures. It runs 100 attach/release/stop cycles with concurrent RX/TX/wake
 activity and unregisters the lower netdevice while a consumer still owns its
-handle. It requires no kernel/RCU/locking diagnostics and a zero test exit.
+handle. Synthetic DMA completions are delayed to exercise real quiesce waits,
+bounded timeout/retry and release before final completion. It requires no
+kernel/RCU/locking diagnostics and a zero test exit.
 It uses the same read-only hostfs and UML kernel guards as the other runners;
 only a synthetic netdevice exists, with no attached NIC or optical hardware.
 `Q1000K_UML_BASE` reuses a UML build cache. When overriding `Q1000K_PON_ETH`,

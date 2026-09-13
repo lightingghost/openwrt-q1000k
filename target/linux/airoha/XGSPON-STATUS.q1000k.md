@@ -46,7 +46,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
 | PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects and the complete MAC module compile and pass modpost. | Integrate interrupt consumers, QDMA/FE, packet metadata, management traffic and complete callback/startup teardown. |
-| Native packet transport | Explicit PON metadata, raw RX, packet ownership and callback attachment are implemented in the existing Ethernet owner; local fixtures and UML RTNL/RCU tests pass. GDM2 stays disabled. | Wire the vendor adapter, physical DMA drain and FE provisioning; verify descriptor/padding behavior on hardware. |
+| Native packet transport | Explicit PON metadata, raw RX, packet ownership and callback attachment are implemented in the existing Ethernet owner; local fixtures and UML RTNL/RCU tests pass. GDM2 stays disabled. | Wire the vendor adapter, physical FIFO/RX drain and FE provisioning; verify descriptor/padding behavior on hardware. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -350,6 +350,25 @@ PON role property but remains disabled; its PHY connection and the vendor
 adapter are still absent. Callback release does not drain hardware DMA or
 turn off optics. See the [native transport contract](XGSPON-INTEGRATION.q1000k.md#native-ethernet-consumer-transport)
 for ownership, limitations and the remaining integration work.
+
+## TX drain checkpoint (2026-09-13)
+
+Patch 9998 adds a bounded quiesce API and per-descriptor references. It closes
+callbacks/TX, waits for native TX reclamation outside RTNL, reports timeouts,
+and prevents reattachment while an old mapping remains. Release remains safe
+with delayed completions because native descriptors retain internal storage
+without invoking consumer callbacks. Mapping failures, normal completion and
+cleanup all release the same ownership; duplicate notifications are ignored.
+
+All 17 host tests pass, including native completion with mixed Ethernet/PON
+traffic and out-of-order fragments. The UML test passes real wait/RTNL/RCU
+execution with delayed completions, timeout/retry, 100 lifecycle cycles and
+unregister/release before final completion. The full Linux 6.18.44 target
+build passes and exports the new quiesce API. No device access was performed.
+This does not establish optical/FE FIFO emptiness or DMA-stop recovery on
+hardware. The [adapter findings](XGSPON-INTEGRATION.q1000k.md#vendor-packet-adapter-findings)
+record the remaining vendor RX length, management framing, TX ownership and
+NAPI mismatches. PON stays disabled.
 
 ## Validation and remaining acceptance gates
 

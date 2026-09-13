@@ -216,10 +216,11 @@ and must stop other users of that handle first. Releasing an old, stopped
 handle cannot detach a later attachment. A generation rejects a software RX
 assembly retained across reattachment.
 
-**This is callback detachment, not a hardware drain or optical-off operation.**
-Already-submitted DMA can complete after release, and a generation does not
-flush descriptors received in hardware before a new attachment. Physical
-TX/RX gating, outstanding descriptor draining, actual GDM padding/CRC behavior,
+**Release disconnects callbacks; quiesce additionally waits for native TX
+descriptor reclamation. Neither is an optical-off operation.** Already-submitted
+DMA can complete after release, and a generation does not flush descriptors
+received in hardware before a new attachment. Physical TX/RX gating, FE/optical
+FIFO draining, actual GDM padding/CRC behavior,
 reset/clock coordination, FE flow programming and the vendor adapter remain
 necessary before activation. The lower phylink/optical connection is also not
 established by this patch. The vendor package stays `BROKEN`, unselected and
@@ -238,6 +239,69 @@ while a handle remains owned, with no RCU/locking/kernel diagnostics. These
 checks establish software behavior, not descriptor behavior on the Q1000K.
 The complete Linux 6.18.44 target builds with all three API exports, and the
 board DT compiles with GDM2 still disabled. All 17 host PON fixtures pass.
+
+## TX descriptor drain checkpoint (2026-09-13)
+
+Patch 9998 adds `airoha_pon_quiesce(handle, timeout_ms)`. It disconnects the
+attachment, drains its callbacks, then waits for outstanding mapped TX
+descriptors without holding RTNL. A zero timeout polls. Timeout returns
+`-ETIMEDOUT` and leaves the attachment disconnected; the caller may retry or
+release its handle. No shared DMA enable, interrupt or reset register is
+changed by this API. A new attachment is rejected while the previous one's
+mapped descriptors remain, including after its caller has released the handle.
+
+Each mapped descriptor retains an internal attachment reference and increments
+both attachment and lower-port counters. Native completion, mapping rollback
+and queue cleanup release the same ownership after unmapping the buffer.
+Completion also clears the retained skb pointer; duplicate notifications for
+already-reaped descriptors are ignored. Counting every fragment prevents the
+last packet fragment from reporting a drain while earlier mappings remain.
+Ordinary Ethernet descriptors do not affect the PON counters. The caller's
+release drops its reference after callback detachment, so delayed completion
+can free internal storage without calling consumer code or reading its private
+data. Native lower-device storage remains owned until queue cleanup finishes.
+
+Host fixtures execute the actual submission, completion and cleanup paths,
+including mixed Ethernet/PON traffic, out-of-order completion, duplicates,
+every fragment-mapping failure, bounded timeout/retry and release with pending
+DMA. The real Linux UML test now uses delayed synthetic descriptor completions:
+it passes timeout/retry, 100 attachment/stop cycles and late completion after
+unregister/release, with 986,082 RX/wake callbacks and no kernel/RCU/locking
+diagnostics. All 17 host PON tests and the full Linux 6.18.44 target build pass;
+`airoha_pon_quiesce` is the fourth exported consumer API.
+
+This establishes the software reclamation contract, not physical FIFO emptiness
+or packet delivery. The existing native DMA-stop timeout path still warns and
+continues cleanup; its hardware recovery behavior needs validation before PON
+activation. RX hardware draining, PHY/reset sequencing and FE/optical FIFO
+checks remain separate. GDM2, the MAC and PON PCS remain disabled.
+
+## Vendor packet adapter findings
+
+The native API cannot be connected to the existing vendor callbacks unchanged:
+
+- `pwan_cb_rx_packet()` expects DMA-written data in an skb whose logical length
+  is still zero; it later calls `skb_put(pktLen)`. Native RX already sets the
+  length and may assemble page fragments. The adapter must normalize that
+  contract once, linearize before vendor direct-pointer parsers where needed,
+  and avoid double growth or copying past a linear buffer.
+- The callback reads Ethernet bytes 12/13 before checking packet length and
+  can reinterpret those bytes as an EAPOL marker even in an OMCI frame. Raw
+  management frames must be selected from validated descriptor metadata and
+  handled separately from Ethernet parsing. Merely setting protocol zero
+  after `eth_type_trans()` does not restore the header bytes it removed.
+- The TX caller frees the skb again for nonzero QDMA results even though its
+  comment says the QDMA call consumed it. Native `NETDEV_TX_BUSY` instead
+  retains an unchanged skb; native `NETDEV_TX_OK` consumes it on success or
+  failure. The adapter must define one ownership contract and deferred retry,
+  and the vendor caller must use it consistently.
+- The vendor receive-event path schedules its own NAPI and changes QDMA RX
+  interrupts. Native NAPI already owns receive delivery; those event/poll hooks
+  cannot control the same ring a second time.
+
+These findings are from the prepared imported source, not from device tests.
+The vendor adapter remains unwired; a success-only hook shim would hide these
+incompatibilities and does not satisfy the integration plan.
 
 ## MAC identity handoff
 
@@ -336,7 +400,7 @@ DMA/RX fixtures, and real Linux attachment/RCU tests in UML. The normal builder 
 protected source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
-resource ownership, the vendor-to-native QDMA/FE adapter, identity handoff from the launcher, required flow
+resource ownership, the vendor-to-native QDMA/FE packet adapter, identity handoff from the launcher, required flow
 operations, AN7581 OMCC transport, OMCI service support, and the actual
 procd/netifd lifecycle. Do not install an init script that merely reports
 success while these components are absent. CLI `start`/`restart`/`reload`

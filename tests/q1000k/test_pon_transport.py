@@ -68,6 +68,25 @@ static void *kzalloc(size_t n,int flags) {
     if(alloc_fail) return NULL; allocations++; return calloc(1,n);
 }
 static void kfree(void *p) { if(p) { releases++; free(p); } }
+typedef struct { int n; } atomic_t;
+typedef struct { int n; } refcount_t;
+typedef struct { int wakes; } wait_queue_head_t;
+static int atomic_read(atomic_t *p) { return p->n; }
+static void atomic_set(atomic_t *p,int n) { p->n=n; }
+static void atomic_inc(atomic_t *p) { p->n++; }
+static void atomic_dec(atomic_t *p) { assert(p->n>0); p->n--; }
+static bool atomic_dec_and_test(atomic_t *p) { atomic_dec(p); return !p->n; }
+static void refcount_set(refcount_t *p,int n) { p->n=n; }
+static void refcount_inc(refcount_t *p) { assert(p->n>0); p->n++; }
+static bool refcount_dec_and_test(refcount_t *p) { assert(p->n>0); return !--p->n; }
+static void init_waitqueue_head(wait_queue_head_t *p) { p->wakes=0; }
+static void wake_up_all(wait_queue_head_t *p) { p->wakes++; }
+#define msecs_to_jiffies(ms) (ms)
+static void (*wait_progress)(void);
+#define wait_event_timeout(wq,condition,timeout) ({ \
+    assert(!rtnl_held && !rcu_readers); \
+    if (!(condition) && (timeout) && wait_progress) wait_progress(); \
+    (condition) ? 1 : 0; })
 struct airoha_pon;
 struct airoha_eth;
 struct airoha_gdm_dev;
@@ -90,6 +109,7 @@ struct airoha_gdm_dev {
     struct airoha_pon *pon;
     bool pon_port;
     u64 pon_generation;
+    atomic_t pon_tx_pending;
 };
 struct airoha_gdm_port { struct airoha_gdm_dev *devs[2]; };
 struct airoha_eth { struct airoha_gdm_port *ports[4]; struct airoha_qdma qdma[2]; };
@@ -126,13 +146,17 @@ static void __netif_tx_unlock_bh(struct netdev_queue *q) { assert(q->locked); q-
 static bool netif_xmit_stopped(struct netdev_queue *q) { return q->stopped; }
 static u16 skb_get_queue_mapping(struct sk_buff *s) { return s->queue; }
 static void skb_set_queue_mapping(struct sk_buff *s,u16 q) { s->queue=q; }
-static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *s,struct net_device *n,u32 msg) {
+static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *s,struct net_device *n,u32 msg,struct airoha_pon *pon) {
     assert(s->dev==n && s->queue<32 && n->txq[s->queue].locked && rcu_readers);
     xmit_calls++; last_msg=msg;
     if(xmit_result==NETDEV_TX_OK) dev_kfree_skb_any(s);
     return xmit_result;
 }
 ''' + masks + '\n' + source + r'''
+static struct airoha_pon *draining;
+static void finish_pending(void) {
+    while (atomic_read(&draining->pending)) airoha_pon_tx_complete(draining);
+}
 static int context;
 static struct airoha_pon_rx_meta last_rx;
 static void rx(void *p,struct sk_buff *skb,const struct airoha_pon_rx_meta *meta) {
@@ -223,6 +247,32 @@ int main(void) {
     airoha_pon_release(next); assert(!gdm.pon && detach_calls==1 && graces==2);
     airoha_pon_tx_wake(&gdm); assert(wake_calls==1);
     airoha_pon_release(NULL);
+    pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon);
+    for(int i=0;i<3;i++) airoha_pon_tx_get(pon);
+    assert(atomic_read(&pon->pending)==3 && atomic_read(&gdm.pon_tx_pending)==3);
+    assert(airoha_pon_quiesce(pon,0)==-ETIMEDOUT && !gdm.pon && !pon->netdev);
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
+    rtnl_lock(); assert(airoha_pon_qdma_busy(&eth.qdma[1])); rtnl_unlock();
+    airoha_pon_tx_complete(pon);
+    assert(airoha_pon_quiesce(pon,0)==-ETIMEDOUT);
+    draining=pon; wait_progress=finish_pending;
+    assert(!airoha_pon_quiesce(pon,10) && !atomic_read(&pon->pending) && pon->drained.wakes==1);
+    assert(!airoha_pon_quiesce(pon,0));
+    next=airoha_pon_attach(&dev,&ops,&context); assert(next==gdm.pon);
+    airoha_pon_release(pon); assert(gdm.pon==next);
+    airoha_pon_tx_get(next); airoha_pon_tx_get(next);
+    rtnl_lock(); airoha_pon_stop(&gdm); rtnl_unlock();
+    int before_release=releases;
+    airoha_pon_release(next); assert(releases==before_release);
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
+    before_release=releases;
+    airoha_pon_tx_complete(next); assert(releases==before_release);
+    airoha_pon_tx_complete(next); assert(releases==before_release+1);
+    assert(!atomic_read(&gdm.pon_tx_pending));
+    next=airoha_pon_attach(&dev,&ops,&context); assert(next==gdm.pon);
+    airoha_pon_release(next);
+    assert(airoha_pon_quiesce(NULL,1)==-EINVAL);
+    airoha_pon_tx_get(NULL); airoha_pon_tx_complete(NULL);
     assert(allocations==releases && !rtnl_held && !rcu_readers);
     return 0;
 }
