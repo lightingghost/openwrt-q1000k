@@ -116,3 +116,17 @@ and IRQ acquisition. It passes 50 cycles plus unload while a polling callback
 and an IRQ thread are blocked using PHY state, with no runtime kernel
 warnings. The AArch64 r23 package builds and packages successfully (341,589
 bytes), and its prepared sources match the tested source and patches.
+
+## Reset-controller prerequisite
+
+The imported PCIe reset polarity patch (`609-02`) used `val |= ...` on an
+uninitialized local in `en7523_reset_update`. The regmap conversion also
+ignored errors from update and status reads. Kernel patch `9999f` assigns the
+reset value directly and returns regmap errors from both operations. It keeps
+the target-bit mask and the inverted PCIC polarity, preserving unrelated bits.
+
+The production reset callbacks pass host tests across all 32 bit positions in
+three banks, both polarities, several initial bit patterns, and read/update
+errors. The Linux 6.18.44 AArch64 kernel builds successfully with the patch;
+the prepared clock source matches the tested source. No reset was performed
+on the Q1000K.
