@@ -8,8 +8,10 @@ two EN7573AN devices**. This document plans the implementation; it does not
 claim functioning optical service.
 
 Implementation has started. See the [current implementation checkpoint](XGSPON-STATUS.q1000k.md)
-for the completed imports, working factory/RPC/LuCI foundation, live checks,
-dependency matrix and concrete kernel/optical blockers. The numbered steps
+for the completed imports, factory/RPC/LuCI foundation, confirmed controller
+selection/power mapping and verified XGS-PON MD32 bring-up. The standalone
+controller and pinctrl/DT changes are implemented; full-image cold boot,
+remaining analog/PHY work, MAC/QDMA and OMCI are still pending. The numbered steps
 below remain the full acceptance plan; they are not all complete.
 
 The reference is [coolsnowwolf/lede commit f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358).

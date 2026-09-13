@@ -3,13 +3,15 @@
 2026-09-12, branch `q1000k-xgspon`, based on `q1000k-dev` at
 `b287be4f00581e04ddee27f1157a4897455078e5`.
 
-**Factory access and development diagnostics work; optical service does not.**
-The backend and adapted LuCI app build for AN7581. The factory reader and
-complete RPC backend have passed live checks on the Q1000K. The vendor
-kernel modules do not build as a complete usable stack, the EN7573 loader
-is not integrated, and OMCI/service provisioning remains unimplemented.
-No firmware image was flashed, PON module loaded, optical control changed,
-or package persistently installed during these checks.
+**Both controller paths detect and XGS-PON MD32 bring-up works; optical
+service does not.** The new `kmod-q1000k-pon-control`, factory backend and
+adapted LuCI app build for AN7581. With the fiber disconnected, live tests
+confirmed the GPIO mapping, both family IDs, exact OEM firmware loading,
+complete PM/DM/calibration readback, MCU enable and asserted TX-disable.
+The new controller module was loaded only from RAM for testing, then
+powered off and removed; the temporary harness restored GPIO/mux state.
+No firmware image was flashed or package persistently installed. The
+vendor PHY/MAC stack and OMCI/service provisioning remain unimplemented.
 
 ## Imported references
 
@@ -29,27 +31,29 @@ OMCI daemon and unrelated PR changes were not imported.
 
 | Component | Evidence and current state | Required next work |
 | --- | --- | --- |
-| Hardware | User reports AN7581SIT and two EN7573AN. Linux identifies `quantum,q1000k-ubi`. | Confirm the role and control wiring of each optical controller. |
+| Hardware | AN7581SIT and two EN7573AN. Linux identifies `quantum,q1000k-ubi`. GPON/XGS-PON selector and enable wiring confirmed by independent power tests. | Verify remaining analog/SoC PHY signals and cold-boot behavior. |
 | Factory identity/calibration | Read-only C reader finds the unique `factory` volume by name under the `ubi` MTD parent. Live serial, WAN MAC and all 513 calibration bytes match the original NAND backup. | Retain this data path for the loader; verify cold-boot and upgrade preservation when images are tested. |
 | Original DSD fallback | Offline `--dsd-file` input is implemented and tested. Automatic raw MTD fallback is excluded. | Establish the logical NAND/BBT/BMT view before adding direct DSD fallback on older installations. |
-| Optical GPIOs and I2C | OEM script shows separate selection and enable sequences. Linux exposes `i2c-0`; the documented ID read currently returns ENXIO. | Confirm mux, power, reset and TX-disable functions/polarities before requesting GPIOs or enabling a controller. |
-| MD32 firmware | OEM program/data files are available locally and extracted with exact size/SHA-256 verification. | Feed the matching pair to the future loader; no firmware redistribution is included. |
-| EN7573 loader | The LEDE package omits `en7572.ko`/LDDLA. A separate vendor source tree contains a reference loader; it declares `MODULE_LICENSE("Proprietary")`. | Resolve the implementation/source licensing path, port the protocol to Linux I2C and DT GPIOs, and validate both controller paths. No loader source was copied into the new GPL userspace package. |
+| Optical GPIOs and I2C | Force-GPIO mux plus active-low enables resolve ENXIO. Both paths return `0x1388`; power-off tests distinguish ownership. DT GPIO descriptors and pinctrl fixes added. | Boot-test the compiled production DT and pinctrl changes. GPON LOS is still based on OEM mapping. |
+| MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
+| EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | Hook declaration and AN7581 IOMUX table-size bugs fixed in patches. Normal Linux 6.18 compilation still fails. | Fix remaining C/kernel API issues and remove AN7583-only modules from the AN7581 dependency graph. |
 | PON MAC | Diagnostic compilation reaches modpost with 41 unresolved symbols. Four resource accessors exist in an unbuilt BSP source; the others have no export in the imported tree. | Integrate resource ownership, interrupts, QDMA/FE, XG-PON events, packet metadata and management traffic. |
 | OMCI | PR #24577's native daemon cross-compiles for AArch64, but has EN7528 transport, baseline-only OMCI and a DZS/H660GM-A MIB. It was not run or installed. | Implement/choose an AN7581 transport and Q1000K service model, extended OMCI as needed, correct errors and procd lifecycle. |
-| LuCI/RPC | Airoha dependency chain builds. Unknown optical values remain JSON null; failed polling clears old data. Identity overrides are validated in UI and backend. | Browser QA after installation; add genuine driver/OMCI status only when those APIs exist. |
-| Experimental builds | Optional diagnostics configuration fragment provided. Normal builder remains on `q1000k-dev`. | Enable a full PON image only after loader, kernel and service integration pass their gates. |
+| LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
+| Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
 
 The reference loader was inspected at
 [airoha_xpon_en757x 950199a](https://github.com/Sirherobrine23/airoha_xpon_en757x/tree/950199a8de6b75e76906a7c1b39b7a9a3e2913f9/v2/lddla).
 It reads the controller family ID at I2C address `0x51`, register `0x0408`,
 expecting `0x1388`. Register addresses are two bytes, most significant byte
 first; the two data bytes form a little-endian word. This is a family check,
-not proof of which EN7573AN is selected. The loader uses MD32 PM/DM registers
-at `0x3000` through `0x3018` on address `0x50`, and consumes a 512-byte BOB
-payload. The OEM's full 513-byte calibration record is preserved by our
-reader; no padding, truncation or substitution is done at the storage layer.
+not proof of which EN7573AN is selected. **Control and address registers
+use `0x51`; only PM/DM data ports `0x3008`/`0x3014` use `0x50`.** This
+corrects the initial checkpoint's overly broad assignment to `0x50`.
+The loader consumes a 512-byte BOB payload. The OEM's full 513-byte record
+is preserved by our reader; the first 512 bytes go to DM offset `0x600`.
+The working copy retains the unit's original bytes, including vendor text.
 The reference loader's firmware hashes differ from the local OEM pair, so
 its bundled firmware must not be substituted just because filenames match.
 
@@ -75,22 +79,39 @@ sysfs and firmware paths were used. The result reported valid factory data,
 both PON modules absent, both firmware files unverified, and all optical
 states unavailable. The temporary files were removed afterward.
 
-The board has one 64-line GPIO controller. PON candidate offsets 8, 9, 10,
-11, 45 and 46 are not requested by the current kernel. The OEM script uses
-global numbers 461/462 for mode selection, 488/489 for enable controls and
-490/491 for LOS. Its preceding GPIO-mode commands associate these with
-local offsets 45/46, 8/9 and 10/11 respectively; this is a software-derived
-mapping, not a confirmed schematic. OEM XGS selection uses 461/462 high,
-then 488 low and 489 high. No such writes were made on OpenWrt.
+The board has one 64-line GPIO controller. The old kernel leaves offsets
+8, 9, 10, 11, 45 and 46 unrequested. OEM global numbers 461/462, 488/489
+and 490/491 correspond to local 45/46, 8/9 and 10/11 respectively.
+Independent power tests with the fiber disconnected confirmed:
+
+| Selected path | GPIO 45/46 | GPIO 8 | GPIO 9 | Family ID |
+| --- | --- | --- | --- | --- |
+| GPON | low/low | high | low | `0x1388` |
+| GPON, own enable inactive | low/low | low | high | ENXIO |
+| XGS-PON | high/high | low | high | `0x1388` |
+| XGS-PON, own enable inactive | high/high | high | low | ENXIO |
+| Either, both disabled | either paired setting | high | high | ENXIO |
+
+GPIO 8 is therefore active-low XGS-PON enable, and GPIO 9 is active-low
+GPON enable. Force-GPIO bits are SCU `0x228[8:11]` and `0x22c[13:14]`.
+The pinctrl patch exposes these GPIO functions and writes output latches
+before enabling output, avoiding a transient opposite-level assertion.
 
 I2C adapter `1fbf8000.i2c0` exists at `/sys/bus/i2c/devices/i2c-0`, with
 `/dev/i2c-0`; absence of `/sys/class/i2c-adapter` alone does not mean I2C
-is unavailable. The driver reports 100 kHz. One combined address-pointer
-write/read transaction (`0x51`: write `04 08`, read two bytes) returned
-ENXIO. No register data, GPIO, mux, power or reset was changed. This result
-cannot distinguish an unpowered controller, an unselected path or another
-wiring issue. It does not prove defective hardware. Successful detection
-of both chips is still an unmet bench milestone.
+is unavailable. The driver reports 100 kHz. The initial unpowered probe
+returned ENXIO; the confirmed GPIO sequence resolves it. Changing the
+I2C-master selection bit `0x214[13]` alone did not help and is unnecessary
+once the GPIOs are configured. The production implementation leaves it alone.
+
+The standalone driver completed the exact OEM PM/DM upload and every-word
+readback of all 16 KiB PM and 4 KiB DM, including this unit's 512-byte
+calibration payload. MCU enable and TX-disable read back asserted after
+startup. XGS LOS was high with the fiber disconnected. These are controller
+register samples, not a firmware heartbeat or proof of a working optical
+service. The existing image lacks the new DT node, so the tests used a
+temporary lookup-table/client harness, reserving GPIOs and restoring the
+owned register bits on exit. No full-image cold-boot test has been done.
 
 ## Kernel audit
 
@@ -154,18 +175,23 @@ test "$(git branch --show-current)" = q1000k-xgspon
 git merge-base --is-ancestor b287be4f00581e04ddee27f1157a4897455078e5 HEAD
 make -j8 package/network/utils/q1000k-xgspon/compile CONFIG_PACKAGE_q1000k-xgspon=m V=s
 make -j8 package/luci-app-econet-xpon/compile CONFIG_PACKAGE_luci-app-econet-xpon=m CONFIG_PACKAGE_q1000k-xgspon=m V=s
+make -j8 package/kernel/q1000k-pon-control/compile CONFIG_PACKAGE_kmod-q1000k-pon-control=m V=s
 ```
 
-Both commands pass using the local GCC 14.4.0 musl toolchain. Outputs are
-`bin/packages/aarch64_cortex-a53/base/q1000k-xgspon-1.apk` and
-`bin/packages/aarch64_cortex-a53/base/luci-app-econet-xpon-1-r2.apk`.
+Run these top-level OpenWrt builds sequentially; concurrent invocations
+race while regenerating shared package metadata. All pass using the local
+GCC 14.4.0 musl toolchain. Outputs include
+`bin/packages/aarch64_cortex-a53/base/q1000k-xgspon-2.apk`,
+`bin/packages/aarch64_cortex-a53/base/luci-app-econet-xpon-1-r3.apk` and
+`bin/targets/airoha/an7581/packages/kmod-q1000k-pon-control-6.18.44-r1.apk`.
 LuCI depends on `luci-base` and `q1000k-xgspon`; it has no dependency on the
 EN7528 kernel package or the broken vendor AN7581 package.
 
 For a diagnostics image, add [q1000k-xgspon.config](q1000k-xgspon.config) to
 an existing `quantum_q1000k` configuration on this branch and run
 `make defconfig`. Pin the checkout revision for any shared test image. This
-fragment does not select PON kernel modules. The normal `q1000k-build`
+fragment selects the standalone controller, with no autoload, but leaves
+the broken vendor PON stack unselected. The normal `q1000k-build`
 repository/settings were not changed. No full XGS-PON image was produced.
 
 After installing the diagnostics packages, the UI is Network → XGS-PON.
@@ -175,15 +201,27 @@ The CLI provides:
 q1000k-xgspon status
 q1000k-xgspon validate
 q1000k-xgspon prepare
+# On a matching kernel/DT with the optional module and verified firmware:
+modprobe q1000k-pon-control
+q1000k-xgspon detect
+q1000k-xgspon initialize
+q1000k-xgspon off
 ```
 
-`status` returns schema version 1; unknown LOS, registration, OMCI, service
-readiness and optical measurements are null. `validate` checks the selected
+`status` returns schema version 1 with a `controller` object. LOS is null
+until initialized and sampled by the driver. Registration, OMCI, service
+readiness and optical measurements remain null. `validate` checks the selected
 factory/override serial and MAC. Blank `/etc/config/q1000k-xgspon` overrides
 use this unit's factory data. `prepare` requires valid factory calibration,
 identity and the exact OEM firmware pair, then stages the 513-byte record
 in a new mode-0700 RAM directory and prints that path. It does not activate
-optics. Remove that temporary directory when finished. `start`, `restart`
+optics. Remove that temporary directory when finished. `detect` probes both
+paths and powers off. `initialize` loads and verifies XGS-PON MD32 with
+TX-disable asserted; it cleans its temporary calibration file on exit.
+`off` disables both controllers. Use these bring-up commands with the fiber
+disconnected until the remaining PHY/analog integration is validated.
+See the [driver API and test instructions](../../../package/kernel/q1000k-pon-control/README.md).
+`start`, `restart`
 and `reload` explicitly fail until optical integration exists; no init
 service is installed yet.
 
@@ -208,22 +246,31 @@ is QKX001-06.00.44.00:
 
 ## Validation and remaining acceptance gates
 
-- Ten Python tests pass for the production C reader, shell backend, CLI and
+- Eleven Python tests pass for the production C reader, shell backend, CLI and
   extraction logic. They cover invalid/truncated/duplicate records, unchanged
   inputs, firmware corruption, absent state, overrides, private staging and
-  failed-stage cleanup.
+  failed-stage cleanup, controller status types/schema and ambiguous discovery.
 - Node tests pass for the production LuCI views, including missing data,
   LOS true/false, failed polling, unknown schema and identity validation.
-- Both AArch64/noarch userspace packages build. All kernel patches prepare
-  successfully; the complete vendor kernel package fails as detailed above.
-- Live factory and RPC checks pass. The I2C family-ID probe returns ENXIO;
-  controller detection, calibration loading and optical activation do not pass.
+- Both userspace packages and the standalone controller module build. The
+  pinctrl patch applies and its objects compile; the board DTS compiles.
+  The complete vendor kernel package remains broken as detailed above.
+- The production loader's host test checks layout, address spaces, endian
+  behavior, readback mismatch and immediate failure at 15,388 I2C transfer
+  points. No MCU enable occurs before successful full-memory verification.
+- Live factory/backend checks, both controller IDs, firmware/calibration
+  loading and readback pass. Two consecutive CLI initialization/off cycles
+  passed with the final module. Short calibration and corrupted firmware
+  were rejected; detection during initialization returned `EBUSY` without
+  interrupting it. Final cleanup restored the owned GPIO/mux bits and empty
+  firmware-loader path, removed both temporary modules, and left LAN1 at
+  1 Gbit/s. Optical service remains unimplemented.
 - No browser QA, image flash, OLT registration, OMCI provisioning, optical
   traffic, reconnect/reboot reliability or accelerated PON traffic test has
   been claimed or completed.
 
-Continue the [implementation plan](XGSPON.q1000k.md) with confirmed board
-selection/power/TX-disable wiring and an EN7573 loader, then resource/QDMA
+Continue the [implementation plan](XGSPON.q1000k.md) with production DT
+boot validation and remaining PHY/analog initialization, then resource/QDMA
 integration and OMCI. Keep `pon_pcs` and `gdm2` disabled until their owner and
 initialization order are implemented. Keep optical packages optional until
 the bench, registration, service and recovery gates pass.
