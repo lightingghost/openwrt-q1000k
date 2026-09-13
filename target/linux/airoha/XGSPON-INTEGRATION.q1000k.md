@@ -168,6 +168,77 @@ leaving references to unloaded code. Reset/clock/analog sequencing and ignored
 FE/PHY operation errors remain separate blockers. No vendor module was loaded
 to test the lifecycle changes.
 
+## Native Ethernet consumer transport
+
+Kernel patch `9997-net-airoha-q1000k-pon-consumer.patch` implements the native
+packet attachment API in `include/linux/soc/airoha/airoha_pon.h`. The disabled
+Q1000K GDM2 node now declares `airoha,pon-port`, with a matching binding. Probe
+rejects this role on other boards, SoCs, GDM ports or nonzero NBOQ. Neither
+GDM2 nor the PON PCS/MAC is enabled; no vendor hook adapter consumes this API
+in this checkpoint.
+
+The native Ethernet driver keeps ownership of QDMA rings, IRQs, NAPI, DMA
+mapping, completion and shared LAN resources. The consumer passes explicit
+GEM/channel/queue/OMCI/MIC-index fields into descriptor word 0. CPU ring
+selection is separate from the OLT's T-CONT/queue allocation. PON submissions
+bypass DSA tagging, disable descriptor accounting/meter selection, and always
+ring the DMA doorbell even when an upper interface is batching packets.
+Ordinary Ethernet submissions to a designated PON port are rejected. The
+port cannot be bridged, has hardware features disabled, rejects TC setup and
+PPE output flows, and uses direct QDMA1 CPU delivery when opened.
+
+TX returns Linux ownership semantics: `NETDEV_TX_BUSY` leaves the packet
+unchanged with its caller; `NETDEV_TX_OK` consumes it, including failures.
+Nonempty frames with a linear head and ordinary page fragments are supported;
+GSO, partial checksums, nested fragment lists and oversized frames are rejected.
+After the ring-capacity check, `skb_orphan()` releases a consumer/socket
+destructor before the native driver retains the packet for DMA completion.
+Both ring-space recovery and BQL completions notify the consumer to schedule
+another TX attempt. The wake callback must not submit inline under the native
+queue lock; an eventual adapter must implement deferred retry and prevent lost
+wakeup races around upper-queue stopping.
+
+RX delivers complete raw frames before Ethernet header parsing, DSA, PPE,
+hashing or GRO. It preserves the first descriptor's four host-endian metadata
+words, accumulating later CRC/runt/long error bits before delivery. It rejects
+aggregation, overflow, mixed-port fragments and excessive assembled length.
+Once a fragment fails, the rest of that chain is discarded through its final
+descriptor, including across NAPI polls. Dropped frames count against the poll
+budget; processing stops when the available descriptors are exhausted. RX
+cleanup frees a retained partial frame. The no-MIC bit is presence information,
+not an authentication verdict; OMCI MIC verification remains unimplemented.
+
+Attach/release serialize under RTNL. RX, TX submission and wake callbacks use
+RCU; lower stop/unregister disconnects both pointers, waits for readers and
+notifies the consumer once. No permanent lower-netdev reference blocks
+unregister. The caller owns its handle and callback storage until release,
+and must stop other users of that handle first. Releasing an old, stopped
+handle cannot detach a later attachment. A generation rejects a software RX
+assembly retained across reattachment.
+
+**This is callback detachment, not a hardware drain or optical-off operation.**
+Already-submitted DMA can complete after release, and a generation does not
+flush descriptors received in hardware before a new attachment. Physical
+TX/RX gating, outstanding descriptor draining, actual GDM padding/CRC behavior,
+reset/clock coordination, FE flow programming and the vendor adapter remain
+necessary before activation. The lower phylink/optical connection is also not
+established by this patch. The vendor package stays `BROKEN`, unselected and
+without autoload; service start continues to fail explicitly.
+
+Local C/UBSan fixtures execute the actual attachment, TX descriptor, RX assembly
+and TX cleanup functions. They cover metadata encoding, unchanged BUSY returns,
+every DMA-map failure for zero through three fragments, cleanup and the ordinary
+Ethernet TX/RX path. RX cases include damaged later fragments, mixed ports,
+allocation failure, aggregation, stale software generations and all-invalid
+rings. A separate UML guest executes the actual attachment implementation with
+real Linux netdevices, skb queues, RTNL and RCU; only hardware-owner storage and
+DMA submission are fixtures. Its 100 attach/release/stop cycles produced
+1,538,479 RX/wake callbacks and 51 detach notifications, including unregister
+while a handle remains owned, with no RCU/locking/kernel diagnostics. These
+checks establish software behavior, not descriptor behavior on the Q1000K.
+The complete Linux 6.18.44 target builds with all three API exports, and the
+board DT compiles with GDM2 still disabled. All 17 host PON fixtures pass.
+
 ## MAC identity handoff
 
 The Q1000K MAC now requires `wan_mac` (exact colon-separated 6-byte unicast
@@ -260,11 +331,12 @@ Completed local checks: factory/backend/LuCI host tests, controller transport
 and every-transfer fault injection, read-only controller status tests, controller
 APK build, BSP/PHY/MAC modpost, complete vendor APK generation, resource/hook
 fixtures, validated MAC/FSAN handoff, unsupported-control error propagation,
-and AES/CMAC known-answer and fault-injection tests. The normal builder and
+AES/CMAC known-answer and fault-injection tests, native packet ownership and
+DMA/RX fixtures, and real Linux attachment/RCU tests in UML. The normal builder and
 protected source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
-resource and QDMA adapters, identity handoff from the launcher, required flow
+resource ownership, the vendor-to-native QDMA/FE adapter, identity handoff from the launcher, required flow
 operations, AN7581 OMCC transport, OMCI service support, and the actual
 procd/netifd lifecycle. Do not install an init script that merely reports
 success while these components are absent. CLI `start`/`restart`/`reload`

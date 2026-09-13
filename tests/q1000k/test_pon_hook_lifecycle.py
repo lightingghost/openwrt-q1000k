@@ -3,7 +3,7 @@
 import re
 import unittest
 from test_pon_hooks import BSP
-from test_pon_lifecycle import run_c
+from pon_test_utils import run_c
 
 
 def function(source, name):

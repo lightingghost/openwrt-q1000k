@@ -142,6 +142,12 @@ recorded in [the PR #24577 review](XGSPON-PR24577.q1000k.md).
    no-op hooks with functioning integration or explicit unsupported
    errors. Avoid competing vendor and OpenWrt WAN netdevices.
 
+   Local checkpoint: patch 9997 implements the native Ethernet consumer API,
+   explicit PON descriptor metadata, raw RX, packet ownership and RTNL/RCU
+   detachment. DMA/RX fault fixtures and a real-kernel UML lifetime test pass.
+   The vendor adapter, physical DMA drain, FE flow operations and PHY/phylink
+   connection remain outstanding; the board's PON nodes stay disabled.
+
    Acceptance: one coherent optical data path with working management
    frame TX/RX, valid packet ownership and no regressions on `lan1` or
    `lan2`. Validate initially with flow offload disabled.

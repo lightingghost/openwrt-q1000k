@@ -80,6 +80,34 @@ Set `Q1000K_PON_BSP` to test another prepared BSP source directory. Kernel
 compilation checks the real APIs; these fixtures do not activate hardware or
 establish reset/clock sequencing.
 
+After preparing the target kernel with native PON patch 9997:
+
+```sh
+python3 tests/q1000k/test_pon_transport.py
+python3 tests/q1000k/test_pon_dma.py
+tests/q1000k/run_pon_transport_uml.sh
+```
+
+The transport fixture covers real attachment, metadata encode/decode, callback
+ownership, generations and BUSY behavior. The DMA fixtures compile the actual
+native TX/RX functions and TX cleanup against DMA/page/ring fixtures. They
+exercise descriptor fields, all mapping failures for zero through three
+fragments, doorbell publication, cleanup, raw frame lengths, ordinary Ethernet
+behavior, damaged fragment chains, allocation failure and an all-invalid ring.
+`Q1000K_PON_ETH` can select a stable prepared Ethernet source directory. Do not
+run against a kernel tree while a build is cleaning/reapplying its patches.
+
+The UML transport test uses real Linux netdevice registration/stop/unregister,
+RTNL, RCU and skb/queue APIs; its hardware-owner storage and DMA submission are
+fixtures. It runs 100 attach/release/stop cycles with concurrent RX/TX/wake
+activity and unregisters the lower netdevice while a consumer still owns its
+handle. It requires no kernel/RCU/locking diagnostics and a zero test exit.
+It uses the same read-only hostfs and UML kernel guards as the other runners;
+only a synthetic netdevice exists, with no attached NIC or optical hardware.
+`Q1000K_UML_BASE` reuses a UML build cache. When overriding `Q1000K_PON_ETH`,
+`Q1000K_PON_HEADER` may select the matching public header. These tests do not
+prove physical DMA drain, padding/CRC, MIC authentication or optical operation.
+
 To execute the same cryptographic helpers with the real Linux crypto API:
 
 ```sh

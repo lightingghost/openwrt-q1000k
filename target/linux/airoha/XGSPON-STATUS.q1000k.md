@@ -46,6 +46,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
 | PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects and the complete MAC module compile and pass modpost. | Integrate interrupt consumers, QDMA/FE, packet metadata, management traffic and complete callback/startup teardown. |
+| Native packet transport | Explicit PON metadata, raw RX, packet ownership and callback attachment are implemented in the existing Ethernet owner; local fixtures and UML RTNL/RCU tests pass. GDM2 stays disabled. | Wire the vendor adapter, physical DMA drain and FE provisioning; verify descriptor/padding behavior on hardware. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -330,6 +331,25 @@ is QKX001-06.00.44.00:
 | --- | ---: | --- |
 | `A60993.elf.pm` | 15232 | `5a8a4bbae5f70c1e615ba0aa1c2a1dce654611d3205d2fa983bf41e6cdadb4a1` |
 | `A60993.elf.dm` | 56 | `21618dc3694a1e6f6b28c7da7141964dea1d6e57f2d2956bbe72a780ca6166a4` |
+
+## Native packet transport checkpoint
+
+Kernel patch 9997 adds a Q1000K-only GDM2 consumer API to the existing Ethernet
+owner. The complete Linux 6.18.44 target build and board DT compilation pass;
+all three public API symbols are exported. All 17 host PON fixtures pass. It carries explicit GEM/T-CONT/OMCI metadata through the native DMA path
+and delivers raw RX before Ethernet parsing or offload. BUSY preserves the
+caller's skb; DMA-map failure and cleanup have one packet owner. Ring and BQL
+wakeups notify the consumer, and PON submissions always publish the doorbell.
+Malformed fragmented RX is discarded as a whole, with bounded poll work.
+
+Attachment and removal use RTNL/RCU, including a lower-stop notification and
+stale software-assembly rejection. Local TX/RX fixtures pass, as do 100 cycles
+with real Linux netdevices and RTNL/RCU in UML (1,538,479 RX/wake callbacks,
+51 lower-detach notifications, no kernel diagnostics). GDM2 has an explicit
+PON role property but remains disabled; its PHY connection and the vendor
+adapter are still absent. Callback release does not drain hardware DMA or
+turn off optics. See the [native transport contract](XGSPON-INTEGRATION.q1000k.md#native-ethernet-consumer-transport)
+for ownership, limitations and the remaining integration work.
 
 ## Validation and remaining acceptance gates
 

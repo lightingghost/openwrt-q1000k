@@ -7,10 +7,9 @@ fixtures. No module is loaded and no connection to the router is made.
 from pathlib import Path
 import os
 import re
-import subprocess
-import tempfile
 import unittest
 from test_pon_identity import BSP
+from pon_test_utils import run_c
 
 MAC = BSP.parent / 'xpon-en757x/xpon_10g/src'
 
@@ -26,18 +25,6 @@ def function(path, name):
         depth += (source[pos] == '{') - (source[pos] == '}')
         pos += 1
     return source[match.start():pos] + '\n'
-
-
-def run_c(source, flags=()):
-    with tempfile.TemporaryDirectory(prefix='q1000k-pon-lifecycle-') as tmp:
-        c, exe = Path(tmp) / 'test.c', Path(tmp) / 'test'
-        c.write_text(source)
-        subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                        '-Wno-unused-parameter', '-Wno-unused-variable',
-                        '-Wno-unused-function', '-fsanitize=undefined',
-                        '-fno-sanitize-recover=all', *flags, str(c), '-o', str(exe)],
-                       check=True)
-        subprocess.run([str(exe)], check=True, timeout=20)
 
 
 class PonLifecycleTests(unittest.TestCase):

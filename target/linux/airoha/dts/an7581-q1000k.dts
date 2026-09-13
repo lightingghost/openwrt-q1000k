@@ -269,6 +269,8 @@
 };
 
 &gdm2 {
+	/* Raw PON transport; activation still awaits PHY/MAC integration. */
+	airoha,pon-port;
 	status = "disabled";
 };
 
