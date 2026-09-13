@@ -64,3 +64,55 @@ make optical operation available.
 The AArch64 Linux 6.18.44 vendor package passes modpost and packaging as r22
 (334,582 bytes). The updated board DT compiles with the kernel DTC. All 32
 PON host tests pass, including the new provider test.
+
+## Typed PHY lifecycle
+
+Patch 025 selects a separate Q1000K lifecycle in `q1000k_phy.c`. Module load
+validates the provider and AN7581 ID, allocates software state and initializes
+its timer and locks. It does not change IOMUX, initialize analog hardware,
+create debug proc writers, register a raw PHY hook, or publish legacy callback
+pointers. Direct exported functions pin `phy_10g` while the MAC uses it.
+
+Configuration, start, stop and public API calls are process-context operations.
+They reject interrupt/atomic contexts and observable RCU nesting. Without
+lockdep, `rcu_read_lock_held()` is a constant true stub and is not used as a
+runtime prohibition; PREEMPT_RCU nesting is checked separately. Callers still
+must honor the process-context contract on builds without RCU tracking.
+Lifecycle and callback mutexes serialize operations; nested calls receive
+`-EBUSY` instead of waiting on their own callback. A caller receiving `-EBUSY`
+from stop has not completed shutdown and must retry from its owning worker.
+
+Configuration accepts XGS-PON only, requires WAN selection 10, and requests
+TX disabled. It does not launch the legacy background retry thread on failure.
+Start requires successful configuration, masks all optical IRQ sources and
+clears pending interrupts before requesting IRQ 43. Ownership is recorded only
+after IRQ acquisition succeeds. It then enables and verifies the digital IRQ
+mask. Failed mask/readback or subsequent callback errors latch a fault and
+close callback admission. Failed IRQ acquisition leaves the source masked and
+can be retried.
+
+The threaded IRQ checks the PHY's own enabled digital/rogue pending bits
+before dispatching. The legacy unconditional interrupt counter and 50 ms busy
+wait are bypassed. Timer callbacks only queue work; polling and IRQ callbacks
+serialize in process context. Stop closes callback admission, masks sources,
+drains IRQ callbacks, deletes the timer, cancels polling work, deletes any
+racing rearm and masks again after callbacks finish. Unload releases software
+state only after this drain. None of these operations establishes optical TX
+or MAC/FE drain.
+
+MAC wrappers return the typed operation's actual error, including when the
+PHY is not configured. GPON-family initialization now requests the XGS-PON
+profile on Q1000K and unwinds crypto if PHY configuration fails. Existing
+internal PHY tuning, full SCU/reset calls and legacy API bodies still need the
+controller/reset ownership audit; the typed wrapper is not proof that those
+hardware operations are complete or individually validated. Hardware gates
+remain in place.
+
+All 33 PON host tests pass. The lifecycle fixture injects failures at each
+startup mask write/read, IRQ allocation, clear, mode setup, polling and stop;
+it checks reentry, sticky failure and retry ownership. The UML fixture uses
+real mutexes, RCU, timers, workqueues and kthreads with synthetic registers
+and IRQ acquisition. It passes 50 cycles plus unload while a polling callback
+and an IRQ thread are blocked using PHY state, with no runtime kernel
+warnings. The AArch64 r23 package builds and packages successfully (341,589
+bytes), and its prepared sources match the tested source and patches.

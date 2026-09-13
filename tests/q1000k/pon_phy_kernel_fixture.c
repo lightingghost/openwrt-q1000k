@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include <linux/module.h>
+#include <linux/device.h>
+#include <linux/interrupt.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/rcupdate.h>
+#include <linux/timer.h>
+#include <linux/workqueue.h>
+#include <linux/kthread.h>
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/utsname.h>
+#ifndef CONFIG_UML
+#error UML only; no device or optical hardware is attached.
+#endif
+/* API */
+/* TYPES */
+#define check(x) do { if (!(x)) { pr_err("Q1000K PHY assertion %s:%d: %s\n",__func__,__LINE__,#x); BUG(); } } while (0)
+static struct device fake_dev;
+static u32 registers[0x8000];
+static DEFINE_SPINLOCK(register_lock);
+static struct task_struct *fake_irq_task;
+static irqreturn_t (*fake_irq_fn)(int,void *);
+static bool fake_irq_owned, hold_event;
+static DECLARE_COMPLETION(event_entered);
+static DECLARE_COMPLETION(event_release);
+static DECLARE_COMPLETION(exit_done);
+static unsigned int polls,irqs;
+static int an7581_pon_phy_status(void) { return 0; }
+static struct device *get_pon_phy_dev(void) { return &fake_dev; }
+static int get_pon_phy_irq(void) { return 75; }
+static int GET_HIR(void) { return 14; }
+static int GET_WAN_CONF(void) { return 10; }
+static int an7581_pon_phy_read(u32 reg,u32 *value)
+{
+    unsigned long flags;
+    spin_lock_irqsave(&register_lock,flags);
+    *value=registers[(reg&0x1ffff)/4];
+    spin_unlock_irqrestore(&register_lock,flags);
+    return 0;
+}
+static int an7581_pon_phy_write(u32 reg,u32 value)
+{
+    unsigned long flags;
+    spin_lock_irqsave(&register_lock,flags);
+    registers[(reg&0x1ffff)/4]=value;
+    spin_unlock_irqrestore(&register_lock,flags);
+    return 0;
+}
+static int fake_request_threaded_irq(unsigned int irq,irq_handler_t primary,irq_handler_t thread,
+                                     unsigned long flags,const char *name,void *dev)
+{
+    check(irq==75 && !primary && dev==&fake_dev && !fake_irq_owned);
+    check(flags==(IRQF_SHARED|IRQF_ONESHOT));
+    fake_irq_fn=thread; fake_irq_owned=true; return 0;
+}
+static void *fake_free_irq(unsigned int irq,void *dev)
+{
+    check(irq==75 && dev==&fake_dev && fake_irq_owned);
+    if(fake_irq_task) { kthread_stop(fake_irq_task); fake_irq_task=NULL; }
+    fake_irq_owned=false; fake_irq_fn=NULL; return NULL;
+}
+#define request_threaded_irq fake_request_threaded_irq
+#define free_irq fake_free_irq
+static int pon_phy_clear_int(void) { return 0; }
+static int phy_mode_config(int mode,int tx)
+{
+    check(mode==PHY_XGSPON_CONFIG && tx==PHY_DISABLE);
+    gpPhyPriv->phy_init_done=TRUE; return 0;
+}
+static int phy_fw_ready(int enable) { check(enable==PHY_DISABLE); return 0; }
+static void pon_phy_api_dispatch(struct ecnt_data *in)
+{
+    struct xpon_phy_api_data_s *data=(void *)in;
+    data->ret=0;
+}
+static void phy_event_poll(struct timer_list *timer) { q1000k_phy_poll(); }
+/* PRODUCTION */
+static int handle_event(char *p)
+{
+    struct xpon_phy_api_data_s query={.api_type=XPON_PHY_API_TYPE_GET};
+    check(lockdep_is_held(&qphy_callback));
+    check(!in_atomic() && !irqs_disabled() && !rcu_read_lock_held());
+    check(q1000k_phy_start()==-EBUSY);
+    check(q1000k_phy_stop()==-EBUSY);
+    check(q1000k_phy_call(&query)==-EBUSY);
+    complete(&event_entered);
+    if(READ_ONCE(hold_event)) wait_for_completion(&event_release);
+    return 0;
+}
+static int handle_poll(char *p) { polls++; return handle_event(p); }
+static int handle_irq(char *p) { irqs++; return handle_event(p); }
+static int irq_task(void *unused)
+{
+    check(fake_irq_fn(75,&fake_dev)==IRQ_HANDLED);
+    while(!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
+    __set_current_state(TASK_RUNNING);
+    return 0;
+}
+static int exit_task(void *unused)
+{
+    q1000k_phy_exit(); complete(&exit_done);
+    while(!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
+    __set_current_state(TASK_RUNNING);
+    return 0;
+}
+static void start_session(void)
+{
+    qphy_dead=false; qphy_fault=0;
+    check(!q1000k_phy_init());
+    check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
+    check(!q1000k_phy_start());
+}
+static void stop_during_callback(bool irq)
+{
+    struct task_struct *task;
+    unsigned int n;
+    start_session();
+    reinit_completion(&event_entered); reinit_completion(&event_release); reinit_completion(&exit_done);
+    WRITE_ONCE(hold_event,true);
+    if(irq) {
+        an7581_pon_phy_write(EN7581_XGPON_PHY_XG_PON_INT_STA,EN7581_XGPON_PHY_RX_LOS_INT_EN);
+        fake_irq_task=kthread_run(irq_task,NULL,"qphy-irq-test");
+        check(!IS_ERR(fake_irq_task));
+    } else {
+        q1000k_phy_poll();
+    }
+    check(wait_for_completion_timeout(&event_entered,5*HZ));
+    task=kthread_run(exit_task,NULL,"qphy-exit-test"); check(!IS_ERR(task));
+    for(n=0;n<500 && !READ_ONCE(qphy_dead);n++) msleep(1);
+    check(READ_ONCE(qphy_dead));
+    /* The callback is still using this state: exit must remain blocked. */
+    check(gpPhyPriv && !completion_done(&exit_done));
+    WRITE_ONCE(hold_event,false); complete(&event_release);
+    check(wait_for_completion_timeout(&exit_done,5*HZ));
+    kthread_stop(task);
+    check(!gpPhyPriv && !fake_irq_owned && !fake_irq_task && !work_busy(&qphy_poll_job));
+}
+static int __init phy_test_init(void)
+{
+    struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET};
+    unsigned long flags;
+    unsigned int n;
+    if(!strstr(init_uts_ns.name.release,"q1000k-pon-phy-test")) return -EPERM;
+    en7581_xgpon_func[PHY_ISR_FUNC]=handle_irq;
+    en7581_xgpon_func[PHY_EVENT_POLL_FUNC]=handle_poll;
+    check(!q1000k_phy_init());
+    check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
+    rcu_read_lock();
+    check(q1000k_phy_start()==-EWOULDBLOCK && q1000k_phy_call(&data)==-EWOULDBLOCK);
+    rcu_read_unlock();
+    local_irq_save(flags); check(q1000k_phy_start()==-EWOULDBLOCK); local_irq_restore(flags);
+    for(n=0;n<50;n++) {
+        check(!q1000k_phy_start());
+        reinit_completion(&event_entered); q1000k_phy_poll();
+        check(wait_for_completion_timeout(&event_entered,5*HZ));
+        flush_work(&qphy_poll_job);
+        check(!q1000k_phy_stop());
+        check(!qphy_active && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
+    }
+    q1000k_phy_exit();
+    stop_during_callback(false);
+    stop_during_callback(true);
+    check(polls==51 && irqs==1);
+    pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 cycles, RCU guards, concurrent poll and IRQ teardown\n");
+    return 0;
+}
+static void __exit phy_test_exit(void) {}
+module_init(phy_test_init);
+module_exit(phy_test_exit);
+MODULE_LICENSE("GPL");

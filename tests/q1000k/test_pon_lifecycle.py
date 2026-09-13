@@ -239,7 +239,7 @@ static int gpon_security_init(void) {
     if(fault==2) return -ENOMEM; crypto=1; return 0;
 }
 static void gponDevSetRspTime(int n) { assert(crypto); }
-static void XPON_PHY_SET_MODE(int n) { assert(crypto); }
+static int XPON_PHY_SET_MODE(int n) { assert(crypto); return fault==4 ? -ENODEV : 0; }
 static void gponDevSetPloamFilterMode(int *p) { assert(crypto); }
 static void ploam_init(void) { assert(crypto && !ploam); ploam=1; }
 static void gpon_act_init(void) { assert(crypto && !act); act=1; }
@@ -251,14 +251,14 @@ static void timer_shutdown_sync(int *t) { assert(crypto); timers++; }
 static void gpon_act_stop_timers(void) { assert(timers==3); }
 static void gpon_act_deinit(void) { assert(!interrupts && act && ++order==2); act=0; }
 static void ploam_deinit(void) { assert(!interrupts && ploam && timers==3 && ++order==1); ploam=0; }
-static void gpon_security_exit(void) { assert(!act && !ploam && crypto); if(fault!=3) assert(++order==3); crypto=0; }
+static void gpon_security_exit(void) { assert(!act && !ploam && crypto); if(fault!=3 && fault!=4) assert(++order==3); crypto=0; }
 static void iounmap(void *p) { assert(0); }
 ''' + production + r'''
 int main(void) {
     gpon_deinit(); gpon_start_interrupts(); gpon_quiesce(); assert(!masked);
     sys.sysPonMode=XMCS_IF_WAN_DETECT_MODE_XGSPON;
-    for(fault=1;fault<=3;fault++) {
-        assert(gpon_init()==(fault==1 ? -ENODATA : fault==2 ? -ENOMEM : -ETIMEDOUT));
+    for(fault=1;fault<=4;fault++) {
+        assert(gpon_init()==(fault==1 ? -ENODATA : fault==2 ? -ENOMEM : fault==3 ? -ETIMEDOUT : -ENODEV));
         assert(!gpon_initialized && !crypto && !act && !ploam && !interrupts);
         gpon_deinit();
     }

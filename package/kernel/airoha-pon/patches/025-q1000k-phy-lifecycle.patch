@@ -1,0 +1,286 @@
+Use a typed, sleepable Q1000K PHY lifecycle with owned IRQ and poll work.
+
+No raw callbacks, debug proc writers or register programming are published by
+PHY module load. Keep the original path for other targets.
+
+--- a/xpon-en757x/xpon_phy_10g/Makefile
++++ b/xpon-en757x/xpon_phy_10g/Makefile
+@@ -33,7 +33,7 @@
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else	
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+-	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c
++	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else
+ 	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7580.c a60972.c en7580_pma.c
+--- a/xpon-en757x/xpon_phy_10g/src/phy.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy.c
+@@ -7,6 +7,7 @@
+ #include <linux/kernel.h>
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ #include <an7581_pon_phy.h>
++#include <q1000k_phy_api.h>
+ #endif
+ #include <linux/slab.h>
+ #include <linux/delay.h>
+@@ -2146,6 +2147,9 @@
+ 
+ void phy_event_poll(struct timer_list *timer)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	q1000k_phy_poll();
++#else
+ 	ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
+ 	if(gpPhyPriv->event_poll_timer_value <1500) //julia_20220511
+ 	{
+@@ -2153,6 +2157,7 @@
+ 		if((gpPhyPriv->phy_deinit_flag ==FALSE)&&(gpPhyPriv->pon_stop_flag ==FALSE))
+ 		PHY_START_TIMER(gpPhyPriv->event_poll_timer,gpPhyPriv->event_poll_timer_value); // julia_20201017 for kernel 5.4
+ 	}
++#endif
+ }
+ 
+ void phy_event_handler(PON_PHY_Event_data_t * pEvent_data)
+--- a/xpon-en757x/xpon_phy_10g/src/phy_init.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy_init.c
+@@ -29,6 +29,7 @@
+ #include <ecnt_pon_phy_api.h>
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ #include <an7581_pon_phy.h>
++#include <q1000k_phy_api.h>
+ #endif
+ #include "phy_tx.h"
+ #include "phy_reg.h"
+@@ -416,6 +417,9 @@
+ ******************************************************************************/
+ int pon_phy_init(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_init();
++#else
+ 	int ret=0;
+ 	uint read_data = 0;
+ 	uint write_data = 0;
+@@ -661,6 +665,7 @@
+ 	printk("____________________________________________\r\n\r\n");
+ 
+ 	return ret ;
++#endif
+ }
+ 
+ #if defined(TCSUPPORT_COMBO_PON)
+@@ -877,8 +882,10 @@
+ 
+ 	if((ret = pon_phy_mod_init())!=0){
+ 		PON_PHY_PRINT(PHY_MSG_ERR,"\r\n[%s:%d] pon_phy_mod_init fail !\r\n\r\n",__FUNCTION__,__LINE__);
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 		gpPhyPriv->phy_trans_task_wait = kthread_run(phy_trans_kthread, NULL,
+ 			"phy_trans_task_wait");
++#endif
+ 		return ret;  //return success to MAC trigger MAC set xpon_phy_start PHY_SUCCESS;  // 
+ 	}
+ 	
+@@ -1066,6 +1073,9 @@
+ 
+ int xpon_phy_start(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_start();
++#else
+ 	int ret = 0;	//ang_20180208
+ 	uint read_data = 0;
+ 	uint write_data = 0;
+@@ -1142,10 +1152,14 @@
+ 	PON_PHY_PRINT(PHY_MSG_ERR,"_______ PHY init step 2 _______ (done)\r\n\r\n");
+ 
+ 	return 0 ;
++#endif
+ }
+ 
+ int xpon_phy_stop(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_stop();
++#else
+ #ifdef TCSUPPORT_CPU_ARMV8 //julia_arm
+ 		struct device *dev = NULL ;
+ #endif
+@@ -1199,6 +1213,7 @@
+ 		PON_PHY_PRINT(PHY_MSG_ERR,"\r\n xpon_phy NOT start yet!! [%s:%d] gpPhyPriv->is_phy_start = %d\r\n",__FUNCTION__,__LINE__, gpPhyPriv->is_phy_start);
+ 		return 0;
+ 	}
++#endif
+ }
+ 
+ 
+@@ -1206,6 +1221,9 @@
+ ******************************************************************************/
+ void pon_phy_deinit(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	q1000k_phy_exit();
++#else
+ 	/* Stop the phy and int timer */
+ 	//PHY_STOP_TIMER(gpPhyPriv->phy_timer) ; /* mark it ,cause phy-timer didnt init */
+ 	printk("\r\n______pon_phy_deinit_______\r\n\r\n");
+@@ -1257,6 +1275,7 @@
+ 	}
+ 
+     ecnt_unregister_hook(&phy_api_dispatch_hook_ops);
++#endif
+ }
+ 
+ 
+--- a/xpon-en757x/xpon_phy_10g/inc/phy_init.h
++++ b/xpon-en757x/xpon_phy_10g/inc/phy_init.h
+@@ -1,5 +1,6 @@
+ #ifndef _PHY_INIT_H_
+ #define _PHY_INIT_H_
++int pon_phy_clear_int(void);
+ 
+ #include <linux/workqueue.h>
+ #include "phy.h"
+--- a/xpon-en757x/xpon_10g/inc/common/phy_if_wrapper.h
++++ b/xpon-en757x/xpon_10g/inc/common/phy_if_wrapper.h
+@@ -45,13 +45,16 @@
+ #include "xpondrv.h"
+ #include <ecnt_hook/ecnt_hook.h>
+ #include <ecnt_hook/ecnt_hook_lddla.h>
+-
+-
+-
+-
+-
+-
+-void XPON_PHY_SET_MODE(Xpon_Phy_Mode_t mode);
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++#include <q1000k_phy_api.h>
++#endif
++
++
++
++
++
++
++int XPON_PHY_SET_MODE(Xpon_Phy_Mode_t mode);
+ void check_sync_result(unsigned long arg);
+ void try_set_phy_mode(unsigned long arg);
+ extern void (*set_pon_phy_mode_config)(Xpon_Phy_Mode_t xpon_mode, int tx_enable);
+@@ -80,6 +83,9 @@
+ 
+ static inline int CALL_PON_PHY_ENCT_HOOK(struct xpon_phy_api_data_s * data)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_call(data);
++#else
+ 
+     if(ECNT_HOOK_ERROR == __ECNT_HOOK(ECNT_XPON_PHY, ECNT_XPON_PHY_API, (struct ecnt_data * )data) ){
+         printk("ECNT_HOOK_ERROR occur with cmd_id:0x%x\n", data->cmd_id);
+@@ -90,12 +96,18 @@
+     }
+ 
+     return data->ret;
++#endif
+ }
+ 
+ static inline int XPON_PHY_SET_API(uint cmd_id, void * in_data)
+ {
+     struct xpon_phy_api_data_s phy_data = {0};
+-
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	if (cmd_id == PON_SET_PHY_START)
++		return q1000k_phy_start();
++	if (cmd_id == PON_SET_PHY_STOP)
++		return q1000k_phy_stop();
++#else
+ 	if(cmd_id == PON_SET_PHY_START) {
+ 		if(set_pon_phy_start)	{
+         	set_pon_phy_start();
+@@ -114,6 +126,7 @@
+ 		}
+ 		return PHY_SUCCESS;
+ 	}
++#endif
+     phy_data.api_type = XPON_PHY_API_TYPE_SET;
+     phy_data.cmd_id   = cmd_id  ;
+     phy_data.raw     = in_data ;
+@@ -135,6 +148,9 @@
+ 
+ static inline int XPON_PHY_GET(uint cmd_id) 
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return XPON_PHY_GET_API(cmd_id, NULL);
++#else
+ 
+ 	if((TRUE == XPON_PHY_GET_API(PON_GET_PHY_INIT_STATUS,NULL)))
+ 	{
+@@ -144,11 +160,15 @@
+ 	{
+ 		return FALSE;
+ 	}
++#endif
+ }
+ 
+ 
+ static inline int XPON_PHY_SET(uint cmd_id)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return XPON_PHY_SET_API(cmd_id, NULL);
++#else
+ 	
+ 	if((cmd_id == PON_SET_PHY_START)||(TRUE == XPON_PHY_GET_API(PON_GET_PHY_INIT_STATUS,NULL)))
+ 	{	
+@@ -158,6 +178,7 @@
+ 	{
+ 		return FALSE;
+ 	}
++#endif
+ }
+ 
+ static inline int XPON_PHY_FW_READY_ENABLE(void)
+--- a/xpon-en757x/xpon_10g/src/phy_if_wrapper.c
++++ b/xpon-en757x/xpon_10g/src/phy_if_wrapper.c
+@@ -62,8 +62,11 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
+-void XPON_PHY_SET_MODE(Xpon_Phy_Mode_t phy_mode )
+-{    
++int XPON_PHY_SET_MODE(Xpon_Phy_Mode_t phy_mode )
++{
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_configure(phy_mode);
++#else    
+ 
+     if(PHY_XGPON_CONFIG == phy_mode && gpGponPriv->emergencyState){
+ 		if(set_pon_phy_mode_config)	{
+@@ -84,7 +87,8 @@
+ 		XPON_DPRINT_MSG("phy_mode:%d , tx enable\n", phy_mode);
+ 	}
+ 
+-    XPON_PHY_SET(PON_SET_PHY_RESET_COUNTER);
++    return XPON_PHY_SET(PON_SET_PHY_RESET_COUNTER);
++#endif
+ }
+ #if 0
+ /*______________________________________________________________________________
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
+@@ -294,7 +294,15 @@
+ 	if (ret)
+ 		goto unmap;
+ 	gponDevSetRspTime(gpGponPriv->gponCfg.onuResponseTime);
+-	XPON_PHY_SET_MODE(PHY_GPON_CONFIG);
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	ret = XPON_PHY_SET_MODE(PHY_XGSPON_CONFIG);
++#else
++	ret = XPON_PHY_SET_MODE(PHY_GPON_CONFIG);
++#endif
++	if (ret) {
++		gpon_security_exit();
++		goto unmap;
++	}
+ 	gponDevSetPloamFilterMode(&gpGponPriv->gponCfg.ploamFilter);
+ 	/* Do not publish timers/tasklets until stop acknowledgment succeeds. */
+ 	ret = gponDevMpiStop(XPON_RESET_HOLD_ON);

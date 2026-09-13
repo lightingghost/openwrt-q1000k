@@ -344,3 +344,18 @@ conntrack and require the slow-path counter to stop increasing for ordinary
 UDP flows. VLAN trunks/PPPoE, hardware PPE execution and performance still
 require Q1000K hardware testing. Build/run logs remain in the printed /tmp
 path. Success requires test exit 0 and no kernel BUG/Oops/panic.
+
+The AN7581 optical PHY provider and Q1000K lifecycle have dedicated fixtures:
+
+```sh
+python3 tests/q1000k/test_pon_phy_resources.py
+python3 tests/q1000k/test_pon_phy_lifecycle.py
+tests/q1000k/run_pon_phy_uml.sh
+```
+
+The host tests compile production code with UBSan and inject MMIO, startup
+and IRQ failures. The UML test uses real kernel mutexes, RCU, workqueues,
+timers and kthreads, with synthetic PHY state, MMIO and IRQ acquisition. It
+checks reentry and concurrent callback teardown over 50 start/stop cycles.
+No optical hardware is accessed. `Q1000K_UML_BASE` may point to an existing
+compatible UML build directory to reuse the local build artifacts.
