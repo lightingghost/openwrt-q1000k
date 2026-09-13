@@ -19,7 +19,7 @@ class PonTransportTests(unittest.TestCase):
         # are independent of FIELD_PREP and the production encode/decode code.
         regs = (ETH / 'airoha_regs.h').read_text()
         masks = '\n'.join(line for line in regs.splitlines() if re.match(
-            r'#define QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)', line))
+            r'#define (?:QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)|REG_QUEUE_CLOSE_CFG)', line))
         run_c(r'''
 #include <assert.h>
 #include <errno.h>
@@ -40,6 +40,8 @@ typedef int netdev_tx_t;
 #define CHECKSUM_NONE 0
 #define CHECKSUM_PARTIAL 1
 #define AIROHA_NUM_TX_RING 32
+#define AIROHA_NUM_QOS_CHANNELS 4
+#define U32_MAX UINT32_MAX
 #define AIROHA_MAX_RX_SIZE 16128
 #define NETIF_F_GRO_HW 1
 #define NETIF_F_LRO 2
@@ -101,7 +103,26 @@ struct net_device {
     struct netdev_queue txq[32];
     struct { int rx_dropped; } stats;
 };
-struct airoha_qdma { struct airoha_eth *eth; };
+typedef struct { bool held; } spinlock_t;
+static void spin_lock_init(spinlock_t *l) { l->held=false; }
+#define spin_lock_irqsave(l,f) do { (f)=0; assert(!(l)->held); (l)->held=true; } while(0)
+#define spin_unlock_irqrestore(l,f) do { (void)(f); assert((l)->held); (l)->held=false; } while(0)
+static bool bitmap_empty(unsigned long *map,int bits) { return !(*map & ((1UL<<bits)-1)); }
+struct airoha_qdma { struct airoha_eth *eth; unsigned long qos_channel_map[1]; u32 regs[8]; };
+static unsigned int reg_reads,reg_writes;
+static int fault_register=-1;
+static unsigned int reg_index(u32 offset) {
+    assert(offset>=0xa0 && offset<=0xbc && !(offset&3)); return (offset-0xa0)/4;
+}
+static u32 airoha_qdma_rr(struct airoha_qdma *q,u32 offset) {
+    reg_reads++; return q->regs[reg_index(offset)] ^ ((int)offset==fault_register ? 1 : 0);
+}
+static void airoha_qdma_wr(struct airoha_qdma *q,u32 offset,u32 value) {
+    reg_writes++; q->regs[reg_index(offset)]=value;
+}
+static void airoha_qdma_rmw(struct airoha_qdma *q,u32 offset,u32 mask,u32 value) {
+    airoha_qdma_wr(q,offset,(airoha_qdma_rr(q,offset)&~mask)|value);
+}
 struct airoha_gdm_dev {
     struct net_device *netdev;
     struct airoha_eth *eth;
@@ -120,7 +141,7 @@ struct sk_buff {
     bool gso,freed,frag_list,empty_head;
     u8 data[64];
 };
-struct airoha_pon_tx_meta { u16 gem; u8 channel,queue,cpu_queue,mic_index; bool omci; };
+struct airoha_pon_tx_meta { u64 epoch; u16 gem; u8 channel,queue,cpu_queue,mic_index; bool omci; };
 struct airoha_pon_rx_meta { u32 words[4]; u16 gem; u8 channel; bool omci,no_mic; };
 struct airoha_pon_ops {
     void (*rx)(void *,struct sk_buff *,const struct airoha_pon_rx_meta *);
@@ -193,9 +214,28 @@ int main(void) {
     dev.reg_state=0; assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-ENODEV); dev.reg_state=NETREG_REGISTERED;
     gdm.qdma=&eth.qdma[0]; assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-ENODEV); gdm.qdma=&eth.qdma[1];
     dev.upper=true; assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY); dev.upper=false;
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY); /* down QDMA1 peer */
     peer.features=NETIF_F_GRO_HW; assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
     peer_gdm.qdma=&eth.qdma[0]; /* LAN QDMA LRO does not block PON. */
+    eth.qdma[1].qos_channel_map[0]=1;
+    assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
+    eth.qdma[1].qos_channel_map[0]=0;
+    assert(reg_writes==0 && reg_reads==0); /* failed reservations must not touch MMIO */
+    for(int reg=0xa0;reg<=0xbc;reg+=4) {
+        fault_register=reg;
+        assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EIO && !gdm.pon);
+    }
+    fault_register=-1;
     pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon);
+    for(int i=0;i<8;i++) assert(eth.qdma[1].regs[i]==UINT32_MAX && !eth.qdma[0].regs[i]);
+    for(int ch=0;ch<32;ch++) {
+        u8 closed=0;
+        assert(!airoha_pon_get_queue_close(pon,ch,&closed) && closed==255);
+    }
+    tx.epoch=123;
+    assert(airoha_pon_prepare_tx(pon,&tx)==-ESHUTDOWN && tx.epoch==123);
+    assert(!airoha_pon_set_queue_close(pon,31,0));
+    assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch==1);
     assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
     rtnl_lock(); assert(airoha_pon_qdma_busy(&eth.qdma[1]) && !airoha_pon_qdma_busy(&eth.qdma[0])); rtnl_unlock();
     assert(!airoha_pon_tx_msg(&tx,&msg) && msg==0x7fffc1ff);
@@ -226,6 +266,52 @@ int main(void) {
         if(error==5) skb.empty_head=true;
         assert(airoha_pon_xmit(pon,&skb,&tx)==NETDEV_TX_OK && skb.freed && xmit_calls==old);
     }
+    /* Every byte in all eight registers preserves its three neighbours. */
+    for(int ch=0;ch<32;ch++) for(int bits=0;bits<256;bits++) {
+        u32 saved_regs[8]; memcpy(saved_regs,eth.qdma[1].regs,sizeof(saved_regs));
+        assert(!airoha_pon_set_queue_close(pon,ch,bits));
+        for(int i=0;i<8;i++) {
+            u32 expected=saved_regs[i];
+            if(i==ch/4) expected=(expected & ~(255u<<((ch%4)*8))) | ((u32)bits<<((ch%4)*8));
+            assert(eth.qdma[1].regs[i]==expected && !eth.qdma[0].regs[i]);
+        }
+        u8 result=0;
+        assert(!airoha_pon_get_queue_close(pon,ch,&result) && result==bits);
+        for(int q=0;q<8;q++) {
+            struct airoha_pon_tx_meta lease={.channel=ch,.queue=q,.epoch=12345};
+            int ret=airoha_pon_prepare_tx(pon,&lease);
+            assert(ret==((bits & (1<<q)) ? -ESHUTDOWN : 0));
+            if(ret) assert(lease.epoch==12345); else assert(lease.epoch==pon->epoch[ch]);
+        }
+    }
+    unsigned int writes=reg_writes;
+    u8 untouched=0xa5;
+    assert(airoha_pon_set_queue_close(NULL,0,0)==-EINVAL);
+    assert(airoha_pon_set_queue_close(pon,32,0)==-EINVAL);
+    assert(airoha_pon_get_queue_close(pon,255,&untouched)==-EINVAL && untouched==0xa5);
+    assert(airoha_pon_get_queue_close(pon,0,NULL)==-EINVAL && writes==reg_writes);
+    assert(airoha_pon_prepare_tx(NULL,&tx)==-EINVAL);
+    assert(airoha_pon_prepare_tx(pon,NULL)==-EINVAL);
+    assert(!airoha_pon_set_queue_close(pon,31,0));
+    assert(!airoha_pon_prepare_tx(pon,&tx));
+    u64 epoch=tx.epoch;
+    reset_skb(&skb,&upper); before=skb; xmit_result=NETDEV_TX_BUSY;
+    assert(airoha_pon_xmit(pon,&skb,&tx)==NETDEV_TX_BUSY && !memcmp(&skb,&before,sizeof(skb)));
+    assert(!airoha_pon_set_queue_close(pon,31,1)); /* closing another queue invalidates whole channel */
+    assert(!airoha_pon_set_queue_close(pon,31,0));
+    int sent=xmit_calls;
+    assert(airoha_pon_xmit(pon,&skb,&tx)==NETDEV_TX_OK && skb.freed && xmit_calls==sent);
+    assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch!=epoch);
+    xmit_result=NETDEV_TX_OK;
+    reset_skb(&skb,&upper); assert(!airoha_pon_xmit(pon,&skb,&tx) && xmit_calls==sent+1);
+    /* Verified state is not reported after an MMIO fault; TX stays blocked. */
+    fault_register=0xbc;
+    assert(airoha_pon_set_queue_close(pon,28,0)==-EIO);
+    assert(airoha_pon_get_queue_close(pon,31,&untouched)==-EIO && untouched==0xa5);
+    assert(airoha_pon_prepare_tx(pon,&tx)==-EIO);
+    writes=reg_writes; fault_register=-1;
+    assert(airoha_pon_set_queue_close(pon,31,0)==-EIO && reg_writes==writes);
+    reset_skb(&skb,&upper); assert(!airoha_pon_xmit(pon,&skb,&tx) && xmit_calls==sent+1 && skb.freed);
     assert(!airoha_pon_rx_meta(words,&meta));
     assert(meta.gem==65535 && meta.channel==31 && meta.omci && meta.no_mic && !memcmp(meta.words,words,sizeof(words)));
     for(int bit=11;bit<=13;bit++) {
@@ -239,6 +325,11 @@ int main(void) {
     airoha_pon_tx_wake(&gdm); assert(wake_calls==1);
     rtnl_lock(); airoha_pon_stop(&gdm); airoha_pon_stop(&gdm); rtnl_unlock();
     assert(detach_calls==1 && !gdm.pon && !airoha_pon_generation(&gdm));
+    writes=reg_writes;
+    assert(airoha_pon_set_queue_close(pon,31,0)==-ENODEV && reg_writes==writes);
+    assert(airoha_pon_get_queue_close(pon,31,&untouched)==-ENODEV && untouched==0xa5);
+    assert(airoha_pon_prepare_tx(pon,&tx)==-ENODEV);
+
     reset_skb(&skb,&upper); assert(!airoha_pon_xmit(pon,&skb,&tx) && skb.freed);
     next=airoha_pon_attach(&dev,&ops,&context); assert(next==gdm.pon && next->generation!=generation);
     reset_skb(&skb,&dev); airoha_pon_rx(&gdm,&skb,words,generation);

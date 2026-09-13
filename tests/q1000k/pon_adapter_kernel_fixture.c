@@ -43,6 +43,8 @@ struct airoha_pon {
     const struct airoha_pon_ops *ops;
     void *priv;
     bool connected;
+    u64 epoch[32];
+    u8 closed[32];
 };
 static struct airoha_pon __rcu *fake_current;
 static DEFINE_SPINLOCK(fake_tx_lock);
@@ -118,6 +120,8 @@ struct airoha_pon *airoha_pon_attach(struct net_device *dev,
     pon = kzalloc(sizeof(*pon), GFP_KERNEL);
     if (!pon)
         return ERR_PTR(-ENOMEM);
+    memset(pon->closed,0xff,sizeof(pon->closed));
+    for(int i=0;i<32;i++) pon->epoch[i]=1;
     pon->ops = ops;
     pon->priv = priv;
     rtnl_lock();
@@ -169,6 +173,34 @@ void airoha_pon_release(struct airoha_pon *pon)
     kfree(pon);
 }
 
+int airoha_pon_set_queue_close(struct airoha_pon *pon,u8 channel,u8 closed)
+{
+    if(channel>31) return -EINVAL;
+    spin_lock_bh(&fake_tx_lock);
+    if(closed & ~pon->closed[channel]) pon->epoch[channel]++;
+    pon->closed[channel]=closed;
+    spin_unlock_bh(&fake_tx_lock);
+    return 0;
+}
+int airoha_pon_get_queue_close(struct airoha_pon *pon,u8 channel,u8 *closed)
+{
+    if(channel>31 || !closed) return -EINVAL;
+    spin_lock_bh(&fake_tx_lock);
+    *closed=pon->closed[channel];
+    spin_unlock_bh(&fake_tx_lock);
+    return 0;
+}
+int airoha_pon_prepare_tx(struct airoha_pon *pon,struct airoha_pon_tx_meta *meta)
+{
+    int ret=0;
+    if(meta->channel>31 || meta->queue>7) return -EINVAL;
+    spin_lock_bh(&fake_tx_lock);
+    if(pon->closed[meta->channel] & BIT(meta->queue)) ret=-ESHUTDOWN;
+    else meta->epoch=pon->epoch[meta->channel];
+    spin_unlock_bh(&fake_tx_lock);
+    return ret;
+}
+
 netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
                             const struct airoha_pon_tx_meta *meta)
 {
@@ -183,6 +215,11 @@ netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
         goto unlock;
     }
     spin_lock_bh(&fake_tx_lock);
+    if ((pon->closed[meta->channel] & BIT(meta->queue)) ||
+        pon->epoch[meta->channel] != meta->epoch) {
+        kfree_skb(skb);
+        goto unlock_queue;
+    }
     if (READ_ONCE(fake_busy)) {
         atomic_inc(&busy_calls);
         if (READ_ONCE(wake_during_busy))
@@ -327,9 +364,12 @@ static int run_tests(void)
     struct task_struct *producer;
     struct airoha_pon *pon;
     int i, ret, count, rx;
+    u8 closed=0xa5;
 
     CHECK(!metadata_test());
     CHECK(!q1000k_transport_stop());
+    CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
+    CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
     CHECK(q1000k_transport_start(NULL, receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("", receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("bad/name", receive_packet) == -EINVAL);
@@ -348,6 +388,13 @@ static int run_tests(void)
     CHECK(q1000k_transport_start("qponlower0", receive_packet) == -EBUSY);
     fake_receive(); CHECK(atomic_read(&received) == rx + 1);
     early_rx = false;
+    CHECK(!q1000k_transport_get_queue_close(27,&closed) && closed==255);
+    skb=packet_new(1); CHECK(skb);
+    CHECK(q1000k_transport_xmit(skb,test_word0,test_word1)==-ESHUTDOWN);
+    CHECK(skb->len==60 && skb->data[0]==0x5a && skb->cb[0]==0xa5);
+    kfree_skb(skb);
+    CHECK(!q1000k_transport_set_queue_close(27,0));
+
 
     fail_packet_alloc = true;
     skb = packet_new(1); CHECK(skb);
@@ -375,6 +422,24 @@ static int run_tests(void)
     for (i = 0; i < Q1000K_TX_LIMIT; i++) CHECK(order[i] == i);
     record_order = false;
 
+    /* Reopen after BUSY must not refresh admission for old queued frames. */
+    WRITE_ONCE(fake_busy,true); count=atomic_read(&accepted);
+    for(i=0;i<10;i++) {
+        skb=packet_new(i); CHECK(skb);
+        ret=q1000k_transport_xmit(skb,test_word0,test_word1);
+        if(ret) kfree_skb(skb);
+        CHECK(!ret);
+    }
+    msleep(2);
+    CHECK(!q1000k_transport_set_queue_close(27,255));
+    CHECK(!q1000k_transport_set_queue_close(27,0));
+    WRITE_ONCE(fake_busy,false);
+    CHECK(!wait_empty(500) && atomic_read(&accepted)==count);
+    skb=packet_new(0); CHECK(skb);
+    ret=q1000k_transport_xmit(skb,test_word0,test_word1);
+    if(ret) kfree_skb(skb);
+    CHECK(!ret && !wait_empty(500) && atomic_read(&accepted)==count+1);
+
     /* Expiry bounds memory and time during a permanently full native ring. */
     fake_busy = true; count = atomic_read(&accepted);
     for (i = 0; i < 10; i++) {
@@ -395,11 +460,15 @@ static int run_tests(void)
     rtnl_lock(); pon = rcu_dereference_protected(fake_current, 1);
     fake_detach_locked(pon); rtnl_unlock();
     CHECK(!q1000k_transport_running()); CHECK(!wait_empty(500));
+    closed=0xa5;
+    CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
+    CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
     CHECK(!q1000k_transport_stop()); CHECK(!q1000k_transport_stop());
 
     /* Accepted native DMA can outlive adapter stop after a reported timeout. */
     fake_busy = false; hold_dma = true; quiesce_error = -ETIMEDOUT;
     CHECK(!q1000k_transport_start("qponlower0", receive_packet));
+    CHECK(!q1000k_transport_set_queue_close(27,0));
     skb = packet_new(0); CHECK(skb);
     ret = q1000k_transport_xmit(skb, test_word0, test_word1);
     if (ret) kfree_skb(skb);
@@ -416,8 +485,15 @@ static int run_tests(void)
     for (i = 0; i < 50; i++) {
         ret = q1000k_transport_start("qponlower0", receive_packet);
         if (ret) break;
+        ret=q1000k_transport_set_queue_close(27,0);
+        if(ret) break;
         WRITE_ONCE(fake_busy, i & 1);
-        msleep(2);
+        msleep(1);
+        ret=q1000k_transport_set_queue_close(27,255);
+        if(ret) break;
+        ret=q1000k_transport_set_queue_close(27,0);
+        if(ret) break;
+        msleep(1);
         ret = q1000k_transport_stop();
         if (ret) break;
     }

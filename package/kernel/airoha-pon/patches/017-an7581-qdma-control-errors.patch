@@ -1,0 +1,75 @@
+Subject: [PATCH] xpon: propagate errors in AN7581 QDMA control wrappers
+
+The AN7581-only wrappers added for the initial BSP port also need the
+unsupported default and negative dispatcher-error handling. A registered
+hook that ignores a request must not appear to have configured hardware.
+
+---
+--- a/bsp/include/ecnt_hook/ecnt_hook_qdma.h
++++ b/bsp/include/ecnt_hook/ecnt_hook_qdma.h
+@@ -1975,7 +1975,7 @@
+ static inline int QDMA_API_SET_GENERAL_TRTCM_VALUE(unsigned int mainType,
+ 						    GENERAL_TrtcmCbsPbsSet_T *cfg)
+ {
+-	struct ECNT_QDMA_Data in_data = { 0 };
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_SET_TRTCM_MODE_VALUE;
+@@ -1983,13 +1983,13 @@
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API,
+ 			  (struct ecnt_data *)&in_data);
+ 
+-	return ret != ECNT_HOOK_ERROR ? in_data.retValue : ECNT_HOOK_ERROR;
++	return ret >= 0 ? in_data.retValue : ret;
+ }
+ 
+ static inline int QDMA_API_GET_GENERAL_TRTCM_VALUE(unsigned int mainType,
+ 						    GENERAL_TrtcmCbsPbsSet_T *cfg)
+ {
+-	struct ECNT_QDMA_Data in_data = { 0 };
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_GENERAL_GET_TRTCM_MODE_VALUE;
+@@ -1997,13 +1997,13 @@
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API,
+ 			  (struct ecnt_data *)&in_data);
+ 
+-	return ret != ECNT_HOOK_ERROR ? in_data.retValue : ECNT_HOOK_ERROR;
++	return ret >= 0 ? in_data.retValue : ret;
+ }
+ 
+ static inline int QDMA_API_SET_CHANNEL_CLOSE_STATUS(unsigned int mainType,
+ 						     QDMA_ChannelStatus_T *status)
+ {
+-	struct ECNT_QDMA_Data in_data = { 0 };
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_CHANNEL_CLOSE_STATUS;
+@@ -2011,13 +2011,13 @@
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API,
+ 			  (struct ecnt_data *)&in_data);
+ 
+-	return ret != ECNT_HOOK_ERROR ? in_data.retValue : ECNT_HOOK_ERROR;
++	return ret >= 0 ? in_data.retValue : ret;
+ }
+ 
+ static inline int QDMA_API_SET_OAM_MODIFY_FP_EN(unsigned int mainType,
+ 						QDMA_Mode_t mode)
+ {
+-	struct ECNT_QDMA_Data in_data = { 0 };
++	struct ECNT_QDMA_Data in_data = { .retValue = -EOPNOTSUPP };
+ 	int ret;
+ 
+ 	in_data.function_id = QDMA_FUNCTION_SET_OAM_MODIFY_FP_EN;
+@@ -2025,7 +2025,7 @@
+ 	ret = __ECNT_HOOK(mainType, ECNT_DRIVER_API,
+ 			  (struct ecnt_data *)&in_data);
+ 
+-	return ret != ECNT_HOOK_ERROR ? in_data.retValue : ECNT_HOOK_ERROR;
++	return ret >= 0 ? in_data.retValue : ret;
+ }
+ #endif
+ 

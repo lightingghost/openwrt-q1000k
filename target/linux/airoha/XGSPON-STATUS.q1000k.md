@@ -52,6 +52,17 @@ OMCI daemon and unrelated PR changes were not imported.
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
 
+The 2026-09-13 continuation adds exclusive native QDMA1 queue configuration,
+verified queue-close writes and packet admission epochs. The adapter rejects
+closed queues and preserves the epoch across retries, preventing a queued frame
+from becoming valid when its channel is reopened. Four remaining AN7581 QDMA
+wrappers now propagate unsupported/dispatcher errors. All 21 host PON tests,
+native/adapter UML concurrency tests, the kernel build and r14 vendor package
+build pass. T-CONT transactions still need to adopt these controls alongside
+FE retirement and GEM mapping synchronization; see the
+[queue admission checkpoint](XGSPON-INTEGRATION.q1000k.md#native-queue-admission-checkpoint-2026-09-13).
+No SSH access or device changes were made for this continuation.
+
 The reference loader was inspected at
 [airoha_xpon_en757x 950199a](https://github.com/Sirherobrine23/airoha_xpon_en757x/tree/950199a8de6b75e76906a7c1b39b7a9a3e2913f9/v2/lddla).
 It reads the controller family ID at I2C address `0x51`, register `0x0408`,

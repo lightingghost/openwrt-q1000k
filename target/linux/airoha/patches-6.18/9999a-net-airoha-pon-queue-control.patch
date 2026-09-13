@@ -1,0 +1,298 @@
+Subject: [PATCH] net: airoha: reserve PON queues and serialize admission
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -2465,6 +2465,11 @@
+ 			break;
+ 		fallthrough;
+ 	case AIROHA_GDM2_IDX:
++		/* A PON attachment reserves QDMA1 channel configuration, including
++		 * while a disconnected attachment still has native TX pending.
++		 */
++		if (airoha_pon_qdma_busy(&dev->eth->qdma[1]))
++			return -EBUSY;
+ 		/* GDM2 is always used as wan */
+ 		dev->flags |= AIROHA_PRIV_F_WAN;
+ 		break;
+@@ -3589,6 +3594,10 @@
+ 
+ 	mutex_lock(&flow_offload_mutex);
+ 
++	if (airoha_pon_qdma_busy(&eth->qdma[1])) {
++		NL_SET_ERR_MSG_MOD(extack, "QDMA1 channels reserved for PON");
++		goto error_unlock;
++	}
+ 	wan_dev = airoha_get_wan_gdm_dev(eth);
+ 	if (wan_dev) {
+ 		if ((wan_dev->flags & AIROHA_PRIV_F_QOS) ||
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -14,6 +14,14 @@
+ 	const struct airoha_pon_ops *ops;
+ 	void *priv;
+ 	u64 generation;
++	/* Order: admission -> netdev TX -> DMA queue -> consumer wake lock.
++	 * IRQ-safe because channel controls can originate in MAC tasklets/IRQs.
++	 * Never enter this API while holding a lock taken by a consumer callback.
++	 */
++	spinlock_t admission_lock;
++	u64 epoch[32];
++	u8 closed[32];
++	bool queue_fault;
+ 	/* Native DMA owns the lower storage until its descriptors are reaped. */
+ 	struct airoha_gdm_dev *dma_dev;
+ 	refcount_t refs;
+@@ -99,9 +107,10 @@
+ 	return false;
+ }
+ 
+-static bool airoha_pon_lro_active(struct airoha_qdma *qdma)
+-{
+-	struct airoha_eth *eth = qdma->eth;
++static bool airoha_pon_qdma_shared(struct airoha_gdm_dev *owner)
++{
++	struct airoha_eth *eth = owner->eth;
++	struct airoha_qdma *qdma = &eth->qdma[1];
+ 	int i, j;
+ 
+ 	ASSERT_RTNL();
+@@ -113,9 +122,10 @@
+ 		for (j = 0; j < ARRAY_SIZE(port->devs); j++) {
+ 			struct airoha_gdm_dev *dev = port->devs[j];
+ 
++			/* A down peer still owns QDMA channel configuration. */
+ 			if (dev && rcu_access_pointer(dev->qdma) == qdma &&
+-			    (netdev_from_priv(dev)->features &
+-			     (NETIF_F_GRO_HW | NETIF_F_LRO)))
++			    (dev != owner || (netdev_from_priv(dev)->features &
++			     (NETIF_F_GRO_HW | NETIF_F_LRO))))
+ 				return true;
+ 		}
+ 	}
+@@ -127,7 +137,7 @@
+ {
+ 	struct airoha_gdm_dev *dev;
+ 	struct airoha_pon *pon;
+-	int err = -ENODEV;
++	int i, err = -ENODEV;
+ 
+ 	if (!netdev || netdev->netdev_ops != &airoha_netdev_ops || !ops ||
+ 	    !ops->rx || !ops->tx_wake || !ops->detached)
+@@ -144,8 +154,25 @@
+ 	err = -EBUSY;
+ 	if (rcu_access_pointer(dev->pon) || atomic_read(&dev->pon_tx_pending) ||
+ 	    netdev_has_any_upper_dev(netdev) ||
+-	    airoha_pon_lro_active(&dev->eth->qdma[1]))
+-		goto out;
++	    airoha_pon_qdma_shared(dev) ||
++	    !bitmap_empty(dev->eth->qdma[1].qos_channel_map,
++			  AIROHA_NUM_QOS_CHANNELS))
++		goto out;
++	/* Exclusive QDMA1 owner; start with every TX queue closed. No DMA
++	 * reset, FE retirement, PHY access or optical-drain claim is involved.
++	 */
++	spin_lock_init(&pon->admission_lock);
++	for (i = 0; i < ARRAY_SIZE(pon->closed); i += 4) {
++		airoha_qdma_wr(&dev->eth->qdma[1], REG_QUEUE_CLOSE_CFG(i), U32_MAX);
++		if (airoha_qdma_rr(&dev->eth->qdma[1], REG_QUEUE_CLOSE_CFG(i)) !=
++		    U32_MAX) {
++			err = -EIO;
++			goto out;
++		}
++	}
++	memset(pon->closed, 0xff, sizeof(pon->closed));
++	for (i = 0; i < ARRAY_SIZE(pon->epoch); i++)
++		pon->epoch[i] = 1;
+ 	refcount_set(&pon->refs, 1);
+ 	atomic_set(&pon->pending, 0);
+ 	init_waitqueue_head(&pon->drained);
+@@ -169,13 +196,16 @@
+ static void airoha_pon_detach_port(struct airoha_gdm_dev *dev, bool notify)
+ {
+ 	struct airoha_pon *pon;
++	unsigned long flags;
+ 
+ 	ASSERT_RTNL();
+ 	pon = rcu_dereference_protected(dev->pon, lockdep_rtnl_is_held());
+ 	if (!pon)
+ 		return;
++	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	rcu_assign_pointer(dev->pon, NULL);
+ 	rcu_assign_pointer(pon->netdev, NULL);
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ 	/* Drain RX, TX and wake callbacks before notifying or freeing data. */
+ 	synchronize_net();
+ 	if (notify)
+@@ -267,12 +297,113 @@
+ 	rcu_read_unlock();
+ }
+ 
++/* The handle is caller-owned; RCU also pins the native netdev/MMIO owner
++ * until detach clears netdev and waits for current control/TX calls.
++ */
++int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed)
++{
++	struct net_device *netdev;
++	struct airoha_qdma *qdma;
++	unsigned long flags;
++	u32 mask, value;
++	int ret = 0;
++
++	if (!pon || channel >= ARRAY_SIZE(pon->closed))
++		return -EINVAL;
++	rcu_read_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	netdev = rcu_dereference(pon->netdev);
++	if (!netdev) {
++		ret = -ENODEV;
++		goto out;
++	}
++	if (pon->queue_fault) {
++		ret = -EIO;
++		goto out;
++	}
++	qdma = &pon->dma_dev->eth->qdma[1];
++	mask = 0xffU << ((channel & 3) * 8);
++	value = (u32)closed << ((channel & 3) * 8);
++	airoha_qdma_rmw(qdma, REG_QUEUE_CLOSE_CFG(channel), mask, value);
++	/* Flush the posted write and fail closed on a register mismatch. */
++	if ((airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(channel)) & mask) != value) {
++		pon->queue_fault = true;
++		ret = -EIO;
++		goto out;
++	}
++	/* A new closure invalidates ALL software packets for this channel.
++	 * Reopening never grants old packets a new lease. Already submitted
++	 * descriptors and FE/optical FIFOs require a separate retirement step.
++	 */
++	if (closed & ~pon->closed[channel]) {
++		if (++pon->epoch[channel] == 0) {
++			pon->queue_fault = true;
++			ret = -EOVERFLOW;
++		}
++	}
++	pon->closed[channel] = closed;
++out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_set_queue_close);
++
++int airoha_pon_get_queue_close(struct airoha_pon *pon, u8 channel, u8 *closed)
++{
++	unsigned long flags;
++	int ret = 0;
++
++	if (!pon || !closed || channel >= ARRAY_SIZE(pon->closed))
++		return -EINVAL;
++	rcu_read_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_dereference(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->queue_fault)
++		ret = -EIO;
++	else
++		*closed = pon->closed[channel];
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_get_queue_close);
++
++int airoha_pon_prepare_tx(struct airoha_pon *pon, struct airoha_pon_tx_meta *meta)
++{
++	unsigned long flags;
++	u32 msg;
++	int ret;
++
++	if (!pon)
++		return -EINVAL;
++	ret = airoha_pon_tx_msg(meta, &msg);
++	if (ret)
++		return ret;
++	rcu_read_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_dereference(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->queue_fault)
++		ret = -EIO;
++	else if (pon->closed[meta->channel] & BIT(meta->queue))
++		ret = -ESHUTDOWN;
++	else
++		meta->epoch = pon->epoch[meta->channel];
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_prepare_tx);
++
+ netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
+ 			    const struct airoha_pon_tx_meta *meta)
+ {
+ 	struct net_device *netdev, *old_dev;
+ 	struct netdev_queue *txq;
+ 	netdev_tx_t ret = NETDEV_TX_OK;
++	unsigned long flags;
+ 	u16 old_queue;
+ 	u32 msg;
+ 
+@@ -286,8 +417,11 @@
+ 		return NETDEV_TX_OK;
+ 	}
+ 	rcu_read_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	netdev = rcu_dereference(pon->netdev);
+-	if (!netdev || !netif_running(netdev)) {
++	if (!netdev || !netif_running(netdev) || pon->queue_fault ||
++	    (pon->closed[meta->channel] & BIT(meta->queue)) ||
++	    meta->epoch != pon->epoch[meta->channel]) {
+ 		dev_kfree_skb_any(skb);
+ 		goto out;
+ 	}
+@@ -309,6 +443,7 @@
+ unlock:
+ 	__netif_tx_unlock_bh(txq);
+ out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ 	rcu_read_unlock();
+ 	return ret;
+ }
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -8,6 +8,7 @@
+ struct airoha_pon;
+ 
+ struct airoha_pon_tx_meta {
++	u64 epoch; /* Set by prepare_tx; immutable across software retries. */
+ 	u16 gem;
+ 	u8 channel;
+ 	u8 queue;
+@@ -65,6 +66,27 @@
+  */
+ int airoha_pon_quiesce(struct airoha_pon *pon, unsigned int timeout_ms);
+ 
++/* Queue configuration requires exclusive QDMA1 ownership: attach rejects
++ * every other assigned netdev (even down) and QoS allocation, then closes all
++ * 32 x 8 TX queues. set/get/prepare are IRQ-safe and serialized against TX.
++ * Callers must retain the handle and MUST NOT hold a consumer callback lock.
++ * closed has one bit per queue; get returns the last verified configuration,
++ * not hardware FIFO occupancy. Errors leave output arguments unchanged.
++ * An MMIO readback failure disables all software admission until reattach.
++ * Detach makes control calls return -ENODEV without touching registers.
++ * Closure is NOT retirement: previously submitted descriptors/FIFOs may still
++ * contain frames. Coordinate physical draining before reallocating T-CONTs.
++ */
++int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed);
++int airoha_pon_get_queue_close(struct airoha_pon *pon, u8 channel, u8 *closed);
++
++/* Capture admission for a fully prepared frame BEFORE enqueueing it. Returns
++ * -ESHUTDOWN for a closed queue. xmit drops stale epochs even after reopen;
++ * never call prepare_tx again for a frame returned as NETDEV_TX_BUSY. A new
++ * closure invalidates all software packets on that channel conservatively.
++ */
++int airoha_pon_prepare_tx(struct airoha_pon *pon, struct airoha_pon_tx_meta *meta);
++
+ /* NETDEV_TX_OK consumes skb, including on errors; NETDEV_TX_BUSY leaves it
+  * unchanged and owned by the caller. Only complete, non-GSO frames with
+  * software-computed checksums are supported. MIC generation/verification,

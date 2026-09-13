@@ -278,6 +278,60 @@ continues cleanup; its hardware recovery behavior needs validation before PON
 activation. RX hardware draining, PHY/reset sequencing and FE/optical FIFO
 checks remain separate. GDM2, the MAC and PON PCS remain disabled.
 
+## Native queue admission checkpoint (2026-09-13)
+
+Kernel patch `9999a-net-airoha-pon-queue-control.patch` adds native QDMA1
+queue close/set/get operations and packet admission epochs. Attachment now
+requires exclusive QDMA1 assignment: another assigned netdev blocks attachment
+even when down, as does an existing QoS allocation or hardware aggregation on
+the PON netdev. New GDM2 registration and copper QoS migration cannot take over
+a QDMA1 attachment or its pending native descriptors.
+
+After those checks, attachment closes all 32 channels' eight TX queues through
+the native QDMA owner and verifies register readback. An IRQ-safe lock
+serializes subsequent queue changes, TX admission and disconnect. Each channel
+occupies one byte of the eight queue-close registers; changing one byte
+preserves its neighbours. A failed readback blocks all software TX admission
+until a new attachment. Getters return the last verified configuration, not
+queue occupancy, and leave output arguments untouched on errors. Disconnected
+handles reject control operations without accessing MMIO.
+
+The vendor packet adapter captures the native admission epoch once before
+enqueueing a frame. Closing any previously open queue invalidates all queued
+software frames for that channel, conservatively including other queues.
+Native TX checks the epoch under the same lock as closure. It consumes stale
+frames even after the channel reopens; a BUSY retry never renews admission.
+The adapter exposes channel close/get helpers without taking its callback
+lock around the native call. Closed queues reject new submissions with
+`-ESHUTDOWN`, leaving the caller's skb unchanged and owned by the caller.
+
+**The T-CONT transaction and FE retirement are still incomplete.** The vendor's
+T-CONT handlers still call the legacy QDMA hook; they have not been connected
+to the new close/get helpers. That conversion needs ordered error handling,
+GEM mapping invalidation and physical retirement before channel reuse. Packets
+whose vendor metadata was prepared before admission also need coordination
+with those transactions. No queues are opened automatically, and neither
+provider-presence gate is removed. Queue closure cannot establish the fate of
+frames already submitted to DMA/FE/optical FIFOs, or replace physical RX/TX
+draining. GDM2 remains disabled and the service launcher remains unavailable.
+
+Vendor patch 017 also fixes four AN7581-only control wrappers missed by patch
+008: general TRTCM set/get, channel closure and OAM forwarding selection now
+default to `-EOPNOTSUPP` and preserve negative dispatcher errors. No provider
+or successful no-op implementation is registered.
+
+Validation: all 21 host PON tests pass, including all 8,192 channel/mask
+combinations, invalid arguments, readback failures, stale BUSY retries and
+unchanged neighbouring registers. The native implementation passes 100 real
+Linux UML attachment cycles with concurrent channel control, TX/RX and delayed
+DMA completion (709,762 RX/wake callbacks). The adapter passes 50 cycles with
+1,141,128 allocated/destroyed packets, including closure/reopening under BUSY,
+unchanged rejected skbs and unregister/timeout cleanup. Both guests report no
+kernel, RCU or locking diagnostics. These are synthetic register/DMA tests,
+not measurements of physical queue or optical behavior. The complete AN7581
+kernel and experimental r14 module package build locally. No device access,
+module loading, installation or flashing was performed.
+
 ## Vendor packet adapter findings
 
 The native API cannot be connected to the original vendor callbacks unchanged.

@@ -17,10 +17,18 @@ int q1000k_transport_start(const char *lower, q1000k_pon_receive_t receive);
 int q1000k_transport_stop(void);
 bool q1000k_transport_running(void);
 
+/* IRQ-safe; no consumer callback lock may be held. One bit per queue, with
+ * all queues closed on attachment. Opening requires the MAC's provisioning
+ * sequence; closing does not retire previously submitted hardware traffic.
+ */
+int q1000k_transport_set_queue_close(u8 channel, u8 closed);
+int q1000k_transport_get_queue_close(u8 channel, u8 *closed);
+
 /* Zero transfers ownership to the bounded retry queue. Negative errno leaves
  * skb unchanged and owned by the caller. Never returns NETDEV_TX_BUSY: the
  * vendor has already modified the skb by this point. Accepted packets may be
- * dropped on expiry, lower detach or shutdown. Metadata is copied outside cb.
+ * dropped on expiry, channel closure, lower detach or shutdown. Metadata and
+ * the native admission epoch are captured once, outside cb, before enqueue.
  */
 int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1);
 

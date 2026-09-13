@@ -192,6 +192,32 @@ bool q1000k_transport_running(void)
 	return active;
 }
 
+int q1000k_transport_set_queue_close(u8 channel, u8 closed)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	rcu_read_lock();
+	transport = rcu_dereference(q1000k_current);
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_set_queue_close(transport->pon, channel, closed);
+	rcu_read_unlock();
+	return ret;
+}
+
+int q1000k_transport_get_queue_close(u8 channel, u8 *closed)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	rcu_read_lock();
+	transport = rcu_dereference(q1000k_current);
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_get_queue_close(transport->pon, channel, closed);
+	rcu_read_unlock();
+	return ret;
+}
+
 int q1000k_transport_start(const char *lower, q1000k_pon_receive_t receive)
 {
 	struct q1000k_transport *transport;
@@ -310,6 +336,14 @@ int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1)
 		ret = -ENODEV;
 		goto unlock;
 	}
+	/* Capture admission exactly once. Rechecking it on BUSY would allow a
+	 * pre-retirement frame to inherit a reused channel. Native submission
+	 * rejects stale epochs even if closure races this enqueue or its worker.
+	 * Do not take our lock before entering native admission (TX may wake us).
+	 */
+	ret = airoha_pon_prepare_tx(transport->pon, &packet->meta);
+	if (ret)
+		goto unlock;
 	spin_lock_bh(&transport->lock);
 	if (!transport->active)
 		ret = -ENODEV;

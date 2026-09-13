@@ -37,6 +37,65 @@ def run_c(source):
 
 
 class PonHookTests(unittest.TestCase):
+    def test_an7581_control_wrapper_errors(self):
+        qdma = (BSP / 'include/ecnt_hook/ecnt_hook_qdma.h').read_text()
+        self.assertNotRegex(qdma, r'in_data\s*=\s*\{\s*0\s*\}')
+        names = ['QDMA_API_SET_GENERAL_TRTCM_VALUE',
+                 'QDMA_API_GET_GENERAL_TRTCM_VALUE',
+                 'QDMA_API_SET_CHANNEL_CLOSE_STATUS',
+                 'QDMA_API_SET_OAM_MODIFY_FP_EN']
+        # CHANNEL_CLOSE has separate EN7580 and EN7581 implementations.
+        # Exercise the latter, which is selected by the Q1000K build.
+        source = ''.join(function(qdma[qdma.rindex('static inline int ' + n):], n)
+                         for n in names)
+        run_c(r'''
+#include <assert.h>
+#include <errno.h>
+#include <string.h>
+typedef struct { unsigned int data[8]; } GENERAL_TrtcmCbsPbsSet_T;
+typedef struct { unsigned char chnlIdx,chnlStatus; } QDMA_ChannelStatus_T;
+typedef int QDMA_Mode_t;
+enum { QDMA_FUNCTION_GENERAL_SET_TRTCM_MODE_VALUE,
+       QDMA_FUNCTION_GENERAL_GET_TRTCM_MODE_VALUE,
+       QDMA_FUNCTION_SET_CHANNEL_CLOSE_STATUS, QDMA_FUNCTION_SET_OAM_MODIFY_FP_EN };
+#define ECNT_DRIVER_API 0
+struct ecnt_data {};
+struct ECNT_QDMA_Data {
+    int function_id,retValue;
+    union { GENERAL_TrtcmCbsPbsSet_T *generalTrtcmCbsPbsSetPtr;
+            QDMA_ChannelStatus_T *chnlCloseStatusSet;
+            QDMA_Mode_t mode; } qdma_private;
+};
+static int dispatch_result,provider_result,handled,calls;
+static int __ECNT_HOOK(unsigned int main,unsigned int sub,struct ecnt_data *data) {
+    struct ECNT_QDMA_Data *req=(void *)data;
+    assert(main==7 && sub==0 && req->function_id==calls%4);
+    assert(req->retValue==-EOPNOTSUPP);
+    if(handled) req->retValue=provider_result;
+    calls++;
+    return dispatch_result;
+}
+''' + source + r'''
+int main(void) {
+    GENERAL_TrtcmCbsPbsSet_T cfg,old;
+    QDMA_ChannelStatus_T channel={31,255};
+    memset(&cfg,0xa5,sizeof(cfg)); old=cfg;
+    for(int mode=0;mode<5;mode++) {
+        dispatch_result=mode==1 ? -1 : mode==2 ? -ETIMEDOUT : 0;
+        provider_result=mode==3 ? -ERANGE : 0;
+        handled=mode>=3;
+        int expected=dispatch_result<0 ? dispatch_result : handled ? provider_result : -EOPNOTSUPP;
+        assert(QDMA_API_SET_GENERAL_TRTCM_VALUE(7,&cfg)==expected);
+        assert(QDMA_API_GET_GENERAL_TRTCM_VALUE(7,&cfg)==expected);
+        assert(QDMA_API_SET_CHANNEL_CLOSE_STATUS(7,&channel)==expected);
+        assert(QDMA_API_SET_OAM_MODIFY_FP_EN(7,1)==expected);
+        assert(!memcmp(&cfg,&old,sizeof(cfg)) && channel.chnlIdx==31 && channel.chnlStatus==255);
+    }
+    assert(calls==20);
+    return 0;
+}
+''')
+
     def test_dispatch_and_readiness(self):
         header = (BSP / 'include/ecnt_hook/ecnt_hook.h').read_text()
         types = header[header.index('typedef enum {'):header.index('/************************************************************************', header.index('struct ecnt_hook_ops {'))]

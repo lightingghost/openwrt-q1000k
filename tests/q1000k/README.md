@@ -166,6 +166,16 @@ with no kernel diagnostics. Native DMA is a fixture and has no physical NIC.
 The existing transport/DMA fixtures separately exercise the native owner's
 implementation. Use `Q1000K_UML_BASE` for the same optional build cache.
 
+The transport host fixture now checks exclusive QDMA1 reservation, all 32
+channels and all 256 queue-close masks, preserved neighbouring bytes, failed
+MMIO readback, unchanged output arguments and admission epochs across closure
+and reopening. The UML transport test races native queue controls against TX
+and detach. The UML adapter test verifies closed-queue rejection and that a
+BUSY retry retains its original epoch across reopening. Register and DMA
+behavior are fixtures; these tests cannot establish physical FIFO retirement.
+`Q1000K_PON_HEADER` can select the matching native public header for either
+UML generator when testing a separately prepared driver tree.
+
 To execute the same cryptographic helpers with the real Linux crypto API:
 
 ```sh

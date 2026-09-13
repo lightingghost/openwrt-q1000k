@@ -26,6 +26,7 @@ print(r'''
 #error This test is for a disposable UML guest only.
 #endif
 #define AIROHA_NUM_TX_RING 32
+#define AIROHA_NUM_QOS_CHANNELS 4
 #define AIROHA_MAX_RX_SIZE 16128
 ''')
 print(header.read_text())
@@ -34,7 +35,25 @@ print(r'''
  * packet queues, RTNL, RCU, skb allocation and stop/unregister are real.
  */
 struct airoha_eth;
-struct airoha_qdma { struct airoha_eth *eth; };
+struct airoha_qdma {
+    struct airoha_eth *eth;
+    DECLARE_BITMAP(qos_channel_map,AIROHA_NUM_QOS_CHANNELS);
+    u32 regs[8];
+};
+static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
+{
+    if (WARN_ON(offset<0xa0 || offset>0xbc || (offset&3))) return 0;
+    return qdma->regs[(offset-0xa0)/4];
+}
+static void airoha_qdma_wr(struct airoha_qdma *qdma,u32 offset,u32 value)
+{
+    if (WARN_ON(offset<0xa0 || offset>0xbc || (offset&3))) return;
+    qdma->regs[(offset-0xa0)/4]=value;
+}
+static void airoha_qdma_rmw(struct airoha_qdma *qdma,u32 offset,u32 mask,u32 value)
+{
+    airoha_qdma_wr(qdma,offset,(airoha_qdma_rr(qdma,offset)&~mask)|value);
+}
 struct airoha_gdm_dev {
     struct airoha_eth *eth;
     struct airoha_qdma __rcu *qdma;
@@ -59,11 +78,13 @@ static LIST_HEAD(pending_tx);
 static DEFINE_SPINLOCK(pending_lock);
 static unsigned int pending_count;
 static atomic_t hold_dma=ATOMIC_INIT(0);
+static void check_admission(struct airoha_pon *pon,u32 msg);
 static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *skb, struct net_device *netdev,
                                      u32 msg, struct airoha_pon *pon)
 {
     struct pending_tx *tx=kmalloc(sizeof(*tx),GFP_ATOMIC);
     RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "PON TX outside RCU");
+    check_admission(pon,msg);
     if(!tx) { dev_kfree_skb_any(skb); return NETDEV_TX_OK; }
     spin_lock_bh(&pending_lock);
     if(pending_count==64) {
@@ -97,10 +118,16 @@ static int dma_worker(void *unused)
 }
 ''')
 print('\n'.join(line for line in (eth / 'airoha_regs.h').read_text().splitlines()
-                if re.match(r'#define QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)', line)))
+                if re.match(r'#define (?:QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)|REG_QUEUE_CLOSE_CFG)', line)))
 source = (eth / 'airoha_pon.c').read_text()
 print(re.sub(r'^#include[^\n]*\n', '', source, flags=re.M))
 print(r'''
+static void check_admission(struct airoha_pon *pon,u32 msg)
+{
+    unsigned int channel=(msg>>3)&31,queue=msg&7;
+    lockdep_assert_held(&pon->admission_lock);
+    WARN_ON(pon->queue_fault || (pon->closed[channel] & BIT(queue)));
+}
 static struct airoha_pon __rcu *active;
 static struct airoha_eth eth;
 static struct airoha_gdm_port port;
@@ -137,7 +164,7 @@ static const struct net_device_ops airoha_netdev_ops={
 };
 static int reader(void *unused)
 {
-    const struct airoha_pon_tx_meta tx={ .gem=0x1357,.channel=5,.queue=3,.cpu_queue=31,.omci=true };
+    struct airoha_pon_tx_meta tx={ .gem=0x1357,.channel=5,.queue=3,.cpu_queue=31,.omci=true };
     const u32 words[4]={0x40054108,0,0x01000000,0};
     struct airoha_gdm_dev *gdm=netdev_priv(lower);
     while (!kthread_should_stop()) {
@@ -149,7 +176,7 @@ static int reader(void *unused)
             skb=alloc_skb(64,GFP_ATOMIC);
             if (skb) {
                 skb_put(skb,48);
-                if (airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_BUSY)
+                if (airoha_pon_prepare_tx(pon,&tx) || airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_BUSY)
                     dev_kfree_skb_any(skb);
             }
         }
@@ -164,16 +191,35 @@ static int reader(void *unused)
     }
     return 0;
 }
+static int channel_worker(void *unused)
+{
+    unsigned int n=0;
+    while(!kthread_should_stop()) {
+        struct airoha_pon *pon;
+        rcu_read_lock();
+        pon=rcu_dereference(active);
+        if(pon) {
+            /* Adjacent byte shares channel 5's register. Keep its value
+             * recognizable to catch collateral RMW corruption.
+             */
+            airoha_pon_set_queue_close(pon,4,0x5a);
+            airoha_pon_set_queue_close(pon,5,(++n&1) ? 0xff : 0);
+        }
+        rcu_read_unlock();
+        cond_resched();
+    }
+    return 0;
+}
 #define CHECK(expr) do { if (!(expr)) { \
     pr_err("Q1000K_PON_TRANSPORT_KERNEL_FAIL line=%d: %s\n",__LINE__,#expr); \
     ret=-EINVAL; goto out; } } while (0)
 static int __init pon_transport_test_init(void)
 {
-    struct task_struct *task=NULL, *dma=NULL;
+    struct task_struct *task=NULL, *dma=NULL, *control=NULL;
     struct airoha_pon *pon=NULL;
     struct airoha_gdm_dev *gdm;
     struct sk_buff *skb;
-    const struct airoha_pon_tx_meta tx={ .gem=5,.channel=1,.cpu_queue=3 };
+    struct airoha_pon_tx_meta tx={ .gem=5,.channel=1,.cpu_queue=3 };
     bool registered=false;
     int ret=0,i;
     if (!strstr(init_utsname()->release,"-q1000k-pon-transport-test")) return -EPERM;
@@ -193,6 +239,8 @@ static int __init pon_transport_test_init(void)
     pon=airoha_pon_attach(lower,&ops,NULL);
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
     skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+    CHECK(!airoha_pon_set_queue_close(pon,tx.channel,0));
+    CHECK(!airoha_pon_prepare_tx(pon,&tx));
     CHECK(airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_OK);
     CHECK(atomic_read(&gdm->pon_tx_pending)==2);
     CHECK(airoha_pon_quiesce(pon,0)==-ETIMEDOUT);
@@ -204,10 +252,13 @@ static int __init pon_transport_test_init(void)
     airoha_pon_release(pon); pon=NULL;
     task=kthread_run(reader,NULL,"pon-transport-test");
     if (IS_ERR(task)) { ret=PTR_ERR(task); task=NULL; goto out; }
+    control=kthread_run(channel_worker,NULL,"pon-channel-test");
+    if(IS_ERR(control)) { ret=PTR_ERR(control); control=NULL; goto out; }
     for(i=0;i<100;i++) {
         atomic_set(&live,1);
         pon=airoha_pon_attach(lower,&ops,NULL);
         if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
+        CHECK(!airoha_pon_set_queue_close(pon,5,0));
         rcu_assign_pointer(active,pon);
         msleep(1);
         if (i&1) {
@@ -223,6 +274,7 @@ static int __init pon_transport_test_init(void)
             rtnl_lock(); ret=dev_open(lower,NULL); rtnl_unlock(); CHECK(!ret);
         }
     }
+    kthread_stop(control); control=NULL;
     kthread_stop(task); task=NULL;
     CHECK(atomic_read(&rx_calls)>0 && atomic_read(&wake_calls)>0);
     CHECK(atomic_read(&detached_calls)==50 && !atomic_read(&bad_calls));
@@ -231,6 +283,8 @@ static int __init pon_transport_test_init(void)
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
     atomic_set(&hold_dma,1);
     skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+    CHECK(!airoha_pon_set_queue_close(pon,tx.channel,0));
+    CHECK(!airoha_pon_prepare_tx(pon,&tx));
     CHECK(airoha_pon_xmit(pon,skb,&tx)==NETDEV_TX_OK);
     CHECK(atomic_read(&gdm->pon_tx_pending)==2);
     /* Unregister with a still-owned handle must not hang on a netdev ref. */
@@ -243,6 +297,7 @@ static int __init pon_transport_test_init(void)
     kthread_stop(dma); dma=NULL;
     CHECK(!atomic_read(&gdm->pon_tx_pending) && !atomic_read(&bad_calls));
 out:
+    if(control) kthread_stop(control);
     if(task) kthread_stop(task);
     rcu_assign_pointer(active,NULL);
     synchronize_rcu();
