@@ -299,6 +299,9 @@ struct omci_ani_topology {
  * @set_tcont: configure a T-CONT mapping
  * @set_gem_port: configure a GEM port
  * @set_uni: enable or disable a UNI
+ * @replace_services: atomically replace the entire service set; an error must
+ *	leave the previous set intact, or return -EUCLEAN if that cannot be proven.
+ *	The array is borrowed for this call only; NULL with count zero removes all.
  * @replace_service: atomically add or replace a normalized upstream service
  * @delete_service: remove a normalized upstream service by cookie
  * @get_telemetry: refresh PON FEC and optical telemetry
@@ -319,6 +322,9 @@ struct omci_device_ops {
 			    u16 gem_port_id, u16 tcont_entity_id,
 			    u8 direction, bool valid, bool encrypted);
 	int (*set_uni)(struct omci_device *odev, u16 entity_id, bool enable);
+	int (*replace_services)(struct omci_device *odev,
+				const struct omci_service_config *services,
+				size_t count);
 	int (*replace_service)(struct omci_device *odev,
 			       const struct omci_service_config *service);
 	int (*delete_service)(struct omci_device *odev, u32 cookie);
@@ -350,6 +356,12 @@ void omci_device_set_identity(struct omci_device *odev,
 			      const u8 serial_number[8],
 			      const u8 password[10]);
 void omci_device_set_onu_id(struct omci_device *odev, u16 onu_id);
+/* Channel/session transitions and all control calls require process context.
+ * Provider callbacks must not re-enter control or session APIs. RX may run in
+ * NAPI/softirq context; the provider must quiesce all producers before unregister.
+ * MIC_VALID may be passed only after authenticating this packet with the current
+ * session key. Descriptor presence bits and global error counters are insufficient.
+ */
 void omci_device_set_channel(struct omci_device *odev, u16 gem_port_id,
 			     bool valid);
 void omci_device_set_state(struct omci_device *odev, u8 state);

@@ -16,6 +16,8 @@ int omci_wire_decode(const void *data, size_t len,
 
 	if (!data || !request || len < 8)
 		return -EINVAL;
+	if (len > OMCI_MAX_PDU_LEN)
+		return -EMSGSIZE;
 
 	memset(request, 0, sizeof(*request));
 	request->transaction_id = get_unaligned_be16(pdu);
@@ -28,6 +30,8 @@ int omci_wire_decode(const void *data, size_t len,
 	case OMCI_BASELINE_DEV_ID:
 		if (len != OMCI_BASELINE_LEN_NO_MIC && len != OMCI_BASELINE_LEN)
 			return -EMSGSIZE;
+		if (get_unaligned_be32(pdu + 40) != 40)
+			return -EPROTO;
 		request->payload = pdu + 8;
 		request->payload_len = 32;
 		return 0;

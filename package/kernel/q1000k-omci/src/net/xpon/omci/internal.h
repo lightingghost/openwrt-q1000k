@@ -81,10 +81,12 @@ struct omci_agent {
 	/* Serializes configuration, MIB and transaction state. */
 	struct mutex lock;
 	struct xarray mib;
-	struct xarray services;
+	struct xarray *services;
+	int service_error;
 	struct omci_agent_config config;
 	u32 upload_index;
 	u16 mib_sync;
+	bool identity_ready;
 	bool enabled;
 	bool permissive;
 	bool fake_omci;
@@ -122,6 +124,10 @@ struct omci_device {
 	u32 capabilities;
 	/* Serializes provider transport ownership. */
 	struct mutex lifecycle_lock;
+	/* Serializes RX processing with channel/session transitions. */
+	struct mutex session_lock;
+	/* Drains in-flight provider TX before stop or channel replacement. */
+	struct mutex tx_lock;
 	bool started;
 
 	/* Protect the optional userspace observer. */
@@ -177,7 +183,7 @@ int omci_agent_mib_set(struct omci_device *odev,
 		       const struct omci_mib_object *object);
 int omci_agent_mib_delete(struct omci_device *odev, u16 class_id,
 			  u16 entity_id);
-void omci_agent_mib_reset(struct omci_device *odev, bool all);
+int omci_agent_mib_reset(struct omci_device *odev, bool all);
 int omci_agent_mib_next(struct omci_device *odev, u32 index,
 			struct omci_mib_object *object, u32 *next_index,
 			const char **name);

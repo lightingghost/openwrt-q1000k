@@ -777,7 +777,7 @@ the Q1000K:
 | Candidate | Evidence | Decision |
 | --- | --- | --- |
 | PR #24577 native `econet-omcid` | AArch64 compilation succeeds; EN7528 procfs transport, baseline-only framing and DZS/H660GM-A MIB. | Retain as a reference. Do not import its successful no-op responses or unsolicited GEM setup. See the [PR review](XGSPON-PR24577.q1000k.md). |
-| Generic `net/xpon` and `net/xpon/omci` at [2e2cf91](https://github.com/Sirherobrine23/airoha_kernel/tree/2e2cf91fe84467d77649efebd99a28284f2124b3/net/xpon) | Both external modules compile and pass modpost on Linux 6.18.44/GCC 14.4.0. Baseline/extended wire codec, managed entities, service reconciliation, identity, sysfs and netlink are present. Only module-description warnings appeared. | More complete transport-independent foundation to adapt after the hardware interface is defined; not imported or selected as a Q1000K service. |
+| Generic `net/xpon` and `net/xpon/omci` at [2e2cf91](https://github.com/Sirherobrine23/airoha_kernel/tree/2e2cf91fe84467d77649efebd99a28284f2124b3/net/xpon) | Both external modules compile and pass modpost on Linux 6.18.44/GCC 14.4.0. Baseline/extended wire codec, managed entities, service reconciliation, identity, sysfs and netlink are present. Only module-description warnings appeared. | Imported as the optional `q1000k-omci` core package; Q1000K hardware transport and service callbacks remain to be connected. |
 
 The generic source requires callbacks for transmit, T-CONTs, GEM ports, UNI
 state, service replacement/deletion, telemetry and operational-state reporting.
@@ -804,6 +804,37 @@ No service VLAN, OLT identity, authenticated OMCC exchange or successful OEM
 MIB trace is available from the current disconnected, non-OEM installation.
 The supplied OEM boot log also reports no PON signal. Therefore the intended
 service model and its managed-entity behavior have not been established.
+
+## OMCI core integration (2026-09-13)
+
+The generic sources are now imported with original authorship in a separate
+commit. `package/kernel/q1000k-omci` builds the PON and OMCI modules and stages
+provider headers/symbols. Neither module autoloads; the package remains
+experimental and does not enable board nodes or provide a hardware backend.
+
+The adaptation fixes the missing-callback and service consistency issues
+listed above. Startup requires explicit identity and all required callbacks.
+RX requires an explicit per-packet authentication verdict, rejects CRC errors,
+linearizes fragmented skbs, and enforces the queue limit under lock. Session
+transitions serialize with request processing. Stop prevents new enqueues
+before waiting for RX work and provider TX to finish. Failed startup cannot
+process synchronous RX. Baseline trailers and extended length arithmetic are
+validated, including rejection of 16-bit length overflow.
+
+Service callbacks now replace a complete set atomically. Both software
+snapshots exist before hardware changes, and publication requires no further
+allocation. Failed removal preserves records and aborts MIB reset; an
+inconsistent backend or failed session cleanup blocks subsequent provisioning.
+Fake-success/permissive settings and their profile bypasses are disabled.
+See the [provider contract](../../../package/kernel/q1000k-omci/README.md).
+
+The complete core passes a local AArch64 module/package build and an isolated
+Linux 6.18.44 UML run with lockdep, RCU and atomic-sleep checks. The fixture
+covers authentication admission flags, malformed/nonlinear packets, identity
+and callback gates, full RX queues, 20 stop races, missing provisioning,
+service-set failures, MIB preservation and a latched backend inconsistency.
+The fixture supplies authentication assertions; it does not implement or
+validate the Q1000K's cryptographic receive path.
 
 ## Validation boundary and remaining plan
 

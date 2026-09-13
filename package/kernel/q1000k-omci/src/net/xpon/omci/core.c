@@ -289,9 +289,9 @@ int omci_validate_tx(struct omci_device *odev, struct sk_buff *skb)
 {
 	const u8 *data = skb->data;
 	u16 content_len;
-	u16 pdu_len;
+	size_t pdu_len;
 
-	if (skb->len < 4)
+	if (skb->len < 4 || skb->len > OMCI_MAX_PDU_LEN)
 		return -EMSGSIZE;
 
 	switch (data[3]) {
@@ -299,6 +299,8 @@ int omci_validate_tx(struct omci_device *odev, struct sk_buff *skb)
 		if (skb->len != OMCI_BASELINE_LEN_NO_MIC &&
 		    skb->len != OMCI_BASELINE_LEN)
 			return -EMSGSIZE;
+		if (get_unaligned_be32(data + 40) != 40)
+			return -EPROTO;
 		if ((odev->capabilities & OMCI_CAP_HW_MIC) &&
 		    skb->len == OMCI_BASELINE_LEN)
 			skb_trim(skb, OMCI_BASELINE_LEN_NO_MIC);
@@ -322,6 +324,25 @@ int omci_validate_tx(struct omci_device *odev, struct sk_buff *skb)
 	}
 
 	return 0;
+}
+
+/* All callers retain the skb on error; the provider consumes only on success. */
+static int omci_transmit(struct omci_device *odev, struct sk_buff *skb,
+			 u16 gem_port_id)
+{
+	int ret = 0;
+
+	mutex_lock(&odev->tx_lock);
+	spin_lock_bh(&odev->state_lock);
+	if (!odev->started)
+		ret = -ENETDOWN;
+	else if (!odev->channel_up || odev->gem_port_id != gem_port_id)
+		ret = -ENOLINK;
+	spin_unlock_bh(&odev->state_lock);
+	if (!ret)
+		ret = odev->ops->xmit(odev, skb, gem_port_id);
+	mutex_unlock(&odev->tx_lock);
+	return ret;
 }
 
 int omci_device_xmit(struct omci_device *odev, const void *data, size_t len)
@@ -351,7 +372,7 @@ int omci_device_xmit(struct omci_device *odev, const void *data, size_t len)
 		goto free_skb;
 
 	tx_len = tx_skb->len;
-	ret = odev->ops->xmit(odev, tx_skb, gem_port_id);
+	ret = omci_transmit(odev, tx_skb, gem_port_id);
 	if (ret)
 		goto free_skb;
 
@@ -419,7 +440,7 @@ static int omci_cmd_tx(struct sk_buff *skb, struct genl_info *info)
 		goto free_tx_skb;
 
 	tx_len = tx_skb->len;
-	ret = odev->ops->xmit(odev, tx_skb, gem_port_id);
+	ret = omci_transmit(odev, tx_skb, gem_port_id);
 	if (ret)
 		goto free_tx_skb;
 
@@ -1007,8 +1028,9 @@ static int omci_cmd_mib_reset(struct sk_buff *skb, struct genl_info *info)
 		ret = -ENODEV;
 		goto out;
 	}
-	omci_agent_mib_reset(odev, true);
-	omci_device_notify(odev, OMCI_EVENT_MIB_CHANGE);
+	ret = omci_agent_mib_reset(odev, true);
+	if (!ret)
+		omci_device_notify(odev, OMCI_EVENT_MIB_CHANGE);
 out:
 	mutex_unlock(&omci_devices_lock);
 	return ret;
@@ -1175,10 +1197,13 @@ static void omci_rx_work(struct work_struct *work)
 		void *hdr;
 		int ret;
 
+		mutex_lock(&odev->session_lock);
 		spin_lock_bh(&odev->state_lock);
 		onu_id = odev->onu_id;
-		if (cb->generation != odev->generation) {
+		if (!odev->started || !odev->channel_up ||
+		    cb->generation != odev->generation) {
 			spin_unlock_bh(&odev->state_lock);
+			mutex_unlock(&odev->session_lock);
 			atomic64_inc(&odev->rx_dropped);
 			dev_kfree_skb_any(skb);
 			continue;
@@ -1186,6 +1211,7 @@ static void omci_rx_work(struct work_struct *work)
 		spin_unlock_bh(&odev->state_lock);
 
 		omci_agent_receive(odev, skb);
+		mutex_unlock(&odev->session_lock);
 
 		mutex_lock(&odev->owner_lock);
 		if (odev->owner_portid && odev->owner_net) {
@@ -1318,6 +1344,8 @@ omci_device_register(struct xpon_device *xpon, u32 capabilities,
 
 	INIT_LIST_HEAD(&odev->list);
 	mutex_init(&odev->lifecycle_lock);
+	mutex_init(&odev->session_lock);
+	mutex_init(&odev->tx_lock);
 	mutex_init(&odev->owner_lock);
 	spin_lock_init(&odev->state_lock);
 	skb_queue_head_init(&odev->rx_queue);
@@ -1370,15 +1398,31 @@ int omci_device_start(struct omci_device *odev)
 	if (odev->started)
 		goto out;
 
-	/*
-	 * Publish the lifecycle state before entering the provider so state and
-	 * receive callbacks generated synchronously by start() are accepted.
-	 */
-	WRITE_ONCE(odev->started, true);
-	if (odev->ops->start) {
+	if (!odev->ops->start || !odev->ops->stop ||
+	    !odev->ops->get_ani_topology || !odev->ops->set_tcont ||
+	    !odev->ops->set_gem_port || !odev->ops->set_uni ||
+	    !odev->ops->replace_services) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+	mutex_lock(&odev->agent.lock);
+	if (!odev->agent.identity_ready)
+		ret = -ENODATA;
+	else if (odev->agent.service_error)
+		ret = odev->agent.service_error;
+	mutex_unlock(&odev->agent.lock);
+	if (ret)
+		goto out;
+
+	/* RX cannot mutate the MIB until provider startup has succeeded. */
+	if (odev->ops->start)
 		ret = odev->ops->start(odev);
-		if (ret)
-			WRITE_ONCE(odev->started, false);
+	if (!ret) {
+		spin_lock_bh(&odev->state_lock);
+		WRITE_ONCE(odev->started, true);
+		spin_unlock_bh(&odev->state_lock);
+	} else {
+		omci_device_reset_session(odev);
 	}
 out:
 	mutex_unlock(&odev->lifecycle_lock);
@@ -1395,10 +1439,19 @@ void omci_device_stop(struct omci_device *odev)
 	if (!odev->started)
 		goto out;
 
-	/* Let the provider drain the active OMCC before rejecting new traffic. */
+	/* Close admission before cancellation; RX schedules under state_lock. */
+	spin_lock_bh(&odev->state_lock);
+	WRITE_ONCE(odev->started, false);
+	odev->generation++;
+	spin_unlock_bh(&odev->state_lock);
+	cancel_work_sync(&odev->rx_work);
+	skb_queue_purge(&odev->rx_queue);
+	/* No subsequent TX can enter the provider after this barrier. */
+	mutex_lock(&odev->tx_lock);
+	mutex_unlock(&odev->tx_lock);
+	omci_device_reset_session(odev);
 	if (odev->ops->stop)
 		odev->ops->stop(odev);
-	WRITE_ONCE(odev->started, false);
 out:
 	mutex_unlock(&odev->lifecycle_lock);
 }
@@ -1541,6 +1594,8 @@ void omci_device_set_channel(struct omci_device *odev, u16 gem_port_id,
 	u8 event = valid ? OMCI_EVENT_CHANNEL_UP : OMCI_EVENT_CHANNEL_DOWN;
 	bool changed;
 
+	mutex_lock(&odev->session_lock);
+	mutex_lock(&odev->tx_lock);
 	spin_lock_bh(&odev->state_lock);
 	changed = odev->channel_up != valid ||
 		  (valid && odev->gem_port_id != gem_port_id);
@@ -1549,13 +1604,14 @@ void omci_device_set_channel(struct omci_device *odev, u16 gem_port_id,
 	odev->channel_up = valid;
 	odev->gem_port_id = valid ? gem_port_id : 0xffff;
 	spin_unlock_bh(&odev->state_lock);
+	mutex_unlock(&odev->tx_lock);
 
-	if (!valid)
-		skb_queue_purge(&odev->rx_queue);
 	if (changed) {
+		skb_queue_purge(&odev->rx_queue);
 		omci_agent_channel_changed(odev, valid);
 		omci_device_notify(odev, event);
 	}
+	mutex_unlock(&odev->session_lock);
 }
 EXPORT_SYMBOL_GPL(omci_device_set_channel);
 
@@ -1578,26 +1634,20 @@ void omci_device_reset_session(struct omci_device *odev)
 	if (!odev)
 		return;
 
-	/*
-	 * Finish requests already accepted on the old OMCC before changing
-	 * the generation. A Deactivate_ONU-ID PLOAM can race with an OMCI
-	 * request carried by the same downstream frame.
-	 */
-	if (current_work() != &odev->rx_work)
-		flush_work(&odev->rx_work);
-
+	/* Wait only for the current transaction, then invalidate queued requests. */
+	mutex_lock(&odev->session_lock);
+	mutex_lock(&odev->tx_lock);
 	spin_lock_bh(&odev->state_lock);
 	odev->generation++;
 	odev->onu_id = 0xffff;
 	odev->gem_port_id = 0xffff;
 	odev->channel_up = false;
 	spin_unlock_bh(&odev->state_lock);
-
-	if (current_work() != &odev->rx_work)
-		cancel_work_sync(&odev->rx_work);
+	mutex_unlock(&odev->tx_lock);
 	skb_queue_purge(&odev->rx_queue);
 	omci_agent_channel_changed(odev, false);
 	omci_device_notify(odev, OMCI_EVENT_CHANNEL_DOWN);
+	mutex_unlock(&odev->session_lock);
 }
 EXPORT_SYMBOL_GPL(omci_device_reset_session);
 
@@ -1605,9 +1655,6 @@ void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
 			 u16 gem_port_id, u32 flags)
 {
 	struct omci_skb_cb *cb;
-	bool channel_up;
-	u16 configured_gem;
-	u32 generation;
 
 	if (!skb)
 		return;
@@ -1615,41 +1662,41 @@ void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
 		dev_kfree_skb_any(skb);
 		return;
 	}
-	if (!READ_ONCE(odev->started)) {
-		atomic64_inc(&odev->rx_dropped);
-		dev_kfree_skb_any(skb);
-		return;
-	}
+	/* MIC_VALID is a per-packet provider assertion, never inferred from
+	 * a missing-MIC descriptor bit or a global hardware error counter.
+	 */
+	if (!(flags & OMCI_F_MIC_VALID) || (flags & OMCI_F_CRC_ERROR) ||
+	    !skb->len || skb->len > OMCI_MAX_PDU_LEN || skb_linearize(skb))
+		goto drop;
 
 	spin_lock_bh(&odev->state_lock);
-	channel_up = odev->channel_up;
-	configured_gem = odev->gem_port_id;
-	generation = odev->generation;
-	spin_unlock_bh(&odev->state_lock);
-
-	if (!channel_up || gem_port_id != configured_gem || !skb->len ||
-	    skb->len > OMCI_MAX_PDU_LEN) {
-		atomic64_inc(&odev->rx_dropped);
-		dev_kfree_skb_any(skb);
-		return;
+	if (!odev->started || !odev->channel_up ||
+	    gem_port_id != odev->gem_port_id) {
+		spin_unlock_bh(&odev->state_lock);
+		goto drop;
 	}
-
+	spin_lock(&odev->rx_queue.lock);
 	if (skb_queue_len(&odev->rx_queue) >= OMCI_RX_QUEUE_LEN) {
-		atomic64_inc(&odev->rx_dropped);
-		dev_kfree_skb_any(skb);
-		return;
+		spin_unlock(&odev->rx_queue.lock);
+		spin_unlock_bh(&odev->state_lock);
+		goto drop;
 	}
-
 	cb = OMCI_SKB_CB(skb);
 	memset(cb, 0, sizeof(*cb));
 	cb->sequence = atomic64_inc_return(&odev->sequence);
 	cb->flags = flags;
-	cb->generation = generation;
+	cb->generation = odev->generation;
 	cb->gem_port_id = gem_port_id;
 	atomic64_inc(&odev->rx_packets);
 	atomic64_add(skb->len, &odev->rx_bytes);
-	skb_queue_tail(&odev->rx_queue, skb);
+	__skb_queue_tail(&odev->rx_queue, skb);
+	spin_unlock(&odev->rx_queue.lock);
 	schedule_work(&odev->rx_work);
+	spin_unlock_bh(&odev->state_lock);
+	return;
+drop:
+	atomic64_inc(&odev->rx_dropped);
+	dev_kfree_skb_any(skb);
 }
 EXPORT_SYMBOL_GPL(omci_device_receive);
 

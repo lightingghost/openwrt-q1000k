@@ -100,7 +100,7 @@ xpon_device_register(struct device *parent,
 		kfree(xpon);
 		return ERR_PTR(ret);
 	}
-	
+
 	ret = xpon_sysfs_register(xpon);
 	if (ret) {
 		kfree(xpon);

@@ -784,6 +784,7 @@ omci_agent_profile_state_locked(struct omci_agent *agent,
 static int
 omci_agent_profile_reconcile_locked(struct omci_device *odev,
 				    u8 old_profile, u8 new_profile);
+static void omci_agent_free_service_array(struct xarray *services);
 static int omci_agent_clear_services_locked(struct omci_device *odev);
 static int omci_agent_reconcile_services_locked(struct omci_device *odev);
 static void omci_agent_reset_duplicate_locked(struct omci_agent *agent);
@@ -868,6 +869,8 @@ omci_agent_profile_refresh_locked(struct omci_device *odev,
 	int ret;
 
 	omci_agent_profile_state_locked(agent, olt, &state);
+	state.quirks &= ~(OMCI_OLT_QUIRK_FAKE_UNSUPPORTED_SUCCESS |
+			  OMCI_OLT_QUIRK_IGNORE_UNSUPPORTED_UNI);
 	omci_profile_sanitize_olt_g(olt, state.quirks);
 	if (olt)
 		state.olt = *olt;
@@ -1859,7 +1862,10 @@ int omci_agent_init(struct omci_device *odev)
 
 	mutex_init(&agent->lock);
 	xa_init(&agent->mib);
-	xa_init(&agent->services);
+	agent->services = kzalloc(sizeof(*agent->services), GFP_KERNEL);
+	if (!agent->services)
+		return -ENOMEM;
+	xa_init(agent->services);
 	agent->enabled = true;
 	agent->permissive = false;
 	agent->fake_omci = false;
@@ -1894,14 +1900,20 @@ int omci_agent_init(struct omci_device *odev)
 
 	ret = omci_identity_load(odev->parent, &identity);
 	if (ret)
-		return ret;
+		goto err_cleanup;
 	omci_agent_apply_identity(agent, &identity);
+	agent->identity_ready = identity.valid & OMCI_IDENTITY_F_SERIAL_NUMBER;
 
 	mutex_lock(&agent->lock);
 	ret = omci_agent_populate_defaults(odev);
 	if (!ret)
 		ret = omci_agent_profile_refresh_locked(odev, NULL, NULL);
 	mutex_unlock(&agent->lock);
+	if (ret)
+		goto err_cleanup;
+	return 0;
+err_cleanup:
+	omci_agent_cleanup(odev);
 	return ret;
 }
 
@@ -1920,7 +1932,9 @@ void omci_agent_cleanup(struct omci_device *odev)
 		kfree(object);
 	}
 	mutex_unlock(&agent->lock);
-	xa_destroy(&agent->services);
+	omci_agent_free_service_array(agent->services);
+	xa_destroy(agent->services);
+	kfree(agent->services);
 	xa_destroy(&agent->mib);
 }
 
@@ -2592,6 +2606,8 @@ static int omci_agent_mib_reset_locked(struct omci_device *odev, bool all,
 
 	omci_agent_reset_table_snapshot_locked(agent);
 	reset_ret = omci_agent_clear_services_locked(odev);
+	if (reset_ret)
+		return reset_ret;
 
 	if (all) {
 		xa_for_each(&agent->mib, index, object) {
@@ -2629,9 +2645,9 @@ static int omci_agent_mib_reset_locked(struct omci_device *odev, bool all,
 	 * until some unrelated event happens to trigger reconcile again.
 	 */
 	if (!ret)
-		omci_agent_reconcile_services_locked(odev);
+		ret = omci_agent_reconcile_services_locked(odev);
 
-	return ret ?: reset_ret;
+	return ret;
 }
 
 static int omci_agent_hw_update(struct omci_device *odev,
@@ -2655,7 +2671,7 @@ static int omci_agent_hw_update(struct omci_device *odev,
 	switch (object->class_id) {
 	case OMCI_CLASS_TCONT:
 		if (!ops->set_tcont)
-			return 0;
+			return -EOPNOTSUPP;
 		if (action == OMCI_MSG_TYPE_DELETE)
 			return ops->set_tcont(odev, object->entity_id, 0xffff,
 					      false);
@@ -2663,7 +2679,7 @@ static int omci_agent_hw_update(struct omci_device *odev,
 		return ops->set_tcont(odev, object->entity_id, value, true);
 	case OMCI_CLASS_GEM_PORT_CTP:
 		if (!ops->set_gem_port)
-			return 0;
+			return -EOPNOTSUPP;
 		return ops->set_gem_port(odev, object->entity_id,
 					 get_unaligned_be16(object->data),
 					 get_unaligned_be16(object->data + 2),
@@ -2672,7 +2688,7 @@ static int omci_agent_hw_update(struct omci_device *odev,
 	case OMCI_CLASS_PPTP_ETHERNET_UNI:
 	case OMCI_CLASS_VEIP:
 		if (!ops->set_uni)
-			return 0;
+			return -EOPNOTSUPP;
 		if (action == OMCI_MSG_TYPE_DELETE)
 			enable = false;
 		else if (object->class_id == OMCI_CLASS_PPTP_ETHERNET_UNI)
@@ -2714,22 +2730,22 @@ static void omci_agent_free_service_array(struct xarray *services)
 static int omci_agent_clear_services_locked(struct omci_device *odev)
 {
 	struct omci_agent *agent = &odev->agent;
-	struct omci_service_state *state;
-	unsigned long index;
-	int first_error = 0;
 	int ret;
 
-	xa_for_each(&agent->services, index, state) {
-		if (odev->ops->delete_service) {
-			ret = odev->ops->delete_service(odev, state->config.cookie);
-			if (ret && ret != -ENOENT && !first_error)
-				first_error = ret;
-		}
-		xa_erase(&agent->services, index);
-		kfree(state);
+	if (agent->service_error)
+		return agent->service_error;
+	if (xa_empty(agent->services))
+		return 0;
+	if (!odev->ops->replace_services)
+		return -EOPNOTSUPP;
+	ret = odev->ops->replace_services(odev, NULL, 0);
+	if (ret) {
+		if (ret == -EUCLEAN)
+			agent->service_error = ret;
+		return ret;
 	}
-
-	return first_error;
+	omci_agent_free_service_array(agent->services);
+	return 0;
 }
 
 static int omci_agent_stage_service(struct xarray *services,
@@ -2738,6 +2754,9 @@ static int omci_agent_stage_service(struct xarray *services,
 	struct omci_service_state *state;
 	void *old;
 
+	/* A cookie collision must not silently replace a different bridge path. */
+	if (xa_load(services, service->cookie))
+		return -EEXIST;
 	state = kmalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)
 		return -ENOMEM;
@@ -2756,81 +2775,32 @@ static int omci_agent_apply_services_locked(struct omci_device *odev,
 					    struct xarray *desired)
 {
 	struct omci_agent *agent = &odev->agent;
+	struct omci_service_config *batch;
 	struct omci_service_state *state;
-	struct omci_service_state *old_state;
 	unsigned long index;
-	int ret = 0;
+	size_t count = 0, i = 0;
+	int ret;
 
-	if (!xa_empty(desired) && !odev->ops->replace_service)
+	if (agent->service_error)
+		return agent->service_error;
+	if (xa_empty(desired) && xa_empty(agent->services))
+		return 0;
+	if (!odev->ops->replace_services)
 		return -EOPNOTSUPP;
-
-	/* Reserve all new cookies before changing hardware state. */
 	xa_for_each(desired, index, state) {
-		if (xa_load(&agent->services, index))
-			continue;
-		ret = xa_reserve(&agent->services, index, GFP_KERNEL);
-		if (ret)
-			goto release_reservations;
+		if (++count > 256)
+			return -ENOSPC;
 	}
-
-	/* Add or replace all desired rules while the previous set remains live. */
-	xa_for_each(desired, index, state) {
-		ret = odev->ops->replace_service(odev, &state->config);
-		if (ret) {
-			dev_warn(odev->parent,
-				 "OMCI install failed for service %#x (UNI %#x GEM %u T-CONT %#x queue %u): %d; rolling back\n",
-				 state->config.cookie,
-				 state->config.uni_entity_id,
-				 state->config.gem_port_id,
-				 state->config.tcont_entity_id,
-				 state->config.queue, ret);
-			goto rollback_hardware;
-		}
-	}
-
-	/* Delete rules that are no longer part of the resolved service graph. */
-	xa_for_each(&agent->services, index, old_state) {
-		if (xa_load(desired, index))
-			continue;
-		if (!odev->ops->delete_service)
-			continue;
-		ret = odev->ops->delete_service(odev, old_state->config.cookie);
-		if (ret && ret != -ENOENT)
-			goto rollback_hardware;
-	}
-
-	/* Hardware is consistent; replace the software snapshot. */
-	omci_agent_free_service_array(&agent->services);
-	xa_for_each(desired, index, state) {
-		void *entry;
-
-		xa_erase(desired, index);
-		entry = xa_store(&agent->services, index, state, GFP_KERNEL);
-		if (WARN_ON(xa_is_err(entry))) {
-			kfree(state);
-			continue;
-		}
-		kfree(entry);
-	}
-	return 0;
-
-rollback_hardware:
-	/* Restore every old rule, including rules deleted before a failure. */
-	if (odev->ops->replace_service)
-		xa_for_each(&agent->services, index, old_state)
-			odev->ops->replace_service(odev, &old_state->config);
-
-	/* Remove newly introduced cookies that were not in the old snapshot. */
-	if (odev->ops->delete_service)
-		xa_for_each(desired, index, state)
-			if (!xa_load(&agent->services, index))
-				odev->ops->delete_service(odev,
-						  state->config.cookie);
-
-release_reservations:
+	batch = count ? kcalloc(count, sizeof(*batch), GFP_KERNEL) : NULL;
+	if (count && !batch)
+		return -ENOMEM;
 	xa_for_each(desired, index, state)
-		if (!xa_load(&agent->services, index))
-			xa_release(&agent->services, index);
+		batch[i++] = state->config;
+	/* Both software snapshots already exist; no allocation follows success. */
+	ret = odev->ops->replace_services(odev, batch, count);
+	kfree(batch);
+	if (ret == -EUCLEAN)
+		agent->service_error = ret;
 	return ret;
 }
 
@@ -3168,12 +3138,15 @@ static int omci_agent_reconcile_services_locked(struct omci_device *odev)
 {
 	struct omci_agent *agent = &odev->agent;
 	struct omci_mib_object *object;
-	struct xarray desired;
+	struct xarray *desired;
 	unsigned long index;
 	bool default_installed = false;
 	int ret;
 
-	xa_init(&desired);
+	desired = kzalloc(sizeof(*desired), GFP_KERNEL);
+	if (!desired)
+		return -ENOMEM;
+	xa_init(desired);
 	xa_for_each(&agent->mib, index, object) {
 		u8 tp_type;
 
@@ -3185,16 +3158,19 @@ static int omci_agent_reconcile_services_locked(struct omci_device *odev)
 		    tp_type != OMCI_BRIDGE_TP_VEIP)
 			continue;
 		ret = omci_agent_resolve_bridge_locked(
-			odev, &desired, object, &default_installed);
+			odev, desired, object, &default_installed);
 		if (ret)
 			goto out;
 	}
 
-	ret = omci_agent_apply_services_locked(odev, &desired);
+	ret = omci_agent_apply_services_locked(odev, desired);
+	if (!ret)
+		swap(agent->services, desired);
 
 out:
-	omci_agent_free_service_array(&desired);
-	xa_destroy(&desired);
+	omci_agent_free_service_array(desired);
+	xa_destroy(desired);
+	kfree(desired);
 	return ret;
 }
 
@@ -4285,7 +4261,8 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 			spin_unlock_bh(&odev->state_lock);
 
 			mutex_lock(&agent->lock);
-			if (channel_up && agent->enabled && !agent->operational) {
+			if (channel_up && agent->enabled && !agent->service_error &&
+			    !agent->operational) {
 				agent->operational = true;
 				operational_changed = true;
 			}
@@ -4366,10 +4343,17 @@ void omci_agent_channel_changed(struct omci_device *odev, bool valid)
 	omci_agent_reset_table_snapshot_locked(agent);
 	agent->upload_index = 0;
 	if (!valid) {
+		int ret;
+
 		agent->alarm_sequence = 0;
-		omci_agent_clear_services_locked(odev);
+		ret = omci_agent_clear_services_locked(odev);
+		if (ret)
+			agent->service_error = ret;
 	} else {
-		omci_agent_reconcile_services_locked(odev);
+		int ret = omci_agent_reconcile_services_locked(odev);
+
+		if (ret)
+			agent->service_error = ret;
 	}
 	mutex_unlock(&agent->lock);
 
@@ -4590,6 +4574,7 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 		changed = memcmp(agent->config.serial_number, value, len);
 		memcpy(agent->config.serial_number, value, len);
 		agent->config.serial_source = source;
+		agent->identity_ready = source > OMCI_CONFIG_SOURCE_DEFAULT;
 		memcpy(agent->config.vendor_id, value,
 		       sizeof(agent->config.vendor_id));
 		agent->config.vendor_source = source;
@@ -4732,6 +4717,11 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 			break;
 		}
 		scalar = *(const u8 *)value;
+		if (scalar && (key == OMCI_CONFIG_AGENT_PERMISSIVE ||
+			       key == OMCI_CONFIG_AGENT_FAKE_OMCI)) {
+			ret = -EOPNOTSUPP;
+			break;
+		}
 		if (key == OMCI_CONFIG_TRAFFIC_MGMT_OPTION) {
 			changed = agent->config.traffic_mgmt_option != scalar;
 			agent->config.traffic_mgmt_option = scalar;
@@ -4980,13 +4970,15 @@ unlock:
 	return ret;
 }
 
-void omci_agent_mib_reset(struct omci_device *odev, bool all)
+int omci_agent_mib_reset(struct omci_device *odev, bool all)
 {
 	struct omci_agent *agent = &odev->agent;
+	int ret;
 
 	mutex_lock(&agent->lock);
-	omci_agent_mib_reset_locked(odev, all, NULL);
+	ret = omci_agent_mib_reset_locked(odev, all, NULL);
 	mutex_unlock(&agent->lock);
+	return ret;
 }
 
 int omci_agent_mib_next(struct omci_device *odev, u32 index,
