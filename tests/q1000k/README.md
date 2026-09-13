@@ -27,6 +27,7 @@ After preparing the v2 vendor PON package, run the resource tests with:
 ```sh
 python3 tests/q1000k/test_pon_resources.py
 python3 tests/q1000k/test_pon_hooks.py
+python3 tests/q1000k/test_pon_identity.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -37,6 +38,9 @@ The hook fixtures exercise actual dispatch and representative QDMA/FE wrappers
 for absent/inactive providers, invalid indices, unhandled requests, provider
 errors, success, copied outputs and TX ownership. They use UBSan and do not
 claim concurrent-unregister or DMA execution coverage.
+The identity fixtures exercise the production parameter/cache implementation
+and MAC callers for exact input lengths, malformed MAC/FSAN, missing values,
+byte order, immutable copies and unchanged outputs on failure.
 Set `Q1000K_PON_BSP` to test another prepared BSP source directory. Kernel
 compilation checks the real APIs; these fixtures do not activate hardware or
 establish reset/clock sequencing.

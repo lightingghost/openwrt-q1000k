@@ -114,7 +114,7 @@ initialization, QoS/weights, rate meters, thresholds, congestion and channel
 closure. They call FE APIs for channel enable/retirement, forwarding, queue
 reservation, packet lengths, meters and counters. These use dynamic ECNT hooks,
 so most missing providers do **not** appear as unresolved linker symbols.
-The [15-symbol list](XGSPON-STATUS.q1000k.md#kernel-audit) is only the linker
+The [9-symbol list](XGSPON-STATUS.q1000k.md#kernel-audit) is only the linker
 boundary, not the complete runtime dependency list.
 
 The API wrappers now initialize every request with an unsupported error and
@@ -127,6 +127,33 @@ This is only a readiness snapshot: it neither pins callback registration nor
 proves that all required operations exist. Many old callers still ignore API
 errors, and shared DMA start/stop plus partial-initialization cleanup must be
 replaced by a proper consumer lifecycle before the vendor stack is enabled.
+
+## MAC identity handoff
+
+The Q1000K MAC now requires `wan_mac` (exact colon-separated 6-byte unicast
+MAC) and `pon_serial` (four ASCII vendor characters plus eight hex digits)
+module parameters. Both are parsed and copied to immutable module-local
+storage before initialization; missing or invalid input returns an error.
+The parameters are not exposed as mutable sysfs files. `get_ethaddr()` now
+reads that validated cache, and GPON initialization consumes the decoded
+8-byte serial. Q1000K EPON compatibility callers also use the cache instead
+of raw flash offsets or the OEM `GetMacAddr` pointer API. WAN interface
+creation rejects identity/registration errors and no longer reports success
+when its netdev was not created.
+
+The cached OEM boot log has `onu_type=71`; the vendor masks/enumerations
+interpret `0x71` as XGS-PON (7), SFU (1), combo flag clear and BBF247 clear.
+This board-specific integration selects those fields and rejects non-XGS
+`mode` overrides. The physical pair of EN7573AN controllers does not imply
+the vendor combo-PON software flag. Actual optical behavior still needs bench
+validation. Registration ID/MSK defaults in the imported source are not a
+validated authentication configuration.
+
+The eventual launcher must pass the existing backend's selected factory or
+UCI override identity. It must not source shell commands from identity data.
+No launcher, automatic module load or working service is installed by this
+checkpoint. Tests cover malformed/trailing/absent values, multicast/zero MACs,
+FSAN byte order, unchanged outputs on errors and rejection before startup.
 
 ## OMCI implementation decision
 
@@ -173,7 +200,7 @@ modpost that names the remaining dependencies. The normal builder and protected
 source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
-resource and QDMA adapters, factory identity delivery to the MAC, required flow
+resource and QDMA adapters, identity handoff from the launcher, required flow
 operations, AN7581 OMCC transport, OMCI service support, and the actual
 procd/netifd lifecycle. Do not install an init script that merely reports
 success while these components are absent. CLI `start`/`restart`/`reload`

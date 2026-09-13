@@ -44,7 +44,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
-| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects compile; modpost correctly fails on 15 remaining symbols. | Integrate interrupt consumers, QDMA/FE, factory identity, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
+| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects compile; modpost correctly fails on 9 remaining symbols. | Integrate interrupt consumers, QDMA/FE, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -160,6 +160,17 @@ ownership at the wrapper boundary. The checks do not pin a provider or
 implement the shared Ethernet adapter; caller error handling and teardown
 still need work.
 
+Patch 009 connects immutable, validated `wan_mac` and `pon_serial` module
+parameters to the MAC identity APIs, WAN netdev creation and GPON serial
+configuration. Missing/invalid identity fails before resource or hardware
+startup; no default MAC/serial or raw NAND read is used on Q1000K. Getter
+errors and netdev registration failures propagate. The board mode is fixed
+to XGS-PON/SFU, consistent with the cached OEM `onu_type=71` record; other
+`mode` overrides are rejected. This removes six more linker dependencies.
+The future launcher must supply the backend's selected factory/override
+values. It is not yet connected to a running service. Registration ID/MSK
+and authentication behavior remain to be integrated and validated.
+
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
 type/format errors and unresolved symbols remain fatal. The imported MAC's
@@ -171,13 +182,12 @@ package is produced or loaded.
 The previous 41-symbol inventory included state/event definitions in the
 omitted procfs source; those definitions were not missing vendor source.
 Comparing the current MAC object against the kernel, BSP and PHY symbol tables
-leaves these **15 unresolved symbols**:
+leaves these **9 unresolved symbols**:
 
 | Integration area | Unresolved symbols |
 | --- | --- |
 | Shared frame engine | `get_frame_engine_data`, `set_frame_engine_data` |
 | WAN/QDMA | `qdma_wan_fwd_timer`, `storm_ctrl_shrehold_wan` |
-| Factory/flash/OEM identity | `GetMacAddr`, `get_ethaddr`, `get_onutype`, `flash_base`, `ranand_read_byte`, `spi_type` |
 | OEM debug/command hooks | `cmd_register`, `cmd_unregister`, `subcmd`, `is_hwnat_dont_clean`, `wan_speed_test_hook` |
 
 The new `airoha_ecnt_xpon` provider resolves the four PON resource symbols.
@@ -280,7 +290,7 @@ is QKX001-06.00.44.00:
 - Both userspace packages and the standalone controller module build. The
   pinctrl patch applies and its objects compile; the board DTS compiles.
   The vendor BSP/PHY now build, but the complete package still fails MAC
-  modpost on the 15 integration dependencies above. Host MMIO/regmap fixtures
+  modpost on the 9 integration dependencies above. Host MMIO/regmap fixtures
   pass for bounds, absent providers, failures and masked shared SCU access.
 - The production loader's host test checks layout, address spaces, endian
   behavior, readback mismatch and immediate failure at 15,388 I2C transfer
