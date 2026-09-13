@@ -1,0 +1,296 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] ecnt: serialize hook removal and node reuse across RCU grace periods
+
+Remove the unregister-by-ID RCU self-deadlock, handle partial-init removal,
+and prevent duplicate registration or node reuse racing an in-flight reader.
+Registration/removal are process-context operations; dispatch remains RCU.
+
+--- a/bsp/core/ecnt_hook.c
++++ b/bsp/core/ecnt_hook.c
+@@ -94,7 +94,10 @@
+ *                  P R I V A T E   D A T A
+ *************************************************************************
+ */
+-static DEFINE_SPINLOCK(ecnt_hook_lock);
++/* Registration and removal are process-context operations. Keep the writer
++ * mutex through the RCU grace period so removed nodes cannot be reused early.
++ */
++static DEFINE_MUTEX(ecnt_hook_mutex);
+ unsigned int hook_id = 0;
+ 
+ /************************************************************************
+@@ -204,31 +207,24 @@
+ //		0: fail
+ //		1: success
+ ******************************************************************************/
+-int set_ecnt_hookfn_execute_or_not(unsigned int maintype, unsigned int subtype, unsigned int hook_id, unsigned int is_execute)
+-{
+-	struct list_head* ptr = &ecnt_hooks[maintype][subtype];
+-	
+-	if((maintype >= ECNT_NUM_MAINTYPE) || (subtype >= ECNT_MAX_SUBTYPE)){
+-		printk("set_ecnt_hookfn_execute_or_not fail, max maintype %d, max subtype %d\n", ECNT_NUM_MAINTYPE, ECNT_MAX_SUBTYPE);
++int set_ecnt_hookfn_execute_or_not(unsigned int maintype, unsigned int subtype,
++				unsigned int id, unsigned int is_execute)
++{
++	struct ecnt_hook_ops *elem;
++	int found = 0;
++
++	if (maintype >= ECNT_NUM_MAINTYPE || subtype >= ECNT_MAX_SUBTYPE)
+ 		return 0;
+-	}
+-	if(list_empty(&ecnt_hooks[maintype][subtype]))
+-		return 0;
+-	
+-	struct ecnt_hook_ops *elem;
+ 	rcu_read_lock();
+-	elem = list_entry_rcu(ptr, struct ecnt_hook_ops, list);
+-	//list_for_each_continue_rcu(pos, &ecnt_hooks[maintype][subtype]){
+-	list_for_each_entry_continue_rcu(elem, &ecnt_hooks[maintype][subtype], list){
+-		if(elem->hook_id == hook_id){
+-			WRITE_ONCE(elem->is_execute, is_execute);
+-			rcu_read_unlock();
+-			return 1;
+-		}
++	list_for_each_entry_rcu(elem, &ecnt_hooks[maintype][subtype], list) {
++		if (elem->hook_id != id)
++			continue;
++		WRITE_ONCE(elem->is_execute, is_execute);
++		found = 1;
++		break;
+ 	}
+ 	rcu_read_unlock();
+-
+-	return 0;
++	return found;
+ }
+ EXPORT_SYMBOL(set_ecnt_hookfn_execute_or_not);
+ 
+@@ -244,33 +240,22 @@
+ //		1: success
+ ******************************************************************************/
+ 
+-int get_ecnt_hookfn(unsigned int maintype, unsigned int subtype){
+-	struct list_head *pos;
+-	struct ecnt_hook_ops *elem;
+-	int index = 1;
+-	
+-	if((maintype >= ECNT_NUM_MAINTYPE) || (subtype >= ECNT_MAX_SUBTYPE)){
+-		printk("get_ecnt_hookfn fail, max maintype %d, max subtype %d\n", ECNT_NUM_MAINTYPE, ECNT_MAX_SUBTYPE);
++int get_ecnt_hookfn(unsigned int maintype, unsigned int subtype)
++{
++	struct ecnt_hook_ops *elem;
++	int count = 0;
++
++	if (maintype >= ECNT_NUM_MAINTYPE || subtype >= ECNT_MAX_SUBTYPE)
+ 		return 0;
+-	}
+-	if(list_empty(&ecnt_hooks[maintype][subtype])){
+-		printk("maintype = %d, subtype=%d, 0 hook functions\n",maintype, subtype);
+-		return 0;
+-	}
+-	
+-	printk("maintype = %d, subtype=%d\n",maintype, subtype);
+-	printk("index\t[id]\tis_exe\tpri\tdropnum\tname\n");
+ 	rcu_read_lock();
+-	
+-	list_for_each(pos, &ecnt_hooks[maintype][subtype]){
+-		elem = (struct ecnt_hook_ops *)pos;
+-		printk("%d.\t[%d]\t%d\t%d\t%d\t%s\n", 
+-			index++, elem->hook_id, elem->is_execute, elem->priority,elem->info.drop_num,elem->name);
+-			
++	list_for_each_entry_rcu(elem, &ecnt_hooks[maintype][subtype], list) {
++		printk("[%u-%u] id=%u enabled=%u priority=%d drops=%u name=%s\n",
++		       maintype, subtype, elem->hook_id, READ_ONCE(elem->is_execute),
++		       elem->priority, READ_ONCE(elem->info.drop_num), elem->name);
++		count++;
+ 	}
+ 	rcu_read_unlock();
+-	
+-	return 1;
++	return count != 0;
+ }
+ EXPORT_SYMBOL(get_ecnt_hookfn);
+ 
+@@ -284,25 +269,13 @@
+ //return :
+ //		1
+ ******************************************************************************/
+-int show_all_ecnt_hookfn(void){
+-	int maintype, subtype;
+-	struct list_head *pos;
+-	struct ecnt_hook_ops *elem;
+-	int index = 1;
+-
+-	printk("index\t[main-sub]\t[id]\tis_exe\tpri\tdropnum\tname\n");
+-	rcu_read_lock();
+-	for(maintype = 0; maintype < ECNT_NUM_MAINTYPE; maintype++){
+-		for(subtype = 0; subtype < ECNT_MAX_SUBTYPE; subtype++){
+-			list_for_each(pos, &ecnt_hooks[maintype][subtype]){
+-				elem = (struct ecnt_hook_ops *)pos;
+-				printk("%d.\t[%d-%d]\t\t[%d]\t%d\t%d\t%d\t%s\n", 
+-					index++, maintype, subtype,elem->hook_id, elem->is_execute, elem->priority,elem->info.drop_num,elem->name);
+-			}
+-		}
+-	}
+-	rcu_read_unlock();
+-	
++int show_all_ecnt_hookfn(void)
++{
++	unsigned int maintype, subtype;
++
++	for (maintype = 0; maintype < ECNT_NUM_MAINTYPE; maintype++)
++		for (subtype = 0; subtype < ECNT_MAX_SUBTYPE; subtype++)
++			get_ecnt_hookfn(maintype, subtype);
+ 	return 1;
+ }
+ EXPORT_SYMBOL(show_all_ecnt_hookfn);
+@@ -321,24 +294,14 @@
+ int ecnt_register_hook(struct ecnt_hook_ops *reg)
+ {
+ 	struct ecnt_hook_ops *elem;
+-
+-	if (!reg || !reg->hookfn) {
+-		printk("ecnt_register_hook fail, missing hook or callback\n");
+-		return ECNT_REGISTER_FAIL;
+-	}
+-	if((reg->maintype >= ECNT_NUM_MAINTYPE) || (reg->subtype >= ECNT_MAX_SUBTYPE)){
+-		printk("ecnt_register_hook fail, maintype = %d, subtype=%d, out of range\n", reg->maintype, reg->subtype);
+-		return ECNT_REGISTER_FAIL;
+-	}
+-	if(reg->list.next!= NULL){
+-		printk("ecnt_register_hook fail, %s already registered\n", reg->name);
+-		return ECNT_REGISTER_FAIL;
+-	}
+-	if(hook_id >= 0xFFFFFFFF){
+-		printk("ecnt_register_hook fail, hook_id out of range\n");
+-		return ECNT_REGISTER_FAIL;
+-	}
+-	spin_lock(&ecnt_hook_lock);
++	int ret = ECNT_REGISTER_FAIL;
++
++	if (!reg || !reg->hookfn || reg->maintype >= ECNT_NUM_MAINTYPE ||
++	    reg->subtype >= ECNT_MAX_SUBTYPE)
++		return ret;
++	mutex_lock(&ecnt_hook_mutex);
++	if (reg->list.next || hook_id == U32_MAX)
++		goto out;
+ 	list_for_each_entry(elem, &ecnt_hooks[reg->maintype][reg->subtype], list) {
+ 		if (reg->priority < elem->priority)
+ 			break;
+@@ -346,9 +309,10 @@
+ 	reg->hook_id = ++hook_id;
+ 	reg->info.drop_num = 0;
+ 	list_add_rcu(&reg->list, elem->list.prev);
+-	spin_unlock(&ecnt_hook_lock);
+-
+-	return ECNT_REGISTER_SUCCESS;
++	ret = ECNT_REGISTER_SUCCESS;
++out:
++	mutex_unlock(&ecnt_hook_mutex);
++	return ret;
+ }
+ EXPORT_SYMBOL(ecnt_register_hook);
+ 
+@@ -364,18 +328,24 @@
+ ******************************************************************************/
+ void ecnt_unregister_hook(struct ecnt_hook_ops *reg)
+ {
+-	if(!reg){
+-		printk("ecnt_unregister_hook fail, reg is NULL\n");
++	struct ecnt_hook_ops *elem;
++
++	if (!reg || reg->maintype >= ECNT_NUM_MAINTYPE ||
++	    reg->subtype >= ECNT_MAX_SUBTYPE)
+ 		return;
+-	}
+-	if(reg->list.prev == LIST_POISON2){
+-		printk("%s already unregistered\n", reg->name);
+-		return;
+-	}
+-	spin_lock(&ecnt_hook_lock);
+-	list_del_rcu(&reg->list);
+-	spin_unlock(&ecnt_hook_lock);
+-	synchronize_rcu();
++	mutex_lock(&ecnt_hook_mutex);
++	/* A zeroed, never-registered or already-removed node is harmless. */
++	list_for_each_entry(elem, &ecnt_hooks[reg->maintype][reg->subtype], list) {
++		if (elem != reg)
++			continue;
++		list_del_rcu(&reg->list);
++		synchronize_rcu();
++		/* Readers must finish before either link is reset for reuse. */
++		reg->list.next = NULL;
++		reg->list.prev = NULL;
++		break;
++	}
++	mutex_unlock(&ecnt_hook_mutex);
+ }
+ EXPORT_SYMBOL(ecnt_unregister_hook);
+ 
+@@ -391,30 +361,28 @@
+ //		1: success
+ ******************************************************************************/
+ 
+-int ecnt_ops_unregister(unsigned int maintype, unsigned int subtype, unsigned int hook_id)
+-{
+-	struct ecnt_hook_ops *elem;
+-	struct list_head* ptr = &ecnt_hooks[maintype][subtype];
+-	if((maintype >= ECNT_NUM_MAINTYPE) || (subtype >= ECNT_MAX_SUBTYPE)){
+-		printk("set_ecnt_hookfn_execute_or_not fail, max maintype %d, max subtype %d\n", ECNT_NUM_MAINTYPE, ECNT_MAX_SUBTYPE);
++int ecnt_ops_unregister(unsigned int maintype, unsigned int subtype,
++			unsigned int id)
++{
++	struct ecnt_hook_ops *elem;
++	int found = 0;
++
++	if (maintype >= ECNT_NUM_MAINTYPE || subtype >= ECNT_MAX_SUBTYPE)
+ 		return 0;
+-	}
+-	if(list_empty(&ecnt_hooks[maintype][subtype]))
+-		return 0;
+-	
+-	rcu_read_lock();	
+-	elem = list_entry_rcu(ptr, struct ecnt_hook_ops, list);
+-	//list_for_each_continue_rcu(pos, &ecnt_hooks[maintype][subtype]){
+-	list_for_each_entry_continue_rcu(elem, &ecnt_hooks[maintype][subtype], list){
+-		if(elem->hook_id == hook_id){
+-			ecnt_unregister_hook(elem);
+-			rcu_read_unlock();
+-			return 1;
+-		}
+-	}
+-	rcu_read_unlock();
+-
+-	return 0;
++	mutex_lock(&ecnt_hook_mutex);
++	list_for_each_entry(elem, &ecnt_hooks[maintype][subtype], list) {
++		if (elem->hook_id != id)
++			continue;
++		list_del_rcu(&elem->list);
++		/* Never wait for a grace period inside our own RCU read section. */
++		synchronize_rcu();
++		elem->list.next = NULL;
++		elem->list.prev = NULL;
++		found = 1;
++		break;
++	}
++	mutex_unlock(&ecnt_hook_mutex);
++	return found;
+ }
+ EXPORT_SYMBOL(ecnt_ops_unregister);
+ 
+--- a/bsp/include/ecnt_hook/ecnt_hook.h
++++ b/bsp/include/ecnt_hook/ecnt_hook.h
+@@ -210,6 +210,12 @@
+ extern void ecnt_hook_init(void);
+ extern int __ECNT_HOOK(unsigned int maintype, unsigned int subtype,struct ecnt_data *in_data);
+ extern int ecnt_hook_is_registered(unsigned int maintype, unsigned int subtype);
++/* Registration/removal may sleep and must not run from an ECNT callback or
++ * any RCU read-side critical section. Initialize ops to zero; its caller-owned
++ * fields and storage must remain valid and unchanged until unregister returns.
++ * Unregister drains readers and permits subsequent reuse of the same ops.
++ * Readiness/enable queries do not pin a provider or its module.
++ */
+ extern int ecnt_register_hook(struct ecnt_hook_ops *reg);
+ extern void ecnt_unregister_hook(struct ecnt_hook_ops *reg);
+ extern int show_all_ecnt_hookfn(void);

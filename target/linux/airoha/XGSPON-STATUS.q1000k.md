@@ -199,6 +199,17 @@ failures, cdev failures, crypto-before-interrupt ordering and 201 real pthread
 worker cycles. These fixtures do not establish hardware rollback or the
 missing native QDMA provider lifetime/detach contract.
 
+Patch 013 fixes unregister-by-ID waiting for an RCU grace period inside its
+own RCU read section. Registration/removal now serialize through a process
+mutex, held through the grace period. Duplicate registration and ID exhaustion
+are checked under that mutex. Removal tolerates never-registered or already
+removed nodes and clears their links only after readers finish, allowing
+reuse. Enable and diagnostic queries validate indices and traverse under RCU.
+A pthread/UBSan fixture passes 100 blocked-reader removal/reuse races and 100
+simultaneous duplicate-registration races, plus partial-batch rollback and
+invalid-index checks. This models the lifetime contract; it does not execute
+Linux RCU or replace a native Ethernet attachment/provider pin.
+
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
 type/format errors and unresolved symbols remain fatal. The imported MAC's
@@ -206,7 +217,7 @@ stack-frame warning exception also remains; runtime/stack auditing is pending.
 All package patches apply to freshly prepared source. The complete vendor
 package now builds against Linux 6.18.44 with no suppressed or unresolved
 symbols. The artifact is
-`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r9.apk`.
+`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r10.apk`.
 It remains gated by `BROKEN`, unselected and without autoload. No vendor
 module or package has been installed or executed on the device.
 

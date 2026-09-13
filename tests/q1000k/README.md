@@ -27,6 +27,7 @@ After preparing the v2 vendor PON package, run the resource tests with:
 ```sh
 python3 tests/q1000k/test_pon_resources.py
 python3 tests/q1000k/test_pon_hooks.py
+python3 tests/q1000k/test_pon_hook_lifecycle.py
 python3 tests/q1000k/test_pon_identity.py
 python3 tests/q1000k/test_pon_unsupported.py
 python3 tests/q1000k/test_pon_crypto.py
@@ -41,6 +42,12 @@ The hook fixtures exercise actual dispatch and representative QDMA/FE wrappers
 for absent/inactive providers, invalid indices, unhandled requests, provider
 errors, success, copied outputs and TX ownership. They use UBSan and do not
 claim concurrent-unregister or DMA execution coverage.
+The separate hook lifecycle fixture runs the production registration/removal
+code with pthread readers and atomic list links. It checks 100 blocked-reader
+removal/reuse races, 100 concurrent duplicate registrations, partial batch
+rollback, ID exhaustion, invalid indices and inactive providers. Its grace
+period fixture rejects waiting from within an RCU read section. This is a
+host concurrency model, not execution of the Linux RCU implementation.
 The identity fixtures exercise the production parameter/cache implementation
 and MAC callers for exact input lengths, malformed MAC/FSAN, missing values,
 byte order, immutable copies and unchanged outputs on failure.

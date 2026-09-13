@@ -130,6 +130,15 @@ proves that all required operations exist. Many old callers still ignore API
 errors, and shared DMA start/stop must be replaced by a proper consumer
 lifecycle before the vendor stack is enabled.
 
+Patch 013 makes ECNT registration/removal explicitly process-context APIs.
+One writer mutex covers publication/removal and the RCU grace period; removed
+nodes are reset for reuse only after readers finish. Unregister-by-ID no longer
+waits from inside its own read section. Never-registered/double removal and
+partial registration rollback are supported. Hook descriptors and callback
+code must remain valid until unregister returns; readiness and enable queries
+still provide no reference or capability guarantee. The raw QDMA callbacks
+installed by `QDMA_API_INIT` are outside this registry's lifetime contract.
+
 Patch 012 tracks completed MAC startup stages and preserves failure codes.
 Netdev open and hook/RX/event dispatch remain closed until the worker and all
 state are initialized; protocol interrupts are enabled after publication.
