@@ -178,7 +178,9 @@ int main(void) {
     struct airoha_eth eth={0}; struct airoha_qdma qdma;
     struct airoha_gdm_dev gdm={.qdma=&qdma,.pon_port=true}; struct net_device dev={.priv=&gdm};
     struct sk_buff skb,before; u32 msg=0x40afc15d; struct airoha_queue *q=&qdma.q_tx[31];
+    for(int management=0;management<2;management++)
     for(int frags=0;frags<=3;frags++) for(int failure=0;failure<=frags+1;failure++) {
+        msg=(msg & ~(1u<<8)) | (management<<8);
         setup(&qdma,&eth,&dev,&skb,frags); map_fail=failure; batching=true;
         assert(__airoha_dev_xmit(&skb,&dev,&msg,&consumer)==NETDEV_TX_OK && !rcu_readers && !q->lock && !dsa_calls);
         assert(orphans==1);
@@ -192,7 +194,7 @@ int main(void) {
             assert(maps==frags+1 && !unmaps && !freed && q->queued==frags+1 && doorbells==1);
             assert(free_entries(q)==8-frags-1 && dev.txq[31].sent==(int)skb.len);
             for(int i=0;i<=frags;i++) {
-                assert(q->desc[i].msg0==msg && q->desc[i].msg1==0x7f2007ff);
+                assert(q->desc[i].msg0==msg && q->desc[i].msg1==(0x7f2007ffu | ((u32)management<<31)));
                 assert(q->desc[i].msg2==0xffff && q->entry[i].skb==(i==frags?&skb:NULL));
                 assert(!!(q->desc[i].ctrl&(1u<<29))==(i<frags));
             }

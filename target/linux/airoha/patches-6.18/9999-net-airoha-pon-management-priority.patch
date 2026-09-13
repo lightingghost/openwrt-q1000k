@@ -1,0 +1,23 @@
+Subject: [PATCH] net: airoha: retain the management no-drop hint for PON TX
+
+Match the AN7581 vendor descriptor's OMCI no-drop flag. Ordinary Ethernet
+and PON data retain their existing policy. This is a descriptor hint, not
+a guarantee of delivery or an exemption from software queue limits.
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -2675,9 +2675,12 @@
+ 	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK, dev->nbq) |
+ 	       FIELD_PREP(QDMA_ETH_TXMSG_FPORT_MASK, fport) |
+ 	       FIELD_PREP(QDMA_ETH_TXMSG_METER_MASK, 0x7f);
+-	if (pon_msg)
++	if (pon_msg) {
+ 		msg1 |= FIELD_PREP(QDMA_ETH_TXMSG_ACNT_G0_MASK, 0x3f) |
+ 			FIELD_PREP(QDMA_ETH_TXMSG_ACNT_G1_MASK, 0x1f);
++		if (*pon_msg & QDMA_ETH_TXMSG_OAM_MASK)
++			msg1 |= QDMA_ETH_TXMSG_NO_DROP;
++	}
+ 
+ 	q = &qdma->q_tx[qid];
+ 	if (WARN_ON_ONCE(!q->ndesc))
