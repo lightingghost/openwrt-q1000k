@@ -249,6 +249,21 @@
 };
 
 /* Optical uplink; enable once the PON data path is supported. */
+&{/soc} {
+	pon_mac: pon@1fb64000 {
+		compatible = "quantum,q1000k-pon-mac";
+		reg = <0 0x1fb64000 0 0x3e8>,
+		      <0 0x1fb65000 0 0xff8>,
+		      <0 0x1fb66000 0 0x23c>;
+		reg-names = "gpon", "xgpon", "epon";
+		interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "mac", "dying-gasp";
+		/* Resource provider only; PHY/reset/QDMA startup is not ready. */
+		status = "disabled";
+	};
+};
+
 &pon_pcs {
 	status = "disabled";
 };

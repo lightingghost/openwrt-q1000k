@@ -16,8 +16,8 @@ unimplemented. BSP/PHY compilation now passes; the MAC still fails modpost.
 
 **Current device restriction: read-only access, never flash firmware.**
 The initialization results below are historical, from before this restriction.
-The latest continuation only read cached kernel resource/interrupt inventories;
-it did not install files, load modules, change GPIOs, probe I2C or reboot.
+The resource integration continuation used cached inventories and local builds
+only; it made no device connection or change.
 
 ## Imported references
 
@@ -43,8 +43,8 @@ OMCI daemon and unrelated PR changes were not imported.
 | Optical GPIOs and I2C | Force-GPIO mux plus active-low enables resolve ENXIO. Both paths return `0x1388`; power-off tests distinguish ownership. DT GPIO descriptors and pinctrl fixes added. | Boot-test the compiled production DT and pinctrl changes. GPON LOS is still based on OEM mapping. |
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
-| BSP/PHY modules | AN7581 builds the hook, SCU and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Port shared SCU/resource ownership and complete analog/startup sequencing before loading. |
-| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects compile; modpost correctly fails on 19 remaining symbols. | Integrate resource ownership, interrupts, QDMA/FE, factory identity, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
+| BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
+| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects compile; modpost correctly fails on 15 remaining symbols. | Integrate interrupt consumers, QDMA/FE, factory identity, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -131,7 +131,7 @@ Patches 002/003 fix the hook declaration and AN7581 IOMUX table bound.
 Patches 004/005 select the AN7581 BSP dependency graph and fix public
 declarations, arm64 IRQ flags, PHY probe error lifetime, callback/argument
 and return types, jiffies width and mapped PHY register access. AN7583 retains
-its extra board/OLT/combo-PHY objects. The three AN7581 BSP modules and
+its extra board/OLT/combo-PHY objects. The four AN7581 BSP modules and
 `phy_10g.ko` compile and pass modpost against Linux 6.18.44/GCC 14.4.0.
 
 Patch 006 restores runtime state and PHY-to-MAC event dispatch from the
@@ -141,6 +141,14 @@ with success stubs. It exposes cached software state through a read-only
 writable debug commands remain unavailable. It also disables OEM WAN-to-LAN
 mirroring, replaces `random32()` with `get_random_u32()` and fixes const/label
 compilation issues.
+
+Patch 007 adds the bounded Q1000K MAC register/IRQ provider and a disabled
+board DT node with named register windows and interrupts. Probe does not
+change clocks, resets or DMA. SCU access uses existing syscon regmaps; masked
+updates are atomic with other regmap users, and full writes retain write
+semantics for strobes. PHY/MAC initialization rejects absent resource providers.
+This does not establish reset/clock sequencing or error propagation through
+legacy void/value-only register APIs. See the integration audit for limits.
 
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
@@ -153,18 +161,17 @@ package is produced or loaded.
 The previous 41-symbol inventory included state/event definitions in the
 omitted procfs source; those definitions were not missing vendor source.
 Comparing the current MAC object against the kernel, BSP and PHY symbol tables
-leaves these **19 unresolved symbols**:
+leaves these **15 unresolved symbols**:
 
 | Integration area | Unresolved symbols |
 | --- | --- |
-| PON resource owner | `get_xpon_data`, `set_xpon_data`, `get_xpon_dev`, `get_xpon_irq` |
 | Shared frame engine | `get_frame_engine_data`, `set_frame_engine_data` |
 | WAN/QDMA | `qdma_wan_fwd_timer`, `storm_ctrl_shrehold_wan` |
 | Factory/flash/OEM identity | `GetMacAddr`, `get_ethaddr`, `get_onutype`, `flash_base`, `ranand_read_byte`, `spi_type` |
 | OEM debug/command hooks | `cmd_register`, `cmd_unregister`, `subcmd`, `is_hwnat_dont_clean`, `wan_speed_test_hook` |
 
-The resource functions exist in unbuilt `bsp/core/ecnt_xpon.c`; adding it
-requires a current DT/resource contract. SCU still expects the OEM hierarchy.
+The new `airoha_ecnt_xpon` provider resolves the four PON resource symbols.
+Its DT node remains disabled, and the provider has not been loaded.
 The current Ethernet driver already owns both QDMA blocks and the FE; the
 DSA switch owns its register region. The dynamic QDMA/FE hooks, imported
 success-only flow helpers and `skb->cb` metadata need real integration even
@@ -263,7 +270,8 @@ is QKX001-06.00.44.00:
 - Both userspace packages and the standalone controller module build. The
   pinctrl patch applies and its objects compile; the board DTS compiles.
   The vendor BSP/PHY now build, but the complete package still fails MAC
-  modpost on the 19 integration dependencies above.
+  modpost on the 15 integration dependencies above. Host MMIO/regmap fixtures
+  pass for bounds, absent providers, failures and masked shared SCU access.
 - The production loader's host test checks layout, address spaces, endian
   behavior, readback mismatch and immediate failure at 15,388 I2C transfer
   points. No MCU enable occurs before successful full-memory verification.

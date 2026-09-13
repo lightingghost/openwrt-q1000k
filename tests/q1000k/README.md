@@ -22,6 +22,20 @@ validation and identity validation. They do not establish optical service or
 replace browser testing. See the [implementation report](../../target/linux/airoha/XGSPON-STATUS.q1000k.md)
 for package builds and the live read-only Q1000K checks.
 
+After preparing the v2 vendor PON package, run the resource tests with:
+
+```sh
+python3 tests/q1000k/test_pon_resources.py
+```
+
+These compile the production MAC MMIO accessors and prepared SCU regmap
+helpers against host fixtures. They cover all register-window offsets,
+misalignment, absent/removed providers, IRQ bounds, read/write failures,
+full-write strobe semantics and masked updates that preserve unrelated bits.
+Set `Q1000K_PON_BSP` to test another prepared BSP source directory. Kernel
+compilation checks the real APIs; these fixtures do not activate hardware or
+establish reset/clock sequencing.
+
 From the OpenWrt repository, after building its host tools:
 
 ```sh

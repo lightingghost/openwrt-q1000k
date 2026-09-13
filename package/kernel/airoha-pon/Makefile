@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -40,6 +40,7 @@ define KernelPackage/airoha-xpon-en757x
 	$(PON_BSP_DIR)/airoha_ecnt_hook.ko \
 	$(PON_BSP_DIR)/airoha_ecnt_scu.ko \
 	$(PON_BSP_DIR)/airoha_ecnt_pon_phy.ko \
+	$(if $(CONFIG_TARGET_airoha_an7581),$(PON_BSP_DIR)/airoha_ecnt_xpon.ko) \
 	$(if $(CONFIG_TARGET_airoha_an7583),\
 		$(PON_BSP_DIR)/airoha_ecnt_olt_phy.ko \
 		$(PON_BSP_DIR)/airoha_arht_board.ko \

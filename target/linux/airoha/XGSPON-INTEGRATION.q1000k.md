@@ -19,12 +19,35 @@ agree on these owners. Reading this inventory does not read device registers.
 | `1fb56000-1fb57fff` | Ethernet QDMA1 | Already owned even with `gdm2` disabled; not an independently available vendor WAN DMA block. |
 | `1fb58000-1fb5ffff` | DSA switch | Never expose this range through a generic PON FE accessor. |
 
-OEM `xpon@1fb64000` describes GPON at `1fb64000`, XG-PON at `1fb65000`
-and EPON at `1fb66000`. The imported unbuilt `bsp/core/ecnt_xpon.c` exports
-accessors for these resources, but assumes the OEM DT layout and IRQ indexing.
-It needs bounded register access, probe/teardown lifetime, interrupt mapping and
-a current binding. Absence from `/proc/iomem` alone is not enough to add a raw
-mapping or to infer that a hardware block is clocked or initialized.
+The new `airoha_ecnt_xpon` resource provider replaces the unbuilt OEM
+`ecnt_xpon.c` on AN7581. The disabled `quantum,q1000k-pon-mac` board node
+names GPON (`1fb64000`, size `3e8`), XG-PON (`1fb65000`, size `ff8`) and EPON
+(`1fb66000`, size `23c`) windows, plus MAC/GASP interrupts (GIC SPI 42/34).
+The provider validates those OEM-derived addresses and sizes, maps only the
+named resources, and publishes them only after all mappings and IRQ lookups
+succeed. Register access accepts aligned 32-bit legacy offsets within each
+window. Removal drains accessors before mappings are freed; manual unbind is
+suppressed because legacy consumers borrow the device pointer. Full consumer
+lifetime and IRQ handling still need integration. Probe performs no clock,
+reset or DMA writes, and the disabled node prevents binding in this checkpoint.
+
+The AN7581 SCU bridge now obtains the existing NP/chip syscon regmaps instead
+of claiming an OEM SCU platform device or PBus IRQ. Masked updates use
+`regmap_update_bits`; full writes use `regmap_write` to preserve strobe/W1C
+semantics. Aligned accesses are bounded by the current DT windows. Existing
+full-register callers still require an ownership audit, and reset/clock
+operations must ultimately use their proper providers. Legacy value-only and
+void accessors log invalid/failed accesses and return all-ones/discard writes;
+they cannot propagate errno to their callers. Startup rejects absent PHY/MAC
+resource providers before accessing hardware, but this is not complete
+end-to-end runtime error handling.
+
+Local host tests compile the actual production accessors against MMIO/regmap
+fixtures and exercise every aligned/misaligned window offset, missing/removed
+providers, failed reads/writes, full-write semantics and masked preservation.
+All four BSP modules and the PHY pass kernel modpost; the board DTS compiles.
+No new provider or DT has been executed on the device. Absence of a region
+from `/proc/iomem` does not establish clocking or initialization.
 
 The SoC PON PHY uses the OEM `1faf0000`, `1faf3000` and `1faf4000` regions.
 The existing `pon_pcs` node instead describes the `1fa08xxx`/`1fa8xxxx`
@@ -91,7 +114,7 @@ initialization, QoS/weights, rate meters, thresholds, congestion and channel
 closure. They call FE APIs for channel enable/retirement, forwarding, queue
 reservation, packet lengths, meters and counters. These use dynamic ECNT hooks,
 so most missing providers do **not** appear as unresolved linker symbols.
-The [19-symbol list](XGSPON-STATUS.q1000k.md#kernel-audit) is only the linker
+The [15-symbol list](XGSPON-STATUS.q1000k.md#kernel-audit) is only the linker
 boundary, not the complete runtime dependency list.
 
 ## OMCI implementation decision

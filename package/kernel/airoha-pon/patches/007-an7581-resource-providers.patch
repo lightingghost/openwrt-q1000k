@@ -1,0 +1,260 @@
+Integrate AN7581 PON resource providers with the current DT and shared SCU.
+
+Use existing syscon regmaps, do not claim the clock driver or PBus timeout IRQ,
+and reject absent resource suppliers before PHY/MAC initialization.
+
+--- a/bsp/Makefile
++++ b/bsp/Makefile
+@@ -8,6 +8,11 @@
+ 
+ obj-m += airoha_ecnt_pon_phy.o
+ airoha_ecnt_pon_phy-y := core/ecnt_pon_phy.o core/legacy_api.o module/ecnt_pon_phy_meta.o
++
++ifeq ($(TCSUPPORT_CPU_AN7583),)
++obj-m += airoha_ecnt_xpon.o
++airoha_ecnt_xpon-y := core/an7581_xpon.o
++endif
+ 
+ ifneq ($(TCSUPPORT_CPU_AN7583),)
+ obj-m += airoha_ecnt_olt_phy.o
+--- a/bsp/core/ecnt_scu.c
++++ b/bsp/core/ecnt_scu.c
+@@ -41,6 +41,11 @@
+ */
+ #include <linux/module.h>
+ #include <ecnt_scu_api.h>
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++#define AN7581_OPENWRT_SCU
++#include <linux/mfd/syscon.h>
++#include <linux/regmap.h>
++#endif
+ #include <linux/types.h>
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+@@ -221,16 +226,54 @@
+ /*****************************************************************
+  ****  N P    S C U    a c c e s s ********************************
+  ******************************************************************/
++#ifdef AN7581_OPENWRT_SCU
++static struct regmap *an7581_np_scu, *an7581_chip_scu;
++
++static u32 an7581_scu_read(struct regmap *map, u32 size, u32 reg)
++{
++	u32 value;
++
++	if (map && !(reg & 3) && reg <= size - 4 &&
++	    !regmap_read(map, reg, &value))
++		return value;
++	pr_err_ratelimited("an7581-pon: invalid/failed SCU read %#x\n", reg);
++	return ~0U;
++}
++
++static void an7581_scu_update(struct regmap *map, u32 size, u32 reg,
++			      u32 mask, u32 value)
++{
++	int ret;
++
++	if (map && !(reg & 3) && reg <= size - 4) {
++		/* Full writes may target strobes/W1C: do not add an implicit read. */
++		ret = mask == ~0U ? regmap_write(map, reg, value) :
++			regmap_update_bits(map, reg, mask, value & mask);
++		if (!ret)
++			return;
++	}
++	pr_err_ratelimited("an7581-pon: invalid/failed SCU update %#x\n", reg);
++}
++#endif
++
+ /* don't EXPORT this function. Create API for your purpose instead. */
+ u32 get_np_scu_data(u32 reg)
+ {
++#ifdef AN7581_OPENWRT_SCU
++	return an7581_scu_read(an7581_np_scu, 0x970, reg);
++#else
+ 	return readl(ecnt_scu->npScu_base + reg);
++#endif
+ }
+ 
+ /* don't EXPORT this function. Create API for your purpose instead. */
+ void set_np_scu_data(u32 reg, u32 val)
+ {
+-	writel(val, ecnt_scu->npScu_base + reg); 
++#ifdef AN7581_OPENWRT_SCU
++	an7581_scu_update(an7581_np_scu, 0x970, reg, ~0U, val);
++#else
++	writel(val, ecnt_scu->npScu_base + reg);
++#endif
+ }
+ 
+ u32 get_npScuReg_bits(u32 reg, u32 mask, u32 offset)
+@@ -244,6 +287,9 @@
+ 
+ void set_npScuReg_bits(u32 reg, u32 mask, u32 bits)
+ {
++#ifdef AN7581_OPENWRT_SCU
++	an7581_scu_update(an7581_np_scu, 0x970, reg, mask, bits);
++#else
+     u32 val = get_np_scu_data(reg);
+ 
+     bits &= mask;
+@@ -251,6 +297,7 @@
+     val |= bits;
+ 
+     set_np_scu_data(reg, val);
++#endif
+ }
+ 
+ u32 GET_IS_DDR4(void)
+@@ -687,13 +734,21 @@
+ /* don't EXPORT this function. Create API for your purpose instead. */
+ u32 get_chip_scu_data(u32 reg)
+ {
++#ifdef AN7581_OPENWRT_SCU
++	return an7581_scu_read(an7581_chip_scu, 0x388, reg);
++#else
+ 	return readl(ecnt_scu->chipScu_base + reg);
++#endif
+ }
+ 
+ /* don't EXPORT this function. Create API for your purpose instead. */
+ void set_chip_scu_data(u32 reg, u32 val)
+ {
+-	writel(val, ecnt_scu->chipScu_base + reg); 
++#ifdef AN7581_OPENWRT_SCU
++	an7581_scu_update(an7581_chip_scu, 0x388, reg, ~0U, val);
++#else
++	writel(val, ecnt_scu->chipScu_base + reg);
++#endif
+ }
+ 
+ u32 GET_IOMUX_CTRL_2(void)
+@@ -842,12 +897,16 @@
+ 
+ void set_chipScuReg_bits(u32 reg, u32 mask, u32 bits)
+ {
++#ifdef AN7581_OPENWRT_SCU
++	an7581_scu_update(an7581_chip_scu, 0x388, reg, mask, bits);
++#else
+     u32 val = get_chip_scu_data(reg);
+ 
+     val &= (~mask);
+     val |= bits;
+ 
+     set_chip_scu_data(reg, val);
++#endif
+ }
+ 
+ void SET_PON_I2C_MODE(u32 mask, u32 bits)
+@@ -1011,6 +1070,7 @@
+ #endif
+ 
+ /* don't EXPORT this function. Create API for your purpose instead. */
++#ifndef AN7581_OPENWRT_SCU
+ static u32 get_rbus_clk_data(u32 reg)
+ {
+     return readl(ecnt_scu->clk_ctl_base + reg);
+@@ -1036,6 +1096,7 @@
+ }
+ 
+ EXPORT_SYMBOL(set_rbus_clk);
++#endif /* FPGA-only RBUS clock API */
+ 
+ /* 
+ 	disable global interrupt method is different between aarch32 & aarch64
+@@ -1167,6 +1228,29 @@
+ }
+ EXPORT_SYMBOL(SET_SCREG_WF0);
+ 
++#ifdef AN7581_OPENWRT_SCU
++static int ECNT_SCU_DRV_PROBE(void)
++{
++	struct regmap *np, *chip;
++	int ret;
++
++	if (!of_machine_is_compatible("quantum,q1000k-ubi"))
++		return -ENODEV;
++	np = syscon_regmap_lookup_by_compatible("airoha,en7581-scu");
++	if (IS_ERR(np))
++		return PTR_ERR(np);
++	chip = syscon_regmap_lookup_by_compatible("airoha,en7581-chip-scu");
++	if (IS_ERR(chip))
++		return PTR_ERR(chip);
++	ret = regmap_read(np, CR_NP_SCU_SCREG_WR0, &l2c_sram_size);
++	if (ret)
++		return ret;
++	an7581_np_scu = np;
++	an7581_chip_scu = chip;
++	/* Keep clock/reset ownership and the PBus timeout IRQ with their drivers. */
++	return 0;
++}
++#else
+ static void pbus_timeout_init(void)
+ {
+ 	if (GET_IS_FPGA()) 
+@@ -1278,6 +1362,8 @@
+ 	return 0;
+ }
+ 
++#endif
++
+ /* init SCU registers' base address (a.s.a.p.) before any kernel module might access it. 
+  * For example, usb_init() calls "isFPGA" which will access NP SCU register. 
+  * If SCU base address has not initialized before that, cpu will crash. 
+--- a/xpon-en757x/xpon_phy_10g/src/phy_init.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy_init.c
+@@ -26,6 +26,7 @@
+ #include "phy_types.h"
+ #include "phy_debug.h"
+ #include "phy_init.h"
++#include <ecnt_pon_phy_api.h>
+ #include "phy_tx.h"
+ #include "phy_reg.h"
+ #include "a60972.h"
+@@ -418,6 +419,11 @@
+ 	unchar ptr[4];
+ 	uint phyIntStatus;	 //david 20170124
+ 
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	if (!get_pon_phy_dev())
++		return -ENODEV;
++#endif
++
+ 	//__________________ At very beginning we know onthing about : chip ID , PON mode __________________
+ 	
+ printk("\r\n____________________________________________\r\n");
+@@ -452,7 +458,7 @@
+ 		gpPhyPriv = (PHY_GlbPriv_T *)kmalloc(sizeof(PHY_GlbPriv_T), GFP_KERNEL) ;
+ 		if( NULL == gpPhyPriv) {
+ 			printk("Alloc data struct memory failed\n") ;
+-			return ret ;
++			return -ENOMEM;
+ 		}
+ 	}
+ 	memset(gpPhyPriv, 0, sizeof(PHY_GlbPriv_T)) ;
+@@ -907,6 +913,11 @@
+ 	unchar ptr[4];
+ 	uint phyIntStatus;	 //david 20170124
+ 
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	if (!get_pon_phy_dev())
++		return -ENODEV;
++#endif
++
+ #if defined(TCSUPPORT_COMBO_PON)
+ 	if(FALSE==gpPhyPriv->is_phy_mode_detected)
+ 	{
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1174,6 +1174,12 @@
+ **____________________________________________________________________________*/
+ static int xpondrv_init(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	/* A platform driver can register successfully without binding a device. */
++	if (!get_xpon_dev() || get_xpon_irq(0) < 0 || get_xpon_irq(1) < 0)
++		return -ENODEV;
++#endif
++
+ 	printk("xPON driver initialing.\n");
+ 	
+     INIT_LIST_HEAD(&fix_reg_list);
