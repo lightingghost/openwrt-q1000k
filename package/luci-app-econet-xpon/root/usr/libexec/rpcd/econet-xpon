@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Q1000K backend for the imported econet-xpon LuCI application.
+case "$1" in
+    list) echo '{"status":{},"raw":{}}' ;;
+    call)
+        case "$2" in
+            status|raw) exec /usr/sbin/q1000k-xgspon status ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    *) exit 1 ;;
+esac
