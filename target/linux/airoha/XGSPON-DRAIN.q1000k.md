@@ -87,3 +87,31 @@ T-CONT/GEM invalidation or reuse. Whole-port TX/RX isolation and termination
 recovery require exclusive lifecycle ownership and checked restoration.
 The supplied evidence does not justify treating an isolated FE busy bit,
 callback teardown, or a software table reset as that complete transaction.
+
+## Checked MAC stop implementation
+
+The MAC resource provider now owns writes to `MBI_MPI_STOP`. Legacy raw writes
+to that mixed control/status register are rejected. The checked API preserves
+the other documented controls, never replays completion bits, checks write
+readback, and waits at most 3,000 one-microsecond intervals for all requested
+acknowledgments. Missing resources, all-ones reads, ignored writes and timeout
+return errors. Failure latches a provider fault that blocks release; further
+hold requests can attempt containment but cannot clear the fault.
+
+The alignment-FIFO wait requires MBI TX stopped and acknowledged, with MPI TX
+still running so buffered data can leave. It checks the low 16-bit used field
+and reports timeout or invalid reads. It does not assert complete optical
+drain. These operations serialize under the resource lock and are usable by
+the imported atomic-context callers; a timeout can hold IRQs off for up to
+3 ms. The eventual process-context lifecycle should avoid invoking them in
+routine packet processing.
+
+Vendor patch 023 routes all five stop helpers and the alignment-FIFO wait to
+the checked provider. MAC initialization now aborts and releases its crypto
+state if the initial MPI stop fails, before publishing timers or tasklets.
+The legacy whole-port FE helper remains unsupported because it ignores FE
+errors and enables channels without ownership checks.
+
+All 30 PON host tests pass, including MAC stop faults and startup unwind. The
+Linux 6.18.44 AArch64 vendor package builds successfully as r20. No stop
+command has been executed on the Q1000K.

@@ -32,6 +32,7 @@ class PonResourceTests(unittest.TestCase):
 #include <errno.h>
 #include <an7581_xpon_map.h>
 typedef uint32_t u32;
+#include <an7581_xpon.h>
 #define __iomem
 #define EXPORT_SYMBOL(x)
 #define DEFINE_RWLOCK(x) int x
@@ -39,6 +40,9 @@ typedef uint32_t u32;
 static unsigned int held, reads, writes;
 #define read_lock_irqsave(l,f) do { (void)(l); assert(!held); held=1; (f)=0; } while (0)
 #define read_unlock_irqrestore(l,f) do { (void)(l); (void)(f); assert(held); held=0; } while (0)
+#define write_lock_irqsave read_lock_irqsave
+#define write_unlock_irqrestore read_unlock_irqrestore
+static void udelay(unsigned int n) { (void)n; assert(held); }
 struct device { int id; };
 static unsigned char memory[3][0x1000] __attribute__((aligned(4)));
 static void check_address(void *p) {
@@ -76,8 +80,9 @@ int main(void) {
         last_reads=reads; last_writes=writes;
         expected=reg ^ 0x12345678;
         set_xpon_data(reg, expected);
-        assert(get_xpon_data(reg)==(valid ? expected : UINT32_MAX));
-        assert(reads-last_reads==(unsigned)valid && writes-last_writes==(unsigned)valid);
+        assert(get_xpon_data(reg)==(valid ? (reg==0x5004 ? 0 : expected) : UINT32_MAX));
+        assert(reads-last_reads==(unsigned)valid);
+        assert(writes-last_writes==(unsigned)(valid && reg!=0x5004));
     }
     last_reads=reads; last_writes=writes;
     set_xpon_data(0x1fb65000, 1); /* Reject physical and old KSEG addresses. */

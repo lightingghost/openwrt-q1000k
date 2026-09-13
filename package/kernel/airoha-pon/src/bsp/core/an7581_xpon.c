@@ -2,6 +2,7 @@
 /* AN7581 PON MAC register/IRQ provider. No clocks, resets or DMA are changed
  * by probe. Optical startup and shared FE/QDMA ownership belong to consumers.
  */
+#include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -15,10 +16,123 @@ struct an7581_xpon {
 	struct device *dev;
 	void __iomem *base[AN7581_XPON_BANKS];
 	int irq[2];
+	bool mac_fault;
 };
 
 static DEFINE_RWLOCK(xpon_lock);
 static struct an7581_xpon *xpon;
+
+/* These mixed control/status registers require a single owner. Never allow a
+ * legacy read/modify/write to race stop transactions or replay status bits.
+ */
+#define AN7581_XPON_STOP_REG 0x5004
+#define AN7581_XPON_TX_FIFO_REG 0x5814
+#define AN7581_XPON_STOP_CONTROL 0x01011111U
+#define AN7581_XPON_STOP_SUPPORTED 0x01010101U
+#define AN7581_XPON_STOP_POLLS 3000
+
+int an7581_xpon_mac_stop(u32 controls, bool hold)
+{
+	unsigned long flags;
+	u32 value, desired, done = 0;
+	unsigned int retry;
+	int ret = -ENODEV;
+
+	if (!controls || (controls & ~AN7581_XPON_STOP_SUPPORTED))
+		return -EINVAL;
+	if (controls & AN7581_XPON_MBI_RX_STOP)
+		done |= 1U << 14;
+	if (controls & AN7581_XPON_MBI_TX_STOP)
+		done |= 1U << 15;
+	if (controls & AN7581_XPON_MPI_RX_STOP)
+		done |= 1U << 30;
+	if (controls & AN7581_XPON_MPI_TX_STOP)
+		done |= 1U << 31;
+
+	/* Callers include protocol IRQ/tasklet paths. Serialize the complete
+	 * bounded transaction, including other legacy register accesses/removal.
+	 */
+	write_lock_irqsave(&xpon_lock, flags);
+	if (!xpon)
+		goto out;
+	if (xpon->mac_fault && !hold) {
+		ret = -EIO;
+		goto out;
+	}
+	value = readl(xpon->base[1] + (AN7581_XPON_STOP_REG & 0xfff));
+	if (value == ~0U) {
+		ret = -EIO;
+		goto fault;
+	}
+	desired = value & AN7581_XPON_STOP_CONTROL;
+	if (hold)
+		desired |= controls;
+	else
+		desired &= ~controls;
+	writel(desired, xpon->base[1] + (AN7581_XPON_STOP_REG & 0xfff));
+	ret = -ETIMEDOUT;
+	for (retry = 0; retry < AN7581_XPON_STOP_POLLS; retry++) {
+		value = readl(xpon->base[1] + (AN7581_XPON_STOP_REG & 0xfff));
+		if (value == ~0U ||
+		    (value & AN7581_XPON_STOP_CONTROL) != desired) {
+			ret = -EIO;
+			break;
+		}
+		if (!hold || (value & done) == done) {
+			ret = xpon->mac_fault ? -EIO : 0;
+			goto out;
+		}
+		udelay(1);
+	}
+fault:
+	xpon->mac_fault = true;
+out:
+	write_unlock_irqrestore(&xpon_lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL(an7581_xpon_mac_stop);
+
+int an7581_xpon_mac_wait_tx_empty(void)
+{
+	unsigned long flags;
+	u32 stop, value;
+	unsigned int retry;
+	int ret = -ENODEV;
+
+	write_lock_irqsave(&xpon_lock, flags);
+	if (!xpon)
+		goto out;
+	ret = -EIO;
+	if (xpon->mac_fault)
+		goto out;
+	stop = readl(xpon->base[1] + (AN7581_XPON_STOP_REG & 0xfff));
+	if (stop == ~0U)
+		goto fault;
+	/* Stop ingress from FE, but leave the optical side able to drain. */
+	ret = -EBUSY;
+	if (!(stop & AN7581_XPON_MBI_TX_STOP) || !(stop & (1U << 15)) ||
+	    (stop & AN7581_XPON_MPI_TX_STOP))
+		goto out;
+	ret = -ETIMEDOUT;
+	for (retry = 0; retry < AN7581_XPON_STOP_POLLS; retry++) {
+		value = readl(xpon->base[1] + (AN7581_XPON_TX_FIFO_REG & 0xfff));
+		if (value == ~0U) {
+			ret = -EIO;
+			goto fault;
+		}
+		if (!(value & 0xffff)) {
+			ret = 0;
+			goto out;
+		}
+		udelay(1);
+	}
+fault:
+	xpon->mac_fault = true;
+out:
+	write_unlock_irqrestore(&xpon_lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL(an7581_xpon_mac_wait_tx_empty);
 
 u32 get_xpon_data(u32 reg)
 {
@@ -50,7 +164,7 @@ void set_xpon_data(u32 reg, u32 value)
 	int bank = an7581_xpon_decode(reg, &offset);
 	bool ready;
 
-	if (bank < 0) {
+	if (bank < 0 || reg == AN7581_XPON_STOP_REG) {
 		pr_err_ratelimited("an7581-xpon: invalid register write %#x\n", reg);
 		return;
 	}

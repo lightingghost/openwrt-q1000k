@@ -1,0 +1,164 @@
+Subject: [PATCH] q1000k: serialize MAC stops and reject false acknowledgments
+
+---
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -1,3 +1,6 @@
++#ifdef Q1000K_PON_IDENTITY
++#include <an7581_xpon.h>
++#endif
+ /***************************************************************
+ Copyright Statement:
+ 
+@@ -156,7 +159,10 @@
+ /*****************************************************************************
+ ******************************************************************************/
+ int feDevGdm2Cdm2Stop(XPON_RESET_MODE_t mode)
+-{	
++{
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else	
+ 	int i=0;
+ 	if((mode != XPON_RESET_HOLD_ON) && (mode != XPON_RESET_RELEASE)) {
+ 		return -1;
+@@ -203,12 +209,19 @@
+ 	}
+ 
+ 	return 0;
++#endif
+ }
+ 
+ /*****************************************************************************
+ ******************************************************************************/
+ int gponDevTxMbiStop(XPON_RESET_MODE_t mode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (mode != XPON_RESET_HOLD_ON && mode != XPON_RESET_RELEASE)
++		return -EINVAL;
++	return an7581_xpon_mac_stop(AN7581_XPON_MBI_TX_STOP,
++				    mode == XPON_RESET_HOLD_ON);
++#else
+ 	   REG_MBI_MPI_STOP gponMbiMpiStop ;
+ 	   int RETRY = 3000 ;
+ 
+@@ -232,10 +245,20 @@
+ 	   }
+ 
+ 	   return 0;
++#endif
+ }
+ 
+ int gponDevMbiStop(XPON_RESET_MODE_t mode, XPON_GDM2CDM2_STOP_FLAG_t flag)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (mode != XPON_RESET_HOLD_ON && mode != XPON_RESET_RELEASE)
++		return -EINVAL;
++	/* Whole-port FE ownership is handled by the native lifecycle. */
++	if (flag == XPON_WITH_GDM2CDM2_STOP)
++		return -EOPNOTSUPP;
++	return an7581_xpon_mac_stop(AN7581_XPON_MBI_TX_STOP | AN7581_XPON_MBI_RX_STOP,
++				    mode == XPON_RESET_HOLD_ON);
++#else
+ 	REG_MBI_MPI_STOP gponMbiMpiStop ;
+     int RETRY = 3000 ;
+ 
+@@ -262,10 +285,17 @@
+ 		feDevGdm2Cdm2Stop(mode);
+ 	
+ 	return 0 ;
++#endif
+ }
+ 
+ int gponDevMpiTxStop(XPON_RESET_MODE_t mode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (mode != XPON_RESET_HOLD_ON && mode != XPON_RESET_RELEASE)
++		return -EINVAL;
++	return an7581_xpon_mac_stop(AN7581_XPON_MPI_TX_STOP,
++				    mode == XPON_RESET_HOLD_ON);
++#else
+ 	REG_MBI_MPI_STOP gponMbiMpiStop ;
+     int RETRY = 3000 ;
+ 
+@@ -288,10 +318,17 @@
+     	}
+     }
+ 	return 0 ;
++#endif
+ }
+ 
+ int gponDevMpiRxStop(XPON_RESET_MODE_t mode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (mode != XPON_RESET_HOLD_ON && mode != XPON_RESET_RELEASE)
++		return -EINVAL;
++	return an7581_xpon_mac_stop(AN7581_XPON_MPI_RX_STOP,
++				    mode == XPON_RESET_HOLD_ON);
++#else
+ 	REG_MBI_MPI_STOP gponMbiMpiStop ;
+     int RETRY = 3000 ;
+ 
+@@ -314,11 +351,18 @@
+     	}
+     }
+ 	return 0 ;
++#endif
+ }
+ 
+ 
+ int gponDevMpiStop(XPON_RESET_MODE_t mode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (mode != XPON_RESET_HOLD_ON && mode != XPON_RESET_RELEASE)
++		return -EINVAL;
++	return an7581_xpon_mac_stop(AN7581_XPON_MPI_TX_STOP | AN7581_XPON_MPI_RX_STOP,
++				    mode == XPON_RESET_HOLD_ON);
++#else
+ 	REG_MBI_MPI_STOP gponMbiMpiStop ;
+     int RETRY = 3000 ;
+ 
+@@ -342,6 +386,7 @@
+     	}
+     }
+ 	return 0 ;
++#endif
+ }
+ 
+ /*****************************************************************************
+@@ -3400,6 +3445,9 @@
+ }
+ 
+ int gponDevWaitTxAlignFifoUnused(void){
++#ifdef Q1000K_PON_IDENTITY
++	return an7581_xpon_mac_wait_tx_empty();
++#else
+ 	REG_DBG_TX_ALIGN_FIFO_STS txAlignFifoUsed;
+ 	int RETRY = 3000 ;
+ 
+@@ -3411,6 +3459,7 @@
+ 	}
+ 	
+ 	return -1;
++#endif
+ }
+ 
+ /******************************************************************************
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
+@@ -296,9 +296,14 @@
+ 	gponDevSetRspTime(gpGponPriv->gponCfg.onuResponseTime);
+ 	XPON_PHY_SET_MODE(PHY_GPON_CONFIG);
+ 	gponDevSetPloamFilterMode(&gpGponPriv->gponCfg.ploamFilter);
++	/* Do not publish timers/tasklets until stop acknowledgment succeeds. */
++	ret = gponDevMpiStop(XPON_RESET_HOLD_ON);
++	if (ret) {
++		gpon_security_exit();
++		goto unmap;
++	}
+ 	ploam_init() ;
+ 	gpon_act_init() ;
+-	gponDevMpiStop(XPON_RESET_HOLD_ON) ;
+ 	gpon_dev_init() ;
+ 	/* xpondrv publishes all callback state before enabling interrupts. */
+ 	
