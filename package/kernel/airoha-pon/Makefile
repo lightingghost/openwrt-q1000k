@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -33,7 +33,8 @@ endef
 
 define KernelPackage/airoha-xpon-en757x
   $(call KernelPackage/airoha-pon/Default)
-  DEPENDS+=@BROKEN @(TARGET_airoha_an7581||TARGET_airoha_an7583)
+  DEPENDS+=@BROKEN @(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-crypto-ecb
+  KCONFIG+=CONFIG_CRYPTO_AES=y
   TITLE:=Airoha EN757x xPON driver (v2)
   VARIANT:=v2
   FILES:= \

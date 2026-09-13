@@ -157,6 +157,29 @@ No launcher, automatic module load or working service is installed by this
 checkpoint. Tests cover malformed/trailing/absent values, multicast/zero MACs,
 FSAN byte order, unchanged outputs on errors and rejection before startup.
 
+## Cryptographic primitives
+
+The imported cipher-to-lskcipher conversion requested `aes`, which the current
+kernel registers as a raw CIPHER algorithm. The port now requests `ecb(aes)`
+as an LSKCIPHER and declares the ECB package/AES kernel dependency. It checks
+set-key and encryption/decryption errors, serializes shared transforms across
+each complete request, validates ECB block lengths, and leaves output buffers
+unchanged on failure. CMAC no longer advances beyond vector bounds and handles
+zero-length fragments and empty messages. Temporary derived blocks are cleared.
+Security setup publishes the CMAC/ECB pair only after both allocations succeed;
+failure releases the first transform. Teardown shuts down both initialized
+timers synchronously before freeing transforms and clears their pointers.
+
+The production functions pass NIST SP800-38B AES-128 CMAC examples (also in the
+kernel's `crypto/testmgr.h`), an AES ECB known-answer test, all splits of input
+lengths 0 through 257 with empty fragments against OpenSSL CMAC, and failure
+injection at each crypto call. ASan/UBSan check the host execution. Separate
+fixtures verify allocation failure, duplicate/retry initialization and timer
+shutdown ordering. The extracted production helpers also pass known-answer
+tests against the actual Linux 6.18.44 crypto API in an isolated UML guest,
+including transform allocation. On-device key transitions, MIC enforcement
+and complete callback teardown remain hardware/runtime acceptance work.
+
 ## OMCI implementation decision
 
 The two candidates were compiled locally, without installation or execution on
@@ -198,8 +221,9 @@ service model and its managed-entity behavior have not been established.
 Completed local checks: factory/backend/LuCI host tests, controller transport
 and every-transfer fault injection, read-only controller status tests, controller
 APK build, BSP/PHY/MAC modpost, complete vendor APK generation, resource/hook
-fixtures, validated MAC/FSAN handoff and unsupported-control error propagation. The normal builder and protected
-source branches remain unchanged.
+fixtures, validated MAC/FSAN handoff, unsupported-control error propagation,
+and AES/CMAC known-answer and fault-injection tests. The normal builder and
+protected source branches remain unchanged.
 
 Outstanding software includes complete analog/SoC PHY sequencing, shared
 resource and QDMA adapters, identity handoff from the launcher, required flow

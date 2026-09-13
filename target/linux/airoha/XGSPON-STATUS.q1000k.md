@@ -45,7 +45,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
 | BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
-| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects and the complete MAC module compile and pass modpost. | Integrate interrupt consumers, QDMA/FE, packet metadata and management traffic; retire unrelated OEM debug interfaces. |
+| PON MAC | Runtime state/event dispatch restored from the omitted vendor procfs source. All C objects and the complete MAC module compile and pass modpost. | Integrate interrupt consumers, QDMA/FE, packet metadata, management traffic and complete callback/startup teardown. |
 | OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
@@ -172,6 +172,21 @@ The future launcher must supply the backend's selected factory/override
 values. It is not yet connected to a running service. Registration ID/MSK
 and authentication behavior remain to be integrated and validated.
 
+Patch 011 corrects the imported crypto conversion to use the Linux 6.18
+`ecb(aes)` lskcipher transform and declares its ECB/AES dependency. Shared
+transforms are serialized across key setup and encryption. AES/CMAC failures
+propagate, outputs are published only after success, and temporary key-derived
+blocks are cleared. CMAC handles empty and split vectors without advancing
+past their bounds; ECB rejects lengths other than one AES block. Host tests
+pass the NIST AES-128/CMAC examples, 33,411 fragmented-input cases against
+OpenSSL's independent CMAC implementation, and injected errors at every crypto
+operation. ASan/UBSan are enabled; leak detection is disabled for the ptrace
+sandbox. Additional fixtures verify both allocation failures, retry, duplicate
+initialization and timer shutdown before transform release. The extracted
+production crypto helpers also pass AES/CMAC known-answer tests using the real
+Linux 6.18.44 crypto API in a disposable UML guest. This does not validate
+on-device key transitions or authenticated OMCC.
+
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
 type/format errors and unresolved symbols remain fatal. The imported MAC's
@@ -179,7 +194,7 @@ stack-frame warning exception also remains; runtime/stack auditing is pending.
 All package patches apply to freshly prepared source. The complete vendor
 package now builds against Linux 6.18.44 with no suppressed or unresolved
 symbols. The artifact is
-`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r7.apk`.
+`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r8.apk`.
 It remains gated by `BROKEN`, unselected and without autoload. No vendor
 module or package has been installed or executed on the device.
 
