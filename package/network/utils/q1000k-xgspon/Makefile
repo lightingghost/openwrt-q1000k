@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0-only
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=q1000k-xgspon
+PKG_RELEASE:=1
+PKG_LICENSE:=GPL-2.0-only
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/q1000k-xgspon
+  SECTION:=net
+  CATEGORY:=Network
+  TITLE:=Q1000K XGS-PON factory data and diagnostics
+  DEPENDS:=@TARGET_airoha_an7581 +jshn
+endef
+
+define Package/q1000k-xgspon/description
+ Read-only factory-data access and diagnostics for Q1000K XGS-PON development.
+ Optical activation remains unavailable until the MAC datapath and EN7573
+ loader are integrated. Installing this package does not load PON modules.
+endef
+
+define Package/q1000k-xgspon/conffiles
+/etc/config/q1000k-xgspon
+endef
+
+define Build/Compile
+	$(TARGET_CC) $(TARGET_CFLAGS) -Wall -Wextra -Werror $(TARGET_CPPFLAGS) \
+		-o $(PKG_BUILD_DIR)/q1000k-pon-factory $(PKG_BUILD_DIR)/factory.c $(TARGET_LDFLAGS)
+endef
+
+define Package/q1000k-xgspon/install
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/config $(1)/lib/q1000k-xgspon
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/q1000k-pon-factory $(1)/usr/sbin/
+	$(INSTALL_BIN) ./files/q1000k-xgspon $(1)/usr/sbin/
+	$(INSTALL_CONF) ./files/q1000k-xgspon.config $(1)/etc/config/q1000k-xgspon
+	$(INSTALL_DATA) ./files/common.sh $(1)/lib/q1000k-xgspon/
+endef
+
+$(eval $(call BuildPackage,q1000k-xgspon))

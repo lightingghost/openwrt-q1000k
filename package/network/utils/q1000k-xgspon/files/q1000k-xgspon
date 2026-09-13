@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+. /lib/q1000k-xgspon/common.sh
+
+case "$1" in
+	status) xgspon_status ;;
+	validate) xgspon_validate ;;
+	prepare)
+		# Stage this unit's exact calibration record in private RAM storage.
+		# This command does not enable GPIOs, load modules or start transmission.
+		umask 077
+		read_identity
+		read_firmware
+		[ "$identity_valid" = 1 ] && [ "$factory_available" = 1 ] &&
+		[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || {
+			echo 'Factory identity/calibration and verified OEM firmware are required.' >&2
+			exit 1
+		}
+		dir=$(mktemp -d /tmp/q1000k-xgspon.XXXXXX) || exit 1
+		if ! /usr/sbin/q1000k-pon-factory calibration > "$dir/xgspon-calibration.bin"; then
+			rm -f "$dir/xgspon-calibration.bin"
+			rmdir "$dir"
+			exit 1
+		fi
+		printf '%s\n' "$dir"
+		;;
+	start|restart|reload)
+		echo 'Optical activation is unavailable: EN7573 loader and AN7581 MAC integration are pending.' >&2
+		exit 1
+		;;
+	*) echo 'Usage: q1000k-xgspon status|validate|prepare' >&2; exit 2 ;;
+esac
