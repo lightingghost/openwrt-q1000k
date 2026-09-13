@@ -30,6 +30,7 @@ python3 tests/q1000k/test_pon_hooks.py
 python3 tests/q1000k/test_pon_identity.py
 python3 tests/q1000k/test_pon_unsupported.py
 python3 tests/q1000k/test_pon_crypto.py
+python3 tests/q1000k/test_pon_lifecycle.py
 ```
 
 These compile the production MAC MMIO accessors and prepared SCU regmap
@@ -53,6 +54,13 @@ initialization and timer shutdown before transform release.
 ASan/UBSan remain enabled; LeakSanitizer is disabled
 because it cannot run under the workspace ptrace sandbox. This does not execute
 the kernel crypto provider or prove the optical authentication/key lifecycle.
+The lifecycle fixtures run extracted startup, teardown, cdev, WAN and worker
+functions. They inject failures at all 17 startup stages and each of the four
+WAN interface creations, retry after failure, verify cdev allocation/publication
+ownership, and check crypto setup precedes interrupt enable. A pthread harness
+executes 201 worker start/stop cycles with idle, full and active queues. These
+tests use UBSan and verify software ownership/order; they do not prove hardware
+rollback, native QDMA attachment, provider removal or real kernel RCU behavior.
 Set `Q1000K_PON_BSP` to test another prepared BSP source directory. Kernel
 compilation checks the real APIs; these fixtures do not activate hardware or
 establish reset/clock sequencing.

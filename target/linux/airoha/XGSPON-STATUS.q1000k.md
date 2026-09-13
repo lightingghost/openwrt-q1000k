@@ -187,6 +187,18 @@ production crypto helpers also pass AES/CMAC known-answer tests using the real
 Linux 6.18.44 crypto API in a disposable UML guest. This does not validate
 on-device key transitions or authenticated OMCC.
 
+Patch 012 adds staged startup and software teardown: errors propagate from
+QDMA setup, worker creation and every WAN interface; failed startup releases
+only completed stages. Callback ingress and netdev opens remain closed until
+all state is ready. Protocol interrupts are enabled last and masked before
+hook removal. Teardown closes WAN interfaces, drains RCU callbacks, timers and
+tasklets, stops the worker and clears global aliases. It fixes the dynamic
+cdev release path and the worker's idle/full-queue stop deadlock. Five host
+fixtures pass 17 startup failure points with retry, all four WAN interface
+failures, cdev failures, crypto-before-interrupt ordering and 201 real pthread
+worker cycles. These fixtures do not establish hardware rollback or the
+missing native QDMA provider lifetime/detach contract.
+
 PHY/MAC builds retain warnings for unused vendor diagnostic code and missing
 prototypes without treating those categories as errors. Implicit declarations,
 type/format errors and unresolved symbols remain fatal. The imported MAC's
@@ -194,7 +206,7 @@ stack-frame warning exception also remains; runtime/stack auditing is pending.
 All package patches apply to freshly prepared source. The complete vendor
 package now builds against Linux 6.18.44 with no suppressed or unresolved
 symbols. The artifact is
-`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r8.apk`.
+`bin/targets/airoha/an7581/packages/kmod-airoha-xpon-en757x-6.18.44-r9.apk`.
 It remains gated by `BROKEN`, unselected and without autoload. No vendor
 module or package has been installed or executed on the device.
 

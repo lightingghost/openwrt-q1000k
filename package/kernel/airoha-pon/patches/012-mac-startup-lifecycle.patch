@@ -1,0 +1,1119 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: unwind staged MAC startup and drain owned work
+
+Track completed stages, keep callbacks closed until startup completes, and
+propagate failures in workers, QDMA setup, and all WAN netdev creation.
+Shutdown timers before freeing state and preserve the dynamic cdev release.
+This establishes software cleanup; the legacy QDMA hook is still not a
+native Ethernet attachment or a provider lifetime/detach guarantee.
+
+--- a/xpon-en757x/xpon_10g/inc/common/xpon_compat.h
++++ b/xpon-en757x/xpon_10g/inc/common/xpon_compat.h
+@@ -6,6 +6,8 @@
+ #include <linux/types.h>
+ #include "q1000k_identity.h"
+ #include <linux/version.h>
++
++bool xpon_is_ready(void);
+ 
+ struct xpon_skb_cb {
+ 	u32 pon_mark;
+--- a/xpon-en757x/xpon_10g/inc/gpon/gpon_act.h
++++ b/xpon-en757x/xpon_10g/inc/gpon/gpon_act.h
+@@ -70,6 +70,7 @@
+ */
+ void gpon_act_change_state(const uint new_state);
+ void gpon_act_init(void);
++void gpon_act_stop_timers(void);
+ void gpon_act_deinit(void);
+ 
+ #endif /*_GPON_ACT_H*/
+--- a/xpon-en757x/xpon_10g/inc/gpon/gpon_init.h
++++ b/xpon-en757x/xpon_10g/inc/gpon/gpon_init.h
+@@ -68,6 +68,9 @@
+ *************************************************************************
+ */
+ int gpon_init(void) ;
++void gpon_start_interrupts(void);
++void gpon_quiesce(void);
++void gpon_stop_work(void);
+ void gpon_deinit(void);
+ 
+ #endif /*_GPON_INIT_H*/
+--- a/xpon-en757x/xpon_10g/inc/pwan/gpon_wan.h
++++ b/xpon-en757x/xpon_10g/inc/pwan/gpon_wan.h
+@@ -145,7 +145,8 @@
+ 
+ int gwan_prepare_tx_message(PWAN_FETxMsg_T *pTxMsg, unchar netIdx, struct sk_buff *skb, int txq, struct port_info *xpon_info) ;
+ int gwan_process_rx_message(PWAN_FERxMsg_T *pRxMsg, struct sk_buff *skb, uint pktLens, unchar *pFlag) ;
+-int gwan_init(GWAN_Priv_T *pGWanPriv) ;
++void gwan_deinit(void);
++int gwan_init(GWAN_Priv_T *pGWanPriv);
+ 
+ 
+ #endif /*_GPON_WAN_H*/
+--- a/xpon-en757x/xpon_10g/inc/pwan/xpon_netif.h
++++ b/xpon-en757x/xpon_10g/inc/pwan/xpon_netif.h
+@@ -345,6 +345,8 @@
+ void pwan_destroy(void);
+ int get_pon_link_type(void);
+ void __dump_skb(struct sk_buff *skb, uint pktLen) ;
++int pwan_delete_net_interface(uint idx);
++void pwan_quiesce(void);
+ int pwan_create_net_interface(uint idx) ;
+ #ifdef TCSUPPORT_XPON_HAL_API_MCST
+ extern int (*mtk_multicast_data_handle_hook)(struct sk_buff *skb);
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -698,20 +698,26 @@
+ **  revision:
+ **		v1.0
+ **____________________________________________________________________________*/
++void gpon_act_stop_timers(void)
++{
++	/* Shutdown prevents a running callback from rearming its timer. */
++	timer_shutdown_sync(&gpGponPriv->to1_timer);
++	timer_shutdown_sync(&gpGponPriv->to2_timer);
++	timer_shutdown_sync(&gpGponPriv->hardware_timer);
++#if defined(TCSUPPORT_CPU_AN7583)
++	timer_shutdown_sync(&gpGponPriv->fe_chn_done_timer);
++#endif
++	if (NGPON2_MODE) {
++		timer_shutdown_sync(&gpGponPriv->to3_timer);
++		timer_shutdown_sync(&gpGponPriv->to4_timer);
++		timer_shutdown_sync(&gpGponPriv->to5_timer);
++		timer_shutdown_sync(&gpGponPriv->toZ_timer);
++	}
++}
++
+ void gpon_act_deinit(void)
+ {
++	gpon_act_stop_timers();
++	/* Protocol tasklets must also be drained before the LED consumer. */
+ 	tasklet_kill(&taskLedConfig);
+-	timer_delete(&gpGponPriv->to1_timer);
+-	timer_delete(&gpGponPriv->to2_timer);
+-#if defined(TCSUPPORT_CPU_AN7583)
+-	timer_delete(&gpGponPriv->fe_chn_done_timer);
+-#endif
+-	if(NGPON2_MODE){
+-		timer_delete(&gpGponPriv->to3_timer);
+-		timer_delete(&gpGponPriv->to4_timer);
+-		timer_delete(&gpGponPriv->to5_timer);
+-		//timer_delete(&gpGponPriv->to6_timer);
+-		timer_delete(&gpGponPriv->toZ_timer);
+-	}
+-    GPON_STOP_TIMER(gpWanPriv->gpon.gemMibTimer) ;
+-}
++}
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
+@@ -57,6 +57,8 @@
+ *************************************************************************
+ */
+ Pxgpon_mac_reg_REGS g_xgpon_mac_reg_BASE = NULL;
++static bool gpon_initialized;
++static bool gpon_work_stopped;
+ /************************************************************************
+ *                  M A C R O S
+ *************************************************************************
+@@ -257,6 +259,8 @@
+ {
+ 	int ret = 0 ;
+ 
++	if (gpon_initialized)
++		return -EALREADY;
+     if((gpPonSysData->sysPonMode != XMCS_IF_WAN_DETECT_MODE_XGPON)&&\
+             (gpPonSysData->sysPonMode != XMCS_IF_WAN_DETECT_MODE_XGSPON) &&\
+             (gpPonSysData->sysPonMode != XMCS_IF_WAN_DETECT_MODE_NGPON2_10G_10G)  &&\
+@@ -280,9 +284,15 @@
+ 	}
+ #endif
+ 
++	/* No interrupt can schedule work against partially initialized state. */
++	gpon_INT_deinit();
+     ret = gpon_init_private_data(gpGponPriv);
+ 	if (ret)
+-		return ret;
++		goto unmap;
++	/* Complete fallible crypto setup before enabling protocol interrupts. */
++	ret = gpon_security_init();
++	if (ret)
++		goto unmap;
+ 	gponDevSetRspTime(gpGponPriv->gponCfg.onuResponseTime);
+ 	XPON_PHY_SET_MODE(PHY_GPON_CONFIG);
+ 	gponDevSetPloamFilterMode(&gpGponPriv->gponCfg.ploamFilter);
+@@ -290,17 +300,19 @@
+ 	gpon_act_init() ;
+ 	gponDevMpiStop(XPON_RESET_HOLD_ON) ;
+ 	gpon_dev_init() ;
+-	gpon_INT_init() ;
++	/* xpondrv publishes all callback state before enabling interrupts. */
+ 	
+ 
+-	ret = gpon_security_init() ;
+-	if(ret != 0) {
+-		PON_MSG(MSG_ERR, "XGPON security initialization failed.\n") ;
+-		return ret ;
+-	}	
++	gpon_work_stopped = false;
++	gpon_initialized = true;
+     gponDevResetCtrl(XPON_RESET_HOLD_ON);
+-	
+-	return ret ;
++	return 0;
++unmap:
++	if (g_xgpon_mac_reg_BASE) {
++		iounmap(g_xgpon_mac_reg_BASE);
++		g_xgpon_mac_reg_BASE = NULL;
++	}
++	return ret;
+ }
+ /*______________________________________________________________________________
+ **  function name
+@@ -327,17 +339,46 @@
+ **  revision:
+ **		v1.0
+ **____________________________________________________________________________*/
++void gpon_start_interrupts(void)
++{
++	if (gpon_initialized && !gpon_work_stopped)
++		gpon_INT_init();
++}
++
++void gpon_quiesce(void)
++{
++	if (gpon_initialized)
++		gpon_INT_deinit();
++}
++
++void gpon_stop_work(void)
++{
++	if (!gpon_initialized || gpon_work_stopped)
++		return;
++	gpon_work_stopped = true;
++	/* Shut down every timer producer before killing its tasklet consumers.
++	 * Protocol tasklets can themselves schedule the LED/WAN tasklets.
++	 */
++	timer_shutdown_sync(&gpGponPriv->silence_timer);
++	timer_shutdown_sync(&gpGponPriv->gponSecurity.TK4_timer);
++	timer_shutdown_sync(&gpGponPriv->gponSecurity.TK5_timer);
++	gpon_act_stop_timers();
++	ploam_deinit();
++	gpon_act_deinit();
++}
++
+ void gpon_deinit(void)
+ {
+-	printk("==NGPON2== xpondrv_cleanup, %d \n",__LINE__);
+-
+-	if(g_xgpon_mac_reg_BASE) {
+-		iounmap(g_xgpon_mac_reg_BASE) ;
+-		g_xgpon_mac_reg_BASE = NULL ;
+-	}	
+-    ploam_deinit();
+-	gpon_act_deinit();
+-    gpon_INT_deinit();
++	if (!gpon_initialized)
++		return;
++	/* Caller has removed and drained the external interrupt/event hook. */
++	gpon_INT_deinit();
++	gpon_stop_work();
++	gpon_initialized = false;
+ 	gpon_security_exit();
+-}
+-
++	if (g_xgpon_mac_reg_BASE) {
++		iounmap(g_xgpon_mac_reg_BASE);
++		g_xgpon_mac_reg_BASE = NULL;
++	}
++}
++
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -1510,11 +1510,12 @@
+ **		v1.0
+ **____________________________________________________________________________*/
+ void ploam_deinit(void){
++	timer_shutdown_sync(&gpGponPriv->silence_timer);
+ 
+ 	tasklet_kill(&gpGponPriv->securityKey_task);
+ 	//tasklet_kill(&gpGponPriv->allocId_task);
+     tasklet_kill(&gpGponPriv->keyReport_task);
+     tasklet_kill(&gpGponPriv->rangingAck_task);    
+ 	tasklet_kill(&gpGponPriv->swreplyploam_task);
+-	tasklet_kill(&clear_channel_task);
+-}
++	/* clear_channel_task belongs to the WAN layer (gwan_deinit). */
++}
+--- a/xpon-en757x/xpon_10g/src/pwan/epon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/epon_wan.c
+@@ -256,7 +256,7 @@
+ ******************************************************************************/
+ int ewan_init(EWAN_Priv_T *pEWanPriv)
+ {
+-	int i ;
++	int i, ret;
+     
+ 	for(i=0 ; i<EPON_LLID_MAX_NUM ; i++) {
+ 		memset(&pEWanPriv->llid[i].info, 0, sizeof(EWAN_LlidInfo_T)) ;
+@@ -266,10 +266,13 @@
+ 		
+ 	}
+ 
+-	pwan_create_net_interface(PWAN_IF_OAM) ;
+-	pwan_create_net_interface(PWAN_IF_EAPOL);
+-
+-	return 0 ;
++	ret = pwan_create_net_interface(PWAN_IF_OAM);
++	if (ret)
++		return ret;
++	ret = pwan_create_net_interface(PWAN_IF_EAPOL);
++	if (ret)
++		pwan_delete_net_interface(PWAN_IF_OAM);
++	return ret;
+ }
+ 
+ 
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -1363,9 +1363,15 @@
+ 
+ /*****************************************************************************
+ ******************************************************************************/
++void gwan_deinit(void)
++{
++	timer_shutdown_sync(&gpWanPriv->gpon.gemMibTimer);
++	tasklet_kill(&clear_channel_task);
++}
++
+ int gwan_init(GWAN_Priv_T *pGWanPriv)
+ {
+-	int i = 0 ;
++	int i = 0, ret;
+ 	XMCSIF_OnuType_t onu_type;
+ 	
+ 	for(i=0 ; i<CONFIG_GPON_10G_MAX_TCONT ; i++){
+@@ -1393,7 +1399,11 @@
+ 	GPON_CREATE_TIMER(&pGWanPriv->gemMibTimer,gwan_update_gem_mib_table,0);
+ 
+ 	tasklet_init(&clear_channel_task, gwan_clear_channel_func,0x0);
+-	pwan_create_net_interface(PWAN_IF_OMCI) ;
++	ret = pwan_create_net_interface(PWAN_IF_OMCI);
++	if (ret) {
++		gwan_deinit();
++		return ret;
++	}
+     gwan_channel_init();
+ 	return 0 ;	
+ }
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -1120,6 +1120,8 @@
+ ******************************************************************************/
+ static int pwan_net_open(struct net_device *dev)
+ {
++	if (!xpon_is_ready())
++		return -ENODEV;
+ 	PON_MSG(MSG_TRACE, "%s entered\n", __FUNCTION__) ;
+ 	printk("*********************%s entered*********************\n", __FUNCTION__);
+ 	
+@@ -1422,9 +1424,9 @@
+ 		return -EEXIST ;
+ 	}
+ 	
++	unregister_netdev(gpWanPriv->pPonNetDev[idx]);
++	/* unregister invokes ndo_stop, which must precede NAPI deletion. */
+ 	pwan_net_del(gpWanPriv->pPonNetDev[idx]);
+-
+-	unregister_netdev(gpWanPriv->pPonNetDev[idx]) ;
+ 	free_netdev(gpWanPriv->pPonNetDev[idx]) ;
+ 	gpWanPriv->pPonNetDev[idx] = NULL ;
+  	
+@@ -1433,13 +1435,35 @@
+ 
+ /*****************************************************************************
+ ******************************************************************************/
++static bool pwan_gwan_initialized;
++
++void pwan_quiesce(void)
++{
++	int i;
++
++	/* Ready has already been cleared, so ndo_open rejects new opens. */
++	rtnl_lock();
++	for (i = 0; i < PWAN_IF_NUMS; i++)
++		if (gpWanPriv->pPonNetDev[i])
++			dev_close(gpWanPriv->pPonNetDev[i]);
++	rtnl_unlock();
++}
++
+ void pwan_destroy(void)
+ {
+ 	int i = 0;
+ 	
+-	for(i=0 ; i<PWAN_IF_NUMS ; i++) {
+-		pwan_delete_net_interface(i) ;
+-    }
++	if (!gpWanPriv)
++		return;
++	/* Call only after transport/hook and protocol work have been drained. */
++#ifdef TCSUPPORT_WAN_GPON
++	if (pwan_gwan_initialized) {
++		gwan_deinit();
++		pwan_gwan_initialized = false;
++	}
++#endif
++	for (i = 0; i < PWAN_IF_NUMS; i++)
++		pwan_delete_net_interface(i);
+ }
+ /*****************************************************************************
+ ******************************************************************************/
+@@ -1454,29 +1478,31 @@
+ 	gpWanPriv->dropForHookBuf = 0;
+ 	gpWanPriv->activeChannelNum = 1; // default is 1 channel(LLID or T-CONT)
+ 	gpWanPriv->greenMaxthreshold = 15 ;
++	memset(&gpWanPriv->devCfg, 0, sizeof(PWAN_Config_T));
++	spin_lock_init(&gpWanPriv->rxLock);
+ 
+ #ifdef TCSUPPORT_WAN_GPON
+ 	if((ret = gwan_init(&gpWanPriv->gpon)) != 0) {
+ 		PON_MSG(MSG_ERR, "GPON WAN initialization failed\n") ;
+ 		return ret ;
+ 	}
++	pwan_gwan_initialized = true;
+ #endif /* TCSUPPORT_WAN_GPON */
+ 
+ #ifdef TCSUPPORT_WAN_EPON
+ 	if((ret = ewan_init(&gpWanPriv->epon)) != 0) {
+ 		PON_MSG(MSG_ERR, "EPON WAN initialization failed\n") ;
++		pwan_destroy();
+ 		return ret ;
+ 	}
+ #endif /* TCSUPPORT_WAN_EPON */
+ 
+ 	ret = pwan_create_net_interface(PWAN_IF_DATA);
+-	if (ret)
++	if (ret) {
++		pwan_destroy();
+ 		return ret;
+-	memset(&gpWanPriv->devCfg, 0, sizeof(PWAN_Config_T)) ;
+-	gpWanPriv->devCfg.flags.isQosUp = 0 ;
+-	
+-	gpWanPriv->devCfg.flags.isTxDropOmcc = 0;
+-	spin_lock_init(&gpWanPriv->rxLock) ;
++	}
++	/* WAN configuration and locks were initialized before publication. */
+ 	PON_MSG(MSG_TRACE, "PON WAN interface initialization done\n") ;
+ 	return 0 ;
+ }
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_mci.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_mci.c
+@@ -86,7 +86,15 @@
+ *                  F U N C T I O N   D E F I N I T I O N S
+ *************************************************************************
+ */
++static bool xmci_region_registered;
++
++static int pon_mci_open(struct inode *inode, struct file *file)
++{
++	return xpon_is_ready() ? 0 : -ENODEV;
++}
++
+ struct file_operations xmci_fops = {
++	.open = pon_mci_open,
+ 	.owner			= THIS_MODULE,
+ 	.unlocked_ioctl = pon_mci_ioctl,
+ #ifdef TCSUPPORT_CPU_ARMV8_64
+@@ -171,19 +179,16 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
+-void xpon_mci_destroy(void) 
+-{	
+-	dev_t devNo;
+-		
+-	if(gpMcsPriv->pPonMciDev != NULL) {
+-		cdev_del(gpMcsPriv->pPonMciDev) ;
+-		gpMcsPriv->pPonMciDev = NULL ;
+-	}
+-	
+-	devNo = MKDEV(COSNT_XMCI_MAJOR_NUN, 0) ;
+-	unregister_chrdev_region(devNo, 1) ;
+-	
+-	PON_MSG(MSG_TRACE, "PON MCI destroy successful\n") ;
++void xpon_mci_destroy(void)
++{
++	if (gpMcsPriv && gpMcsPriv->pPonMciDev) {
++		cdev_del(gpMcsPriv->pPonMciDev);
++		gpMcsPriv->pPonMciDev = NULL;
++	}
++	if (xmci_region_registered) {
++		unregister_chrdev_region(MKDEV(COSNT_XMCI_MAJOR_NUN, 0), 1);
++		xmci_region_registered = false;
++	}
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -204,45 +209,43 @@
+ **____________________________________________________________________________*/
+ int xpon_mci_init(void)
+ {
+-	int ret = 0;
+-	dev_t devNo;
+-	
+-	devNo = MKDEV(COSNT_XMCI_MAJOR_NUN, 0) ;
+-	
+-	ret = register_chrdev_region(devNo, 1, CONST_XMCI_DEV_NAME) ;
+-	if(ret < 0) {
+-		PON_MSG(MSG_ERR, "Get the PON MCI device number (register_chrdev_region()) failed\n") ;
+-		return ret ;
+-	}
+-	
+-	gpMcsPriv->pPonMciDev = cdev_alloc() ;
+-	if(gpMcsPriv->pPonMciDev == NULL) {
+-		PON_MSG(MSG_ERR, "Alloc character device (cdev_alloc()) failed\n") ;
+-		ret = -ENOMEM ;
+-		goto out ;
+-	}
+-	
+-	cdev_init(gpMcsPriv->pPonMciDev, &xmci_fops) ;
+-	gpMcsPriv->pPonMciDev->owner = THIS_MODULE ;
+-	gpMcsPriv->pPonMciDev->ops = &xmci_fops ;
+-	ret = cdev_add(gpMcsPriv->pPonMciDev, devNo, 1) ;
+-	if(ret < 0) {
+-		PON_MSG(MSG_ERR, "PON MCI driver register failed\n") ;
+-		goto out ;
+-	} 
+-
+-    /* init XMCS wait queue */
+-    init_waitqueue_head(&gpMcsPriv->xmcsWaitQueue) ;
+-    memset(&gpMcsPriv->xmcsEventStatus, 0, sizeof(struct XMCS_PonEventStatus_S)) ;
+-    gpMcsPriv->ctrlFlag.report_init_O1= 0;
+-    
+-    spin_lock_init(&gpMcsPriv->fdetLock) ;
+-
+-    PON_MSG(MSG_TRACE, "PON MCI initialization successful\n") ;
+-
+-	return ret ; 
+-
+-out:
+-	xpon_mci_destroy() ;
+-	return ret ;
+-}
++	dev_t devno = MKDEV(COSNT_XMCI_MAJOR_NUN, 0);
++	struct cdev *cdev;
++	int ret;
++
++	if (!gpMcsPriv)
++		return -ENODEV;
++	if (xmci_region_registered)
++		return -EALREADY;
++	/* Complete callback-visible state before publishing the cdev. */
++	init_waitqueue_head(&gpMcsPriv->xmcsWaitQueue);
++	memset(&gpMcsPriv->xmcsEventStatus, 0,
++	       sizeof(gpMcsPriv->xmcsEventStatus));
++	gpMcsPriv->ctrlFlag.report_init_O1 = 0;
++	spin_lock_init(&gpMcsPriv->fdetLock);
++
++	ret = register_chrdev_region(devno, 1, CONST_XMCI_DEV_NAME);
++	if (ret)
++		return ret;
++	xmci_region_registered = true;
++	cdev = cdev_alloc();
++	if (!cdev) {
++		ret = -ENOMEM;
++		goto unregister;
++	}
++	/* cdev_alloc supplies the dynamic kobject release function. Do not
++	 * overwrite it with cdev_init (which is for embedded/static cdevs).
++	 */
++	cdev->owner = THIS_MODULE;
++	cdev->ops = &xmci_fops;
++	ret = cdev_add(cdev, devno, 1);
++	if (ret) {
++		kobject_put(&cdev->kobj);
++		goto unregister;
++	}
++	gpMcsPriv->pPonMciDev = cdev;
++	return 0;
++unregister:
++	xpon_mci_destroy();
++	return ret;
++}
+--- a/xpon-en757x/xpon_10g/src/xpon_api.c
++++ b/xpon-en757x/xpon_10g/src/xpon_api.c
+@@ -138,6 +138,8 @@
+     ecnt_ret_val ret = ECNT_HOOK_ERROR;	
+ 	ECNT_XPON_CUSTOMER_Data_t *xpon_data = (ECNT_XPON_CUSTOMER_Data_t *)indata ;
+ 
++	if (!xpon_is_ready())
++		return -ENODEV;
+ 	if(NULL == indata){
+ 		printk("input param error!\n");
+ 		return -ENODEV;
+--- a/xpon-en757x/xpon_10g/src/xpon_daemon.c
++++ b/xpon-en757x/xpon_10g/src/xpon_daemon.c
+@@ -120,15 +120,11 @@
+ **____________________________________________________________________________*/
+ void xpon_daemon_quit(void)
+ {
+-	if(!IS_ERR(gpPonSysData->xpon_daemon.task)){
+-		XPON_DAEMON_Job_data_t job = {0};
+-		job.id		 = XPON_DAEMON_JOB_QUIT ;
+-		job.priority = XPON_DAEMON_JOB_PRIORITY_HIGH  ;
+-
+-		xpon_daemon_job_enqueue(&job)  ;	
+-		wake_up_xpon_daemon() ;
+-		kthread_stop(gpPonSysData->xpon_daemon.task);
+-	}
++	if (!gpPonSysData || IS_ERR_OR_NULL(gpPonSysData->xpon_daemon.task))
++		return;
++	/* kthread_stop wakes the waitqueue; a full job queue cannot block exit. */
++	kthread_stop(gpPonSysData->xpon_daemon.task);
++	gpPonSysData->xpon_daemon.task = NULL;
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -182,22 +178,23 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
+-static int xpon_daemon_job_dequeue(XPON_DAEMON_Job_data_t * job_data)
+-{
+-    XPON_DAEMON_Job_Queue_t * queue = &gpPonSysData->xpon_daemon.job_queue;
+-    
+-    uint idx = queue->out_index ;
+-    
+-    if(FALSE == queue->jobs[idx].valid) {
+-        return FALSE ;
+-    }
+-    
+-    *job_data = queue->jobs[idx].data ;
+-    mb() ;
+-    queue->jobs[idx].valid = FALSE ;
+-    queue->out_index = JOB_QUEUE_IDX_INC(queue->out_index) ;
+-    
+-    return TRUE;
++static int xpon_daemon_job_dequeue(XPON_DAEMON_Job_data_t *job_data)
++{
++	XPON_DAEMON_Job_Queue_t *queue = &gpPonSysData->xpon_daemon.job_queue;
++	unsigned long flags;
++	unsigned int idx;
++	int found = FALSE;
++
++	spin_lock_irqsave(&queue->lock, flags);
++	idx = queue->out_index;
++	if (queue->jobs[idx].valid) {
++		*job_data = queue->jobs[idx].data;
++		queue->jobs[idx].valid = FALSE;
++		queue->out_index = JOB_QUEUE_IDX_INC(idx);
++		found = TRUE;
++	}
++	spin_unlock_irqrestore(&queue->lock, flags);
++	return found;
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -214,11 +211,16 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
+-static inline int xpon_daemon_job_dequeue_not_empty(void)
+-{
+-    XPON_DAEMON_Job_Queue_t * queue = &gpPonSysData->xpon_daemon.job_queue;
+-
+-    return (TRUE == queue->jobs[queue->out_index].valid) ;
++static int xpon_daemon_job_dequeue_not_empty(void)
++{
++	XPON_DAEMON_Job_Queue_t *queue = &gpPonSysData->xpon_daemon.job_queue;
++	unsigned long flags;
++	int found;
++
++	spin_lock_irqsave(&queue->lock, flags);
++	found = queue->jobs[queue->out_index].valid;
++	spin_unlock_irqrestore(&queue->lock, flags);
++	return found;
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -328,7 +330,10 @@
+ 	while(!kthread_should_stop())
+ 	{
+         /* block until there is any job need to be done */
+-		wait_event_interruptible(gpPonSysData->xpon_daemon.wq,  xpon_daemon_job_dequeue_not_empty() ); 
++		wait_event_interruptible(gpPonSysData->xpon_daemon.wq,
++			kthread_should_stop() || xpon_daemon_job_dequeue_not_empty());
++		if (kthread_should_stop())
++			break; 
+         
+         /* because jobs have different priority, it needs to be sorted before run */
+         job_num = 0;
+@@ -350,7 +355,7 @@
+     
+         for(job_idx = 0; job_idx < job_num; job_idx ++)
+         {
+-            if(xpon_daemon_job_dispatch(&jobs[job_idx])!= XD_SUCCESS)
++            if(kthread_should_stop() || xpon_daemon_job_dispatch(&jobs[job_idx]) != XD_SUCCESS)
+                     return 0;
+         }
+ 	}
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -132,6 +132,16 @@
+ int mode = -1;
+ 	
+ module_param(mode, int, 0);
++
++static bool xpon_ready;
++static struct {
++	bool globals, monitor, wan, mci, epon, gpon, qdma, gasp, proc, hook, api;
++} xpon_owned;
++
++bool xpon_is_ready(void)
++{
++	return smp_load_acquire(&xpon_ready);
++}
+ /************************************************************************
+ *                  P R I V A T E   D A T A
+ *************************************************************************
+@@ -345,8 +355,9 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
+-static void xpondrv_init_global_data(void)
+-{	
++static int xpondrv_init_global_data(void)
++{
++	int ret;	
+ 	gpPonSysData->sysLinkStatus = PON_LINK_STATUS_OFF;
+ 	gpPonSysData->sysPrevLink   = PON_LINK_STATUS_OFF;
+     gpPonSysData->sysStartup    = PON_WAN_STOP ;
+@@ -360,7 +371,9 @@
+ 
+ 	gpPonSysData->debugLevel = 0 ;
+ 	
+-    UNION_IC_FUNCTION_HOOK(ONLINE_ACTION_PON_GET_ONU_MODE_TYPE,NULL,NULL);
++	ret = UNION_IC_FUNCTION_HOOK(ONLINE_ACTION_PON_GET_ONU_MODE_TYPE, NULL, NULL);
++	if (ret)
++		return ret;
+ 	if(mode != -1){
+ 		gpPonSysData->sysPonMode = mode;
+ 	}
+@@ -377,11 +390,8 @@
+ 	init_waitqueue_head(&gpPonSysData->xpon_daemon.wq) ;
+     memset(&gpPonSysData->xpon_daemon.job_queue, 0, sizeof(gpPonSysData->xpon_daemon.job_queue));
+     spin_lock_init(&gpPonSysData->xpon_daemon.job_queue.lock);    
+-	gpPonSysData->xpon_daemon.task= kthread_run(xpon_daemon, NULL, "xpon_daemon");
+-	if(IS_ERR(gpPonSysData->xpon_daemon.task))
+-	{		
+-		printk("@%s>>%d--xpon_daemon init failed\n", __FUNCTION__, __LINE__);
+-	}
++	/* Start the worker only after all state used by its jobs is ready. */
++	return 0;
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -399,33 +409,80 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
+-static void xpondrv_qdma_init(void)
+-{
+-	QDMA_InitCfg_t qdmaInitCfg;
+-		
+-	memset(&qdmaInitCfg, 0x0, sizeof(QDMA_InitCfg_t));
+-	
+-	qdmaInitCfg.cbRecvPkts = pwan_cb_rx_packet;
+-	qdmaInitCfg.cbEventHandler = pwan_cb_event_handler;
+-	
+-	QDMA_API_INIT(ECNT_QDMA_WAN, &qdmaInitCfg);
+-	
+-	/*if rmmod the xpon_10g,the QDMA WAN RX INT will be disabled,so we should enable it in case*/
+-	QDMA_API_ENABLE_RXPKT_INT(ECNT_QDMA_WAN) ;
+-	QDMA_API_TX_DMA_MODE(ECNT_QDMA_WAN, QDMA_ENABLE);
+-	QDMA_API_RX_DMA_MODE(ECNT_QDMA_WAN, QDMA_ENABLE);
+-	QDMA_API_LOOPBACK_MODE(ECNT_QDMA_WAN, QDMA_LOOPBACK_DISABLE) ;
+-	
++static int xpondrv_rx_packet(void *msg, uint msg_len, struct sk_buff *skb, uint len)
++{
++	int ret;
++
++	rcu_read_lock();
++	if (xpon_is_ready())
++		ret = pwan_cb_rx_packet(msg, msg_len, skb, len);
++	else {
++		dev_kfree_skb_any(skb);
++		ret = -ENODEV;
++	}
++	rcu_read_unlock();
++	return ret;
++}
++
++static int xpondrv_qdma_event(QDMA_EventType_t event)
++{
++	int ret = -ENODEV;
++
++	rcu_read_lock();
++	if (xpon_is_ready())
++		ret = pwan_cb_event_handler(event);
++	rcu_read_unlock();
++	return ret;
++}
++
++static void xpondrv_qdma_deinit(void);
++
++static int xpondrv_qdma_init(void)
++{
++	QDMA_InitCfg_t cfg = {0};
++	int ret;
++
++	cfg.cbRecvPkts = xpondrv_rx_packet;
++	cfg.cbEventHandler = xpondrv_qdma_event;
++	ret = QDMA_API_INIT(ECNT_QDMA_WAN, &cfg);
++	if (ret)
++		return ret;
++	xpon_owned.qdma = true;
++	ret = QDMA_API_ENABLE_RXPKT_INT(ECNT_QDMA_WAN);
++	if (ret)
++		goto detach;
++	ret = QDMA_API_TX_DMA_MODE(ECNT_QDMA_WAN, QDMA_ENABLE);
++	if (ret)
++		goto detach;
++	ret = QDMA_API_RX_DMA_MODE(ECNT_QDMA_WAN, QDMA_ENABLE);
++	if (ret)
++		goto detach;
++	ret = QDMA_API_LOOPBACK_MODE(ECNT_QDMA_WAN, QDMA_LOOPBACK_DISABLE);
++	if (!ret)
++		return 0;
++detach:
++	xpondrv_qdma_deinit();
++	return ret;
+ }
+ 
+ static void xpondrv_qdma_deinit(void)
+ {
+-	QDMA_InitCfg_t qdmaInitCfg;
+-	/*when rmmod the xpon_10g,we should disable QDMA WAN RX INT*/
+-	QDMA_API_DISABLE_RXPKT_INT(ECNT_QDMA_WAN) ;
+-	
+-	memset(&qdmaInitCfg, 0x0, sizeof(QDMA_InitCfg_t));
+-	QDMA_API_INIT(ECNT_QDMA_WAN, &qdmaInitCfg);
++	QDMA_InitCfg_t cfg = {0};
++	int ret;
++
++	if (!xpon_owned.qdma)
++		return;
++	/* The future native adapter must detach and drain callbacks here; its
++	 * shared DMA engine must remain under the Ethernet driver's ownership.
++	 * The legacy hook ABI alone does not guarantee either property.
++	 */
++	ret = QDMA_API_DISABLE_RXPKT_INT(ECNT_QDMA_WAN);
++	if (ret)
++		pr_err("xpon: QDMA interrupt detach failed: %d\n", ret);
++	ret = QDMA_API_INIT(ECNT_QDMA_WAN, &cfg);
++	if (ret)
++		pr_err("xpon: QDMA callback detach failed: %d\n", ret);
++	xpon_owned.qdma = false;
+ }
+ 
+ /*______________________________________________________________________________
+@@ -1011,8 +1068,7 @@
+             break;
+ #endif
+         default:
+-            panic("XPON MAC Driver not ready to receive event from module with id:%d pub_type:%d", data->src_module,data->pub_info.type);
+-            return ECNT_RETURN;
++            return -EOPNOTSUPP;
+     }
+ 
+     return ECNT_RETURN;
+@@ -1041,6 +1097,8 @@
+     int ret = 0;
+     xpon_mac_hook_data_t * data = (xpon_mac_hook_data_t *)in_data;
+     
++	if (!xpon_is_ready() || !data)
++		return -ENODEV;
+     switch (data->src_module)
+     {
+         case XPON_PHY_MODULE:
+@@ -1112,36 +1170,75 @@
+ **____________________________________________________________________________*/
+ static void xpondrv_cleanup(void)
+ {
+-#ifdef TCSUPPORT_CPU_ARMV8_64
+-		int irq = -1;
+-		struct device *dev = NULL ;
++	/* Close ingress before stopping workers or releasing callback state. */
++	smp_store_release(&xpon_ready, false);
++	if (!gpPonSysData)
++		return;
++	gpPonSysData->sysMACStartup = PON_MAC_STOP;
++	if (xpon_owned.gpon)
++		gpon_quiesce();
++	if (xpon_owned.hook) {
++		ecnt_unregister_hook(&xpondrv_hook_dispatch_ops);
++		xpon_owned.hook = false;
++	}
++	if (xpon_owned.api) {
++		xpon_api_deinit();
++		xpon_owned.api = false;
++	}
++	if (xpon_owned.gasp) {
++#ifdef TCSUPPORT_CPU_ARMV8
++		free_irq(get_xpon_irq(1), get_xpon_dev());
++#else
++		free_irq(DYINGGASP_INT, NULL);
+ #endif
+-
++		xpon_owned.gasp = false;
++	}
++	if (xpon_owned.wan)
++		pwan_quiesce();
++	xpondrv_qdma_deinit();
++	/* In-flight RX/event wrappers may have observed ready before closure. */
++	synchronize_rcu();
++	if (xpon_owned.proc) {
++		xpon_proc_dest();
++		xpon_owned.proc = false;
++	}
++	if (xpon_owned.mci) {
++		xpon_mci_destroy();
++		xpon_owned.mci = false;
++	}
++	if (xpon_owned.globals) {
++		timer_shutdown_sync(&gpPhyData->trans_status_refresh_timer);
++		timer_shutdown_sync(&gpPhyData->traffic_status_refresh_timer);
++	}
+ 	xpon_daemon_quit();
+-    gpon_deinit();
+-    xpon_proc_dest();    
+-    epon_deinit();       
+-    stop_omci_oam_monitor();
+-
+-#ifdef TCSUPPORT_CPU_ARMV8
+-	irq = get_xpon_irq(1);
+-	dev = get_xpon_dev();
+-	free_irq(irq, dev);
+-#else
+-    free_irq(DYINGGASP_INT, NULL);
+-#endif
+-
+-    xpon_mci_destroy();
+-    pwan_destroy(); 
+-	xpondrv_qdma_deinit();
+-    ecnt_unregister_hook(&xpondrv_hook_dispatch_ops);
+-    xpon_api_deinit();
+-	XPON_STOP_TIMER(gpPhyData->trans_status_refresh_timer) ;
+-	XPON_STOP_TIMER(gpPhyData->traffic_status_refresh_timer) ;
+-    if(gpPonSysData != NULL) {
+-        kfree(gpPonSysData) ;
+-        gpPonSysData = NULL ;
+-    }
++	if (xpon_owned.monitor) {
++		stop_omci_oam_monitor();
++		timer_shutdown_sync(&gpPonSysData->Omci_Oam_Monitor.xponCntRxPkt);
++		xpon_owned.monitor = false;
++	}
++	if (xpon_owned.gpon)
++		gpon_stop_work();
++	if (xpon_owned.wan) {
++		pwan_destroy();
++		xpon_owned.wan = false;
++	}
++	if (xpon_owned.gpon) {
++		gpon_deinit();
++		xpon_owned.gpon = false;
++	}
++	if (xpon_owned.epon) {
++		epon_deinit();
++		xpon_owned.epon = false;
++	}
++	/* No cached alias may survive release of the containing allocation. */
++	kfree(gpPonSysData);
++	gpPonSysData = NULL;
++	gpPhyData = NULL;
++	gpWanPriv = NULL;
++	gpMcsPriv = NULL;
++	gpGponPriv = NULL;
++	gpEponPriv = NULL;
++	xpon_owned.globals = false;
+ }
+ 
+ /*______________________________________________________________________________
+@@ -1174,102 +1271,91 @@
+ **____________________________________________________________________________*/
+ static int xpondrv_init(void)
+ {
++	int ret;
+ #ifdef Q1000K_PON_IDENTITY
+-	int identity_ret = q1000k_pon_identity_init();
+-
+-	if (identity_ret)
+-		return identity_ret;
++	ret = q1000k_pon_identity_init();
++	if (ret)
++		return ret;
+ 	if (mode != -1 && mode != XMCS_IF_WAN_DETECT_MODE_XGSPON)
+ 		return -EOPNOTSUPP;
+ #endif
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+-	/* A platform driver can register successfully without binding a device. */
+ 	if (!get_xpon_dev() || get_xpon_irq(0) < 0 || get_xpon_irq(1) < 0)
+ 		return -ENODEV;
+-	/* Missing dynamic hooks are not reported by the module linker. */
+ 	if (!ecnt_hook_is_registered(ECNT_QDMA_WAN, ECNT_DRIVER_API) ||
+ 	    !ecnt_hook_is_registered(ECNT_FE, ECNT_FE_API))
+ 		return -ENODEV;
+ #endif
+-
+-	printk("xPON driver initialing.\n");
+-	
+-    INIT_LIST_HEAD(&fix_reg_list);
+-
+-	if(init_union_ic_function() != 0)
+-	{
+-		printk("Init UNION IC Table failed\n") ;
+-		goto ret ;
+-	}
+-
+-	/* initial the global data memory */
+-	gpPonSysData = (PON_SysData_T *)kmalloc(sizeof(PON_SysData_T), GFP_KERNEL) ;
+-	if(gpPonSysData == NULL){
+-		printk("Alloc data struct memory failed\n") ;
+-		goto ret ;
+-	}
+-	else{
+-		memset(gpPonSysData, 0x0, sizeof(PON_SysData_T));
+-		XPON_DPRINT_MSG("Alloc data struct memory successful, %d\n", (uint)sizeof(PON_SysData_T)) ;
+-		xpondrv_init_global_data() ;
+-	}
+-
+-    omci_oam_monitor_init(&gpPonSysData->Omci_Oam_Monitor) ;
+-
+-	/* WAN/OAM/OMCI interface driver initizliation */
+-	if(pwan_init() != 0){
+-		printk("XPON WAN/OAM/OMCI interface driver initialization failed\n") ;
+-		goto ret ;
+-	}	
+-
+-	/* XPON character device driver initizliation */
+-	if(xpon_mci_init() != 0) {
+-		printk("PON monitor and control interface driver initialization failed\n") ;
+-		goto ret ;
+-	}
+-	if (ECNT_REGISTER_SUCCESS != ecnt_register_hook(&xpondrv_hook_dispatch_ops)){
+-        panic("Register hook function failed! %s:%d", __FUNCTION__, __LINE__);
+-	}
+-	/* EPON initialization */
+-	if(epon_init() != 0) {
+-		printk("EPON initialization failed\n");
+-		goto ret ;
+-	}
+-	/* GPON initialization */
+-	if(gpon_init() != 0){
+-		printk("GPON initialization failed\n") ;
+-		goto ret ;
+-	}
+-	
+-	xpondrv_qdma_init();
+-
+-	if(xpon_dying_gasp_init() != 0) {
+-		printk("xpon dying gasp initialization failed\n") ;
+-		goto ret ;
+-	}
+-	
+-	if(xpon_proc_init() != 0){
+-		printk("xpon vlan filter initialization failed\n") ;
+-		goto ret ;
+-	}
+-
+-        /*LED flicker*/ 
+-        change_alarm_led_status(LED_FLICKER);
+-
++	INIT_LIST_HEAD(&fix_reg_list);
++	ret = init_union_ic_function();
++	if (ret)
++		return ret;
++	gpPonSysData = kzalloc(sizeof(*gpPonSysData), GFP_KERNEL);
++	if (!gpPonSysData)
++		return -ENOMEM;
++	ret = xpondrv_init_global_data();
++	if (ret)
++		goto fail;
++	xpon_owned.globals = true;
++	omci_oam_monitor_init(&gpPonSysData->Omci_Oam_Monitor);
++	xpon_owned.monitor = true;
++	ret = pwan_init();
++	if (ret)
++		goto fail;
++	xpon_owned.wan = true;
++	ret = xpon_mci_init();
++	if (ret)
++		goto fail;
++	xpon_owned.mci = true;
++#ifndef Q1000K_PON_IDENTITY
++	ret = epon_init();
++	if (ret)
++		goto fail;
++	xpon_owned.epon = true;
++#endif
++	ret = gpon_init();
++	if (ret)
++		goto fail;
++	xpon_owned.gpon = true;
++	ret = xpondrv_qdma_init();
++	if (ret)
++		goto fail;
++	ret = xpon_dying_gasp_init();
++	if (ret)
++		goto fail;
++	xpon_owned.gasp = true;
++	ret = xpon_proc_init();
++	if (ret)
++		goto fail;
++	xpon_owned.proc = true;
++	ret = ecnt_register_hook(&xpondrv_hook_dispatch_ops);
++	if (ret != ECNT_REGISTER_SUCCESS) {
++		ret = -EBUSY;
++		goto fail;
++	}
++	xpon_owned.hook = true;
++	ret = xpon_api_init();
++	if (ret)
++		goto fail;
++	xpon_owned.api = true;
++	gpPonSysData->xpon_daemon.task = kthread_run(xpon_daemon, NULL, "xpon_daemon");
++	if (IS_ERR(gpPonSysData->xpon_daemon.task)) {
++		ret = PTR_ERR(gpPonSysData->xpon_daemon.task);
++		gpPonSysData->xpon_daemon.task = NULL;
++		goto fail;
++	}
++	/* No fallible startup step follows publication. */
+ 	gpPonSysData->sysMACStartup = PON_MAC_START;
+-	XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer,1000) ;/* 1,000 ms */
+-
+-	if(xpon_api_init() != 0){
+-		printk("xpon api initialization failed\n") ;
+-		goto ret ;
+-	}
+-
+-   	printk("%s\n", MODULE_VERSION_10GXPONMAC);	
+-	return 0;	
+-	
+-ret:
+-	xpondrv_cleanup() ;
+-	return -EFAULT ;
++	smp_store_release(&xpon_ready, true);
++	gpon_start_interrupts();
++	change_alarm_led_status(LED_FLICKER);
++	XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer, 1000);
++	pr_info("%s\n", MODULE_VERSION_10GXPONMAC);
++	return 0;
++fail:
++	pr_err("xpon: initialization failed: %d\n", ret);
++	xpondrv_cleanup();
++	return ret;
+ }
+ 
+ module_init(xpondrv_init)

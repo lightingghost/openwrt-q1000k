@@ -127,8 +127,37 @@ only after success (direct output pointers remain the provider's contract).
 The MAC rejects absent QDMA WAN/FE providers before initializing hardware.
 This is only a readiness snapshot: it neither pins callback registration nor
 proves that all required operations exist. Many old callers still ignore API
-errors, and shared DMA start/stop plus partial-initialization cleanup must be
-replaced by a proper consumer lifecycle before the vendor stack is enabled.
+errors, and shared DMA start/stop must be replaced by a proper consumer
+lifecycle before the vendor stack is enabled.
+
+Patch 012 tracks completed MAC startup stages and preserves failure codes.
+Netdev open and hook/RX/event dispatch remain closed until the worker and all
+state are initialized; protocol interrupts are enabled after publication.
+On teardown it closes ingress, masks protocol interrupts, unregisters hooks,
+frees the acquired dying-gasp IRQ, closes WAN interfaces (including NAPI),
+detaches the legacy QDMA callbacks and waits for RCU readers. It then removes
+user interfaces, shuts down timers, stops the worker and releases WAN,
+protocol and crypto state. All cached aliases are cleared before returning.
+The idle worker can stop without enqueuing a synthetic quit job, including
+when its queue is full. Producers and the consumer use the same queue lock.
+
+Nested WAN initialization now propagates OMCI/OAM/EAPOL creation failures and
+unwinds already-created interfaces and GPON work. The dynamic MCI cdev retains
+the release function supplied by `cdev_alloc`; failed publication drops its
+kobject reference, and only acquired device numbers are unregistered.
+Crypto allocation occurs before PHY mode setup or protocol interrupt enable.
+Protocol teardown also shuts down the previously omitted hardware and silence
+timers, and drains tasklets before releasing their data.
+
+These are software lifetime fixes, **not hardware rollback or a completed
+transport attachment**. Legacy QDMA callback replacement has no documented
+provider pin or synchronous detach contract. Detach errors are now logged;
+they cannot make module unload safe by themselves. Before enabling this
+package, replace those hooks with a native Ethernet consumer API that owns and
+drains callbacks, preserves LAN DMA state, and prevents provider removal from
+leaving references to unloaded code. Reset/clock/analog sequencing and ignored
+FE/PHY operation errors remain separate blockers. No vendor module was loaded
+to test the lifecycle changes.
 
 ## MAC identity handoff
 
