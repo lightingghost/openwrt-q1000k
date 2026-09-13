@@ -205,15 +205,17 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 {
 	struct q1000k_pon *pon = dev_get_drvdata(dev);
 	const char *los = "null";
-	u32 mcu, tx;
+	struct en7573_state state = { .md32_enabled = -1, .tx_disabled = -1 };
 	int ret = 0;
 	ssize_t size;
 	mutex_lock(&pon->lock);
+	if (pon->mode == -1) {
+		state.md32_enabled = 0;
+		state.tx_disabled = 1;
+	}
 	if (pon->initialized) {
-		ret = en7573_read_control(&pon->io, EN7573_MCU_ENABLE, &mcu);
-		if (!ret)
-			ret = en7573_read_control(&pon->io, EN7573_TX_CONTROL, &tx);
-		if (!ret && (!(mcu & 1) || !(tx & EN7573_TX_DISABLE)))
+		ret = en7573_sample_state(&pon->io, &state);
+		if (!ret && (!state.md32_enabled || !state.tx_disabled))
 			ret = -EIO;
 		if (!ret) {
 			ret = gpiod_get_value_cansleep(pon->los[1]);
@@ -221,12 +223,6 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 				los = ret ? "true" : "false";
 				ret = 0;
 			}
-		}
-		if (ret) {
-			int off_ret = pon_off(pon);
-			if (off_ret)
-				dev_err(dev, "power-off failed: %d\n", off_ret);
-			pon->last_error = ret;
 		}
 	}
 	size = sysfs_emit(buffer,
@@ -237,10 +233,9 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 		pon->mode == -2 ? "unknown" : pon->mode == -1 ? "off" : pon->mode ? "xgspon" : "gpon",
 		detected_json(pon->detected[0]), detected_json(pon->detected[1]),
 		pon->id[0], pon->id[1], pon->checked_at,
-		pon->mode == -2 ? "null" : pon->initialized ? "true" : "false",
-		pon->mode == -1 || pon->initialized ? "true" : "null",
+		detected_json(state.md32_enabled), detected_json(state.tx_disabled),
 		pon->calibration_valid ? "true" : "false",
-		pon->initialized ? "true" : "false", los, pon->last_error, pon->stage);
+		pon->initialized ? "true" : "false", los, ret ? ret : pon->last_error, pon->stage);
 	mutex_unlock(&pon->lock);
 	return size;
 }

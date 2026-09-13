@@ -44,8 +44,12 @@ Discover the single `*-0051` child under
   hashes and complete memory readback passed in this initialization.
   `tx_disabled` is true after power-off or a successful initialized-state
   check; it is null when the state cannot be established. `los` is only
-  sampled after initialization. A failed control check powers off and
-  reports `last_error` as negative Linux errno. `stage` identifies the
+  sampled after initialization. Reading status never powers, selects, resets
+  or writes controller registers. Failed register reads report unknown MCU/TX
+  values and `last_error` as negative Linux errno. Unexpected MCU/TX bits are
+  reported as sampled, with `last_error = -EIO`. An operator must explicitly
+  request `off` to shut down; polling is not a protection mechanism.
+  `stage` identifies the
   operation stage; it does not imply optical service readiness.
 - `calibration` accepts one offset-zero write of exactly 513 bytes. The
   factory reader provides this unit's record. The first 512 bytes must not
@@ -104,3 +108,5 @@ The test executes the production loader with synthetic firmware and an I2C
 memory model. It checks address spaces, byte order, exact calibration,
 padding, readback rejection, no MCU enable before successful verification,
 invalid input rejection and immediate error propagation at every transfer.
+State sampling is tested with no write/delay callbacks, all four MCU/TX bit
+combinations and failures of either register read; stale values become unknown.

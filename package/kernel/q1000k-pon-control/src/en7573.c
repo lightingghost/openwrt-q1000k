@@ -26,6 +26,24 @@ int en7573_read_control(struct en7573_io *io, u16 reg, u32 *value)
 	return ret;
 }
 
+int en7573_sample_state(struct en7573_io *io, struct en7573_state *state)
+{
+	u32 mcu, tx;
+	int ret;
+
+	state->md32_enabled = -1;
+	state->tx_disabled = -1;
+	ret = en7573_read_control(io, EN7573_MCU_ENABLE, &mcu);
+	if (ret)
+		return ret;
+	ret = en7573_read_control(io, EN7573_TX_CONTROL, &tx);
+	if (ret)
+		return ret;
+	state->md32_enabled = !!(mcu & 1);
+	state->tx_disabled = !!(tx & EN7573_TX_DISABLE);
+	return 0;
+}
+
 static int write_control(struct en7573_io *io, u16 reg, u32 value)
 {
 	u8 data[] = { value, value >> 8, value >> 16, value >> 24 };

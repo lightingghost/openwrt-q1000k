@@ -35,8 +35,15 @@ struct en7573_io {
 	void (*delay_ms)(void *ctx, unsigned int ms);
 };
 
+/* A failed sample leaves both values unknown (-1). Sampling never writes. */
+struct en7573_state {
+	int md32_enabled;
+	int tx_disabled;
+};
+
 int en7573_identify(struct en7573_io *io, u16 *id);
 int en7573_read_control(struct en7573_io *io, u16 reg, u32 *value);
+int en7573_sample_state(struct en7573_io *io, struct en7573_state *state);
 int en7573_load(struct en7573_io *io, const u8 *pm, size_t pm_size,
 		const u8 *dm, size_t dm_size, const u8 *cal);
 int en7573_start_tx_disabled(struct en7573_io *io);

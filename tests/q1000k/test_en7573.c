@@ -81,6 +81,35 @@ static int wr(void *ctx, u8 dev, u16 reg, const u8 *buf, size_t len)
 
 static void delay(void *ctx, unsigned int ms) { (void)ctx; assert(ms == 100 || ms == 500); }
 
+static void test_read_only_state(void)
+{
+	struct model m = {0};
+	/* Any attempted write or delay would call a NULL function pointer. */
+	struct en7573_io io = { .ctx = &m, .read = rd };
+	struct en7573_state state;
+	unsigned int mcu, tx, fail;
+
+	for (mcu = 0; mcu < 2; mcu++) {
+		for (tx = 0; tx < 2; tx++) {
+			m.regs[EN7573_MCU_ENABLE / 4] = mcu;
+			m.regs[EN7573_TX_CONTROL / 4] = tx ? EN7573_TX_DISABLE : 0;
+			assert(!en7573_sample_state(&io, &state));
+			assert(state.md32_enabled == (int)mcu);
+			assert(state.tx_disabled == (int)tx);
+		}
+	}
+	for (fail = 1; fail <= 2; fail++) {
+		m.calls = 0;
+		m.fail_at = fail;
+		state.md32_enabled = state.tx_disabled = 1;
+		assert(en7573_sample_state(&io, &state) == -EREMOTEIO);
+		assert(state.md32_enabled == -1 && state.tx_disabled == -1);
+		assert(m.calls == fail);
+		assert(m.regs[EN7573_MCU_ENABLE / 4] == 1);
+		assert(m.regs[EN7573_TX_CONTROL / 4] == EN7573_TX_DISABLE);
+	}
+}
+
 int main(void)
 {
 	struct model m = {0};
@@ -121,6 +150,8 @@ int main(void)
 	assert(en7573_load(&io, pm, EN7573_PM_SIZE + 1, dm, sizeof(dm), cal) == -EINVAL);
 	assert(en7573_load(&io, pm, sizeof(pm), dm, EN7573_CAL_ADDRESS + 1, cal) == -EINVAL);
 	assert(m.calls == 0);
+	test_read_only_state();
 	printf("EN7573 loader: layout, addressing, readback and %u I2C failure points passed\n", calls);
+	puts("EN7573 status: read-only samples and read failures passed");
 	return 0;
 }
