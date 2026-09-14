@@ -14,6 +14,8 @@ void q1000k_omci_backend_cleanup(void);
 /* These request functions require protocol ownership and copy their inputs. */
 int q1000k_omci_profile(const u8 tag[8], u8 sequence, bool acknowledge);
 int q1000k_omci_assign(u16 onu);
+/* Verify the hardware registration-key transition before publishing it. */
+int q1000k_omci_registration_keys(void);
 int q1000k_omci_alloc_changed(void);
 void q1000k_omci_state(void);
 /* Ordered protocol control callback, invoked without the executor mutex. */

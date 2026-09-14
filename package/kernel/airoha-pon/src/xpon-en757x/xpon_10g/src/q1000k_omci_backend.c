@@ -250,6 +250,44 @@ int q1000k_omci_assign(u16 onu)
 	return qomci_request(b);
 }
 
+int q1000k_omci_registration_keys(void)
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+	GPON_Security_t *security;
+	u8 ploam, omci;
+	int ret;
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	if (!b)
+		return -ENODEV;
+	if (GPON_CURR_STATE != GPON_10G_STATE_O4 && GPON_CURR_STATE != GPON_10G_STATE_O5)
+		return -EINVAL;
+	security = &gpGponPriv->gponSecurity;
+	if (!b->keys_valid || b->request.reset || security->smaValid != GPON_SMA_INVALID)
+		ret = -ENOKEY;
+	else {
+		ret = q1000k_mac_key_indices(&ploam, &omci);
+		/* Ranging/registration uses the registration-derived bank zero.
+		 * A partial switch cannot publish a usable integrity/KEK epoch.
+		 */
+		if (!ret && (ploam || omci))
+			ret = -EKEYREJECTED;
+	}
+	if (ret) {
+		qomci_close(b);
+		q1000k_protocol_fail(ret);
+		return ret;
+	}
+	if (!security->ploamIkIdx && !security->omciIkIdx && !security->kekIdx &&
+	    security->registerIDState == GPON_REG_ID_REPORTED)
+		return 0;
+	qomci_close(b);
+	security->ploamIkIdx = security->omciIkIdx = security->kekIdx = 0;
+	security->registerIDState = GPON_REG_ID_REPORTED;
+	return qomci_request(b);
+}
+
 void q1000k_omci_state(void)
 {
 	struct qomci_backend *b = rcu_access_pointer(qomci_current);

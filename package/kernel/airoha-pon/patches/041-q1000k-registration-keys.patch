@@ -1,0 +1,328 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: verify registration key selectors before publishing authentication
+
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_security.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_security.c
+@@ -47,7 +47,11 @@
+ #include <crypto/skcipher.h>
+ #include <linux/spinlock.h>
+ #include <linux/string.h>
+-#include "common/xpon_global.h"
++#include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_omci_backend.h"
++#include "common/q1000k_protocol.h"
++#endif
+ #include "gpon/gpon_security.h"
+ 
+ 
+@@ -390,6 +394,17 @@
+ **____________________________________________________________________________*/
+ void gpon_key_index_change_by_hw(GPON_Security_t *gponSecurity)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int ret;
++
++	if (gponSecurity != &gpGponPriv->gponSecurity) {
++		q1000k_protocol_fail(-EINVAL);
++		return;
++	}
++	ret = q1000k_omci_registration_keys();
++	if (ret)
++		q1000k_protocol_fail(ret);
++#else
+ 	unchar ploamIkIdx = 0;
+ 	unchar omciIkIdx = 0;
+ 	
+@@ -409,6 +424,8 @@
+ 		}
+         gponSecurity->registerIDState = GPON_REG_ID_REPORTED;
+ 	}	
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -429,6 +446,10 @@
+ **____________________________________________________________________________*/
+ void gpon_ploamIk_index_change_by_OMCI_base_secure(GPON_Security_t *gponSecurity)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Mutual-authentication rekey needs its own drained key transaction. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	unchar ploamIkIdx = 0;
+ 
+ 	PON_MSG(MSG_SECUR, "key index change by OMCI_base secure \n");
+@@ -437,6 +458,8 @@
+     gponSecurity->ploamIkIdx = (gponSecurity->ploamIkIdx == GPON_PLOAM_IK_IDX0)? GPON_PLOAM_IK_IDX1 : GPON_PLOAM_IK_IDX0;
+     gponSecurity->kekIdx = (gponSecurity->kekIdx == GPON_KEK_IK_IDX0)? GPON_KEK_IK_IDX1 : GPON_KEK_IK_IDX0;
+     gponDevSetPloamIkIdx(gponSecurity->ploamIkIdx);   
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -457,6 +480,10 @@
+ **____________________________________________________________________________*/
+ void gpon_omciIk_index_change_by_OMCI_base_secure(GPON_Security_t *gponSecurity)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Mutual-authentication rekey needs its own drained key transaction. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	unchar omciIkIdx = 0;
+ 
+ 	PON_MSG(MSG_SECUR, "key index change by OMCI_base secure \n");
+@@ -471,6 +498,8 @@
+ 		gponSecurity->omciIkIdx = GPON_OMCI_IK_IDX0;
+ 		gponDevSetOmciIkIdx(GPON_OMCI_IK_IDX0);
+ 	}
++
++#endif
+ }
+ /*_____________________________________________________________________________
+ **      function name: 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -838,6 +838,10 @@
+ 			}
+ 			if(intStatus.Bits.o4_ranging_req_recv_int) {			
+ 				gpon_key_index_change_by_hw(&gpGponPriv->gponSecurity);
++#ifdef Q1000K_PON_IDENTITY
++				if (q1000k_protocol_status())
++					return;
++#endif
+ 				PON_MSG((MSG_INT|MSG_ACT), "XGPON IRQ: Ranging_Request received interrupt.\n") ;
+ 			}
+ 			if(intStatus.Bits.o4_registration_send_int) {
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -533,6 +533,11 @@
+ 	    new_state != GPON_10G_STATE_O5) {
+ 		ret = -EOPNOTSUPP;
+ 		goto out;
++	}
++	if (new_state == GPON_10G_STATE_O5) {
++		ret = q1000k_omci_registration_keys();
++		if (ret)
++			goto out;
+ 	}
+ 	ret = q1000k_mac_activation_set(new_state);
+ 	if (!ret && new_state == GPON_10G_STATE_O2_3)
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -929,6 +929,24 @@
+ **____________________________________________________________________________*/
+ static int ploam_recv_request_registration(PLOAM_RAW_Request_Registration_T *pReqRegistMsg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	u16 dest;
++	int ret;
++
++	if (!pReqRegistMsg)
++		return -EINVAL;
++	if (!q1000k_protocol_owned())
++		return -EPERM;
++	dest = (u16)pReqRegistMsg->raw.dest_id[0] << 8 | pReqRegistMsg->raw.dest_id[1];
++	if (dest != GPON_ONU_ID || GPON_CURR_STATE != GPON_10G_STATE_O5)
++		return -EINVAL;
++	ret = q1000k_omci_registration_keys();
++	if (ret)
++		return ret;
++	/* Repeated requests retain the verified bank; never toggle indices. */
++	ploam_send_registration_msg(pReqRegistMsg->raw.seq_no, gpGponPriv->gponCfg.reg_id);
++	return q1000k_protocol_status();
++#else
+ 	uint msgDestId = 0;
+ 	
+ 	GPON_PLOAM_MSG_RAW(MSG_OAM,"PLOAM: Receive request registration ploam message:", pReqRegistMsg->value,PLOAM_DOWN_MSG_LENGTH);
+@@ -961,6 +979,8 @@
+ 		ploam_send_registration_msg(pReqRegistMsg->raw.seq_no,gpGponPriv->gponCfg.reg_id) ;
+ 	}
+ 	return 0 ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -1183,6 +1183,9 @@
+ ******************************************************************************/
+ int gponDevSetErrMicPloamDrop(XPON_Mode_t mode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 	REG_EPDROP_EN gponMicDrop ;
+ 	
+ 	if(mode != XPON_DISABLE && mode != XPON_ENABLE) {
+@@ -1193,6 +1196,8 @@
+ 	IO_SREG(EPDROP_EN, gponMicDrop.Raw) ;
+ 
+ 	return 0;
++
++#endif
+ }
+ 
+ /*****************************************************************************
+@@ -1647,6 +1652,10 @@
+ Ret Value:     none.
+ ******************************************************************************/
+ void gponDevSetPloamIkIdx(unchar index){
++#ifdef Q1000K_PON_IDENTITY
++	/* Key selection and software MIC mode belong to the OMCI owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 
+ 	REG_SW_SET_KIDX gponKeyIdx;
+ 
+@@ -1655,6 +1664,8 @@
+ 	gponKeyIdx.Bits.sw_set_pik_en = 1 ;
+ 	IO_SREG(SW_SET_KIDX, gponKeyIdx.Raw) ;
+ 
++
++#endif
+ }
+ /*****************************************************************************
+ Descriptor:    get the PLOAM_IK index
+@@ -1674,6 +1685,10 @@
+ Ret Value:     none.
+ ******************************************************************************/
+ void gponDevSetOmciIkIdx(unchar index){
++#ifdef Q1000K_PON_IDENTITY
++	/* Key selection and software MIC mode belong to the OMCI owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 
+ 	REG_SW_SET_KIDX gponKeyIdx;
+ 	
+@@ -1681,6 +1696,8 @@
+ 	gponKeyIdx.Bits.sw_set_oik_idx = index ;
+ 	gponKeyIdx.Bits.sw_set_oik_en = 1 ;	
+ 	IO_SREG(SW_SET_KIDX, gponKeyIdx.Raw) ;
++
++#endif
+ }
+ /*****************************************************************************
+ Descriptor:    get the OMCI_IK index
+@@ -3217,12 +3234,18 @@
+ ******************************************************************************/
+ void gponDevSetDownstreamOmciMicCtrl(XGPON_SW_HW_SELECT_T ctrl)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Key selection and software MIC mode belong to the OMCI owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+     REG_DBG_CAP_SETTING		gponOmciMicCtrl;
+ 
+     gponOmciMicCtrl.Raw =	IO_GREG(DBG_CAP_SETTING);
+ 	gponOmciMicCtrl.Bits.hw_cal_ds_omci_mic = (ctrl == XGPON_HW) ? 1 : 0;
+ 	IO_SREG(DBG_CAP_SETTING, gponOmciMicCtrl.Raw) ;
+     omciMicErrSwCnt = 0;
++
++#endif
+ }
+ 
+ /******************************************************************************
+@@ -3232,11 +3255,17 @@
+ ******************************************************************************/
+ void gponDevSetUpstreamOmciMicCtrl(XGPON_SW_HW_SELECT_T ctrl)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Key selection and software MIC mode belong to the OMCI owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+     REG_DBG_CAP_SETTING		gponOmciMicCtrl;
+     
+     gponOmciMicCtrl.Raw =	IO_GREG(DBG_CAP_SETTING);
+ 	gponOmciMicCtrl.Bits.hw_cal_us_omci_mic = (ctrl == XGPON_HW) ? 1 : 0;
+ 	IO_SREG(DBG_CAP_SETTING, gponOmciMicCtrl.Raw) ;
++
++#endif
+ }
+ 
+ /******************************************************************************
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_gpon.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_gpon.c
+@@ -215,7 +215,11 @@
+ /*****************************************************************************
+ ******************************************************************************/
+ static int xmcs_set_msk(struct XGMCS_XgponMsk_S *pMsk) 
+-{	
++{
++#ifdef Q1000K_PON_IDENTITY
++	/* Reject before modifying cached keys, hardware or authentication policy. */
++	return -EOPNOTSUPP;
++#else	
+ 	/* Compare the msk */
+ 	if(memcmp(gpGponPriv->gponSecurity.msk, pMsk->msk, GPON_MSK_LENS) == 0) {
+ 		PON_MSG((MSG_SECUR), "PLOAM: The msk is same\n") ;
+@@ -231,11 +235,17 @@
+ 	gpGponPriv->gponSecurity.smaValid = GPON_SMA_VALID;
+ 	
+ 	return 0 ;
++
++#endif
+ }
+ /*****************************************************************************
+ ******************************************************************************/
+ static int xmcs_set_broadcast_key(struct XGMCS_XgponBroadcast_Key_S *pBroadcasetKey) 
+-{	
++{
++#ifdef Q1000K_PON_IDENTITY
++	/* Reject before modifying cached keys, hardware or authentication policy. */
++	return -EOPNOTSUPP;
++#else	
+ 	uint i = 0;
+ 	
+ 	printk("ioctl set broadcast keyindex: %d FragmentNum:%d FragmentIndex:%d\n key:",pBroadcasetKey->keyIndex,pBroadcasetKey->keyFragmentNum,pBroadcasetKey->keyFragmentIndex);
+@@ -246,6 +256,8 @@
+ 	printk("\n");
+ 	
+ 	return 0 ;
++
++#endif
+ }
+ /***************************************************************
+ ***************************************************************/
+@@ -479,12 +491,18 @@
+ ***************************************************************/
+ int xmcs_set_omci_mic_ctrl(GPON_10G_DEV_OMCI_MIC_CTRL_T *omciMicCtrl)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Reject before modifying cached keys, hardware or authentication policy. */
++	return -EOPNOTSUPP;
++#else
+     gpGponPriv->gponCfg.dsOmciMicCtrl = omciMicCtrl->dsOmciMicMode;    
+     gpGponPriv->gponCfg.usOmciMicCtrl = omciMicCtrl->usOmciMicMode;
+     gponDevSetDownstreamOmciMicCtrl(omciMicCtrl->dsOmciMicMode);
+     gponDevSetUpstreamOmciMicCtrl(omciMicCtrl->usOmciMicMode);
+     
+     return 0 ;    
++
++#endif
+ }
+ /***************************************************************
+ ***************************************************************/
+@@ -498,6 +516,10 @@
+ ***************************************************************/
+ int xmcs_set_omci_broadcast_key(struct XMCS_OMCI_BROADCAST_KEY_S * pOmciBroadCastKey)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Reject before modifying cached keys, hardware or authentication policy. */
++	return -EOPNOTSUPP;
++#else
+     __u8 *fragment = NULL;
+ 	uint ret = 0;
+  	unchar broadcastKey[16]={0};	
+@@ -530,6 +552,8 @@
+     }
+     
+     return 0;
++
++#endif
+ }
+ 
+ /***************************************************************

@@ -1194,3 +1194,24 @@ tests pass with lockdep enabled. Matching controller and vendor AArch64 packages
 build successfully. This checkpoint does not remove the remaining
 legacy FE/QDMA startup gate; key-transition and remaining default-call audits
 continue before enabling that path. No device access occurred.
+
+## Verified registration-key transitions
+
+Vendor r44 uses a single checked read of the hardware PLOAM/OMCI selectors
+before accepting ranging or entering O5. Both must select registration-derived
+bank zero. Partial switches, read faults and unavailable keys close admission
+and contain the protocol; software indices and registration-reported state
+remain unchanged. A verified switch updates PLOAM, OMCI and KEK together and
+requests the existing ordered authentication boundary.
+
+Repeated Request_Registration messages in O5 retain that verified bank and send
+the requested registration reply. They no longer toggle software indices.
+Legacy userspace MSK, broadcast-key and MIC-mode writes reject before changing
+cached security state. Direct legacy selector setters cannot bypass the owner.
+Mutual-authentication rekey and data-encryption provisioning still need separate
+transactions; this checkpoint does not claim those modes work.
+
+All 56 host tests pass, including selector-pair failures, read failures, repeated
+requests, no publication after a failed O5 transition and unsupported security
+writes. The complete AArch64 vendor package builds successfully. No device
+access occurred; the remaining FE/QDMA and PHY default-call audit continues.

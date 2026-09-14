@@ -39,6 +39,7 @@ typedef uint64_t u64;
 #define UPAES_MODE_NONE 0
 #define GPON_SMA_INVALID 0
 #define GPON_REG_ID_NOT_REPORT 0
+#define GPON_REG_ID_REPORTED 1
 #define KEY_STATE_KN0 0
 #define XMCS_EVENT_TYPE_GPON 1
 #define XMCS_EVENT_GPON_STATE_CHANGE 2
@@ -86,6 +87,7 @@ static int ack_count, resets, service_resets, live_skb, native_error, derivation
 static int request_during_barrier, assign_count, refresh_count;
 static bool services_enabled, install_phase, optical_tx;
 static int cold_count;
+static u8 hw_ploam_index, hw_omci_index;
 int snSendInO23Cnt;
 static u16 hardware_onu;
 static u64 native_epoch,native_last;
@@ -201,6 +203,9 @@ int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u
     memset(keys,0,sizeof(*keys)); memcpy(keys->pon_tag,tag,8); memset(keys->bank[0].omci,0x30,16); memset(keys->bank[1].omci,0x31,16); return 0;
 }
 int q1000k_mac_keys_install(const struct q1000k_mac_keys *keys) { assert(owned && install_phase && !auth_held); return step(); }
+int q1000k_mac_key_indices(u8 *ploam,u8 *omci) {
+    assert(owned); int ret=step(); if(!ret) { *ploam=hw_ploam_index; *omci=hw_omci_index; } return ret;
+}
 int q1000k_mac_onu_install(u16 onu) { assert(owned && install_phase); int ret=step(); if(!ret) hardware_onu=onu; return ret; }
 int q1000k_auth_omci_mic(struct crypto_lskcipher *tfm,const u8 key[16],const struct sk_buff *skb,bool has,u8 direction,u8 mic[4]) {
     assert(auth_held && !has && direction==2 && skb->len==44); memset(mic,key[0],4); return 0;
@@ -212,6 +217,7 @@ static void begin(void)
 {
     static struct net_device dev;
     memset(&vendor,0,sizeof(vendor)); vendor.state=2; vendor.gponSecurity.omciIkIdx=1;
+    hw_ploam_index=hw_omci_index=0;
     owned=auth_held=fault=calls=fail_at=0; native_epoch=native_last=0;
     assert(!q1000k_omci_backend_init(&dev));
 }
@@ -232,7 +238,10 @@ static void profile_and_assign(void)
 }
 static void operational(void)
 {
-    int token=q1000k_protocol_enter(); gpon_act_change_state(5); q1000k_protocol_leave(token); q1000k_omci_control();
+    int token=q1000k_protocol_enter();
+    int ret=q1000k_omci_registration_keys();
+    if(!ret) gpon_act_change_state(5);
+    q1000k_protocol_leave(token); q1000k_omci_control();
 }
 int main(void)
 {
@@ -249,15 +258,17 @@ int main(void)
     q1000k_omci_control(); assert(b->active && b->service_error==-EOPNOTSUPP && !fault);
     reconcile_error=0;
 
-    struct sk_buff *p=packet(48); p->data[47]=0x31; q1000k_omci_receive(p,17,false);
+    struct sk_buff *p=packet(48); p->data[47]=0x30; q1000k_omci_receive(p,17,false);
     assert(core_count==1 && !live_skb);
-    p=packet(48); p->data[47]=0x30; q1000k_omci_receive(p,17,false); assert(core_count==1 && !live_skb);
-    p=packet(48); p->data[47]=0x31; q1000k_omci_receive(p,18,false); assert(core_count==1 && !live_skb);
+    p=packet(48); p->data[47]=0x31; q1000k_omci_receive(p,17,false); assert(core_count==1 && !live_skb);
+    p=packet(48); p->data[47]=0x30; q1000k_omci_receive(p,18,false); assert(core_count==1 && !live_skb);
     p=packet(44); assert(!qomci_xmit(b->omci,p,17,b->published) && !live_skb && native_count==1);
     p=packet(44); assert(qomci_xmit(b->omci,p,17,b->published-1)==-EKEYREJECTED && live_skb==1); dev_kfree_skb_any(p);
     native_error=-ENOBUFS; p=packet(44); assert(qomci_xmit(b->omci,p,17,b->published)==-ENOBUFS && live_skb==1); dev_kfree_skb_any(p); native_error=0;
     u64 old=b->published;
-    int token=q1000k_protocol_enter(); vendor.gponSecurity.omciIkIdx=0; q1000k_omci_state(); q1000k_protocol_leave(token);
+    int token=q1000k_protocol_enter();
+    u8 new_tag[8]={7}; assert(!q1000k_omci_profile(new_tag,9,false));
+    q1000k_protocol_leave(token);
     assert(!b->active && !services_enabled); q1000k_omci_control();
     assert(b->active && b->published>old && b->index==0 && !fault);
     p=packet(48); p->data[47]=0x30; q1000k_omci_receive(p,17,false); assert(core_count==2);
@@ -289,5 +300,22 @@ int main(void)
         assert(fault && !qomci_current->active && !qomci_current->keys_valid && !native_epoch);
         q1000k_omci_backend_cleanup();
     }
+    for(int pair=1;pair<4;pair++) {
+        startup(); profile_and_assign();
+        GPON_Security_t before=vendor.gponSecurity;
+        token=q1000k_protocol_enter(); hw_ploam_index=pair&1; hw_omci_index=!!(pair&2);
+        assert(q1000k_omci_registration_keys()==-EKEYREJECTED);
+        assert(!memcmp(&before,&vendor.gponSecurity,sizeof(before)));
+        assert(fault==-EKEYREJECTED && !services_enabled && !qomci_current->active);
+        q1000k_protocol_leave(token); q1000k_omci_backend_cleanup();
+    }
+    startup(); profile_and_assign(); token=q1000k_protocol_enter();
+    assert(!q1000k_omci_registration_keys());
+    u64 generation=qomci_current->request.generation;
+    assert(vendor.gponSecurity.registerIDState==GPON_REG_ID_REPORTED);
+    assert(!q1000k_omci_registration_keys() && generation==qomci_current->request.generation);
+    q1000k_protocol_leave(token);
+    assert(q1000k_omci_registration_keys()==-EPERM);
+    q1000k_omci_backend_cleanup();
     assert(!live_skb); return 0;
 }

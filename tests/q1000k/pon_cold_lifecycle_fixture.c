@@ -64,11 +64,13 @@ static void xmcs_report_event(int type,int event,unsigned int value) {
     else if(event==2) ready_events++;
     else { assert(event==3); loss_events++; }
 }
+static int key_error;
+static int q1000k_omci_registration_keys(void) { assert(owned); return key_error; }
 /* PRODUCTION */
 static void reset(void) {
     memset(&priv,0,sizeof(priv)); memset(&sys,0,sizeof(sys)); memset(&phy,0,sizeof(phy));
     owned=1; priv.state=1; priv.gponCfg.to1Timer=10000; priv.gponCfg.hardware_timer=1000;
-    enter_error=fault=state_error=tx_error=reset_error=0;
+    key_error=enter_error=fault=state_error=tx_error=reset_error=0;
     state_calls=reset_calls=ready_events=state_events=loss_events=omci_notifications=led_schedules=0;
     tx_enabled=requested_phy_reset=requested_emergency=false;
 }
@@ -84,6 +86,8 @@ int main(void) {
     assert(fault==-ETIMEDOUT && !ready_events && !state_events && priv.state==1 && !tx_enabled);
     reset(); tx_error=-EIO; gpon_phy_ready_handler(7);
     assert(fault==-EIO && !ready_events && priv.state==1 && !tx_enabled);
+    reset(); priv.state=4; key_error=-EKEYREJECTED; gpon_act_change_state(5);
+    assert(fault==-EKEYREJECTED && priv.state==4 && !state_calls && !state_events);
     reset(); priv.state=6; gpon_phy_ready_handler(7);
     assert(fault==-EOPNOTSUPP && !ready_events && !state_calls);
     reset(); gpon_act_change_state(260); assert(fault==-EOPNOTSUPP && !state_calls && priv.state==1);
