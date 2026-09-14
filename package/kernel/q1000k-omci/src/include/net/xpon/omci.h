@@ -245,6 +245,8 @@ struct omci_telemetry {
  * @alloc_id: Alloc-ID of that T-CONT, so a backend whose entity map was
  *	cleared by a GPON restart can still resolve the channel
  * @vlan_id: VLAN identifier used for upstream classification
+ * @mapper_valid: PCP selection comes from an IEEE 802.1p mapper
+ * @mapper_unmarked_pcp: fixed implied priority for untagged upstream frames
  * @pcp: IEEE 802.1p priority used for classification and queue selection
  * @queue: hardware upstream queue
  * @encryption_key_ring: G.988 GEM key ring (0 none, 1 unicast both, 2 broadcast, 3 unicast downstream)
@@ -273,6 +275,8 @@ struct omci_service_config {
 	u16 vlan_input_tpid, vlan_output_tpid;
 	u8 vlan_downstream_mode;
 	u8 encryption_key_ring;
+	u8 mapper_unmarked_pcp;
+	bool mapper_valid;
 	u32 cookie;
 	u16 uni_entity_id;
 	u16 gem_ctp_entity_id;

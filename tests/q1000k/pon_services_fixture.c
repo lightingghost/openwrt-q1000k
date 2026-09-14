@@ -262,6 +262,31 @@ int main(void)
         assert(!q1000k_services_replace(NULL,rules,2));
         make_tag(&skb,1894,4);
     }
+    /* Fixed implied priority carries untagged DHCP/ARP without inserting a
+     * VLAN. Downstream forwarding is independent of the upstream mapping.
+     */
+    {
+        struct omci_service_config map[2]={s,s};
+        map[0].vlan_valid=map[1].vlan_valid=false;
+        map[0].pcp_valid=map[1].pcp_valid=true;
+        map[0].mapper_valid=map[1].mapper_valid=true;
+        map[0].mapper_unmarked_pcp=map[1].mapper_unmarked_pcp=5;
+        map[0].pcp=0; map[1].pcp=5; map[1].cookie=2; map[1].queue=6;
+        assert(!q1000k_services_replace(NULL,map,2));
+        memset(&skb,0,sizeof(skb)); skb.len=60; skb.data[12]=8; skb.data[13]=6;
+        assert(!q1000k_services_tx(&skb) && (tx_word0&7)==6 && skb.len==60 && skb.data[12]==8);
+        assert(!q1000k_services_rx(&skb,500));
+        make_tag(&skb,0,7); assert(q1000k_services_tx(&skb)==-ENOENT);
+        assert(!q1000k_services_rx(&skb,500));
+        make_tag(&skb,124,0); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==3);
+        /* A stacked frame uses the bridge-facing outer PCP. */
+        make_tag(&skb,124,7); assert(!__vlan_insert_tag(&skb,0x88a8,(5<<13)|123));
+        assert(!q1000k_services_tx(&skb) && (tx_word0&7)==6);
+        int ops=physical_ops;
+        map[0].mapper_unmarked_pcp=8;
+        assert(q1000k_services_replace(NULL,map,2)==-EINVAL && physical_ops==ops);
+        assert(!q1000k_services_replace(NULL,rules,2)); make_tag(&skb,1894,4);
+    }
     int before=physical_ops;
     rules[1].pcp_valid=false;
     assert(q1000k_services_replace(NULL,rules,2)==-EEXIST && physical_ops==before && !qs_changing);

@@ -2961,12 +2961,37 @@ static int omci_agent_service_queue_locked(struct omci_device *odev,
 	return 0;
 }
 
+/* G.988 9.3.10: an unmarked frame has an implied priority without adding
+ * a tag. A constant DSCP table is also fully defined for non-IP traffic.
+ * A nonconstant table needs payload classification; reject it explicitly
+ * rather than acknowledging it and then losing untagged DHCP/ARP frames.
+ */
+static int omci_agent_mapper_unmarked(const struct omci_mib_object *mapper)
+{
+	const u8 *map;
+	unsigned int i, bit, value, priority;
+
+	if (!mapper) return -ENOENT;
+	if (mapper->data[18] == 1) return mapper->data[43] & 7;
+	if (mapper->data[18] != 0) return -EINVAL;
+	map = mapper->data + 19;
+	priority = map[0] >> 5;
+	for (i = 1; i < 64; i++) {
+		bit = i * 3;
+		value = (unsigned int)map[bit / 8] << 8;
+		if (bit / 8 + 1 < 24) value |= map[bit / 8 + 1];
+		if (((value >> (13 - bit % 8)) & 7) != priority)
+			return -EOPNOTSUPP;
+	}
+	return priority;
+}
+
 static int
 omci_agent_stage_service_rule_locked(struct omci_device *odev,
 				     struct xarray *services,
 				     u16 lan_port_entity,
 				     u16 uni_entity, u16 gem_iwtp_entity,
-				     u8 mapper_pcp, bool mapper_pcp_valid,
+				     u8 mapper_pcp, bool mapper_pcp_valid, int unmarked_pcp,
 				     const struct omci_vlan_tagging_filter *filters,
 				     const struct omci_extended_vlan_rule *ext_rule,
 				     const struct omci_mib_object *vlan_object, bool vlan_ani_side,
@@ -3010,6 +3035,9 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	service.multicast_ani_entity_id = ani_entity_id;
 	service.multicast_ani_valid = ani_valid;
 	if (mapper_pcp_valid) {
+		if (unmarked_pcp < 0 || unmarked_pcp > 7) return -EINVAL;
+		service.mapper_valid = true;
+		service.mapper_unmarked_pcp = unmarked_pcp;
 		service.pcp = mapper_pcp;
 		service.pcp_valid = true;
 		service.queue = mapper_pcp;
@@ -3127,8 +3155,13 @@ omci_agent_stage_path_locked(struct omci_device *odev,
 	 */
 	u16 selector = pcp_valid ? 0x1000 | (pcp << 8) : 0;
 	bool ani_side = false;
-	int ret;
+	int ret, unmarked_pcp = 0;
 
+	if (pcp_valid) {
+		object = omci_mib_lookup(agent, OMCI_CLASS_8021P_MAPPER, service_entity);
+		unmarked_pcp = omci_agent_mapper_unmarked(object);
+		if (unmarked_pcp < 0) return unmarked_pcp;
+	}
 	wan = omci_mib_lookup(agent, OMCI_CLASS_MAC_BRIDGE_PORT_CONFIG_DATA,
 			     bridge_port_entity);
 	xa_for_each(&agent->mib, index, object) {
@@ -3154,7 +3187,7 @@ omci_agent_stage_path_locked(struct omci_device *odev,
 		for (i = 0; i < extended->extended_vlan.rule_count; i++) {
 			ret = omci_agent_stage_service_rule_locked(
 				odev, services, lan_port->entity_id,
-				uni_entity, gem_iwtp_entity, pcp, pcp_valid,
+				uni_entity, gem_iwtp_entity, pcp, pcp_valid, unmarked_pcp,
 				filters, &extended->extended_vlan.rules[i], extended, ani_side,
 				selector + i + 0x20, default_installed,
 				multicast, ani_entity_id, ani_valid);
@@ -3164,7 +3197,7 @@ omci_agent_stage_path_locked(struct omci_device *odev,
 	}
 	return omci_agent_stage_service_rule_locked(
 		odev, services, lan_port->entity_id, uni_entity, gem_iwtp_entity,
-		pcp, pcp_valid, filters, NULL, NULL, false, selector, default_installed,
+		pcp, pcp_valid, unmarked_pcp, filters, NULL, NULL, false, selector, default_installed,
 		multicast, ani_entity_id, ani_valid);
 }
 

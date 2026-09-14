@@ -565,6 +565,7 @@ int q1000k_services_replace(struct omci_device *odev,
 		int uni = qs_uni_index(s->uni_entity_id);
 
 		if (uni < 0 || s->queue > 7 || (s->pcp_valid && s->pcp > 7) ||
+		    (s->mapper_valid && (!s->pcp_valid || s->mapper_unmarked_pcp > 7)) ||
 		    s->tcont_entity_id < QS_TCONT_BASE || s->tcont_entity_id >= QS_TCONT_BASE + QS_TCONTS ||
 		    (s->vlan_valid && s->vlan_id > 4094) || s->direction < 1 || s->direction > 3) {
 			ret = -EINVAL; goto free;
@@ -764,8 +765,16 @@ static int qs_service_frame(const struct qs_rules *rules, size_t i, bool upstrea
 	if (ret) return ret;
 	ret = q1000k_vlan_filter_apply(&s->vlan_filter[1], !upstream, bridge);
 	if (ret) return ret;
-	if (s->pcp_valid && (!bridge->count ||
-	    s->pcp != bridge->tag[bridge->count - 1].tci >> 13)) return -ENOENT;
+	if (s->pcp_valid) {
+		if (s->mapper_valid) {
+			/* The mapper selects an upstream GEM. Downstream frames on
+			 * any of its GEMs pass to its root TP without a PCP test.
+			 */
+			if (upstream && s->pcp != (bridge->count ?
+			    bridge->tag[0].tci >> 13 : s->mapper_unmarked_pcp)) return -ENOENT;
+		} else if (!bridge->count ||
+			   s->pcp != bridge->tag[bridge->count - 1].tci >> 13) return -ENOENT;
+	}
 	if (s->vlan_valid && (!bridge->count ||
 	    s->vlan_id != (bridge->tag[0].tci & VLAN_VID_MASK))) return -ENOENT;
 	if (s->vlan_treatment_valid && !transform_first)

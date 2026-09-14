@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r56 and OMCI core r10 implement the native packet path,
+ demonstrated.** Vendor r57 and OMCI core r11 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -61,6 +61,14 @@ during setup. The package and matching dependencies build locally. The actual
 data netdevice is `pon` in this build; `pon0` belongs to a disabled vendor HAL
 variant. Earlier current-contract references have been corrected.
 See [WAN package behavior](../../../package/network/utils/q1000k-xgspon-wan/README.md).
+
+Vendor r57/core r11 implement the mapper's fixed implied priority for untagged
+upstream frames, including DSCP maps whose 64 entries are identical. Tagged
+traffic uses the outer bridge PCP; downstream traffic on a mapped GEM no
+longer runs the upstream priority selector. Nonconstant DSCP maps are rejected
+rather than acknowledged and ignored. Tests cover all eight implied priorities,
+a changed last DSCP entry, retained untagged DHCP/ARP, stacked tags and downstream
+frames whose PCP has no upstream mapping. Hardware acceptance is unchanged.
 
 ## Imported references
 

@@ -539,7 +539,7 @@ int q1000k_omci_core_test(void)
 	 * An empty configured table cannot fall back to an unrestricted service.
 	 */
 	{
-		struct omci_mib_object *gem, *iwtp, *vlan, *filter, *tcont;
+		struct omci_mib_object *gem, *iwtp, *vlan, *filter, *tcont, *mapper;
 		struct omci_mib_object lan = { .entity_id = 0xee0 };
 		struct omci_service_state *state;
 		bool fallback = false;
@@ -552,7 +552,9 @@ int q1000k_omci_core_test(void)
 		iwtp = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_GEM_IWTP, 0xee2, true);
 		vlan = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_EXTENDED_VLAN, 0xee3, true);
 		tcont = omci_mib_lookup(&odev->agent, OMCI_CLASS_TCONT, 0x8000);
-		CHECK(gem && iwtp && vlan && tcont);
+		mapper = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_8021P_MAPPER, 0xee5, true);
+		CHECK(gem && iwtp && vlan && tcont && mapper);
+		mapper->data[18] = 1; mapper->data[43] = 5;
 		put_unaligned_be16(500, gem->data);
 		put_unaligned_be16(0x8000, gem->data + 2); gem->data[4] = 3;
 		put_unaligned_be16(0, gem->data + 5);
@@ -627,6 +629,7 @@ int q1000k_omci_core_test(void)
 			0xee2, 5, true, false, 0, false, &fallback));
 		xa_for_each(&desired, index, state) {
 			CHECK(state->config.vlan_ani_side && state->config.pcp_valid && state->config.pcp == 5);
+			CHECK(state->config.mapper_valid && state->config.mapper_unmarked_pcp == 5);
 		}
 		omci_agent_free_service_array(&desired);
 		{
@@ -641,6 +644,21 @@ int q1000k_omci_core_test(void)
 			vlan->extended_vlan.associated_me = 0xee2;
 			CHECK(omci_agent_vlan_side(vlan, &lan, 1, &wan, 0xee4, 0xee5, 0xee2) == 1);
 		}
+		for (i = 0; i < 8; i++) {
+			unsigned int bit;
+			mapper->data[18] = 0;
+			memset(mapper->data + 19, 0, 24);
+			for (bit = 0; bit < 192; bit++)
+				if (i & BIT(2 - bit % 3)) mapper->data[19 + bit / 8] |= BIT(7 - bit % 8);
+			CHECK(omci_agent_mapper_unmarked(mapper) == i);
+			mapper->data[42] ^= 1;
+			CHECK(omci_agent_mapper_unmarked(mapper) == -EOPNOTSUPP);
+			mapper->data[18] = 1; mapper->data[43] = 0xf8 | i;
+			CHECK(omci_agent_mapper_unmarked(mapper) == i);
+		}
+		mapper->data[18] = 2;
+		CHECK(omci_agent_mapper_unmarked(mapper) == -EINVAL);
+		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_8021P_MAPPER, 0xee5)));
 		/* Counts and modes are validated, not silently clamped. */
 		filter->data[24] = 0x10; filter->data[25] = 12;
 		CHECK(!omci_vlan_filter_parse_create(filter, filter->data));

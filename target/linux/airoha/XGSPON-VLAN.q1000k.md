@@ -1,6 +1,6 @@
 # Q1000K VLAN service contract
 
-Vendor r56 / generic OMCI core r10, 2026-09-14. This is locally tested software,
+Vendor r57 / generic OMCI core r11, 2026-09-14. This is locally tested software,
 not evidence of optical interoperability or AT&T Internet access.
 
 `pon` presents the customer/UNI side of a supported class 171 service. The
@@ -27,6 +27,10 @@ Supported operations include:
   attached to either the UNI or ANI side. Associations use both managed-entity
   class and pointer. Mapper PCP is checked at the bridge side; explicit GEM
   queue pointers take precedence over PCP queue fallback.
+- Mapper unmarked-frame fixed priority, including a constant DSCP-to-PCP
+  map. The frame stays untagged; the implied priority chooses its upstream
+  GEM. Tagged frames use the bridge-facing outer PCP. Downstream traffic on
+  a mapped GEM passes to its root TP without an upstream PCP test.
 - Class 84 basic forwarding/discard, positive VID/PCP/full-TCI filtering in
   both directions, and negative filtering on egress only. VID filtering does
   not accidentally require the PCP stored in the filter entry. Reserved modes
@@ -46,7 +50,7 @@ a rejected row cannot fall through to a later wildcard. Mapper priorities
 sharing a GEM retain distinct row cookies. Conflicting equal-priority routes
 return an error before transmitting.
 
-DSCP-derived priority, downstream modes 2 and above, more than two tags,
+Nonconstant DSCP maps, DSCP-derived tag priority, downstream modes 2 and above, more than two tags,
 multiple class 171 tables on one path, and class 84 action j (destination-MAC
 learning with no flooding) return unsupported. The service abstraction remains
 one UNI-facing device, without a complete OMCI multiport bridge FDB. Unsupported
