@@ -41,11 +41,12 @@ struct airoha_eth;
 struct airoha_qdma {
     struct airoha_eth *eth;
     DECLARE_BITMAP(qos_channel_map,AIROHA_NUM_QOS_CHANNELS);
-    u32 regs[8],qos_cmd,qos_modes[4];
+    u32 regs[8],qos_cmd,qos_modes[4],global;
     u16 qos_weights[32][8];
 };
 static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
 {
+    if (offset==4) return qdma->global;
     if (offset==0x1020) return BIT(3); /* Native byte-weight mode. */
     if (offset==0x1024) return qdma->qos_cmd;
     if (offset>=0x1280 && offset<=0x129c && !(offset&3)) return 0;
@@ -56,6 +57,7 @@ static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
 }
 static void airoha_qdma_wr(struct airoha_qdma *qdma,u32 offset,u32 value)
 {
+    if (offset==4) { qdma->global=value; return; }
     if (offset==0x1024) {
         unsigned int channel=(value>>19)&31,queue=(value>>16)&7;
         ASSERT_RTNL();
@@ -73,6 +75,8 @@ static void airoha_qdma_rmw(struct airoha_qdma *qdma,u32 offset,u32 mask,u32 val
 {
     airoha_qdma_wr(qdma,offset,(airoha_qdma_rr(qdma,offset)&~mask)|value);
 }
+#define airoha_qdma_set(q,r,v) airoha_qdma_rmw(q,r,v,v)
+#define airoha_qdma_clear(q,r,v) airoha_qdma_rmw(q,r,v,0)
 struct airoha_gdm_dev {
     struct airoha_eth *eth;
     struct airoha_qdma __rcu *qdma;
@@ -168,6 +172,7 @@ static int dma_worker(void *unused)
 print('\n'.join(line for line in (eth / 'airoha_regs.h').read_text().splitlines()
                 if re.match(r'#define (?:QDMA_ETH_(?:TXMSG_|RXMSG_AGG_COUNT_MASK)|REG_QUEUE_CLOSE_CFG)', line)))
 regs = (eth / 'airoha_regs.h').read_text()
+print('\n'.join(line for line in regs.splitlines() if re.match(r'#define (?:REG_QDMA_GLOBAL_CFG|GLOBAL_CFG_(?:RX|TX)_DMA_(?:EN|BUSY)_MASK)', line)))
 print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:REG_TXWRR_|TWRR_|REG_CHAN_QOS_MODE)', line)))
 print(re.search(r'#define GDM_BASE\(_n\).*?(?=\n\n)', regs, re.S).group())
@@ -357,8 +362,25 @@ static int __init pon_transport_test_init(void)
         for(i=0;i<31;i++) CHECK(!airoha_pon_retire_fe(pon,i));
         CHECK(!airoha_pon_drain_rx(pon));
         CHECK(pon->rx_closed && pon->rx_drained && rx_drain_calls==1);
+        CHECK(airoha_pon_resume(pon)==-EBUSY);
+        CHECK(!airoha_pon_reset_epoch(pon));
+        CHECK(!airoha_pon_set_tx_channel(pon,31,true));
+        CHECK(!airoha_pon_activate_rx(pon,BIT(31)));
         CHECK(!airoha_pon_resume(pon));
-        CHECK(airoha_pon_set_tx_channel(pon,31,true)==-ESHUTDOWN);
+        CHECK(!airoha_pon_set_queue_close(pon,31,0));
+        /* A packet authorized before the physical drain cannot enter the
+         * newly enabled channel, despite the same channel/GEM numbers.
+         */
+        skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+        CHECK(airoha_pon_xmit(pon,skb,&paused_tx)==NETDEV_TX_OK);
+        CHECK(!atomic_read(&pon->pending));
+        {
+            u32 old_words[4]={};
+            int received=atomic_read(&rx_calls);
+            skb=alloc_skb(64,GFP_KERNEL); CHECK(skb); skb_put(skb,48);
+            airoha_pon_rx(gdm,skb,old_words,pon->generation-1);
+            CHECK(atomic_read(&rx_calls)==received);
+        }
         CHECK(!atomic_read(&pon->pending));
         airoha_pon_release(pon);
         pon=airoha_pon_attach(lower,&ops,NULL);

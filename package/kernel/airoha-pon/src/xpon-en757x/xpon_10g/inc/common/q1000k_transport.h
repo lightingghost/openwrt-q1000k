@@ -47,6 +47,10 @@ int q1000k_transport_pause(unsigned int timeout_ms);
 int q1000k_transport_retire_fe(u8 channel);
 /* After all FE channels retire and MAC ingress stops; leaves RX DMA closed. */
 int q1000k_transport_drain_rx(void);
+/* Call only while MAC ingress/egress is held stopped, after old tables are
+ * removed. Activate only after replacement tables and channels are verified. */
+int q1000k_transport_reset_epoch(void);
+int q1000k_transport_activate_rx(u32 channels);
 int q1000k_transport_resume(void);
 
 /* Permanently close this attachment's channel and poll native TX mappings.

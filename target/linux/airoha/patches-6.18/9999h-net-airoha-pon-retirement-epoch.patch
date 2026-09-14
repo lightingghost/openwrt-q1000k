@@ -1,0 +1,206 @@
+net: airoha: rearm PON channels only after complete physical retirement
+
+Invalidate packet generations before service namespace reuse. Keep CPU queues
+closed and require verified replacement channels before restoring RX DMA.
+
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -25,7 +25,7 @@
+ 	u8 paused_closed[32];
+ 	bool paused;
+ 	bool pause_ready;
+-	bool rx_closed, rx_drained;
++	bool rx_closed, rx_drained, epoch_ready;
+ 	u32 fe_retired;
+ 	u32 retiring;
+ 	u32 tx_enabled;
+@@ -299,7 +299,7 @@
+ 
+ 	rcu_read_lock();
+ 	pon = rcu_dereference(dev->pon);
+-	if (pon && !READ_ONCE(pon->rx_closed) && pon->generation == generation &&
++	if (pon && !smp_load_acquire(&pon->rx_closed) && pon->generation == generation &&
+ 	    !airoha_pon_rx_meta(words, &meta)) {
+ 		pon->ops->rx(pon->priv, skb, &meta);
+ 	} else {
+@@ -654,7 +654,7 @@
+ 		ret = -ENODEV;
+ 	else if (pon->control_fault)
+ 		ret = -EIO;
+-	else if (pon->configuring || !pon->paused || !pon->pause_ready)
++	else if (pon->configuring || !pon->paused || !pon->pause_ready || pon->rx_closed)
+ 		ret = -EBUSY;
+ 	if (ret)
+ 		goto out;
+@@ -930,6 +930,140 @@
+ }
+ EXPORT_SYMBOL_GPL(airoha_pon_drain_rx);
+ 
++/* Only an owner that completed full FE/MAC/RX retirement may replace the
++ * namespace. Queue epochs and RX generation change before reuse is allowed.
++ */
++int airoha_pon_reset_epoch(struct airoha_pon *pon)
++{
++	struct airoha_gdm_dev *dev;
++	struct airoha_eth *eth;
++	unsigned long flags;
++	u32 dma;
++	int i, ret = 0;
++
++	if (!pon)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring || !pon->paused || !pon->pause_ready ||
++		 !pon->rx_closed || !pon->rx_drained ||
++		 pon->fe_retired != U32_MAX || pon->epoch_ready ||
++		 atomic_read_acquire(&pon->pending))
++		ret = -EBUSY;
++	if (ret)
++		goto out;
++	dev = pon->dma_dev;
++	eth = dev->eth;
++	for (i = 0; i < 32; i++)
++		if (pon->epoch[i] == U64_MAX || dev->pon_generation == U64_MAX) {
++			ret = -EOVERFLOW;
++			goto fault;
++		}
++	dma = airoha_qdma_rr(&eth->qdma[1], REG_QDMA_GLOBAL_CFG);
++	if (dma == U32_MAX ||
++	    (dma & (GLOBAL_CFG_RX_DMA_EN_MASK | GLOBAL_CFG_RX_DMA_BUSY_MASK)) ||
++	    airoha_fe_rr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX)) ||
++	    airoha_fe_rr(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX)) ||
++	    airoha_fe_rr(eth, REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX))) {
++		ret = -EIO;
++		goto fault;
++	}
++	for (i = 0; i < 32; i += 4)
++		if (airoha_qdma_rr(&eth->qdma[1], REG_QUEUE_CLOSE_CFG(i)) != U32_MAX) {
++			ret = -EIO;
++			goto fault;
++		}
++	for (i = 0; i < 32; i++)
++		pon->epoch[i]++;
++	WRITE_ONCE(pon->generation, ++dev->pon_generation);
++	memset(pon->closed, 0xff, sizeof(pon->closed));
++	memset(pon->paused_closed, 0xff, sizeof(pon->paused_closed));
++	pon->retiring = 0;
++	pon->fe_retired = 0;
++	pon->tx_enabled = 0;
++	pon->epoch_ready = true;
++	goto out;
++fault:
++	pon->control_fault = true;
++out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rtnl_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_reset_epoch);
++
++int airoha_pon_activate_rx(struct airoha_pon *pon, u32 channels)
++{
++	struct airoha_eth *eth;
++	struct airoha_qdma *qdma;
++	unsigned long flags;
++	u32 before, after;
++	int ret = 0;
++
++	if (!pon || !channels)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring || !pon->paused || !pon->pause_ready ||
++		 !pon->rx_closed || !pon->rx_drained || !pon->epoch_ready)
++		ret = -EBUSY;
++	else if ((channels & ~pon->tx_enabled) || (channels & pon->retiring))
++		ret = -EINVAL;
++	if (ret)
++		goto out;
++	eth = pon->dma_dev->eth;
++	qdma = &eth->qdma[1];
++	before = airoha_qdma_rr(qdma, REG_QDMA_GLOBAL_CFG);
++	if (before == U32_MAX ||
++	    (before & (GLOBAL_CFG_RX_DMA_EN_MASK | GLOBAL_CFG_RX_DMA_BUSY_MASK)) ||
++	    airoha_fe_rr(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX))) {
++		ret = -EIO;
++		goto fault;
++	}
++	/* Receive DMA is ready before FE can admit packets for the new tables. */
++	airoha_qdma_set(qdma, REG_QDMA_GLOBAL_CFG, GLOBAL_CFG_RX_DMA_EN_MASK);
++	after = airoha_qdma_rr(qdma, REG_QDMA_GLOBAL_CFG);
++	if (after == U32_MAX || !(after & GLOBAL_CFG_RX_DMA_EN_MASK) ||
++	    ((after ^ before) & ~(GLOBAL_CFG_RX_DMA_EN_MASK |
++				GLOBAL_CFG_RX_DMA_BUSY_MASK |
++				GLOBAL_CFG_TX_DMA_BUSY_MASK))) {
++		ret = -EIO;
++		goto fault;
++	}
++	ret = airoha_pon_fe_write_checked(eth,
++					REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), channels);
++	if (ret)
++		goto fault;
++	pon->rx_drained = false;
++	pon->epoch_ready = false;
++	smp_store_release(&pon->rx_closed, false);
++	goto out;
++fault:
++	/* Keep admission closed even if physical containment fails. No page is
++	 * freed here; DMA ownership is retained for the next lower teardown.
++	 */
++	airoha_pon_fe_write_checked(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), 0);
++	airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG, GLOBAL_CFG_RX_DMA_EN_MASK);
++	pon->control_fault = true;
++out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rtnl_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_activate_rx);
++
+ int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed)
+ {
+ 	unsigned long flags;
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -138,7 +138,7 @@
+  * FE/QDMA release sequence, temporarily isolating the entire GDM2 port and
+  * opening only the target's hardware queues while CPU admission stays closed.
+  * Requires two consecutive release-done, not-busy, empty-queue observations.
+- * Success leaves the target permanently closed with TX/RX/forwarding disabled;
++ * Success leaves the target closed until verified epoch reset with TX/RX/forwarding disabled;
+  * other bitmaps are restored and verified. Failure attempts whole-port
+  * containment and latches a control fault. Active MBI/release recovery returns
+  * -EBUSY instead of attempting undocumented termination recovery.
+@@ -156,6 +156,19 @@
+  * Failure is sticky and never frees pages while DMA is still busy.
+  */
+ int airoha_pon_drain_rx(struct airoha_pon *pon);
++
++/* Process context, MAC ingress/egress still held stopped. After full RX drain
++ * and old service-table removal, invalidate all TX epochs and RX generations
++ * before allowing retired channels to be programmed again. Leaves RX DMA,
++ * RX callbacks and CPU queues closed. Never clears a hardware fault.
++ */
++int airoha_pon_reset_epoch(struct airoha_pon *pon);
++/* After replacement service tables and TX-channel configuration are verified,
++ * start receive DMA and admit only the supplied channels. CPU TX stays paused
++ * until resume; its queues remain closed for explicit queue configuration.
++ * No MAC, PHY or optical transmitter is started by these functions.
++ */
++int airoha_pon_activate_rx(struct airoha_pon *pon, u32 channels);
+ 
+ /* Pause CPU admission without disconnecting RX/consumer callbacks. Invalidate
+  * every old TX lease, wait up to timeout_ms (0..3000) for native mappings,

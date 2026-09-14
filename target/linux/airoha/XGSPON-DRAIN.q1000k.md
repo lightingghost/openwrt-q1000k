@@ -193,3 +193,25 @@ tested files. No device was accessed.
 This completes the downstream FE/QDMA receive stage. Coordinated MAC ingress
 stop, optical stop, service-table replacement and verified reactivation are
 still required around it; an isolated call is not a complete PON shutdown.
+
+## Generation replacement after a complete receive drain
+
+Kernel patch `9999h` allows a new namespace only after all 32 physical FE
+releases, completed RX DMA drain, closed queues, zero native TX mappings and
+verified FE isolation. It checks every TX epoch and the RX generation for
+64-bit overflow before changing any of them. Resetting the generation leaves
+admission and DMA closed and never clears a hardware fault. The caller must
+hold MAC ingress/egress stopped and remove the old service tables first.
+
+After replacement tables and channels are verified, explicit RX activation
+checks the channel mask, enables only RX DMA, verifies the FE RX bitmap and
+publishes the new admission boundary with release ordering. Failed readback
+attempts FE/RX-DMA containment and keeps a sticky fault. CPU TX remains paused
+until an explicit resume; old retry packets and old RX generations stay stale.
+Sleepable adapter wrappers pin the native attachment throughout each call.
+
+All 40 PON host tests pass. The native UML guest covers complete retirement,
+receive drain, generation replacement and reactivation, including stale TX/RX
+rejection with real RTNL/RCU. Adapter UML verifies context and error forwarding.
+Linux 6.18.44 and vendor r27 build successfully. These are local tests with
+mocked hardware; no device access or physical acceptance was performed.

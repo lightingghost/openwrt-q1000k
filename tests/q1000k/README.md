@@ -382,3 +382,9 @@ balanced NAPI on errors. `test_pon_dma.py` exercises real RX assembly while
 discarding incomplete chains and a whole ring after DMA stops. The native UML
 fixture retires all channels before its RX-admission test; the adapter UML
 fixture checks the sleepable wrapper and exact error propagation.
+
+`test_pon_epoch.py` exercises production generation replacement and receive
+activation, including missing physical-retirement bits, live DMA, every epoch
+overflow position and failed enable/readback. The native UML test joins these
+operations to pause/FE/RX drain and checks rejection of stale TX and RX after
+reactivation. The adapter UML test verifies both sleepable wrappers.

@@ -295,6 +295,38 @@ int q1000k_transport_drain_rx(void)
 	return ret;
 }
 
+int q1000k_transport_reset_epoch(void)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	if (in_interrupt() || irqs_disabled())
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_transport_mutex);
+	transport = rcu_dereference_protected(q1000k_current,
+				lockdep_is_held(&q1000k_transport_mutex));
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_reset_epoch(transport->pon);
+	mutex_unlock(&q1000k_transport_mutex);
+	return ret;
+}
+
+int q1000k_transport_activate_rx(u32 channels)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	if (in_interrupt() || irqs_disabled())
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_transport_mutex);
+	transport = rcu_dereference_protected(q1000k_current,
+				lockdep_is_held(&q1000k_transport_mutex));
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_activate_rx(transport->pon, channels);
+	mutex_unlock(&q1000k_transport_mutex);
+	return ret;
+}
+
 int q1000k_transport_resume(void)
 {
 	struct q1000k_transport *transport;
