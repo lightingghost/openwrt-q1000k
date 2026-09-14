@@ -1,0 +1,300 @@
+net: airoha: add an owned PON downstream RX drain boundary
+
+Only after complete FE retirement, stop QDMA1 RX DMA, drain callback/NAPI
+ownership and discard queued/partial frames. Preserve normal NAPI lifetime.
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -925,7 +925,7 @@
+ 					dir);
+ 
+ 		page = virt_to_head_page(e->buf);
+-		if (q->rx_discard)
++		if (q->rx_discard || q->pon_drain)
+ 			goto free_frag;
+ 		len = FIELD_GET(QDMA_DESC_LEN_MASK, desc_ctrl);
+ 		data_len = q->skb ? AIROHA_RX_LEN(q->buf_size) : e->dma_len;
+@@ -1024,11 +1024,114 @@
+ 			dev_kfree_skb(q->skb);
+ 			q->skb = NULL;
+ 		}
+-		page_pool_put_full_page(q->page_pool, page, true);
++		page_pool_put_full_page(q->page_pool, page, !q->pon_drain);
+ 	}
+ 	airoha_qdma_fill_rx_queue(q);
+ 
+ 	return done;
++}
++
++/* Stop only the exclusively owned QDMA1 receive engine. TX and QDMA0 stay
++ * under their existing owner. The caller has closed GDM2 ingress and proved
++ * FE retirement; this function establishes the DMA/descriptor boundary.
++ */
++static int airoha_qdma_pon_rx_irq(struct airoha_qdma *qdma, bool enable)
++{
++	int bank, index, first = 0;
++
++	for (bank = 0; bank < ARRAY_SIZE(qdma->irq_banks); bank++) {
++		struct airoha_irq_bank *irq_bank = &qdma->irq_banks[bank];
++		unsigned long flags;
++
++		for (index = QDMA_INT_REG_IDX1; index <= QDMA_INT_REG_IDX2; index++) {
++			u32 mask = index == QDMA_INT_REG_IDX1 ?
++				INT_RX1_MASK(RX_IRQ_BANK_PIN_MASK(bank)) :
++				INT_RX2_MASK(RX_IRQ_BANK_PIN_MASK(bank));
++			u32 actual;
++
++			spin_lock_irqsave(&irq_bank->irq_lock, flags);
++			if (enable)
++				irq_bank->irqmask[index] |= mask;
++			else
++				irq_bank->irqmask[index] &= ~mask;
++			airoha_qdma_wr(qdma, REG_INT_ENABLE(bank, index),
++				       irq_bank->irqmask[index]);
++			actual = airoha_qdma_rr(qdma, REG_INT_ENABLE(bank, index));
++			if (actual != irq_bank->irqmask[index])
++				first = -EIO;
++			spin_unlock_irqrestore(&irq_bank->irq_lock, flags);
++		}
++	}
++	return first;
++}
++
++static int airoha_qdma_pon_discard_rx(struct airoha_queue *q)
++{
++	if (!q->ndesc)
++		return 0;
++	if (q->skb) {
++		dev_kfree_skb_any(q->skb);
++		q->skb = NULL;
++	}
++	q->pon_drain = true;
++	/* At most one ring of completed descriptors; the engine cannot refill.
++	 * MORE chains are discarded too, without delivering a partial packet.
++	 */
++	airoha_qdma_rx_process(q, q->ndesc);
++	q->pon_drain = false;
++	q->rx_discard = false;
++	q->pon_frame = false;
++	q->pon_generation = 0;
++	if (le32_to_cpu(READ_ONCE(q->desc[q->tail].ctrl)) & QDMA_DESC_DONE_MASK)
++		return -EIO;
++	return 0;
++}
++
++int airoha_qdma_pon_drain_rx(struct airoha_qdma *qdma)
++{
++	u32 value;
++	int i, ret, restore;
++
++	ASSERT_RTNL();
++	if (qdma != &qdma->eth->qdma[1] || qdma->users != 1)
++		return -EBUSY;
++	value = airoha_qdma_rr(qdma, REG_QDMA_GLOBAL_CFG);
++	if (value == U32_MAX || !(value & GLOBAL_CFG_RX_DMA_EN_MASK))
++		return -EIO;
++	airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG, GLOBAL_CFG_RX_DMA_EN_MASK);
++	ret = read_poll_timeout(airoha_qdma_rr, value,
++			       value == U32_MAX || !(value & GLOBAL_CFG_RX_DMA_BUSY_MASK),
++			       1000, 50000, true, qdma, REG_QDMA_GLOBAL_CFG);
++	if (value == U32_MAX || (value & GLOBAL_CFG_RX_DMA_EN_MASK))
++		return -EIO;
++	if (ret)
++		return ret; /* No descriptor or page may be touched while DMA is busy. */
++	ret = airoha_qdma_pon_rx_irq(qdma, false);
++	for (i = 0; i < ARRAY_SIZE(qdma->irq_banks); i++)
++		synchronize_irq(qdma->irq_banks[i].irq);
++	for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++)
++		if (qdma->q_rx[i].ndesc)
++			napi_disable(&qdma->q_rx[i].napi);
++	/* A NAPI completion may have re-enabled its source before disable won. */
++	restore = airoha_qdma_pon_rx_irq(qdma, false);
++	if (!ret)
++		ret = restore;
++	for (i = 0; i < ARRAY_SIZE(qdma->irq_banks); i++)
++		synchronize_irq(qdma->irq_banks[i].irq);
++	if (!ret)
++		for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++) {
++			restore = airoha_qdma_pon_discard_rx(&qdma->q_rx[i]);
++			if (restore && !ret)
++				ret = restore;
++		}
++	/* Keep normal NAPI lifetime balanced, even on failure. RX DMA remains
++	 * off until the owning PON lifecycle explicitly activates a new epoch.
++	 */
++	for (i = 0; i < ARRAY_SIZE(qdma->q_rx); i++)
++		if (qdma->q_rx[i].ndesc)
++			napi_enable(&qdma->q_rx[i].napi);
++	restore = airoha_qdma_pon_rx_irq(qdma, true);
++	return ret ? ret : restore;
+ }
+ 
+ static int airoha_qdma_rx_napi_poll(struct napi_struct *napi, int budget)
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -220,6 +220,7 @@
+ 	struct sk_buff *skb;
+ 	bool pon_frame;
+ 	bool rx_discard;
++	bool pon_drain;
+ 	u64 pon_generation;
+ 	u32 pon_words[4];
+ 
+@@ -598,6 +599,7 @@
+ };
+ 
+ extern const struct net_device_ops airoha_netdev_ops;
++int airoha_qdma_pon_drain_rx(struct airoha_qdma *qdma);
+ bool airoha_pon_qdma_busy(struct airoha_qdma *qdma);
+ u64 airoha_pon_generation(struct airoha_gdm_dev *dev);
+ void airoha_pon_stop(struct airoha_gdm_dev *dev);
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -25,6 +25,8 @@
+ 	u8 paused_closed[32];
+ 	bool paused;
+ 	bool pause_ready;
++	bool rx_closed, rx_drained;
++	u32 fe_retired;
+ 	u32 retiring;
+ 	u32 tx_enabled;
+ 	u32 configuring;
+@@ -297,7 +299,7 @@
+ 
+ 	rcu_read_lock();
+ 	pon = rcu_dereference(dev->pon);
+-	if (pon && pon->generation == generation &&
++	if (pon && !READ_ONCE(pon->rx_closed) && pon->generation == generation &&
+ 	    !airoha_pon_rx_meta(words, &meta)) {
+ 		pon->ops->rx(pon->priv, skb, &meta);
+ 	} else {
+@@ -832,8 +834,10 @@
+ 	}
+ complete:
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+-	if (changed && !ret)
++	if (changed && !ret) {
+ 		pon->tx_enabled = tx;
++		pon->fe_retired |= BIT(channel);
++	}
+ 	if (ret && ret != -EBUSY)
+ 		pon->control_fault = true;
+ 	pon->configuring = 0;
+@@ -843,6 +847,88 @@
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(airoha_pon_retire_fe);
++
++/* RX admission closes before hardware drain, and opens only after the new
++ * service namespace has been installed by the owning MAC lifecycle.
++ */
++int airoha_pon_drain_rx(struct airoha_pon *pon)
++{
++	struct airoha_eth *eth;
++	unsigned long flags;
++	u32 status, busy;
++	int ret = 0, stable = 0, i;
++
++	if (!pon)
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring || !pon->paused || !pon->pause_ready ||
++		 pon->fe_retired != U32_MAX || atomic_read_acquire(&pon->pending))
++		ret = -EBUSY;
++	else if (pon->rx_drained)
++		ret = 1;
++	if (ret) {
++		spin_unlock_irqrestore(&pon->admission_lock, flags);
++		if (ret == 1)
++			ret = 0;
++		goto out;
++	}
++	pon->configuring = U32_MAX;
++	WRITE_ONCE(pon->rx_closed, true);
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	/* Complete callbacks admitted before rx_closed was published. */
++	synchronize_net();
++	eth = pon->dma_dev->eth;
++	if (airoha_pon_qdma_shared(pon->dma_dev) ||
++	    airoha_fe_rr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX)) ||
++	    airoha_fe_rr(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX)) ||
++	    airoha_fe_rr(eth, REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX))) {
++		ret = -EIO;
++		goto complete;
++	}
++	/* OEM retire-all checks the whole-port word at GDM2 + 0x74 after
++	 * individual releases. Require two stable zero observations and retain
++	 * errors, unlike the OEM diagnostic-only timeout path.
++	 */
++	ret = -ETIMEDOUT;
++	for (i = 0; i < 50; i++) {
++		status = airoha_fe_rr(eth, REG_GDM_RETIRE_STS(AIROHA_GDM2_IDX));
++		busy = airoha_fe_rr(eth, REG_GDM_CHN_BUSY(AIROHA_GDM2_IDX));
++		if (status == U32_MAX || busy == U32_MAX) {
++			ret = -EIO;
++			break;
++		}
++		if (!status && !busy) {
++			if (++stable == 2) {
++				ret = 0;
++				break;
++			}
++		} else {
++			stable = 0;
++		}
++		usleep_range(1000, 1500);
++	}
++	if (!ret)
++		ret = airoha_qdma_pon_drain_rx(&eth->qdma[1]);
++complete:
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (ret)
++		pon->control_fault = true;
++	else
++		pon->rx_drained = true;
++	pon->configuring = 0;
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++out:
++	rtnl_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_pon_drain_rx);
+ 
+ int airoha_pon_set_queue_close(struct airoha_pon *pon, u8 channel, u8 closed)
+ {
+--- a/drivers/net/ethernet/airoha/airoha_regs.h
++++ b/drivers/net/ethernet/airoha/airoha_regs.h
+@@ -171,6 +171,8 @@
+ #define REG_GDM_CHN_RLS(_n)		(GDM_BASE(_n) + 0x20)
+ #define MBI_RX_AGE_SEL_MASK		GENMASK(26, 25)
+ #define MBI_TX_AGE_SEL_MASK		GENMASK(18, 17)
++
++#define REG_GDM_RETIRE_STS(_n)		(GDM_BASE(_n) + 0x74)
+ 
+ #define REG_GDM_CHN_BUSY(_n)		(GDM_BASE(_n) + 0x70)
+ 
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -148,6 +148,15 @@
+  */
+ int airoha_pon_retire_fe(struct airoha_pon *pon, u8 channel);
+ 
++/* Drain downstream FE/QDMA1 RX after all 32 channels were retired, with the
++ * MAC ingress already stopped by its owner. Requires a completed CPU pause.
++ * Close RX callbacks, check whole-port retirement, stop RX DMA and wait for
++ * idle before draining NAPI/descriptors. Success keeps RX admission and DMA
++ * closed; service identifiers must not be reused until this succeeds.
++ * Failure is sticky and never frees pages while DMA is still busy.
++ */
++int airoha_pon_drain_rx(struct airoha_pon *pon);
++
+ /* Pause CPU admission without disconnecting RX/consumer callbacks. Invalidate
+  * every old TX lease, wait up to timeout_ms (0..3000) for native mappings,
+  * then close all physical queues. Retrying a timed-out pause is supported;

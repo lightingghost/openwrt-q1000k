@@ -23,7 +23,7 @@ struct airoha_pon {
     void *netdev;
     struct airoha_gdm_dev *dma_dev;
     bool admission_lock,control_fault,paused,pause_ready;
-    u32 tx_enabled,retiring,configuring;
+    u32 tx_enabled,retiring,configuring,fe_retired;
     u8 closed[32];
     int pending;
 };
@@ -118,6 +118,7 @@ int main(void)
         reset(c);
         assert(!airoha_pon_retire_fe(&pon,c));
         assert(ticks==4 && writes==10 && !pon.control_fault);
+        assert(pon.fe_retired==BIT(c));
         assert(eth.tx==(U32_MAX&~BIT(c)) && pon.tx_enabled==eth.tx);
         assert(eth.rx==(0xabcdefab&~BIT(c)) && eth.forward==(0x56789abc&~BIT(c)));
         assert(eth.command==(BIT(17)|BIT(26)) && (pon.retiring&BIT(c)));

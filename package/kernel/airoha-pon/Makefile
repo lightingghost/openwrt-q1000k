@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=25
+PKG_RELEASE:=26
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 

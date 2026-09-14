@@ -253,6 +253,10 @@ int airoha_pon_retire_fe(struct airoha_pon *pon,u8 channel)
     WARN_ON(channel!=29);
     return fake_lifecycle(pon);
 }
+int airoha_pon_drain_rx(struct airoha_pon *pon)
+{
+    return fake_lifecycle(pon);
+}
 int airoha_pon_get_queue_close(struct airoha_pon *pon,u8 channel,u8 *closed)
 {
     if(channel>31 || !closed) return -EINVAL;
@@ -449,6 +453,7 @@ static int run_tests(void)
     CHECK(q1000k_transport_pause(750)==-ENODEV);
     CHECK(q1000k_transport_retire_fe(29)==-ENODEV);
     CHECK(q1000k_transport_resume()==-ENODEV);
+    CHECK(q1000k_transport_drain_rx()==-ENODEV);
     CHECK(q1000k_transport_start(NULL, receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("", receive_packet) == -EINVAL);
     CHECK(q1000k_transport_start("bad/name", receive_packet) == -EINVAL);
@@ -477,6 +482,7 @@ static int run_tests(void)
         CHECK(q1000k_transport_pause(750)==errors[i]);
         CHECK(q1000k_transport_retire_fe(29)==errors[i]);
         CHECK(q1000k_transport_resume()==errors[i]);
+        CHECK(q1000k_transport_drain_rx()==errors[i]);
         saved=qos;
         CHECK(q1000k_transport_get_qos(29,&qos)==errors[i]);
         CHECK(errors[i] ? !memcmp(&saved,&qos,sizeof(qos)) : qos.mode==1);

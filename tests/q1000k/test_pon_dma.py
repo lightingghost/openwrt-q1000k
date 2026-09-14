@@ -43,7 +43,8 @@ class PonDmaTests(unittest.TestCase):
         end = pon.index('\n}\n', start) + 3
         source = source.replace('/* RX_META */', pon[start:end])
         source = source.replace('/* PRODUCTION */', function('airoha_qdma_build_rx_skb') +
-                                function('airoha_qdma_rx_process'))
+                                function('airoha_qdma_rx_process') +
+                                function('airoha_qdma_pon_discard_rx'))
         run_c(source, flags=['-Wno-sign-compare'])
 
 

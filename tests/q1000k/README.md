@@ -375,3 +375,10 @@ The PHY lifecycle fixture additionally checks controller acquisition retry,
 pinctrl/PBUS setup failure, the verified Q1000K transceiver profile, explicit
 TX authorization, temporary reset suppression and optical disable on stop.
 The resource fixture checks explicit pin selection without IRQ locks.
+
+`test_pon_rx_drain.py` checks the production FE/RX admission boundary and native
+QDMA1 DMA/IRQ/NAPI orchestration, including timeout before page access and
+balanced NAPI on errors. `test_pon_dma.py` exercises real RX assembly while
+discarding incomplete chains and a whole ring after DMA stops. The native UML
+fixture retires all channels before its RX-admission test; the adapter UML
+fixture checks the sleepable wrapper and exact error propagation.

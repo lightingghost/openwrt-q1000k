@@ -95,7 +95,8 @@ static u32 airoha_fe_rr(struct airoha_eth *eth,u32 reg) {
     case 0x1520: return eth->fe_release | (eth->fe_release&1 ? 2 : 0);
     case 0x1524: return eth->fe_tx;
     case 0x1528: return eth->fe_rx;
-    case 0x1570: return 0;
+    case 0x1570:
+    case 0x1574: return 0;
     default: WARN_ON(1); return ~0U;
     }
 }
@@ -174,7 +175,8 @@ print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK)', line)))
 print(re.search(r'#define CDM_BASE\(_n\).*?(?=\n(?:#|\n))', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
-    r'#define (?:CDM[12]_BASE|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
+    r'#define (?:CDM[12]_BASE|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_|RETIRE_STS)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
+print('static int rx_drain_calls;\nstatic int airoha_qdma_pon_drain_rx(struct airoha_qdma *q) { ASSERT_RTNL(); rx_drain_calls++; return 0; }')
 source = (eth / 'airoha_pon.c').read_text()
 print(re.sub(r'^#include[^\n]*\n', '', source, flags=re.M))
 print(r'''
@@ -352,6 +354,9 @@ static int __init pon_transport_test_init(void)
         atomic_set(&hold_dma,0);
         CHECK(!airoha_pon_pause(pon,1000));
         CHECK(!airoha_pon_retire_fe(pon,31));
+        for(i=0;i<31;i++) CHECK(!airoha_pon_retire_fe(pon,i));
+        CHECK(!airoha_pon_drain_rx(pon));
+        CHECK(pon->rx_closed && pon->rx_drained && rx_drain_calls==1);
         CHECK(!airoha_pon_resume(pon));
         CHECK(airoha_pon_set_tx_channel(pon,31,true)==-ESHUTDOWN);
         CHECK(!atomic_read(&pon->pending));

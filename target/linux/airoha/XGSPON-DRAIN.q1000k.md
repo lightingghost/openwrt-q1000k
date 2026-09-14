@@ -156,3 +156,40 @@ transaction. MAC FIFO, pending downstream RX, service-table invalidation,
 and optical quiescence must be coordinated before identifiers can be reused.
 The whole-port isolation may interrupt peer channels; it is not a lossless
 per-channel operation. No retirement or pause command was run on hardware.
+
+## Downstream FE/QDMA1 receive boundary
+
+OEM `fe_api_set_channel_retire_all` at `.text+0x13948` selects GDM2 status
+`0x1574`; after individual releases it waits for the entire word to become
+zero at `0x13a30`. Its timeout only prints diagnostics. Kernel patch `9999g`
+requires two consecutive zero observations of that word and the channel-busy
+bitmap, with checked TX/RX/forwarding isolation. A separate bitmap records
+successful physical FE releases; a software quarantine bit is insufficient.
+All 32 channels must have completed release before this receive drain.
+
+The new API first closes RX callback admission and waits for admitted callbacks
+through `synchronize_net()`. It then verifies FE isolation and retirement,
+disables only QDMA1 RX DMA and waits for idle. A timeout or failed readback
+returns before descriptors or pages are touched. The helper requires QDMA1
+with exactly one active user; it never changes QDMA0 or TX DMA controls.
+
+With DMA idle it masks RX completion interrupts, drains IRQ handlers, disables
+RX NAPI instances, and masks again to account for a racing NAPI completion.
+It discards completed descriptors and any partial scattered packet, using
+non-direct page-pool recycling outside NAPI. No partial or stale frame reaches
+the consumer or GRO. Descriptor refill uses the existing native owner. NAPI
+lifetime is balanced on every path; RX DMA and callback admission remain closed
+for explicit service-namespace reactivation. Failures remain sticky.
+
+The native and adapter UML tests pass with real RTNL/RCU and lifecycle locks.
+The native fixture retires all 32 channels and checks receive admission; its
+DMA hardware stage is mocked. Dedicated host tests execute the production
+DMA/IRQ/NAPI orchestration with injected timeouts, dropped mask writes and
+incomplete descriptor drain. The production RX assembly fixture verifies
+partial-chain and whole-ring discard. All 39 PON host tests pass. Linux
+6.18.44 and vendor r26 build successfully and the prepared sources match the
+tested files. No device was accessed.
+
+This completes the downstream FE/QDMA receive stage. Coordinated MAC ingress
+stop, optical stop, service-table replacement and verified reactivation are
+still required around it; an isolated call is not a complete PON shutdown.

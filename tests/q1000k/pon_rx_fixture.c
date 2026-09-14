@@ -1,5 +1,6 @@
 /* RX pages and networking primitives are fixtures; the assembly path is real. */
 #include <assert.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -43,7 +44,7 @@ struct airoha_queue {
     struct airoha_qdma *qdma;
     struct airoha_queue_entry entry[16]; struct airoha_qdma_desc desc[16];
     int queued,tail,ndesc,buf_size,napi,page_pool;
-    struct sk_buff *skb; bool pon_frame,rx_discard;
+    struct sk_buff *skb; bool pon_frame,rx_discard,pon_drain;
     u64 pon_generation; u32 pon_words[4];
 };
 struct airoha_eth { void *dev; struct { int dev; } *ppe; };
@@ -101,7 +102,10 @@ static unsigned jhash_1word(unsigned hash,unsigned seed) { return hash; }
 static void skb_set_hash(struct sk_buff *s,unsigned hash,int type) { assert(!s->dev->priv->pon_port); }
 static void airoha_ppe_check_skb(int *ppe,struct sk_buff *s,unsigned hash,bool flow) { assert(!s->dev->priv->pon_port); }
 static void napi_gro_receive(int *napi,struct sk_buff *s) { assert(!s->dev->priv->pon_port); gro_calls++; dev_kfree_skb(s); }
-static void airoha_qdma_fill_rx_queue(struct airoha_queue *q) {}
+#define dev_kfree_skb_any dev_kfree_skb
+static void airoha_qdma_fill_rx_queue(struct airoha_queue *q) {
+    if(q->pon_drain) for(int i=0;i<16;i++) if(pages[i].freed) q->desc[i].ctrl=0;
+}
 struct airoha_pon_rx_meta { u32 words[4]; u16 gem; u8 channel; bool omci,no_mic; };
 /* MASKS */
 /* RX_META */
@@ -137,6 +141,16 @@ static void packet(int index,int port,int len,bool more) {
 }
 static void pages_freed(int n) { for(int i=0;i<n;i++) assert(pages[i].freed); }
 int main(void) {
+    setup(); packet(0,0,24,true); assert(!airoha_qdma_rx_process(q,8) && q->skb);
+    packet(1,0,24,false); packet(2,1,48,false); packet(3,0,12,true);
+    assert(!airoha_qdma_pon_discard_rx(q));
+    assert(!q->skb && !q->rx_discard && !q->pon_frame && !q->pon_drain);
+    assert(!pon_calls && !gro_calls && !ethernet_calls && !q->pon_generation);
+    pages_freed(4);
+    setup(); for(int i=0;i<16;i++) packet(i,0,48,true);
+    assert(!airoha_qdma_pon_discard_rx(q) && !q->queued && !q->rx_discard);
+    pages_freed(16); assert(!allocations && !pon_calls && !gro_calls);
+
     setup(); packet(0,0,48,false); assert(airoha_qdma_rx_process(q,8)==1);
     assert(pon_calls==1 && delivered_len==48 && !ethernet_calls && !lro_calls && !gro_calls);
     assert(!memcmp(delivered_words,&q->desc[0].msg0,16));

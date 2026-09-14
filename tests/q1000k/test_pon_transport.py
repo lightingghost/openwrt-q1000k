@@ -20,6 +20,8 @@ class PonTransportTests(unittest.TestCase):
                         '', source, flags=re.S)
         source = re.sub(r'/\* The OEM release engine.*?EXPORT_SYMBOL_GPL\(airoha_pon_retire_fe\);',
                         '', source, flags=re.S)
+        source = re.sub(r'/\* RX admission closes.*?EXPORT_SYMBOL_GPL\(airoha_pon_drain_rx\);',
+                        '', source, flags=re.S)
         # Keep the wire masks from the real driver; numeric expectations below
         # are independent of FIELD_PREP and the production encode/decode code.
         regs = (ETH / 'airoha_regs.h').read_text()
@@ -41,6 +43,7 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int netdev_tx_t;
+#define READ_ONCE(x) (x)
 #define __rcu
 #define NETDEV_TX_OK 0
 #define NETDEV_TX_BUSY 1

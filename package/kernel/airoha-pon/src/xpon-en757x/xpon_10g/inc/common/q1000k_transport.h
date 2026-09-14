@@ -45,6 +45,8 @@ int q1000k_transport_get_qos(u8 channel, struct airoha_pon_qos *qos);
  */
 int q1000k_transport_pause(unsigned int timeout_ms);
 int q1000k_transport_retire_fe(u8 channel);
+/* After all FE channels retire and MAC ingress stops; leaves RX DMA closed. */
+int q1000k_transport_drain_rx(void);
 int q1000k_transport_resume(void);
 
 /* Permanently close this attachment's channel and poll native TX mappings.
