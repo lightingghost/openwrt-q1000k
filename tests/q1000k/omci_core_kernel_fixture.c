@@ -191,6 +191,8 @@ static int fixture_stop_thread(void *arg)
 	pr_err("Q1000K_OMCI_CORE_FAIL line=%u: %s\n", __LINE__, #condition); \
 	ret = -EINVAL; goto out; } } while (0)
 
+int q1000k_omci_telemetry_test(void);
+
 int q1000k_omci_core_test(void)
 {
 	struct device *parent = NULL;
@@ -212,6 +214,8 @@ int q1000k_omci_core_test(void)
 
 	if (!strstr(init_utsname()->release, "-q1000k-omci-core-test"))
 		return -EPERM;
+	ret = q1000k_omci_telemetry_test();
+	if (ret) return ret;
 	parent = root_device_register("q1000k-omci-fixture");
 	if (IS_ERR(parent))
 		return PTR_ERR(parent);

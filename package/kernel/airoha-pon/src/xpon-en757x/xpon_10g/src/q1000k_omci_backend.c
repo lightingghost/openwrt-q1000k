@@ -202,6 +202,42 @@ static int qomci_gem_encryption(struct omci_device *odev, u16 entity, u8 *mode)
 	return ret;
 }
 
+static int qomci_telemetry(struct omci_device *odev, struct omci_telemetry *telemetry)
+{
+	struct qomci_backend *b = omci_device_priv(odev);
+	struct xpon_phy_api_data_s query = {
+		.api_type = XPON_PHY_API_TYPE_GET, .cmd_id = PON_GET_PHY_TX_FEC_STATUS,
+	};
+	struct omci_telemetry result = {};
+	int token, ret;
+
+	if (!telemetry) return -EINVAL;
+	token = q1000k_protocol_enter();
+	if (token < 0) return token;
+	/* An old TX status bit outside the established session is not a current
+	 * upstream FEC sample. The PHY query checks controller ownership/health
+	 * and reads the observed TX status, not the configured burst profile.
+	 */
+	if (!b->cold_started || !b->started || !b->active || b->request.reset ||
+	    GPON_CURR_STATE != GPON_10G_STATE_O5) {
+		ret = -ENODATA;
+		goto out;
+	}
+	ret = q1000k_phy_call(&query);
+	if (ret < 0) goto out;
+	if (ret > 1) { ret = -EIO; goto out; }
+	result.valid = OMCI_TELEMETRY_F_FEC_UPSTREAM;
+	result.upstream_fec = ret ? OMCI_FEC_STATUS_UP : OMCI_FEC_STATUS_DOWN;
+	/* RX FEC configuration is not an observation. Optical sensors require
+	 * their own calibrated controller interface; leave those bits invalid.
+	 */
+	*telemetry = result;
+	ret = 0;
+out:
+	q1000k_protocol_leave(token);
+	return ret;
+}
+
 static const struct omci_device_ops qomci_ops = {
 	.start = qomci_start, .stop = qomci_stop, .xmit = qomci_xmit,
 	.get_ani_topology = q1000k_services_topology,
@@ -212,6 +248,7 @@ static const struct omci_device_ops qomci_ops = {
 	.set_traffic_scheduler = q1000k_services_scheduler,
 	.config_changed = qomci_config_changed,
 	.service_fault = qomci_service_fault,
+	.get_telemetry = qomci_telemetry,
 };
 
 void q1000k_omci_receive(struct sk_buff *skb, u16 gem, bool crc_error)

@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r58 and OMCI core r12 implement the native packet path,
+ demonstrated.** Vendor r59 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -79,6 +79,14 @@ check rejection before physical operations, preservation of installed intent
 and deletion despite unsupported candidate attributes. The user's BGW320-500
 with Nokia 3FE46901AC optic identifies an XGS-PON setup; the actual subscriber
 identity and OLT service remain unknown. See the [QoS contract](XGSPON-QOS.q1000k.md).
+
+Vendor r59/core r13 connect observed upstream FEC to OMCI telemetry. Only a
+current established session may supply the sample; inactive/reset/faulted
+sessions and failed PHY reads leave it unavailable. Downstream FEC and optical
+sensor values remain invalid. Netlink status now discards partially populated
+telemetry when a provider returns an error. Host provider tests and the real
+UML netlink parser cover the availability and error behavior. No hardware was
+accessed. See the [PHY status contract](XGSPON-PHY.q1000k.md#observed-fec-telemetry).
 
 ## Imported references
 

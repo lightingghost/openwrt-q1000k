@@ -10,7 +10,7 @@ class BackendTests(unittest.TestCase):
     def test_session_order_rekey_reset_packet_ownership_and_faults(self):
         omci=(ROOT/'package/kernel/q1000k-omci/src/include/net/xpon/omci.h').read_text()
         types=''
-        for name in ['omci_identity','omci_gem_qos','omci_gem_port_config','omci_device_ops']:
+        for name in ['omci_identity','omci_telemetry','omci_gem_qos','omci_gem_port_config','omci_device_ops']:
             types+=re.search(r'struct '+name+r' \{.*?\n\};',omci,re.S).group(0)+'\n'
         code=(ROOT/'package/kernel/airoha-pon/src/bsp/include/q1000k_phy_api.h').read_text()+(MAC/'inc/common/q1000k_auth.h').read_text()+(MAC/'inc/common/q1000k_mac_keys.h').read_text()
         code+=(MAC/'inc/common/q1000k_key_exchange.h').read_text()

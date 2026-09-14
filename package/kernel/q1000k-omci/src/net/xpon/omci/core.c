@@ -102,8 +102,8 @@ static int omci_put_telemetry(struct sk_buff *msg, struct omci_device *odev)
 {
 	struct omci_telemetry telemetry = {};
 
-	if (odev->ops->get_telemetry)
-		odev->ops->get_telemetry(odev, &telemetry);
+	if (odev->ops->get_telemetry && odev->ops->get_telemetry(odev, &telemetry))
+		memset(&telemetry, 0, sizeof(telemetry));
 
 	if (nla_put_u32(msg, OMCI_ATTR_TELEMETRY_VALID, telemetry.valid))
 		return -EMSGSIZE;

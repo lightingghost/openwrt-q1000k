@@ -30,6 +30,7 @@ done
 make -C "$source_tree" ARCH=um O="$work/build" -j"${Q1000K_TEST_JOBS:-8}" >> "$work/build.log" 2>&1
 cp -a "$repo/package/kernel/q1000k-omci/src" "$work/module"
 cat "$test_dir/omci_core_kernel_fixture.c" >> "$work/module/net/xpon/omci/agent.c"
+cat "$test_dir/omci_telemetry_kernel_fixture.c" >> "$work/module/net/xpon/omci/core.c"
 if [ -n "${Q1000K_OMCI_CLI:-}" ]; then
 	cat "$test_dir/omci_cli_kernel_fixture.c" >> "$work/module/net/xpon/omci/agent.c"
 fi

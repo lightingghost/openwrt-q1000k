@@ -194,3 +194,24 @@ connected lifecycle. The board DT compiles. Vendor r25 builds and its prepared
 sources match the tested files. No hardware access was performed. MAC startup,
 physical drain and OMCI coordination still must use these typed interfaces
 before the disabled board gates can be removed.
+
+## Observed FEC telemetry
+
+Vendor r59 connects the checked external TX-FEC query to the OMCI provider.
+The query reads `EN7581_XGPON_PHY_DBG_TX_FEC_STA`; it does not infer FEC from a
+configured burst profile. Sampling holds the protocol owner and requires a
+cold-started, started, active O5 session with no pending reset. PHY/controller
+faults, invalid boolean results and inactive sessions leave output unchanged
+and return an error. Only `OMCI_TELEMETRY_F_FEC_UPSTREAM` is published.
+
+Downstream FEC configuration is not a measurement, so the corresponding valid
+bit remains clear. Temperature, voltage, bias and optical powers also remain
+unavailable pending a calibrated controller interface. This path does not
+select a debug probe, clear counters or issue a generic SFP sensor read.
+
+Core r13 clears all telemetry validity when a provider reports failure, even
+if the provider partially populated its output. The UML fixture parses the
+real generated netlink attributes, checking success, missing callbacks,
+`-EIO` and `-ENODATA`, and absence of every unvalidated field. Host tests
+exercise the production provider and each session/query rejection. Matching
+AN7581 packages build; no Q1000K connection or firmware flashing occurred.

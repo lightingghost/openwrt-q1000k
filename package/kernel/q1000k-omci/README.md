@@ -64,6 +64,9 @@ be used as evidence that PON service is ready.
   traffic-descriptor references. Normalized service records carry the same QoS
   attributes; unsupported policies must return an error before mutation. See
   the [QoS contract](../../../target/linux/airoha/XGSPON-QOS.q1000k.md).
+- Telemetry fields require their individual validity bits. A failed provider
+  query clears validity in netlink status; partial data from that failed query
+  cannot appear as a current reading.
 - Failed service removal preserves the previous records and aborts MIB reset.
   Session-transition removal failure latches an error rather than reopening
   admission with unaccounted hardware state. Provider teardown remains

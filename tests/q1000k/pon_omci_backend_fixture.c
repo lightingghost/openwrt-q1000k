@@ -9,6 +9,7 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef int32_t s32;
 #define BIT(n) (UINT32_C(1)<<(n))
 #define U64_MAX UINT64_MAX
 #define OMCI_OLT_VENDOR_ID_LEN 4
@@ -36,6 +37,12 @@ typedef uint64_t u64;
 #define CHECKSUM_NONE 0
 #define PHY_XGSPON_CONFIG 7
 #define DS_FEC_SETTING_FORCE_ON 1
+#define OMCI_TELEMETRY_F_FEC_UPSTREAM 2
+#define OMCI_FEC_STATUS_DOWN 1
+#define OMCI_FEC_STATUS_UP 2
+#define XPON_PHY_API_TYPE_GET 0
+#define PON_GET_PHY_TX_FEC_STATUS 99
+struct xpon_phy_api_data_s { int api_type, cmd_id; };
 #define TRAFFIC_DOWN 0
 #define UPAES_MODE_NONE 0
 #define GPON_SMA_INVALID 0
@@ -201,6 +208,11 @@ static int q1000k_gwan_refresh_checked(int (*install)(void *),int (*ready)(void 
 }
 static void xmcs_report_event(int type,int event,u8 state) { assert(owned && type==1 && event==2 && (state==1||state==7)); }
 static int q1000k_phy_set_tx(bool enable) { assert(owned); int ret=step(); if(!ret) optical_tx=enable; return ret; }
+static int phy_fec_value, phy_fec_calls;
+int q1000k_phy_call(struct xpon_phy_api_data_s *q) {
+    assert(owned && q->api_type==XPON_PHY_API_TYPE_GET && q->cmd_id==PON_GET_PHY_TX_FEC_STATUS);
+    phy_fec_calls++; return phy_fec_value;
+}
 static int q1000k_phy_configure(u32 mode) { assert(owned && install_phase && mode==PHY_XGSPON_CONFIG); return step(); }
 static int XPON_PHY_SET_RX_ENABLE(void) { assert(owned && install_phase); return step(); }
 static int XPON_PHY_SET_RX_FEC(int mode) { assert(owned && install_phase && mode==1); return step(); }
@@ -298,6 +310,10 @@ static void operational(void)
 int main(void)
 {
     startup(); assert(q1000k_omci_assign(17)==-EPERM);
+    struct omci_telemetry telemetry, saved_telemetry;
+    memset(&telemetry,0xa5,sizeof(telemetry)); saved_telemetry=telemetry;
+    assert(qomci_ops.get_telemetry(qomci_current->omci,&telemetry)==-ENODATA && !phy_fec_calls);
+    assert(!memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)));
     u8 ploam[48]={3,255}; ploam[47]=0x55;
     assert(q1000k_omci_ploam_verify(ploam,48)==-EPERM);
     int verify_owner=q1000k_protocol_enter();
@@ -350,6 +366,33 @@ int main(void)
     q1000k_protocol_leave(same_tag_owner); q1000k_omci_control();
     assert(!fault && ack_count==2);
     operational(); assert(!fault && b->active && services_enabled && b->omci->epoch==b->published && native_epoch==b->published);
+    for(int value=0;value<2;value++) {
+        phy_fec_value=value;
+        assert(!qomci_ops.get_telemetry(b->omci,&telemetry));
+        assert(telemetry.valid==OMCI_TELEMETRY_F_FEC_UPSTREAM);
+        assert(telemetry.upstream_fec==(value ? OMCI_FEC_STATUS_UP : OMCI_FEC_STATUS_DOWN));
+        assert(!telemetry.downstream_fec && !telemetry.bosa_rx_power_nw && !telemetry.bosa_tx_power_nw);
+    }
+    saved_telemetry=telemetry;
+    phy_fec_value=-EIO;
+    assert(qomci_ops.get_telemetry(b->omci,&telemetry)==-EIO);
+    assert(!memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)) && !owned);
+    phy_fec_value=2;
+    assert(qomci_ops.get_telemetry(b->omci,&telemetry)==-EIO);
+    assert(!memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)));
+    for(int state=0;state<6;state++) {
+        int before=phy_fec_calls;
+        if(state==0) b->cold_started=false;
+        if(state==1) b->started=false;
+        if(state==2) b->active=false;
+        if(state==3) b->request.reset=true;
+        if(state==4) vendor.state=4;
+        if(state==5) fault=-ETIMEDOUT;
+        assert(qomci_ops.get_telemetry(b->omci,&telemetry)==(state==5 ? -ETIMEDOUT : -ENODATA));
+        assert(phy_fec_calls==before && !memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)) && !owned);
+        b->cold_started=b->started=b->active=true; b->request.reset=false; vendor.state=5; fault=0;
+    }
+    assert(qomci_ops.get_telemetry(b->omci,NULL)==-EINVAL);
     assert(b->ranged && b->delay==100 && vendor.gponCfg.eqd==400);
     int ranging_owner=q1000k_protocol_enter(),prior_calls=calls;
     assert(q1000k_omci_ranging(0x40000000,true,false,0,true)==-ERANGE);
