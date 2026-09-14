@@ -90,11 +90,44 @@ controller_field() {
 	fi
 }
 
+# Use only the command's fixed, read-only status operation. Keep its parser
+# namespace separate from factory/controller data and never reuse a stale sample.
+read_omci() {
+	local data previous version type
+	omci_available=0
+	json_set_namespace q1000k_omci previous
+	json_init
+	if [ -x /usr/sbin/q1000k-omci ] && \
+	   data=$(/usr/sbin/q1000k-omci -i pon status 2>/dev/null) && json_load "$data"; then
+		json_get_type type schema_version
+		json_get_var version schema_version
+		[ "$type" = int ] && [ "$version" = 1 ] && omci_available=1
+	fi
+	json_set_namespace "$previous"
+}
+
+omci_field() {
+	local name="$1" expected="$2" output="${3:-$1}" previous type value
+	json_set_namespace q1000k_omci previous
+	json_get_type type "$name"
+	json_get_var value "$name"
+	json_set_namespace "$previous"
+	if [ "$omci_available" = 1 ] && [ "$type" = "$expected" ]; then
+		case "$type" in
+			int) json_add_int "$output" "$value" ;;
+			string) json_add_string "$output" "$value" ;;
+		esac
+	else
+		json_add_null "$output"
+	fi
+}
+
 xgspon_status() {
 	local phy=0 mac=0 uptime=0
 	read_identity
 	read_firmware
 	read_controller
+	read_omci
 	[ -d /sys/module/phy_10g ] && phy=1
 	[ -d /sys/module/xpon_10g ] && mac=1
 	read -r uptime ignored < /proc/uptime
@@ -106,7 +139,7 @@ xgspon_status() {
 	json_add_string optics '2 × EN7573AN'
 	json_add_string mode 'XGS-PON'
 	json_add_boolean activation_supported 0
-	json_add_string limitation 'Controller bring-up is available; PON MAC and OMCI service integration are pending.'
+	json_add_string limitation 'OMCI diagnostics are available when the experimental core is loaded; optical startup and hardware acceptance remain pending.'
 	json_add_object factory
 	json_add_boolean available "${factory_available:-0}"
 	json_add_string source "$factory_source"
@@ -141,11 +174,22 @@ xgspon_status() {
 	controller_field calibration_supplied boolean
 	controller_field last_error int
 	json_close_object
-	# LOS is sampled by the initialized controller driver. O5, OMCI and
-	# service readiness still have no authoritative implementation.
 	controller_field los boolean
-	json_add_null registration
-	json_add_null omci
+	omci_field state int registration
+	if [ "$omci_available" = 1 ]; then
+		json_add_object omci
+		for field in device_id ifindex onu_id gem_port_id authenticated agent_enabled \
+		             agent_operational service_rules service_error mib_sync mib_objects olt_profile; do
+			omci_field "$field" int
+		done
+		for field in rx_packets rx_dropped tx_packets tx_errors responses unsupported; do
+			omci_field "$field" string
+		done
+		json_close_object
+	else
+		json_add_null omci
+	fi
+	# Configured rules may be dormant: they do not establish Internet service.
 	json_add_null service_ready
 	json_add_null optical
 	json_dump

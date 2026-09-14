@@ -13,7 +13,7 @@ powered off and removed; the temporary harness restored GPIO/mux state.
 No firmware image was flashed or package persistently installed. The
 vendor packet adapter now builds and passes host/UML lifetime tests. Native
 FE/QoS, physical shutdown, owned PHY resources, a namespace transaction
-coordinator, and OMCI authentication barriers are implemented locally. The owned MAC IRQ and resumable protocol executor are also implemented. Authenticated OMCI RX/TX, ordered key/ONU/OMCC publication and a baseline unicast service backend are now connected locally. Strict-priority and WRR managed-entity controls are connected to verified drained QoS updates. Profile-seeded unicast services and PLOAM allocation reconciliation are also connected. Cold startup/reset and advanced service paths remain unfinished.
+coordinator, and OMCI authentication barriers are implemented locally. The owned MAC IRQ and resumable protocol executor are also implemented. Authenticated OMCI RX/TX, ordered key/ONU/OMCC publication and a baseline unicast service backend are now connected locally. Strict-priority and WRR managed-entity controls are connected to verified drained QoS updates. Profile-seeded unicast services and PLOAM allocation reconciliation are also connected. The q1000k-omci userspace command and read-only LuCI status/MIB integration are implemented and tested against the kernel core in UML. Cold startup/reset and advanced service paths remain unfinished.
 BSP, PHY and MAC compile and pass modpost, and the
 experimental vendor package builds with no unresolved symbols.
 

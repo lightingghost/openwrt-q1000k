@@ -54,6 +54,15 @@ async function main() {
     h.state.result = { ...sample, los: false };
     await h.polls[0]();
     assert.match(text(tree), /Signal detected/);
+    h.state.result = { ...sample, registration: 5, omci: { authenticated: 1,
+        agent_enabled: 1, agent_operational: 0, mib_objects: 281, service_rules: 3,
+        service_error: -22, rx_packets: '18446744073709551615' } };
+    await h.polls[0]();
+    assert.match(text(tree), /O5/);
+    assert.match(text(tree), /Admitted/);
+    assert.match(text(tree), /18446744073709551615/);
+    assert.match(text(tree), /may be dormant/);
+    assert.doesNotMatch(text(tree), /\[object Object\]/);
     h.state.fail = true;
     await h.polls[0]();
     assert.match(text(tree), /last sample could not be refreshed/);
@@ -71,6 +80,19 @@ async function main() {
     await d.polls[0]();
     assert.doesNotMatch(text(raw), /Quantum Fiber Q1000K/);
     assert.match(text(raw), /Diagnostics unavailable/);
+
+    const button = raw.children.find(n => n.tag === 'button');
+    d.state.fail = false;
+    d.state.result = { schema_version: 1, available: true, entities: [{ class_id: 277, name: '<script>test</script>' }] };
+    await button.attrs.click();
+    assert.equal(button.disabled, false);
+    assert.match(text(raw), /class_id/);
+    assert.match(text(raw), /<script>test<\/script>/); // Text content, never innerHTML.
+    d.state.fail = true;
+    await button.attrs.click();
+    assert.match(text(raw), /MIB unavailable/);
+    assert.doesNotMatch(text(raw), /class_id/);
+    assert.equal(button.disabled, false);
 
     const s = harness('settings.js');
     s.view.render();

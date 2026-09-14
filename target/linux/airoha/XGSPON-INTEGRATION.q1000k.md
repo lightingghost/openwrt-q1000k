@@ -1122,3 +1122,20 @@ The current PR #24577 head was rechecked through the GitHub API and remains
 applies. Its user-facing management concept is useful; its EN7528 procfs
 transport and successful no-op protocol replies are not imported. The user
 confirmed continuing with the existing generic core.
+
+## OMCI diagnostics in LuCI
+
+The imported econet-xpon application now reads the q1000k-omci command's
+structured status through a separate JSON namespace. It exposes activation
+state, authenticated admission, agent exchanges, MIB size, configured service
+rules, reconciliation errors and exact decimal packet counters. Missing, failed
+or wrongly typed samples become unavailable. Configured rules may be dormant;
+service readiness remains unknown. No configuration write RPC was added.
+
+The MIB page requests a live read only when its button is pressed, instead of
+walking hundreds of entities on every status poll. RPC selects the fixed `pon`
+interface and fixed read command. Failed reads replace old results. CLI absence
+is supported, so the normal diagnostics package does not force experimental
+kernel modules into an image. All 13 factory/backend tests and the LuCI view
+fixtures pass. Matching PON/core/CLI/backend/LuCI AArch64 packages build locally;
+no package was installed on the device.

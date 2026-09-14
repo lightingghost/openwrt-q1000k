@@ -107,6 +107,7 @@ class BackendTests(unittest.TestCase):
         source = re.sub(r'(?<![A-Za-z0-9])/(sys|proc|lib/firmware)/',
                         lambda m: str(self.root) + '/' + m[1] + '/', source)
         source = source.replace('/usr/sbin/q1000k-pon-factory', str(self.root / 'factory'))
+        source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
         self.firmware = {
             'pm': (b'fixture program', '5a8a4bbae5f70c1e615ba0aa1c2a1dce654611d3205d2fa983bf41e6cdadb4a1'),
             'dm': (b'fixture data', '21618dc3694a1e6f6b28c7da7141964dea1d6e57f2d2956bbe72a780ca6166a4'),
@@ -193,6 +194,51 @@ class BackendTests(unittest.TestCase):
         self.write(base.replace('0-0051', '1-0051') + 'status', json.dumps(status))
         self.write(base.replace('0-0051', '1-0051') + 'operation', '')
         self.assertFalse(self.call()[1]['controller']['available'])
+
+    def test_omci_status_isolated_typed_and_does_not_prove_service(self):
+        self.write('omci', '#!/bin/sh\n[ "$*" = "-i pon status" ] || exit 2\ncat "' +
+                   str(self.root / 'omci.json') + '"\nexit "${OMCI_FAIL:-0}"\n').chmod(0o755)
+        status = {'schema_version': 1, 'device_id': 7, 'ifindex': 9, 'state': 5,
+                  'authenticated': 1, 'service_rules': 3, 'service_error': -22,
+                  'rx_packets': '18446744073709551615', 'mib_objects': 281}
+        sample = self.write('omci.json', json.dumps(status))
+        _, d = self.call()
+        self.assertEqual(d['registration'], 5)
+        self.assertEqual(d['omci']['service_error'], -22)
+        self.assertEqual(d['omci']['rx_packets'], '18446744073709551615')
+        self.assertIsNone(d['omci']['tx_packets'])
+        self.assertFalse(d['controller']['available'])
+        self.assertIsNone(d['service_ready'])
+        for bad in ('{', json.dumps(dict(status, schema_version=99)),
+                    json.dumps(dict(status, schema_version='1'))):
+            sample.write_text(bad)
+            self.assertIsNone(self.call()[1]['omci'])
+        sample.write_text(json.dumps(dict(status, state='5', authenticated=True, rx_packets=7)))
+        _, d = self.call()
+        self.assertIsNone(d['registration'])
+        self.assertIsNone(d['omci']['authenticated'])
+        self.assertIsNone(d['omci']['rx_packets'])
+        sample.write_text(json.dumps(status))
+        self.env['OMCI_FAIL'] = '1'
+        self.assertIsNone(self.call()[1]['omci'])
+
+    def test_mib_rpc_fixed_read_only_command_and_error(self):
+        rpc = (REPO / 'package/luci-app-econet-xpon/root/usr/libexec/rpcd/econet-xpon').read_text()
+        script = self.write('rpc', rpc.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci')))
+        self.write('omci', '#!/bin/sh\n[ "$*" = "-i pon mib" ] || exit 2\nprintf "%s" "$MIB_DATA"\nexit "${OMCI_FAIL:-0}"\n').chmod(0o755)
+        self.env['MIB_DATA'] = '[{"class_id":277,"entity_id":32768}]'
+        def call(*args):
+            return subprocess.run(['busybox', 'ash', str(script), *args], env=self.env,
+                                  capture_output=True, text=True)
+        self.assertEqual(set(json.loads(call('list').stdout)), {'status', 'raw', 'mib'})
+        d = json.loads(call('call', 'mib').stdout)
+        self.assertTrue(d['available'])
+        self.assertEqual(d['entities'][0]['class_id'], 277)
+        self.env['OMCI_FAIL'] = '1'
+        d = json.loads(call('call', 'mib').stdout)
+        self.assertFalse(d['available'])
+        self.assertIsNone(d['entities'])
+        self.assertNotEqual(call('call', 'set').returncode, 0)
 
     def test_identity_fallback_and_override_validation(self):
         self.write('factory.json', json.dumps({'available': True, 'source': 'factory',

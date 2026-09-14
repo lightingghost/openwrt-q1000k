@@ -12,8 +12,11 @@ function value(v) {
 function state(v, yes, no) {
     return typeof v !== 'boolean' ? _('Unavailable') : (v ? yes : no);
 }
+function flag(v, yes, no) {
+    return state(v === 0 ? false : v === 1 ? true : null, yes, no);
+}
 function rows(d) {
-    var f = d.factory || {}, i = d.identity || {}, fw = d.firmware || {}, m = d.modules || {}, c = d.controller || {};
+    var f = d.factory || {}, i = d.identity || {}, fw = d.firmware || {}, m = d.modules || {}, c = d.controller || {}, o = d.omci || {};
     return [
         [ _('Device'), value(d.model) ],
         [ _('SoC'), value(d.soc) ],
@@ -40,8 +43,15 @@ function rows(d) {
         [ _('PON PHY module'), state(m.phy_loaded, _('Loaded'), _('Not loaded')) ],
         [ _('PON MAC module'), state(m.mac_loaded, _('Loaded'), _('Not loaded')) ],
         [ _('Loss of signal'), state(d.los, _('Signal lost'), _('Signal detected')) ],
-        [ _('Registration'), value(d.registration) ],
-        [ _('OMCI'), value(d.omci) ],
+        [ _('ONU activation state'), Number.isInteger(d.registration) ? 'O' + d.registration : value(null) ],
+        [ _('OMCI authenticated session'), flag(o.authenticated, _('Admitted'), _('Closed')) ],
+        [ _('OMCI agent'), flag(o.agent_enabled, _('Enabled'), _('Disabled')) ],
+        [ _('OMCI exchanges'), flag(o.agent_operational, _('Observed'), _('Not observed')) ],
+        [ _('OMCI MIB objects'), value(o.mib_objects) ],
+        [ _('Configured service rules (may be dormant)'), value(o.service_rules) ],
+        [ _('Service reconciliation error'), value(o.service_error) ],
+        [ _('OMCI received packets'), value(o.rx_packets) ],
+        [ _('OMCI transmitted packets'), value(o.tx_packets) ],
         [ _('Provisioned service'), state(d.service_ready, _('Ready'), _('Not ready')) ],
         [ _('Optical measurements'), _('Unavailable') ]
     ];
@@ -69,7 +79,7 @@ return view.extend({
         return E('div', { 'class': 'cbi-map' }, [
             E('h2', {}, _('Q1000K XGS-PON')),
             E('p', { 'class': 'cbi-map-descr' },
-                _('Development diagnostics. Optical registration and Internet service are not available yet. Missing readings are shown as Unavailable.')),
+                _('Development diagnostics. An admitted OMCI session and configured rules do not prove Internet service. Missing readings are shown as Unavailable.')),
             content
         ]);
     },
