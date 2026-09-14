@@ -4,12 +4,12 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r53 and OMCI core r8 implement the native packet path,
+ demonstrated.** Vendor r54 and OMCI core r8 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
 `q1000k-omci` userspace command and read-only LuCI status/MIB are implemented.
-Data-key/encrypted-service support, combined VLAN filter pipelines and the
+Encrypted-service provisioning, combined VLAN filter pipelines and the
 remaining advanced service paths are still incomplete.
 
 **Device access is read-only; never flash firmware.** No device access or
@@ -18,7 +18,7 @@ below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 71 passing PON host tests, the complete OMCI
+The current local evidence is 72 passing PON host tests, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,
 cryptography and PHY concurrency results. Hardware cold boot, OLT registration,
@@ -28,13 +28,17 @@ disabled and the experimental packages remain optional/BROKEN.
 See [integration details](XGSPON-INTEGRATION.q1000k.md),
 [VLAN contract](XGSPON-VLAN.q1000k.md) and [AT&T research](XGSPON-ATT.q1000k.md).
 
-Vendor r53 adds checked AES-128 unicast key-bank writes and key-switch
-completion primitives. Both directions are revoked before bank replacement;
-invalid banks are erased, and only the switch interrupt is acknowledged.
-AES-ECB key wrapping and CMAC key-name reports pass published crypto vectors
-in real Linux UML. These helpers are not yet connected to Key_Control or
-OMCI encrypted GEM provisioning. ECB and CMAC users must own separate crypto
-transforms because the imported helpers have separate locks.
+Vendor r54 connects authenticated Key_Control to the registration owner.
+Generate/Confirm use explicit key contexts, separate ECB/CMAC transforms,
+kernel randomness, checked bank replacement, bounded switch completion and
+checked PLOAM FIFO submission. Reset supersedes pending requests and erases
+data keys. No ONU retransmission timers or legacy key task run. Tests cover
+all seven contexts, duplicate/confused exchanges, supersession and every
+install/report failure, including crypto in real Linux UML. Key-switch timing
+and OMCC encryption mirroring still require hardware validation. OMCI data
+GEM encryption provisioning is the next integration step.
+
+See [key exchange contract](XGSPON-KEYS.q1000k.md).
 
 ## Imported references
 
@@ -60,7 +64,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | PHY/MAC lifecycle | Owned IRQ/protocol executor, physical clear/install/reactivation, cold receive-only startup, reset, full burst profiles and checked ranging | Hardware synchronization, burst timing, full analog/PHY audit and interoperability |
 | GEM/T-CONT | Full namespace replacement, quarantined failures, PLOAM allocation reconciliation, separate ONU/OMCC publication | Encrypted GEM activation, multicast channel ownership and hardware validation |
 | FE/QoS | Checked native frame/queue controls, SP and WRR managed entities, drained scheduler replacement | Advanced shaping/backpressure and hardware throughput tests |
-| Authentication | 36-byte registration derivation, software OMCI/PLOAM MICs, key/epoch barriers, recovery containment | Unicast data-key exchange, encrypted service and secure mutual-authentication rekey |
+| Authentication | 36-byte registration derivation, software OMCI/PLOAM MICs, key/epoch barriers, recovery containment | Encrypted service provisioning and secure mutual-authentication rekey |
 | OMCI services | Generic core, topology, unicast GEM/bridge/mapper provisioning, class 171 tag processing on UNI-facing pon0 | Combined class 84/171 pipeline, advanced VLAN modes, multicast and actual OLT identity/MIB compatibility |
 | Userspace/LuCI | q1000k-omci status/MIB/get/set; read-only LuCI; optional explicit supervisor with owned teardown | Browser QA on an installed image, final netifd/firewall integration and hardware lifecycle acceptance |
 | AT&T WAN | DHCP identified; optical VLAN must come from provisioning, with local tag handling defined by OMCI | Actual gateway/line identity, OLT provisioning, successful DHCP and IPv4/IPv6 tests |

@@ -5,6 +5,7 @@
 #include <q1000k_phy_api.h>
 #include <linux/err.h>
 #include <linux/rcupdate.h>
+#include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <net/xpon.h>
@@ -14,6 +15,7 @@
 #include "common/q1000k_mac_cold.h"
 #include "common/q1000k_identity.h"
 #include "common/q1000k_mac_keys.h"
+#include "common/q1000k_key_exchange.h"
 #include "common/q1000k_gwan.h"
 #include "common/q1000k_protocol.h"
 #include "common/q1000k_transport.h"
@@ -24,8 +26,13 @@
 
 #define QOMCI_ACKS 64
 extern int snSendInO23Cnt;
+struct qomci_key_request {
+	bool pending, confirm;
+	u8 index, sequence;
+};
 struct qomci_request {
 	u64 generation;
+	struct qomci_key_request data;
 	u16 onu;
 	u8 tag[8], state, index;
 	u8 ack[QOMCI_ACKS], acks;
@@ -38,9 +45,10 @@ struct qomci_request {
 struct qomci_backend {
 	struct xpon_device *xpon;
 	struct omci_device *omci;
-	struct crypto_lskcipher *cipher;
+	struct crypto_lskcipher *cipher, *ecb_cipher;
 	spinlock_t auth_lock;
 	struct q1000k_mac_keys keys;
+	struct q1000k_key_state data;
 	struct qomci_request request;
 	struct q1000k_pon_profile burst[4];
 	u8 burst_mask;
@@ -259,6 +267,7 @@ int q1000k_omci_reset(bool emergency, bool reset_phy)
 	b->request.acks = 0;
 	b->request.burst_mask = 0;
 	b->request.ranging = false;
+	memset(&b->request.data, 0, sizeof(b->request.data));
 	return qomci_request(b);
 }
 
@@ -272,6 +281,8 @@ int q1000k_omci_profile(const u8 tag[8], u8 sequence, bool acknowledge)
 		return -ENODEV;
 	if (b->request.reset)
 		return -EAGAIN;
+	if (b->request.data.pending)
+		return -EBUSY;
 	/* Do not acknowledge a superseded tag with a different key. The OLT
 	 * can retry a new profile after this ordered control boundary.
 	 */
@@ -450,8 +461,58 @@ int q1000k_omci_alloc_changed(void)
 	return b ? qomci_request(b) : -ENODEV;
 }
 
+int q1000k_omci_key_control(bool confirm, u8 index, u8 length, u8 sequence)
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+
+	if (!q1000k_protocol_owned()) return -EPERM;
+	if (!b || !b->cold_started) return -ENODEV;
+	if (index < 1 || index > 2) return -EINVAL;
+	if (!confirm && length != 16) return -EOPNOTSUPP;
+	if (GPON_CURR_STATE != GPON_10G_STATE_O5 || !b->ranged || !b->keys_valid ||
+	    b->onu > 1020 || b->index || gpGponPriv->gponSecurity.smaValid != GPON_SMA_INVALID)
+		return -ENOKEY;
+	if (b->request.reset || b->request.assign || b->request.profile ||
+	    b->request.ranging || b->request.burst_mask || b->request.acks)
+		return -EAGAIN;
+	/* One authenticated request per control boundary. The OLT owns retry;
+	 * do not overwrite a not-yet-reported key request from this RX batch.
+	 */
+	if (b->request.data.pending) return -EBUSY;
+	if (!confirm && b->data.regenerating != index && !rng_is_initialized())
+		return -EAGAIN;
+	b->request.data = (struct qomci_key_request) {
+		.pending = true, .confirm = confirm, .index = index, .sequence = sequence,
+	};
+	return qomci_request(b);
+}
+
+static int qomci_key_report(u16 onu, const struct qomci_key_request *request,
+			   const struct q1000k_key_update *update)
+{
+	u8 message[44] = {};
+	int ret;
+
+	/* Registration-derived PIK bank zero, one 16-byte AES-128 fragment.
+	 * The MAC computes the upstream PLOAM MIC over the 40-byte body.
+	 */
+	message[4] = onu >> 8;
+	message[5] = onu;
+	message[6] = 5;
+	message[7] = request->sequence;
+	message[8] = request->confirm;
+	message[9] = update->report_index;
+	memcpy(message + 12, update->report, 32);
+	ret = q1000k_ploam_send(message);
+	if (!ret) gpGponPriv->ploamMsgcounter.txPloamMsgCnt++;
+	memzero_explicit(message, sizeof(message));
+	return ret;
+}
+
 struct qomci_install {
 	struct q1000k_mac_keys keys;
+	struct q1000k_key_update data;
+	bool key_switch;
 	struct q1000k_pon_profile burst[4];
 	u8 burst_mask;
 	u16 onu;
@@ -479,6 +540,8 @@ static int qomci_install(void *arg)
 	}
 	if (!ret && (install->valid || install->cold))
 		ret = q1000k_mac_keys_install(&install->keys);
+	if (!ret && install->data.changed)
+		ret = q1000k_mac_data_keys_install(&install->data.next.mac, &install->key_switch);
 	if (!ret && install->registration)
 		ret = q1000k_mac_onu_install(install->onu);
 	if (!ret)
@@ -505,9 +568,12 @@ static int qomci_install(void *arg)
 	return ret;
 }
 
-static int qomci_ranging_ready(void *arg)
+static int qomci_ready(void *arg)
 {
-	return q1000k_mac_ranging_ready();
+	struct qomci_install *install = arg;
+	int ret = install->ranging ? q1000k_mac_ranging_ready() : 0;
+
+	return ret ?: q1000k_mac_data_keys_ready(install->key_switch);
 }
 
 static void qomci_legacy_keys(const struct q1000k_mac_keys *keys)
@@ -571,6 +637,7 @@ void q1000k_omci_control(void)
 	install = kzalloc(sizeof(*install), GFP_KERNEL);
 	if (!install) { q1000k_protocol_fail(-ENOMEM); return; }
 again:
+	memzero_explicit(install, sizeof(*install));
 	token = q1000k_protocol_enter();
 	if (token < 0) { ret = token; goto failed; }
 	request = b->request;
@@ -586,6 +653,11 @@ again:
 	install->keys = b->keys;
 	install->valid = b->keys_valid;
 	install->registration = request.assign || request.reset;
+	install->data.next = b->data;
+	if (install->registration) {
+		memzero_explicit(&install->data.next, sizeof(install->data.next));
+		install->data.changed = true;
+	}
 	install->cold = request.reset;
 	install->reset_phy = request.reset_phy;
 	install->emergency = request.emergency;
@@ -621,6 +693,14 @@ again:
 			goto failed;
 		install->valid = !request.reset;
 	}
+	if (request.data.pending) {
+		struct q1000k_key_state prior = install->data.next;
+
+		ret = q1000k_key_prepare(b->ecb_cipher, b->cipher, install->keys.bank[0].kek,
+			&prior, request.data.confirm, request.data.index, &install->data);
+		memzero_explicit(&prior, sizeof(prior));
+		if (ret) goto failed;
+	}
 	if (request.assign && (!install->valid || !install->burst_mask)) { ret = -ENOKEY; goto failed; }
 	if (request.index > 1) { ret = -EINVAL; goto failed; }
 	token = q1000k_protocol_enter();
@@ -634,13 +714,20 @@ again:
 		ret = q1000k_gwan_cold_reset(qomci_install, install);
 	else if (install->registration)
 		ret = q1000k_gwan_register(install->onu, qomci_install, install);
-	else if (install->ranging)
-		ret = q1000k_gwan_refresh_checked(qomci_install, qomci_ranging_ready, install);
+	else if (install->ranging || install->data.changed)
+		ret = q1000k_gwan_refresh_checked(qomci_install, qomci_ready, install);
 	else if (request.profile || request.burst_mask || up)
 		ret = q1000k_gwan_refresh(qomci_install, install);
 	if (ret) {
 		q1000k_protocol_leave(token); goto failed;
 	}
+	if (request.data.pending) {
+		ret = qomci_key_report(install->onu, &request.data, &install->data);
+		if (ret) { q1000k_protocol_leave(token); goto failed; }
+	}
+	/* Publish only after physical completion and successful report enqueue. */
+	b->data = install->data.next;
+	memset(&b->request.data, 0, sizeof(b->request.data));
 	if (install->registration) {
 		q1000k_services_reset();
 		b->onu = install->onu;
@@ -798,6 +885,11 @@ int q1000k_omci_backend_init(struct net_device *dev)
 		goto free;
 	b->cipher = crypto_alloc_lskcipher("ecb(aes)", 0, 0);
 	if (IS_ERR(b->cipher)) { ret = PTR_ERR(b->cipher); goto free; }
+	/* The imported ECB and CMAC helpers use separate locks. Never share
+	 * their transform while OMCI RX/TX can compute a MIC concurrently.
+	 */
+	b->ecb_cipher = crypto_alloc_lskcipher("ecb(aes)", 0, 0);
+	if (IS_ERR(b->ecb_cipher)) { ret = PTR_ERR(b->ecb_cipher); goto cmac; }
 	q1000k_services_init();
 	b->xpon = xpon_device_register(get_xpon_dev(), &desc);
 	if (IS_ERR(b->xpon)) { ret = PTR_ERR(b->xpon); goto cipher; }
@@ -820,6 +912,8 @@ omci:
 xpon:
 	xpon_device_unregister(b->xpon);
 cipher:
+	crypto_free_lskcipher(b->ecb_cipher);
+cmac:
 	crypto_free_lskcipher(b->cipher);
 free:
 	kfree_sensitive(b);
@@ -838,6 +932,7 @@ void q1000k_omci_backend_cleanup(void)
 	omci_device_unregister(b->omci);
 	xpon_device_unregister(b->xpon);
 	q1000k_services_destroy();
+	crypto_free_lskcipher(b->ecb_cipher);
 	crypto_free_lskcipher(b->cipher);
 	kfree_sensitive(b);
 }

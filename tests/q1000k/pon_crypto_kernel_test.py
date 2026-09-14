@@ -2,6 +2,7 @@
 """Generate a UML-only module that tests the production helpers in the kernel."""
 from test_pon_crypto import BSP, function
 from test_pon_auth import production as auth_production
+from test_pon_key_exchange import key_source
 from pathlib import Path
 
 mac = BSP.parent / 'xpon-en757x/xpon_10g'
@@ -13,6 +14,7 @@ production = ''.join(function(source, name) for name in [
 print(r'''
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/module.h>
+#include <linux/random.h>
 #include <linux/kernel.h>
 #include <linux/utsname.h>
 #include <linux/spinlock.h>
@@ -35,6 +37,7 @@ for name in ['gpon_aes_cmac_encrypt', 'gpon_aes_cmac_setup', 'gpon_aes_ecb_encry
     print(function(source, name).split('{', 1)[0].strip() + ';')
 print(production)
 print(auth_production())
+print(key_source().split("static int qkey_fifo_status")[0])
 print(Path(__file__).with_name("pon_auth_vectors.h").read_text())
 print(r'''
 static const u8 key[]={0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c};
@@ -49,6 +52,55 @@ static const u8 cmac[4][16]={
     {0xdf,0xa6,0x67,0x47,0xde,0x9a,0xe6,0x30,0x30,0xca,0x32,0x61,0x14,0x97,0xc8,0x27},
     {0x51,0xf0,0xbe,0xbf,0x7e,0x3b,0x9d,0x92,0xfc,0x49,0x74,0x17,0x79,0x36,0x3c,0xfe}};
 static const u8 ecb[]={0x3a,0xd7,0x7b,0xb4,0x0d,0x7a,0x36,0x60,0xa8,0x9e,0xca,0xf3,0x24,0x66,0xef,0x97};
+static int key_exchange_vectors(struct crypto_lskcipher *ec, struct crypto_lskcipher *cm)
+{
+    const u8 active[]={0,0,2,0,1,1,2}, regen[]={0,1,1,2,2,0,0};
+    const u8 expected[][7]={{1,1,2,1,1,1,2},{3,3,3,3,4,4,3},
+                            {0,5,5,3,4,5,6},{0,1,2,6,6,5,6}};
+    struct q1000k_key_state prior={};
+    struct q1000k_key_update update={};
+    u8 decoded[16], name[32], digest[16];
+    unsigned int context, command, i;
+    int ret;
+
+    ret=wait_for_random_bytes();
+    if(ret) return ret;
+    for(context=0;context<7;context++) for(command=0;command<4;command++) {
+        u8 index=(command&1)+1, next=expected[command][context];
+        bool confirm=command>=2;
+        memset(&prior,0,sizeof(prior));
+        prior.mac.tx_index=active[context]; prior.regenerating=regen[context];
+        prior.mac.rx_valid=(active[context] ? BIT(active[context]-1) : 0) |
+                          (regen[context] ? BIT(regen[context]-1) : 0);
+        for(i=0;i<2;i++) if(prior.mac.rx_valid&BIT(i)) memcpy(prior.mac.key[i],message+16*i,16);
+        ret=q1000k_key_prepare(ec,cm,key,&prior,confirm,index,&update);
+        if(ret) goto out;
+        if(update.next.mac.tx_index!=active[next] || update.next.regenerating!=regen[next]) {
+            ret=-EINVAL; goto out;
+        }
+        if(confirm && !(prior.mac.rx_valid&BIT(index-1))) {
+            if(update.report_index!=3-index || memchr_inv(update.report,0,32)) { ret=-EINVAL; goto out; }
+            continue;
+        }
+        if(confirm) {
+            memcpy(name,update.next.mac.key[index-1],16);
+            memcpy(name+16,"3141592653589793",16);
+            ret=gpon_aes_cmac_encrypt(cm,key,name,32,digest);
+            if(!ret && memcmp(digest,update.report,16)) ret=-EBADMSG;
+        } else {
+            ret=gpon_aes_ecb_decrypt(ec,key,update.report,16,decoded);
+            if(!ret && memcmp(decoded,update.next.mac.key[index-1],16)) ret=-EBADMSG;
+        }
+        if(!ret && memchr_inv(update.report+16,0,16)) ret=-EBADMSG;
+        if(ret) goto out;
+    }
+    ret=0;
+out:
+    memzero_explicit(&prior,sizeof(prior)); memzero_explicit(&update,sizeof(update));
+    memzero_explicit(decoded,sizeof(decoded)); memzero_explicit(name,sizeof(name));
+    memzero_explicit(digest,sizeof(digest));
+    return ret;
+}
 static int auth_vectors(struct crypto_lskcipher *tfm)
 {
     struct q1000k_auth_keys keys;
@@ -107,6 +159,8 @@ static int __init pon_crypto_test_init(void)
         return -ENODEV;
     cm=gpon_aes_cmac_setup(); ec=gpon_aes_ecb_setup();
     if (!cm || !ec) { ret=-ENOENT; goto out; }
+    ret=key_exchange_vectors(ec,cm);
+    if(ret) goto out;
     for (i=0;i<ARRAY_SIZE(lengths);i++) {
         if(gpon_aes_cmac_encrypt(cm,key,lengths[i] ? message : NULL,lengths[i],out) ||
            memcmp(out,cmac[i],16)) goto out;

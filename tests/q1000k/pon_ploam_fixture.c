@@ -37,13 +37,17 @@ static int q1000k_omci_reset(bool disabled,bool phy) {
     if(!reset_error) vendor.emergencyState=disabled;
     return reset_error;
 }
+static int key_calls;
+static int q1000k_omci_key_control(bool confirm,u8 index,u8 length,u8 seq) {
+    assert(owned && confirm && index==2 && length==16 && seq==42); key_calls++; return 0;
+}
 /* No raw MMIO, PHY TX, reboot or task scheduling functions exist here. */
 /* PRODUCTION */
 int main(void)
 {
     PLOAM_RAW_General_T message={};
     PLOAM_RAW_Disable_SN_T sn={.raw={.dest_id={3,255}}};
-    const int supported[]={1,3,4,5,6,9,10};
+    const int supported[]={1,3,4,5,6,9,10,13};
     assert(ploam_parser_down_message(NULL)==-EPERM);
     owned=true;
     assert(ploam_parser_down_message(NULL)==-EINVAL && !auth_calls);
@@ -77,7 +81,15 @@ int main(void)
     auth_error=-EIO;
     int before=handler_calls;
     assert(ploam_parser_down_message(&message)==-EIO && fault==-EIO && handler_calls==before);
-    assert(ploam_recv_key_control(NULL)==-EOPNOTSUPP);
+    assert(ploam_recv_key_control(NULL)==-EINVAL);
+    message.raw.dest_id[0]=0; message.raw.dest_id[1]=17;
+    message.raw.seq_no=42; message.raw.payload[1]=0xff; message.raw.payload[2]=0xfe; message.raw.payload[3]=16;
+    assert(!ploam_recv_key_control(&message) && key_calls==1);
+    message.raw.dest_id[0]=3; message.raw.dest_id[1]=255;
+    assert(!ploam_recv_key_control(&message) && key_calls==2);
+    message.raw.dest_id[1]=254;
+    assert(ploam_recv_key_control(&message)==-EINVAL && key_calls==2);
+    owned=false; assert(ploam_recv_key_control(&message)==-EPERM); owned=true;
     gponDevUnicastKeyExchange(0); assert(fault==-EOPNOTSUPP);
 
     assert(ploam_recv_deactivate_onu(NULL)==-EINVAL);

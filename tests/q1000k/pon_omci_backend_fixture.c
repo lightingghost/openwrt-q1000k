@@ -78,6 +78,7 @@ typedef struct { u8 msk[16],sk[16],ploamIk[2][16],omciIk[2][16],kek[2][16];
 } GPON_Security_t;
 static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl,usOmciMicCtrl,dsOmciMicCtrl; u32 eqd,eqd_olt_absolute,eqd_olt_init; } gponCfg;
     GPON_Security_t gponSecurity;
+    struct { unsigned int txPloamMsgCnt; } ploamMsgcounter;
     u8 state, prePloamMsg[52]; int swreplyploam_task, gpon_traffic_status,gemUpAESMode; bool typeBOnGoing,emergencyState;
 } vendor,*gpGponPriv=&vendor;
 static struct { int traffic_status_refresh_timer; } phy,*gpPhyData=&phy;
@@ -87,7 +88,12 @@ static int reconciles, reconcile_error;
 static int ack_count, resets, service_resets, live_skb, native_error, derivations;
 static int request_during_barrier, assign_count, refresh_count;
 static bool services_enabled, install_phase, optical_tx;
-static int cold_count;
+static int cold_count, data_installs, data_reports, random_calls;
+static u8 data_tx, data_rx, data_keys[2][16], last_report[44];
+static bool random_ready=true;
+static bool rng_is_initialized(void) { return random_ready; }
+static void get_random_bytes(void *p,size_t n) { assert(!owned && n==16 && random_ready); memset(p,++random_calls,n); }
+
 static u8 hw_ploam_index, hw_omci_index, installed_profiles, profile_version[4];
 int snSendInO23Cnt;
 static u16 hardware_onu;
@@ -111,6 +117,7 @@ static int q1000k_protocol_control(void) { assert(owned); return fault; }
 void q1000k_omci_state(void);
 int q1000k_omci_assign(u16 onu);
 int q1000k_omci_ranged(void);
+int q1000k_omci_reset(bool emergency, bool phy);
 static void gpon_act_change_state(u8 state) { assert(owned && (state!=5 || !q1000k_omci_ranged())); vendor.state=state; q1000k_omci_state(); }
 static void ploam_send_acknowledge_msg(u8 seq,int result) { assert(owned && !result); ack_count++; }
 static void q1000k_services_enable(bool enabled) { services_enabled=enabled; }
@@ -145,8 +152,10 @@ static void omci_device_unregister(struct omci_device *o) { o->ops->stop(o); fre
 static int omci_device_set_auth_epoch(struct omci_device *o,u64 epoch) {
     assert(!owned && !auth_held);
     if(!epoch && request_during_barrier) {
-        request_during_barrier=0; int token=q1000k_protocol_enter();
-        assert(token>=0); assert(!q1000k_omci_assign(19)); q1000k_protocol_leave(token);
+        int mode=request_during_barrier; request_during_barrier=0; int token=q1000k_protocol_enter();
+        assert(token>=0); if(mode==1) assert(!q1000k_omci_assign(19));
+        else assert(!q1000k_omci_reset(true,false));
+        q1000k_protocol_leave(token);
     }
     if(epoch && (!o->channel || epoch<=o->last)) return -ESTALE;
     o->epoch=epoch; if(epoch) o->last=epoch; return 0;
@@ -203,6 +212,31 @@ static int q1000k_gwan_cold_reset(int (*install)(void *),void *arg) {
     install_phase=true; ret=install(arg); install_phase=false; optical_tx=false; return ret;
 }
 /* PRODUCTION */
+int q1000k_auth_key_report(struct crypto_lskcipher *tfm,const u8 kek[16],const u8 key[16],bool confirm,u8 report[32]) {
+    assert(!owned && !auth_held && tfm==(confirm ? qomci_current->cipher : qomci_current->ecb_cipher));
+    int ret=step(); if(ret) return ret;
+    memset(report,0,32); memcpy(report,key,16); report[0]^=confirm ? 0xab : 0xef; return 0;
+}
+int q1000k_mac_data_keys_install(const struct q1000k_mac_data_keys *keys,bool *pending) {
+    assert(owned && install_phase && !native_epoch && !qomci_current->active);
+    int ret=step(); if(ret) return ret;
+    data_installs++; data_tx=keys->tx_index; data_rx=keys->rx_valid;
+    memcpy(data_keys,keys->key,32); *pending=data_tx!=0; return 0;
+}
+int q1000k_mac_data_keys_ready(bool pending) {
+    assert(owned && !install_phase && !native_epoch && !qomci_current->active);
+    return pending ? step() : 0;
+}
+int q1000k_ploam_send(const u8 message[44]) {
+    assert(owned && !install_phase && !native_epoch && !qomci_current->active);
+    assert(!message[0] && !message[1] && !message[2] && !message[3]);
+    assert(message[4]==hardware_onu>>8 && message[5]==(u8)hardware_onu && message[6]==5);
+    assert(message[9]==1 || message[9]==2);
+    assert(!message[10] && !message[11]);
+    for(int i=28;i<44;i++) assert(!message[i]);
+    int ret=step(); if(ret) return ret;
+    memcpy(last_report,message,44); data_reports++; return 0;
+}
 int q1000k_mac_ranging_install(u32 delay) { assert(owned && install_phase && !installed_profiles && delay<=0x3fffffff); return step(); }
 int q1000k_mac_ranging_ready(void) { assert(owned && !install_phase); return step(); }
 int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u8 sn[8],const u8 tag[8],struct q1000k_mac_keys *keys) {
@@ -412,5 +446,57 @@ int main(void)
     assert(!fault && installed_profiles==8 && qomci_current->burst_mask==8 && profile_version[3]==2);
     assert(qomci_current->keys.pon_tag[0]==5);
     q1000k_omci_backend_cleanup();
+    /* Data-key preparation is outside the protocol mutex. Install, ready
+     * and report precede software publication and admission reopening.
+     */
+    startup(); profile_and_assign(); operational(); b=qomci_current;
+    token=q1000k_protocol_enter();
+    u64 initial=b->request.generation;
+    for(int i=0;i<256;i++) if(i!=1 && i!=2) assert(q1000k_omci_key_control(false,i,16,5)==-EINVAL);
+    for(int i=0;i<256;i++) if(i!=16) assert(q1000k_omci_key_control(false,1,i,5)==-EOPNOTSUPP);
+    random_ready=false;
+    assert(q1000k_omci_key_control(false,1,16,5)==-EAGAIN && b->active && b->request.generation==initial);
+    random_ready=true;
+    assert(!q1000k_omci_key_control(false,1,16,5));
+    assert(q1000k_omci_key_control(false,1,16,5)==-EBUSY);
+    assert(q1000k_omci_key_control(true,1,0,6)==-EBUSY);
+    assert(q1000k_omci_profile(b->keys.pon_tag,1,false)==-EBUSY);
+    assert(!b->active && !b->data.mac.rx_valid);
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && b->active && b->data.mac.rx_valid==1 && b->data.regenerating==1 && !data_tx);
+    assert(last_report[7]==5 && !last_report[8] && last_report[9]==1);
+    int installed=data_installs, reported=data_reports, generated=random_calls;
+    token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(false,1,16,9));
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && b->active && data_installs==installed && random_calls==generated && data_reports==reported+1);
+    assert(last_report[7]==9);
+    token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(true,1,0,10));
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && b->active && !b->data.regenerating && b->data.mac.tx_index==1 && data_tx==1 && data_rx==1);
+    token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(false,2,16,11));
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && data_tx==1 && data_rx==3 && b->data.regenerating==2);
+    token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(true,2,0,12));
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && data_tx==2 && data_rx==2 && !b->data.regenerating);
+    for(int i=0;i<16;i++) assert(!data_keys[0][i] && !b->data.mac.key[0][i]);
+    /* Reset in the core barrier supersedes a previously accepted request. */
+    reported=data_reports;
+    token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(false,1,16,13));
+    q1000k_protocol_leave(token); request_during_barrier=2; q1000k_omci_control();
+    assert(!fault && data_reports==reported && !data_rx && !data_tx && !b->active && vendor.state==7);
+    for(int i=0;i<32;i++) assert(!((u8 *)b->data.mac.key)[i]);
+    q1000k_omci_backend_cleanup();
+    /* Inject failure into every crypto/install/activation/report/open step. */
+    for(int failing=0,total_steps=1;failing<=total_steps;failing++) {
+        startup(); profile_and_assign(); operational();
+        token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(false,1,16,1));
+        q1000k_protocol_leave(token); q1000k_omci_control(); assert(!fault);
+        token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(true,1,0,2));
+        q1000k_protocol_leave(token); calls=0; fail_at=failing; q1000k_omci_control();
+        if(!failing) { assert(!fault && qomci_current->active); total_steps=calls; }
+        else assert(fault==-ETIMEDOUT && !qomci_current->active && !services_enabled && !native_epoch && !qomci_current->omci->epoch);
+        q1000k_omci_backend_cleanup();
+    }
     assert(!live_skb); return 0;
 }

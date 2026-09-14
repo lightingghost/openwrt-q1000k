@@ -29,6 +29,8 @@ int q1000k_omci_registration_keys(void);
 int q1000k_omci_ranging(u32 delay, bool absolute, bool negative, u8 sequence, bool acknowledge);
 int q1000k_omci_ranged(void);
 int q1000k_omci_alloc_changed(void);
+/* Caller dispatches only an authenticated, addressed Key_Control PLOAM. */
+int q1000k_omci_key_control(bool confirm, u8 index, u8 length, u8 sequence);
 void q1000k_omci_state(void);
 /* Ordered protocol control callback, invoked without the executor mutex. */
 void q1000k_omci_control(void);

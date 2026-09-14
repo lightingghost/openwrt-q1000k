@@ -13,6 +13,8 @@ class BackendTests(unittest.TestCase):
         for name in ['omci_identity','omci_device_ops']:
             types+=re.search(r'struct '+name+r' \{.*?\n\};',omci,re.S).group(0)+'\n'
         code=(ROOT/'package/kernel/airoha-pon/src/bsp/include/q1000k_phy_api.h').read_text()+(MAC/'inc/common/q1000k_auth.h').read_text()+(MAC/'inc/common/q1000k_mac_keys.h').read_text()
+        code+=(MAC/'inc/common/q1000k_key_exchange.h').read_text()
+        code+=(MAC/'src/q1000k_key_exchange.c').read_text().split('static int qkey_fifo_status')[0]
         code+=(MAC/'inc/common/q1000k_mac_cold.h').read_text()+(MAC/'src/q1000k_omci_backend.c').read_text()
         code=re.sub(r'^#include[^\n]*\n','',code,flags=re.M)
         fixture=Path(__file__).with_name('pon_omci_backend_fixture.c').read_text()
