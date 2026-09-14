@@ -1285,3 +1285,21 @@ checks preservation of the old MIB, one fault callback and rejection of later
 mutations. Backend host tests check immediate data/authentication closure.
 All 58 host tests, full OMCI core UML and matching AArch64 core/vendor builds
 pass. These tests use simulated providers, with no device connection.
+
+## Checked external PHY queries
+
+Vendor r48 replaces the remaining external GET dispatcher with explicit
+queries for initialization, configured mode, controller TX state, LOS/sync,
+configured RX FEC, observed TX FEC and downstream FEC/frame counters. These
+queries never change probe selectors or access generic SFP diagnostics on the
+controller's I2C address. Unimplemented BIP, round-trip delay, LOF status and
+other legacy requests return `-EOPNOTSUPP` instead of an initial success value.
+RX FEC configuration is distinct from observed RX FEC status; the latter's
+legacy probe-selector operation is not exposed by this interface.
+
+Each register read propagates errors. Counter structures publish only after
+all reads succeed and retain legitimate full-width all-ones values. Status
+register all-ones reads fault the PHY and contain TX. Host fixtures cover the
+external command namespace, boolean semantics, controller/cache disagreement,
+every counter read failure and unchanged output on error. All 58 host tests,
+PHY UML and the AArch64 vendor build pass without device access.

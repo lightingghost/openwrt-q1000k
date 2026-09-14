@@ -43,7 +43,6 @@ static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|
 #define PON_SET_PHY_TRANS_POWER_SWITCH 4
 #define PON_SET_PHY_TX_POWER_CONFIG 5
 #define PON_SET_PHY_FW_READY 6
-#define PON_GET_PHY_INIT_STATUS 6
 #define PON_SET_PHY_RX_FEC_SETTING 20
 #define PON_SET_PHY_XGPON_RX_ENABLE 30
 #define PON_SET_PHY_XGPON_RX_DISABLE 31
@@ -98,7 +97,9 @@ static struct phy_private *gpPhyPriv;
 static int (*en7581_xgpon_func[2])(char *);
 static int (**ponPhyFunc)(char *);
 struct ecnt_data { int n; };
-struct xpon_phy_api_data_s { int ret,api_type,cmd_id; int *data; };
+typedef struct { u32 correct_bytes,correct_codewords,uncorrect_codewords,total_rx_codewords,fec_seconds; } PHY_FecCount_T;
+typedef struct { u32 frame_count_low,frame_count_high,lof_counter; } PHY_FrameCount_T;
+struct xpon_phy_api_data_s { int ret,api_type,cmd_id; union { int *data; PHY_FecCount_T *rx_fec_cnt; PHY_FrameCount_T *rx_frame_cnt; }; };
 static int provider=1,provider_error,hwid=14,wan=10,mode_error,api_error,poll_error,isr_error,fw_error;
 static unsigned int reads,writes,fail_read,fail_write;
 static u32 regs[0x8000];
@@ -217,11 +218,73 @@ static void initialized(void)
     assert(gpPhyPriv->phy_init_done && !qphy_active && !allocated_irq);
     reads=writes=0;
 }
+static void checked_queries(void)
+{
+    PHY_FecCount_T fec,saved;
+    PHY_FrameCount_T frames,previous;
+    struct xpon_phy_api_data_s q={.api_type=XPON_PHY_API_TYPE_GET};
+    initialized();
+    regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+    q.cmd_id=PON_GET_PHY_READY_STATUS; assert(q1000k_phy_call(&q)==1 && q.ret==1);
+    q.cmd_id=PON_GET_PHY_IS_SYNC; assert(q1000k_phy_call(&q)==1);
+    regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+    assert(!q1000k_phy_call(&q));
+    q.cmd_id=PON_GET_PHY_LOS_STATUS; assert(q1000k_phy_call(&q)==1);
+    controller.tx=true; gpPhyPriv->phyCfg.flags.txPowerEnFlag=false;
+    q.cmd_id=PON_GET_PHY_GET_TX_POWER_EN_FLAG; assert(q1000k_phy_call(&q)==1);
+    gpPhyPriv->phyCfg.flags.mode=PHY_XGSPON_CONFIG;
+    q.cmd_id=PON_GET_PHY_MODE; assert(q1000k_phy_call(&q)==PHY_XGSPON_CONFIG);
+    regs[(EN7581_XGPON_PHY_DBG_CTRL&0x1ffff)/4]=EN7581_XGPON_PHY_DBG_RX_FEC_FORCE_OFF;
+    q.cmd_id=PON_GET_PHY_RX_FEC_GETTING; assert(q1000k_phy_call(&q)==1);
+    regs[(EN7581_XGPON_PHY_DBG_TX_FEC_STA&0x1ffff)/4]=EN7581_XGPON_PHY_TX_FEC;
+    q.cmd_id=PON_GET_PHY_TX_FEC_STATUS; assert(q1000k_phy_call(&q)==1);
+    q.cmd_id=PON_GET_PHY_RX_FEC_COUNTER; q.rx_fec_cnt=NULL; assert(q1000k_phy_call(&q)==-EINVAL);
+    q.cmd_id=PON_GET_PHY_RX_FRAME_COUNTER; assert(q1000k_phy_call(&q)==-EINVAL);
+    assert(!qphy_fault && !writes && !api_calls);
+    for(unsigned int cmd=0x8000;cmd<0x8080;cmd++) {
+        switch(cmd) {
+        case PON_GET_PHY_INIT_STATUS: case PON_GET_PHY_MODE: case PON_GET_PHY_GET_TX_POWER_EN_FLAG:
+        case PON_GET_PHY_LOS_STATUS: case PON_GET_PHY_READY_STATUS: case PON_GET_PHY_IS_SYNC:
+        case PON_GET_PHY_RX_FEC_GETTING: case PON_GET_PHY_TX_FEC_STATUS:
+        case PON_GET_PHY_RX_FEC_COUNTER: case PON_GET_PHY_RX_FRAME_COUNTER: continue;
+        }
+        unsigned int before=reads; q.cmd_id=cmd;
+        assert(q1000k_phy_call(&q)==-EOPNOTSUPP && reads==before && !writes && !qphy_fault);
+    }
+    for(unsigned int failure=0;failure<=5;failure++) {
+        initialized(); memset(&fec,0xa5,sizeof(fec)); saved=fec;
+        regs[(EN7581_XGPON_PHY_FEC_CORRECTED_BYTE_CNT&0x1ffff)/4]=~0U;
+        regs[(EN7581_XGPON_PHY_FEC_CORRECTED_CW_CNT&0x1ffff)/4]=31;
+        regs[(EN7581_XGPON_PHY_FEC_UNCORRECTED_CW_CNT&0x1ffff)/4]=32;
+        regs[(EN7581_XGPON_PHY_FEC_TOTAL_CW_CNT&0x1ffff)/4]=33;
+        regs[(EN7581_XGPON_PHY_FEC_ERR_SECONDS&0x1ffff)/4]=34;
+        q.cmd_id=PON_GET_PHY_RX_FEC_COUNTER; q.rx_fec_cnt=&fec; fail_read=failure;
+        if(failure) assert(q1000k_phy_call(&q)==-EIO && !memcmp(&fec,&saved,sizeof(fec)) && qphy_fault);
+        else {
+            assert(!q1000k_phy_call(&q) && !writes && !qphy_fault);
+            assert(fec.correct_bytes==~0U && fec.correct_codewords==31 && fec.uncorrect_codewords==32 && fec.total_rx_codewords==33 && fec.fec_seconds==34);
+        }
+    }
+    for(unsigned int failure=0;failure<=2;failure++) {
+        initialized(); memset(&frames,0x55,sizeof(frames)); previous=frames;
+        regs[(EN7581_XGPON_PHY_DBG_RX_FRAME2PHYD_CNT&0x1ffff)/4]=~0U;
+        regs[(EN7581_XGPON_PHY_DBG_LOF_CNT&0x1ffff)/4]=123;
+        q.cmd_id=PON_GET_PHY_RX_FRAME_COUNTER; q.rx_frame_cnt=&frames; fail_read=failure;
+        if(failure) assert(q1000k_phy_call(&q)==-EIO && !memcmp(&frames,&previous,sizeof(frames)));
+        else assert(!q1000k_phy_call(&q) && frames.frame_count_low==~0U && !frames.frame_count_high && frames.lof_counter==123 && !writes);
+    }
+    initialized(); q.cmd_id=PON_GET_PHY_READY_STATUS;
+    regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=~0U;
+    assert(q1000k_phy_call(&q)==-EIO && qphy_fault && !controller.tx);
+    initialized(); controller_error=-ETIMEDOUT;
+    assert(q1000k_phy_call(&q)==-ETIMEDOUT && qphy_fault==-ETIMEDOUT);
+}
 int main(void)
 {
     unsigned int n;
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET,.cmd_id=99};
     struct q1000k_pon_profile profile={.repeat=255,.preamble_len=8,.delimiter_len=4,.fec=1,.version=15};
+    checked_queries();
     memset(profile.preamble,0xff,8); memcpy(profile.delimiter,"abcdefgh",8);
     for(int index=0;index<4;index++) {
         initialized(); profile.index=index;
@@ -337,11 +400,12 @@ int main(void)
     irq_error=0; assert(!q1000k_phy_start() && allocated_irq && qphy_active);
     assert(!q1000k_phy_start());
     assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EBUSY);
-    assert(!q1000k_phy_call(&data) && api_calls==1);
+    data.cmd_id=PON_GET_PHY_READY_STATUS;
+    assert(!q1000k_phy_call(&data) && !api_calls);
     struct xpon_phy_api_data_s fw_request={.api_type=XPON_PHY_API_TYPE_SET,.cmd_id=PON_SET_PHY_FW_READY};
-    assert(q1000k_phy_call(&fw_request)==-EOPNOTSUPP && api_calls==1);
+    assert(q1000k_phy_call(&fw_request)==-EOPNOTSUPP && !api_calls);
 
-    api_error=-EOPNOTSUPP; assert(q1000k_phy_call(&data)==-EOPNOTSUPP);
+    data.cmd_id=PON_GET_PHY_BIP_COUNTER; assert(q1000k_phy_call(&data)==-EOPNOTSUPP);
     assert(irq_fn(75,&device)==IRQ_NONE && !isrs);
     regs[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=EN7581_XGPON_PHY_RX_LOS_INT_EN;
     reenter=1; assert(irq_fn(75,&device)==IRQ_HANDLED && isrs==1);

@@ -13,11 +13,14 @@ def production_source(path=None):
     source = (path or PHY / 'src/q1000k_phy.c').read_text()
     source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
     definitions = {}
-    for line in (PHY / 'inc/en7581_reg.h').read_text(encoding='latin1').splitlines():
+    headers = (PHY / 'inc/en7581_reg.h').read_text(encoding='latin1')
+    headers += (BSP / 'include/ecnt_hook/ecnt_hook_pon_phy.h').read_text(encoding='latin1')
+    for line in headers.splitlines():
         m = re.match(r'#define\s+(\w+)\s+(.*)', line)
         if m:
             definitions[m[1]] = m[2].split('//')[0]
     needed = set(re.findall(r'\bEN7581_\w+', source))
+    needed.update(n for n in definitions if n.startswith('PON_GET_PHY_'))
     pending = list(needed)
     while pending:
         name = pending.pop()

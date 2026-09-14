@@ -619,6 +619,85 @@ static int qphy_receive_set(struct xpon_phy_api_data_s *data)
 	return ret;
 }
 
+static int qphy_status_read(u32 reg, u32 *value)
+{
+	int ret = an7581_pon_phy_read(reg, value);
+
+	return ret ?: *value == ~0U ? -EIO : 0;
+}
+
+/* External queries never select probes, clear counters, read an unowned
+ * transceiver address, or report a vendor stub's initial zero as success.
+ * Counter outputs are snapshots: publish only after every read succeeds.
+ */
+static int qphy_get(struct xpon_phy_api_data_s *data)
+{
+	u32 value, other;
+	bool enabled;
+	int ret;
+
+	switch (data->cmd_id) {
+	case PON_GET_PHY_MODE:
+		return gpPhyPriv->phyCfg.flags.mode;
+	case PON_GET_PHY_GET_TX_POWER_EN_FLAG:
+		ret = q1000k_pon_get_tx(qphy_controller, &enabled);
+		return ret ?: enabled;
+	case PON_GET_PHY_LOS_STATUS:
+		ret = qphy_status_read(EN7581_XGPON_PHY_SFP_STA, &value);
+		return ret ?: !!(value & EN7581_XGPON_PHY_SFP_RX_LOS_ST);
+	case PON_GET_PHY_READY_STATUS:
+		ret = qphy_status_read(EN7581_XGPON_PHY_DBG_RX_SYNC_ST, &value);
+		return ret ?: (value & EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC) ==
+			EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+	case PON_GET_PHY_IS_SYNC:
+		ret = qphy_status_read(EN7581_XGPON_PHY_SFP_STA, &value);
+		if (!ret)
+			ret = qphy_status_read(EN7581_XGPON_PHY_DBG_RX_SYNC_ST, &other);
+		return ret ?: !(value & EN7581_XGPON_PHY_SFP_RX_LOS_ST) &&
+			(other & EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC) ==
+			EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+	case PON_GET_PHY_RX_FEC_GETTING:
+		ret = qphy_status_read(EN7581_XGPON_PHY_DBG_CTRL, &value);
+		return ret ?: !!(value & EN7581_XGPON_PHY_DBG_RX_FEC_FORCE_OFF);
+	case PON_GET_PHY_TX_FEC_STATUS:
+		ret = qphy_status_read(EN7581_XGPON_PHY_DBG_TX_FEC_STA, &value);
+		return ret ?: !!(value & EN7581_XGPON_PHY_TX_FEC);
+	case PON_GET_PHY_RX_FEC_COUNTER: {
+		PHY_FecCount_T result = {};
+
+		if (!data->rx_fec_cnt)
+			return -EINVAL;
+		/* All-ones is a valid full-width counter value, not an error. */
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_CORRECTED_BYTE_CNT, &result.correct_bytes);
+		if (!ret)
+			ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_CORRECTED_CW_CNT, &result.correct_codewords);
+		if (!ret)
+			ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_UNCORRECTED_CW_CNT, &result.uncorrect_codewords);
+		if (!ret)
+			ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_TOTAL_CW_CNT, &result.total_rx_codewords);
+		if (!ret)
+			ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_ERR_SECONDS, &result.fec_seconds);
+		if (!ret)
+			*data->rx_fec_cnt = result;
+		return ret;
+	}
+	case PON_GET_PHY_RX_FRAME_COUNTER: {
+		PHY_FrameCount_T result = {};
+
+		if (!data->rx_frame_cnt)
+			return -EINVAL;
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_FRAME2PHYD_CNT, &result.frame_count_low);
+		if (!ret)
+			ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_LOF_CNT, &result.lof_counter);
+		if (!ret)
+			*data->rx_frame_cnt = result;
+		return ret;
+	}
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
 int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 {
 	int ret = qphy_context();
@@ -656,11 +735,11 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 		goto out;
 	}
 	if (!ret) {
-		data->ret = -EOPNOTSUPP;
-		pon_phy_api_dispatch((struct ecnt_data *)data);
-		ret = an7581_pon_phy_status();
+		ret = q1000k_phy_controller_check();
 		if (!ret)
-			ret = data->ret;
+			ret = qphy_get(data);
+		if (ret < 0 && ret != -EINVAL && ret != -EOPNOTSUPP)
+			qphy_failed(ret);
 	}
 out:
 	data->ret = ret;
