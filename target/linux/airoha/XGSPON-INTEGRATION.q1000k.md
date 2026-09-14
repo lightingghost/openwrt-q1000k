@@ -1215,3 +1215,32 @@ All 56 host tests pass, including selector-pair failures, read failures, repeate
 requests, no publication after a failed O5 transition and unsupported security
 writes. The complete AArch64 vendor package builds successfully. No device
 access occurred; the remaining FE/QDMA and PHY default-call audit continues.
+
+## Native default-path ownership and packet accounting
+
+Vendor r45 removes the legacy FE/QDMA hook-presence gate. The native attachment
+now validates and pins the real Ethernet owner before MAC initialization, and
+all packet admission, queue closure, scheduler, drain and retirement operations
+on the Q1000K default path use that owner. A compiled/preprocessed call audit
+confirmed that legacy GEM packet helpers and EPON FE hooks are bypassed by the
+native OMCI/service callbacks. Optional ToD and customer hooks do not provide
+packet or queue ownership.
+
+Q1000K no longer requests the EPON software dying-gasp IRQ handler, which called
+OEM power-optimization hooks and wrote shared SCU state. XGS hardware dying-gasp
+configuration remains in the checked cold MAC defaults; CPU power optimization
+is not provided. The EPON-only periodic traffic notification is not armed, and
+the legacy MCI ioctl rejects EPON operations on the uninitialized EPON stack.
+The board nodes remain disabled and the package remains experimental without
+autoload; removing an obsolete provider check does not validate optical service.
+
+Native RX now returns a defined error for every drop and consumes each packet
+exactly once. It checks the data interface is running, accounts accepted frames
+before removing their Ethernet header, and separates OMCI from data counters.
+Successful service TX/RX updates the per-GEM counters through the guarded
+registry. Failed classification and failed submissions do not count as traffic.
+
+All 57 host tests and the AArch64 vendor build pass. Tests cover every RX drop,
+OMCI independence from data-interface state, statistics, and full startup and
+unwind with no legacy FE/QDMA hooks. PHY burst-profile programming still needs
+its checked install boundary; no device access or optical test occurred.

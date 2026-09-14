@@ -110,7 +110,9 @@ int main(void)
     q1000k_services_enable(true);
     assert(!q1000k_services_tx(&skb) && (tx_word0&7)==3 && ((tx_word0>>3)&31)==1 && (tx_word0>>14)==500);
     assert(tx_word1==(0x7f2007ff|BIT(15)));
+    assert(wan.gpon.gemPort[0].stats.tx_packets==1 && wan.gpon.gemPort[0].stats.tx_bytes==60);
     assert(!q1000k_services_rx(&skb,500));
+    assert(wan.gpon.gemPort[0].stats.rx_packets==1 && wan.gpon.gemPort[0].stats.rx_bytes==60);
     skb.vlan=true; skb.tci=1894; skb.vlan_proto=0x8100;
     assert(!q1000k_services_tx(&skb) && !skb.vlan && skb.len==64);
     make_tag(&skb,1894,0); skb.len=18; skb.ip_summed=CHECKSUM_PARTIAL;

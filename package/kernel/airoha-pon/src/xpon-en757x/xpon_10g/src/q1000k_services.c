@@ -630,6 +630,7 @@ int q1000k_services_tx(struct sk_buff *skb)
 	struct qs_rules *rules = rcu_dereference(qs_current);
 	struct q1000k_gwan_binding binding;
 	int score = -1, ret;
+	unsigned int bytes;
 	size_t i;
 	u16 vid;
 	u8 pcp;
@@ -680,9 +681,13 @@ int q1000k_services_tx(struct sk_buff *skb)
 		return ret;
 	if (binding.alloc_id != selected->alloc_id)
 		return -ESTALE;
-	return q1000k_transport_xmit(skb, ((u32)binding.gem << 14) |
+	bytes = skb->len;
+	ret = q1000k_transport_xmit(skb, ((u32)binding.gem << 14) |
 		((u32)binding.channel << 3) | selected->queue,
 		0x7f2007ff | ((u32)binding.channel << 15));
+	if (!ret)
+		q1000k_gwan_account(binding.gem, true, bytes);
+	return ret;
 }
 
 int q1000k_services_rx(struct sk_buff *skb, u16 gem)
@@ -711,8 +716,10 @@ int q1000k_services_rx(struct sk_buff *skb, u16 gem)
 			    s->direction != OMCI_GEM_PORT_DIRECTION_UNI_TO_ANI &&
 			    (!s->vlan_valid || (tagged && vid == s->vlan_id)) &&
 			    (!s->pcp_valid || (tagged && pcp == s->pcp)) &&
-			    READ_ONCE(qs_uni[qs_uni_index(s->uni_entity_id)]))
+			    READ_ONCE(qs_uni[qs_uni_index(s->uni_entity_id)])) {
+				q1000k_gwan_account(gem, false, skb->len);
 				return 0;
+			}
 		}
 	return -ENOENT;
 }

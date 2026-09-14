@@ -1,0 +1,144 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: use native FE attachment and complete receive accounting
+
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -299,6 +299,9 @@
+ 
+ static void traffic_status_refresh(TIMER_FUN_PAAM arg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return;
++#else
+     static ENUM_PhyTrafficStatus last_status = TRAFFIC_STATUS_DOWN;
+     ENUM_PhyTrafficStatus status = TRAFFIC_STATUS_DOWN;
+     static uint8 is_first = 1;
+@@ -324,6 +327,8 @@
+         XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer,1000);/* 1,000 ms */
+ 	}
+     return;
++
++#endif
+ }
+ 
+ 
+@@ -436,30 +441,50 @@
+ **____________________________________________________________________________*/
+ static int xpondrv_rx_packet(void *msg, uint msg_len, struct sk_buff *skb, uint len)
+ {
+-	int ret;
++	int ret = -ENODEV;
+ 
+ 	rcu_read_lock();
+ #ifdef Q1000K_PON_IDENTITY
+-	if (xpon_is_ready() && !q1000k_pwan_rx_prepare(skb, msg, msg_len, len)) {
+-		u32 first = ((u32 *)msg)[0];
+-		u16 gem = (first >> 14) & 0xffff;
+-		struct net_device *dev = gpWanPriv->pPonNetDev[PWAN_IF_DATA];
+-
+-		if (first & BIT(8)) {
+-			q1000k_omci_receive(skb, gem, !!(first & BIT(11)));
+-			ret = 0;
+-		} else if (!(first & (BIT(11) | BIT(12) | BIT(13))) && dev &&
+-			   !q1000k_services_rx(skb, gem)) {
+-			skb->ip_summed = CHECKSUM_NONE;
+-			skb->protocol = eth_type_trans(skb, dev);
+-			netif_rx(skb);
+-			ret = 0;
+-		} else {
+-			dev_kfree_skb_any(skb);
+-		}
+-	} else {
+-		dev_kfree_skb_any(skb);
+-	}
++	struct net_device *dev = NULL;
++	PWAN_NetPriv_T *priv = NULL;
++	u32 first;
++	u16 gem;
++
++	if (!xpon_is_ready())
++		goto drop;
++	dev = gpWanPriv->pPonNetDev[PWAN_IF_DATA];
++	if (dev)
++		priv = netdev_priv(dev);
++	ret = q1000k_pwan_rx_prepare(skb, msg, msg_len, len);
++	if (ret)
++		goto drop;
++	first = ((u32 *)msg)[0];
++	gem = (first >> 14) & 0xffff;
++	if (first & BIT(8)) {
++		q1000k_omci_receive(skb, gem, !!(first & BIT(11)));
++		ret = 0;
++		goto out;
++	}
++	ret = -EBADMSG;
++	if (first & (BIT(11) | BIT(12) | BIT(13)))
++		goto drop;
++	ret = -ENETDOWN;
++	if (!dev || !netif_running(dev))
++		goto drop;
++	ret = q1000k_services_rx(skb, gem);
++	if (ret)
++		goto drop;
++	priv->stats.rx_packets++;
++	priv->stats.rx_bytes += skb->len;
++	skb->ip_summed = CHECKSUM_NONE;
++	skb->protocol = eth_type_trans(skb, dev);
++	netif_rx(skb);
++	goto out;
++drop:
++	if (priv)
++		priv->stats.rx_dropped++;
++	dev_kfree_skb_any(skb);
++out:
+ #else
+ 	if (xpon_is_ready())
+ 		ret = pwan_cb_rx_packet(msg, msg_len, skb, len);
+@@ -1476,10 +1501,7 @@
+ 	ret = an7581_xpon_status();
+ 	if (ret)
+ 		return ret;
+-	/* ECNT still supplies control/QoS operations, never native packet DMA. */
+-	if (!ecnt_hook_is_registered(ECNT_QDMA_WAN, ECNT_DRIVER_API) ||
+-	    !ecnt_hook_is_registered(ECNT_FE, ECNT_FE_API))
+-		return -ENODEV;
++	/* Native attachment validates and pins FE/QDMA ownership below. */
+ #endif
+ 	INIT_LIST_HEAD(&fix_reg_list);
+ 	ret = init_union_ic_function();
+@@ -1534,10 +1556,12 @@
+ 	if (ret)
+ 		goto fail;
+ #endif
++#ifndef Q1000K_PON_IDENTITY
+ 	ret = xpon_dying_gasp_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.gasp = true;
++#endif
+ 	ret = xpon_proc_init();
+ 	if (ret)
+ 		goto fail;
+@@ -1579,7 +1603,9 @@
+ 		goto fail;
+ #endif
+ 	change_alarm_led_status(LED_FLICKER);
++#ifndef Q1000K_PON_IDENTITY
+ 	XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer, 1000);
++#endif
+ 	pr_info("%s\n", MODULE_VERSION_10GXPONMAC);
+ 	return 0;
+ fail:
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_mci.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_mci.c
+@@ -158,6 +158,10 @@
+ 
+ long pon_mci_ioctl(struct file *filp, uint cmd, ulong arg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Q1000K management uses the typed OMCI API; EPON is not initialized. */
++	return -EOPNOTSUPP;
++#endif
+ 	if (_IOC_TYPE(cmd) == EPON_MAGIC)
+ 		return epon_cmd_proc(cmd, arg);
+ 

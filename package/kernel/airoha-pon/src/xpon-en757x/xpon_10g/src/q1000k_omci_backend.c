@@ -389,7 +389,6 @@ static void qomci_reset_legacy(bool emergency)
 	security->txKeyValid = 1;
 	GPON_CURR_STATE = state;
 	xmcs_report_event(XMCS_EVENT_TYPE_GPON, XMCS_EVENT_GPON_STATE_CHANGE, state);
-	XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer, 1000);
 }
 
 void q1000k_omci_control(void)

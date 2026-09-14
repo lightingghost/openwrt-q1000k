@@ -329,7 +329,7 @@ static struct phy *gpPhyData;
 static struct { void *pPonNetDev[4]; } wan_data, *gpWanPriv;
 static void *gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
-enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, GASP, PROC, HOOK, API, WORKER, COLD, PROTOSTART, STEPS };
+enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, PROC, HOOK, API, WORKER, COLD, PROTOSTART, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
 static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error,xpon_protocol_ops;
 static bool xpon_is_ready(void); /* production definition is non-static */
@@ -401,7 +401,7 @@ static int q1000k_transport_start(const char *lower,int (*receive)(void)) {
     return acquire(ATTACH);
 }
 static int q1000k_transport_stop(void) { assert(!xpon_ready); release(ATTACH); return 0; }
-static int xpon_dying_gasp_init(void) { return acquire(GASP); }
+static int xpon_dying_gasp_init(void) { assert(0); return -EOPNOTSUPP; }
 static int xpon_proc_init(void) { return acquire(PROC); }
 static int ecnt_register_hook(void *p) { return acquire(HOOK); }
 static int xpon_api_init(void) { return acquire(API); }
@@ -416,7 +416,7 @@ static void change_alarm_led_status(int s) { assert(xpon_ready); }
 #define XPON_START_TIMER(t,n) assert(xpon_ready && live[WORKER])
 static void ecnt_unregister_hook(void *p) { assert(!xpon_ready); release(HOOK); }
 static void xpon_api_deinit(void) { assert(!xpon_ready); release(API); }
-static void free_irq(int irq,void *p) { assert(irq==101); release(GASP); }
+static void free_irq(int irq,void *p) { assert(0); }
 static void pwan_quiesce(void) { assert(live[WAN] && !xpon_ready); tx_stopped=1; }
 static void synchronize_rcu(void) { assert(!xpon_ready); rcu_drained=1; }
 static void xpon_proc_dest(void) { assert(rcu_drained); release(PROC); }
@@ -464,7 +464,7 @@ int main(void) {
     pipeline_error=0; mac_error=-EIO;
     reset(0); assert(xpondrv_init()==-EIO && step==ID); clean(); mac_error=0;
     reset(0); irq_resources=0; assert(xpondrv_init()==-ENODEV && step==ID); clean();
-    reset(0); irq_resources=1; providers=0; assert(xpondrv_init()==-ENODEV && step==ID); clean();
+    reset(0); irq_resources=1; providers=0; assert(!xpondrv_init()); xpondrv_cleanup(); clean();
     reset(0); providers=1; mode=6; assert(xpondrv_init()==-EOPNOTSUPP && step==ID); clean();
     return 0;
 }
