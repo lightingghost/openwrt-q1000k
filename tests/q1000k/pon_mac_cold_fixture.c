@@ -84,5 +84,23 @@ int main(void) {
     phase=2; assert(!q1000k_mac_cold_interrupts(0x1234) && regs[0x5040/4]==0x1234);
     writes=0; fail_write=2;
     assert(q1000k_mac_cold_interrupts(0x1234)==-EIO);
+    reset(); assert(q1000k_mac_profiles_invalidate()==-EPERM);
+    assert(q1000k_mac_profile_install(0,1,100)==-EPERM && !writes);
+    phase=2; regs[0x511c/4]=0xf1f1f1f1;
+    assert(!q1000k_mac_profiles_invalidate() && regs[0x511c/4]==0xf0f0f0f0);
+    for(unsigned int i=0;i<4;i++) {
+        assert(!q1000k_mac_profile_install(i,i+1,100+i));
+        assert(((regs[0x511c/4]>>(8*i))&0xf1)==((i+1)*16+1));
+        assert(((regs[(0x5120+4*(i/2))/4]>>(16*(i&1)))&0xffff)==100+i);
+    }
+    for(int n=1;n<=2;n++) {
+        reset(); phase=2; fail_write=n;
+        assert(q1000k_mac_profile_install(0,1,100)==-EIO && writes==n);
+        if(n==1) assert(!(regs[0x511c/4]&1));
+    }
+    reset(); phase=2;
+    assert(q1000k_mac_profile_install(4,1,100)==-EINVAL);
+    assert(q1000k_mac_profile_install(0,16,100)==-EINVAL);
+    assert(q1000k_mac_profile_install(0,1,0)==-EINVAL && !writes);
     return 0;
 }

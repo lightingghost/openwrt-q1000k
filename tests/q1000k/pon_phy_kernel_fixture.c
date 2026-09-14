@@ -11,6 +11,7 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/utsname.h>
+#include <linux/unaligned.h>
 #ifndef CONFIG_UML
 #error UML only; no device or optical hardware is attached.
 #endif

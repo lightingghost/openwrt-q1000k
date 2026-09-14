@@ -1,0 +1,103 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: defer complete burst profiles to the checked physical install
+
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -46,6 +46,9 @@
+ #include <linux/random.h>
+ #include <linux/types.h>
+ #include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include <q1000k_phy_api.h>
++#endif
+ #include "common/phy_if_wrapper.h"
+ #include "gpon/gpon_security.h"
+ #include "xpon_event_global.h"
+@@ -398,7 +401,37 @@
+ **		v1.0
+ **____________________________________________________________________________*/
+ static int ploam_recv_profile(PLOAM_RAW_Profile_T *pRecvProfMsg)
+-{	
++{
++#ifdef Q1000K_PON_IDENTITY
++	struct q1000k_pon_profile profile = {};
++	u16 dest;
++	bool broadcast;
++
++	if (!pRecvProfMsg)
++		return -EINVAL;
++	if (!q1000k_protocol_owned())
++		return -EPERM;
++	if (GPON_CURR_STATE != GPON_10G_STATE_O2_3 && GPON_CURR_STATE != GPON_10G_STATE_O4 &&
++	    GPON_CURR_STATE != GPON_10G_STATE_O5)
++		return -EINVAL;
++	if (pRecvProfMsg->raw.line_rate != PLOAM_XGSPON_LINE_RATE)
++		return -EOPNOTSUPP;
++	dest = (u16)pRecvProfMsg->raw.dest_id[0] << 8 | pRecvProfMsg->raw.dest_id[1];
++	broadcast = dest == PLOAM_BROADCAST_ADDR || dest == PLOAM_XGSPON_BROADCAST_ADDR ||
++		dest == PLOAM_XGSPON_BROADCAST_ADDR_NOKIA;
++	if (!broadcast && (GPON_CURR_STATE == GPON_10G_STATE_O2_3 || dest != GPON_ONU_ID))
++		return -EINVAL;
++	profile.index = pRecvProfMsg->raw.prof_index;
++	profile.version = pRecvProfMsg->raw.prof_version;
++	profile.repeat = pRecvProfMsg->raw.preamble_repeat_cnt;
++	profile.preamble_len = pRecvProfMsg->raw.preamble_lens;
++	profile.delimiter_len = pRecvProfMsg->raw.delimiter_lens;
++	profile.fec = pRecvProfMsg->raw.fec;
++	memcpy(profile.preamble, pRecvProfMsg->raw.preamble, sizeof(profile.preamble));
++	memcpy(profile.delimiter, pRecvProfMsg->raw.delimiter, sizeof(profile.delimiter));
++	return q1000k_omci_burst_profile(&profile, pRecvProfMsg->raw.pon_tag,
++		pRecvProfMsg->raw.seq_no, !broadcast);
++#else	
+ 	uint msgDestId =0;
+ 	uint profLens =0;
+ 
+@@ -487,6 +520,8 @@
+ 		}
+ 	}
+ 	return 0 ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -485,6 +485,9 @@
+ ******************************************************************************/
+ void gponDevSetProfileInfo(unchar profIndex, uint profLens, unchar version)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	REG_US_PROF_VLD gponProfValid;
+ 	REG_US_PROF_PSBu_LEN_0_1 gponProfLen01;    
+ 	REG_US_PROF_PSBu_LEN_2_3 gponProfLen23;
+@@ -518,6 +521,8 @@
+ 	IO_SREG(US_PROF_PSBu_LEN_0_1, gponProfLen01.Raw) ;
+     IO_SREG(US_PROF_PSBu_LEN_2_3, gponProfLen23.Raw) ;
+ 
++
++#endif
+ }
+ 
+ /*****************************************************************************
+@@ -3864,6 +3869,9 @@
+ 
+ int gponDevSetPhyProfile(PLOAM_RAW_Profile_T *pRecvProfMsg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 	PHY_Xgpon_Profile_Msg_T xgponPhyProfile;
+ 	memset(&xgponPhyProfile,0,sizeof(xgponPhyProfile));
+ 
+@@ -3877,6 +3885,8 @@
+ 
+ 	XPON_PHY_SET_API(PON_SET_PHY_XGPON_PROFILE, &xgponPhyProfile);
+ 	return 0;
++
++#endif
+ }
+ 
+ /*****************************************************************************

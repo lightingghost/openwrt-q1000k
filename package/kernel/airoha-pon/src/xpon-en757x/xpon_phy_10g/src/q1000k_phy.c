@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
+#include <linux/unaligned.h>
 #include <an7581_pon_phy.h>
 #include <an7581_pon_scu.h>
 #include <q1000k_pon.h>
@@ -525,6 +526,99 @@ int q1000k_phy_get_tx(bool *enabled)
 }
 EXPORT_SYMBOL(q1000k_phy_get_tx);
 
+static int qphy_reg_update(u32 reg, u32 mask, u32 value, u32 omit)
+{
+	u32 old;
+	int ret = an7581_pon_phy_read(reg, &old);
+
+	if (ret || old == ~0U)
+		return ret ?: -EIO;
+	return qphy_reg_write(reg, (old & ~(mask | omit)) | value);
+}
+
+int q1000k_phy_profile_set(const struct q1000k_pon_profile *p)
+{
+	u32 offset, info;
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (!q1000k_pon_profile_valid(p))
+		return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (!ret && !gpPhyPriv->phy_init_done)
+		ret = -EAGAIN;
+	if (!ret && (READ_ONCE(qphy_active) || qphy_irq_dev))
+		ret = -EBUSY;
+	if (ret)
+		goto out;
+	ret = q1000k_phy_controller_check();
+	if (ret)
+		goto fail;
+	offset = 8U * p->index;
+	ret = qphy_reg_write(EN7581_XGPON_PHY_PREAMBLE1_UPPER + offset, get_unaligned_be32(p->preamble));
+	if (!ret)
+		ret = qphy_reg_write(EN7581_XGPON_PHY_PREAMBLE1_LOWER + offset, get_unaligned_be32(p->preamble + 4));
+	if (!ret)
+		ret = qphy_reg_write(EN7581_XGPON_PHY_DELIMITER1_UPPER + offset, get_unaligned_be32(p->delimiter));
+	if (!ret)
+		ret = qphy_reg_write(EN7581_XGPON_PHY_DELIMITER1_LOWER + offset, get_unaligned_be32(p->delimiter + 4));
+	info = (u32)p->repeat << 16 | (u32)p->preamble_len << 8 | p->delimiter_len;
+	if (!ret)
+		ret = qphy_reg_write(EN7581_XGPON_PHY_PSBU_INFO1 + 4U * p->index, info);
+	if (!ret)
+		ret = qphy_reg_update(EN7581_XGPON_PHY_XG_TX_FEC_EN_CTRL,
+			1U << offset, (u32)p->fec << offset, 0);
+fail:
+	if (ret)
+		qphy_failed(ret);
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_profile_set);
+
+static int qphy_receive_set(struct xpon_phy_api_data_s *data)
+{
+	u32 value, mask;
+	int ret;
+
+	if (READ_ONCE(qphy_active) || qphy_irq_dev)
+		return -EBUSY;
+	if (data->cmd_id != PON_SET_PHY_RX_FEC_SETTING)
+		return qphy_reg_update(EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL,
+			EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL_RX_ENABLE,
+			data->cmd_id == PON_SET_PHY_XGPON_RX_ENABLE ?
+			EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL_RX_ENABLE : 0, 0);
+	if (!data->data || *data->data < DS_FEC_SETTING_FORCE_OFF ||
+	    *data->data > DS_FEC_SETTING_FORCE_OC)
+		return -EINVAL;
+	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_CTRL, &value);
+	if (ret || value == ~0U)
+		return ret ?: -EIO;
+	/* Preserve the AN7581 vendor mode encoding, including the distinct
+	 * OC-reference controls. Never replay the counter-clear strobe.
+	 */
+	mask = EN7581_XGPON_PHY_DBG_RX_FEC_OC_REF_EN |
+		EN7581_XGPON_PHY_DBG_XG_OC_EN;
+	value &= ~(mask | EN7581_XGPON_PHY_DBG_CTRL_DBG_CNT_CLEAR);
+	if (*data->data == DS_FEC_SETTING_FORCE_ON)
+		value |= EN7581_XGPON_PHY_DBG_RX_FEC_FORCE_OFF;
+	else if (*data->data == DS_FEC_SETTING_FORCE_OFF)
+		value &= ~(EN7581_XGPON_PHY_DBG_RX_FEC_FORCE_OFF | EN7581_XGPON_PHY_DBG_RX_FEC_FORCE_ON);
+	else
+		value |= mask | EN7581_XGPON_PHY_DBG_RX_FEC_FORCE_OFF;
+	ret = qphy_reg_write(EN7581_XGPON_PHY_DBG_CTRL, value);
+	if (!ret)
+		gpPhyPriv->rx_fec_setting = *data->data;
+	return ret;
+}
+
 int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 {
 	int ret = qphy_context();
@@ -537,15 +631,10 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 	    data->api_type != XPON_PHY_API_TYPE_SET)
 		return data->ret = -EINVAL;
 	if (data->api_type == XPON_PHY_API_TYPE_SET) {
-		if (data->cmd_id == PON_SET_PHY_START)
-			return data->ret = q1000k_phy_start();
-		if (data->cmd_id == PON_SET_PHY_STOP)
-			return data->ret = q1000k_phy_stop();
-		/* Lifecycle and optical TX cannot bypass coordinated startup. */
-		if (data->cmd_id == PON_SET_PHY_MODE_CONFIG ||
-		    data->cmd_id == PON_SET_PHY_TRANS_POWER_SWITCH ||
-		    data->cmd_id == PON_SET_PHY_TX_POWER_CONFIG ||
-		    data->cmd_id == PON_SET_PHY_FW_READY)
+		/* Reset, TX, mode and profile writes require typed lifecycle APIs. */
+		if (data->cmd_id != PON_SET_PHY_RX_FEC_SETTING &&
+		    data->cmd_id != PON_SET_PHY_XGPON_RX_ENABLE &&
+		    data->cmd_id != PON_SET_PHY_XGPON_RX_DISABLE)
 			return data->ret = -EOPNOTSUPP;
 	}
 	if (READ_ONCE(qphy_owner) == current)
@@ -560,6 +649,12 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 	}
 	if (!ret && !gpPhyPriv->phy_init_done)
 		ret = -EAGAIN;
+	if (!ret && data->api_type == XPON_PHY_API_TYPE_SET) {
+		ret = qphy_receive_set(data);
+		if (ret && ret != -EINVAL && ret != -EBUSY)
+			qphy_failed(ret);
+		goto out;
+	}
 	if (!ret) {
 		data->ret = -EOPNOTSUPP;
 		pon_phy_api_dispatch((struct ecnt_data *)data);

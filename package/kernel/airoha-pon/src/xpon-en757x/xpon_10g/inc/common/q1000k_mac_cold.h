@@ -11,6 +11,8 @@ int q1000k_mac_cold_release(void);
 int q1000k_mac_cold_install(const u8 serial[8], const u8 registration[36], bool emergency);
 int q1000k_mac_cold_select_keys(void);
 int q1000k_mac_cold_interrupts(u32 enables);
+int q1000k_mac_profiles_invalidate(void);
+int q1000k_mac_profile_install(u8 index, u8 version, u16 length);
 /* Protocol-owner state publication. Unsupported NG-PON2/fast-resume states
  * are rejected. The caller publishes software state only after success.
  */

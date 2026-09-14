@@ -7,6 +7,8 @@
 #include <string.h>
 #include <errno.h>
 typedef uint32_t u32;
+typedef uint8_t u8;
+static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|(u32)p[2]<<8|p[3]; }
 #include <q1000k_phy_api.h>
 #define EXPORT_SYMBOL(x)
 #define ERR_PTR(n) ((void *)(intptr_t)(n))
@@ -42,6 +44,12 @@ typedef uint32_t u32;
 #define PON_SET_PHY_TX_POWER_CONFIG 5
 #define PON_SET_PHY_FW_READY 6
 #define PON_GET_PHY_INIT_STATUS 6
+#define PON_SET_PHY_RX_FEC_SETTING 20
+#define PON_SET_PHY_XGPON_RX_ENABLE 30
+#define PON_SET_PHY_XGPON_RX_DISABLE 31
+#define DS_FEC_SETTING_FORCE_ON 1
+#define DS_FEC_SETTING_FORCE_OFF 0
+#define DS_FEC_SETTING_FORCE_OC 3
 #define PHY_ISR_FUNC 0
 #define PHY_EVENT_POLL_FUNC 1
 #define IRQ_NONE 0
@@ -90,7 +98,7 @@ static struct phy_private *gpPhyPriv;
 static int (*en7581_xgpon_func[2])(char *);
 static int (**ponPhyFunc)(char *);
 struct ecnt_data { int n; };
-struct xpon_phy_api_data_s { int ret,api_type,cmd_id; };
+struct xpon_phy_api_data_s { int ret,api_type,cmd_id; int *data; };
 static int provider=1,provider_error,hwid=14,wan=10,mode_error,api_error,poll_error,isr_error,fw_error;
 static unsigned int reads,writes,fail_read,fail_write;
 static u32 regs[0x8000];
@@ -213,6 +221,49 @@ int main(void)
 {
     unsigned int n;
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET,.cmd_id=99};
+    struct q1000k_pon_profile profile={.repeat=255,.preamble_len=8,.delimiter_len=4,.fec=1,.version=15};
+    memset(profile.preamble,0xff,8); memcpy(profile.delimiter,"abcdefgh",8);
+    for(int index=0;index<4;index++) {
+        initialized(); profile.index=index;
+        regs[(EN7581_XGPON_PHY_XG_TX_FEC_EN_CTRL&0x1ffff)/4]=0x80808080;
+        assert(!q1000k_phy_profile_set(&profile));
+        assert(regs[((EN7581_XGPON_PHY_PREAMBLE1_UPPER+8*index)&0x1ffff)/4]==0xffffffff);
+        assert(regs[((EN7581_XGPON_PHY_DELIMITER1_UPPER+8*index)&0x1ffff)/4]==0x61626364);
+        assert(regs[((EN7581_XGPON_PHY_PSBU_INFO1+4*index)&0x1ffff)/4]==0xff0804);
+        assert(regs[(EN7581_XGPON_PHY_XG_TX_FEC_EN_CTRL&0x1ffff)/4]==(0x80808080|(1U<<(8*index))));
+    }
+    unsigned int profile_writes=writes, profile_reads=reads;
+    for(unsigned int n=1;n<=profile_writes;n++) {
+        initialized(); fail_write=n;
+        assert(q1000k_phy_profile_set(&profile)==-EIO && qphy_fault && !controller.tx);
+    }
+    for(unsigned int n=1;n<=profile_reads;n++) {
+        initialized(); fail_read=n;
+        assert(q1000k_phy_profile_set(&profile)==-EIO && qphy_fault && !controller.tx);
+    }
+    initialized(); profile.index=4;
+    assert(q1000k_phy_profile_set(&profile)==-EINVAL && !writes);
+    profile.index=0; profile.preamble_len=9;
+    assert(q1000k_phy_profile_set(&profile)==-EINVAL && !writes); profile.preamble_len=8;
+    assert(!q1000k_phy_start());
+    assert(q1000k_phy_profile_set(&profile)==-EBUSY);
+    assert(!q1000k_phy_stop());
+    int fec=1;
+    struct xpon_phy_api_data_s receive={.api_type=XPON_PHY_API_TYPE_SET,.cmd_id=PON_SET_PHY_RX_FEC_SETTING,.data=&fec};
+    assert(!q1000k_phy_call(&receive) && gpPhyPriv->rx_fec_setting==1);
+    fec=4; assert(q1000k_phy_call(&receive)==-EINVAL && gpPhyPriv->rx_fec_setting==1);
+    fec=-1; assert(q1000k_phy_call(&receive)==-EINVAL);
+    receive.data=NULL; assert(q1000k_phy_call(&receive)==-EINVAL);
+    receive.cmd_id=PON_SET_PHY_XGPON_RX_ENABLE;
+    assert(!q1000k_phy_call(&receive));
+    assert(regs[(EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL&0x1ffff)/4] & (1U<<16));
+    assert(!q1000k_phy_start());
+    receive.cmd_id=PON_SET_PHY_XGPON_RX_DISABLE;
+    assert(q1000k_phy_call(&receive)==-EBUSY);
+    for(unsigned int cmd=0;cmd<128;cmd++) {
+        if(cmd==PON_SET_PHY_RX_FEC_SETTING || cmd==PON_SET_PHY_XGPON_RX_ENABLE || cmd==PON_SET_PHY_XGPON_RX_DISABLE) continue;
+        receive.cmd_id=cmd; assert(q1000k_phy_call(&receive)==-EOPNOTSUPP);
+    }
     reset(); provider=0; assert(q1000k_phy_init()==-ENODEV && !allocs);
     reset(); hwid=7; assert(q1000k_phy_init()==-ENODEV && !allocs);
     reset(); provider_error=-EIO; assert(q1000k_phy_init()==-EIO && !allocs);

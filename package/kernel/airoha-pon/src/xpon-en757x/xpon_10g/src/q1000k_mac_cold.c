@@ -147,3 +147,26 @@ int q1000k_mac_cold_interrupts(u32 enables)
 	ret = an7581_xpon_status();
 	return ret ?: qcold_write(0x5040, enables, ~0U);
 }
+
+int q1000k_mac_profiles_invalidate(void)
+{
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	return ret ?: qcold_update(0x511c, 0x01010101, 0, 0);
+}
+
+int q1000k_mac_profile_install(u8 index, u8 version, u16 length)
+{
+	u32 shift;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	if (ret)
+		return ret;
+	if (index > 3 || version > 15 || !length)
+		return -EINVAL;
+	shift = (index & 1) * 16;
+	ret = qcold_update(0x5120 + 4 * (index / 2), 0xffffU << shift, (u32)length << shift, 0);
+	/* Publish validity only after the caller verified the PHY and length. */
+	shift = index * 8;
+	return ret ?: qcold_update(0x511c, 0xf1U << shift, ((u32)version << 4 | 1) << shift, 0);
+}

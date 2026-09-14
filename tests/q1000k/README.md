@@ -440,3 +440,9 @@ record fixture requires producer synchronization before physical replacement.
 `test_pon_fcs.py` separately exercises the production FCS command's initial busy
 check, all-ones rejection, provider failures and bounded completion polling.
 The PLOAM fixture checks failed physical deallocation produces an error ACK.
+
+`test_pon_burst_profile.py` exercises the compiled PLOAM profile caller's
+destination/state checks and complete field handoff. PHY and cold-MAC fixtures
+cover all four banks, verified validity ordering, preserved peer fields and
+every failing register operation. The OMCI backend fixture checks replay,
+tag replacement and conflicting pending ACKs, including a same-tag ACK.

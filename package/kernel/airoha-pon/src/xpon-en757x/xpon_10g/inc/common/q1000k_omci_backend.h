@@ -4,6 +4,7 @@
 #include <linux/types.h>
 struct net_device;
 struct sk_buff;
+struct q1000k_pon_profile;
 int q1000k_omci_backend_init(struct net_device *dev);
 /* Module owner only: after hooks/ready publication, before protocol start. */
 int q1000k_omci_cold_start(void);
@@ -13,6 +14,8 @@ int q1000k_omci_reset(bool emergency, bool reset_phy);
 void q1000k_omci_backend_cleanup(void);
 /* These request functions require protocol ownership and copy their inputs. */
 int q1000k_omci_profile(const u8 tag[8], u8 sequence, bool acknowledge);
+int q1000k_omci_burst_profile(const struct q1000k_pon_profile *profile,
+			    const u8 tag[8], u8 sequence, bool acknowledge);
 int q1000k_omci_assign(u16 onu);
 /* Verify the hardware registration-key transition before publishing it. */
 int q1000k_omci_registration_keys(void);

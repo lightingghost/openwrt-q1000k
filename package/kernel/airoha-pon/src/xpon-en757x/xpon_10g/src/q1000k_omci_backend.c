@@ -30,6 +30,8 @@ struct qomci_request {
 	u8 tag[8], state, index;
 	u8 ack[QOMCI_ACKS], acks;
 	bool profile, assign, reset, reset_phy, emergency;
+	struct q1000k_pon_profile burst[4];
+	u8 burst_mask;
 };
 struct qomci_backend {
 	struct xpon_device *xpon;
@@ -38,6 +40,8 @@ struct qomci_backend {
 	spinlock_t auth_lock;
 	struct q1000k_mac_keys keys;
 	struct qomci_request request;
+	struct q1000k_pon_profile burst[4];
+	u8 burst_mask;
 	u8 serial[8], registration[36], index;
 	u16 onu;
 	u64 epoch, published;
@@ -192,6 +196,7 @@ int q1000k_omci_reset(bool emergency, bool reset_phy)
 	b->request.onu = 0xffff;
 	b->request.assign = b->request.profile = false;
 	b->request.acks = 0;
+	b->request.burst_mask = 0;
 	return qomci_request(b);
 }
 
@@ -208,20 +213,47 @@ int q1000k_omci_profile(const u8 tag[8], u8 sequence, bool acknowledge)
 	/* Do not acknowledge a superseded tag with a different key. The OLT
 	 * can retry a new profile after this ordered control boundary.
 	 */
-	if (b->request.profile && b->request.acks && memcmp(tag, b->request.tag, 8))
+	if (b->request.acks && memcmp(tag, b->request.tag, 8))
 		return -EBUSY;
 	if (acknowledge) {
 		if (b->request.acks == QOMCI_ACKS) {
 			qomci_close(b); q1000k_protocol_fail(-ENOSPC); return -ENOSPC;
 		}
-		b->request.ack[b->request.acks++] = sequence;
 	}
 	if (!b->keys_valid || memcmp(tag, b->keys.pon_tag, 8) || b->request.profile) {
-		memcpy(b->request.tag, tag, 8);
+		if (b->request.profile && memcmp(tag, b->request.tag, 8))
+			b->request.burst_mask = 0;
 		b->request.profile = true;
 	}
+	memcpy(b->request.tag, tag, 8);
+	if (acknowledge)
+		b->request.ack[b->request.acks++] = sequence;
 	if (!b->request.profile && !acknowledge)
 		return 0;
+	return qomci_request(b);
+}
+
+int q1000k_omci_burst_profile(const struct q1000k_pon_profile *p,
+			    const u8 tag[8], u8 sequence, bool acknowledge)
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+	int ret;
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	if (!b)
+		return -ENODEV;
+	if (!q1000k_pon_profile_valid(p) || !tag)
+		return -EINVAL;
+	if ((b->request.burst_mask & BIT(p->index)) && b->request.acks &&
+	    memcmp(p, &b->request.burst[p->index], sizeof(*p)))
+		return -EBUSY;
+	ret = q1000k_omci_profile(tag, sequence, acknowledge);
+	if (ret)
+		return ret;
+	b->request.burst[p->index] = *p;
+	b->request.burst_mask |= BIT(p->index);
+	/* Same-tag broadcasts also need a physical profile install. */
 	return qomci_request(b);
 }
 
@@ -264,7 +296,7 @@ int q1000k_omci_registration_keys(void)
 	if (GPON_CURR_STATE != GPON_10G_STATE_O4 && GPON_CURR_STATE != GPON_10G_STATE_O5)
 		return -EINVAL;
 	security = &gpGponPriv->gponSecurity;
-	if (!b->keys_valid || b->request.reset || security->smaValid != GPON_SMA_INVALID)
+	if (!b->keys_valid || !b->burst_mask || b->request.reset || security->smaValid != GPON_SMA_INVALID)
 		ret = -ENOKEY;
 	else {
 		ret = q1000k_mac_key_indices(&ploam, &omci);
@@ -314,6 +346,8 @@ int q1000k_omci_alloc_changed(void)
 
 struct qomci_install {
 	struct q1000k_mac_keys keys;
+	struct q1000k_pon_profile burst[4];
+	u8 burst_mask;
 	u16 onu;
 	bool valid, registration, cold, reset_phy, emergency;
 	const u8 *serial, *registration_id;
@@ -321,6 +355,7 @@ struct qomci_install {
 static int qomci_install(void *arg)
 {
 	struct qomci_install *install = arg;
+	unsigned int i;
 	int ret = 0;
 
 	if (install->cold) {
@@ -338,6 +373,18 @@ static int qomci_install(void *arg)
 		ret = q1000k_mac_keys_install(&install->keys);
 	if (!ret && install->registration)
 		ret = q1000k_mac_onu_install(install->onu);
+	if (!ret)
+		ret = q1000k_mac_profiles_invalidate();
+	for (i = 0; !ret && i < 4; i++) {
+		const struct q1000k_pon_profile *p = &install->burst[i];
+
+		if (!(install->burst_mask & BIT(i)))
+			continue;
+		ret = q1000k_phy_profile_set(p);
+		if (!ret)
+			ret = q1000k_mac_profile_install(i, p->version,
+				(u16)p->preamble_len * p->repeat + p->delimiter_len);
+	}
 	if (!ret && install->cold) {
 		ret = q1000k_mac_cold_select_keys();
 		if (!ret) {
@@ -409,6 +456,15 @@ again:
 	token = q1000k_protocol_enter();
 	if (token < 0) { ret = token; goto failed; }
 	request = b->request;
+	memcpy(install->burst, b->burst, sizeof(install->burst));
+	install->burst_mask = b->burst_mask;
+	if (request.reset || (request.profile && memcmp(request.tag, b->keys.pon_tag, 8)))
+		install->burst_mask = 0;
+	for (i = 0; i < 4; i++)
+		if (!request.reset && (request.burst_mask & BIT(i))) {
+			install->burst[i] = request.burst[i];
+			install->burst_mask |= BIT(i);
+		}
 	install->keys = b->keys;
 	install->valid = b->keys_valid;
 	install->registration = request.assign || request.reset;
@@ -445,19 +501,20 @@ again:
 			goto failed;
 		install->valid = !request.reset;
 	}
-	if (request.assign && !install->valid) { ret = -ENOKEY; goto failed; }
+	if (request.assign && (!install->valid || !install->burst_mask)) { ret = -ENOKEY; goto failed; }
 	if (request.index > 1) { ret = -EINVAL; goto failed; }
 	token = q1000k_protocol_enter();
 	if (token < 0) { ret = token; goto failed; }
 	if (request.generation != b->request.generation) {
 		q1000k_protocol_leave(token); goto again;
 	}
-	up = request.state == GPON_10G_STATE_O5 && install->onu != 0xffff && install->valid;
+	up = request.state == GPON_10G_STATE_O5 && install->onu != 0xffff &&
+		install->valid && install->burst_mask;
 	if (install->cold)
 		ret = q1000k_gwan_cold_reset(qomci_install, install);
 	else if (install->registration)
 		ret = q1000k_gwan_register(install->onu, qomci_install, install);
-	else if (request.profile || up)
+	else if (request.profile || request.burst_mask || up)
 		ret = q1000k_gwan_refresh(qomci_install, install);
 	if (ret) {
 		q1000k_protocol_leave(token); goto failed;
@@ -480,6 +537,9 @@ again:
 	}
 	if (install->valid || install->cold)
 		qomci_legacy_keys(&install->keys);
+	memcpy(b->burst, install->burst, sizeof(b->burst));
+	b->burst_mask = install->burst_mask;
+	b->request.burst_mask = 0;
 	spin_lock_bh(&b->auth_lock);
 	b->keys = install->keys;
 	b->keys_valid = install->valid;

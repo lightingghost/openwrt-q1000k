@@ -9,6 +9,7 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+#define BIT(n) (UINT32_C(1)<<(n))
 #define U64_MAX UINT64_MAX
 #define OMCI_OLT_VENDOR_ID_LEN 4
 #define OMCI_OLT_VERSION_LEN 14
@@ -87,7 +88,7 @@ static int ack_count, resets, service_resets, live_skb, native_error, derivation
 static int request_during_barrier, assign_count, refresh_count;
 static bool services_enabled, install_phase, optical_tx;
 static int cold_count;
-static u8 hw_ploam_index, hw_omci_index;
+static u8 hw_ploam_index, hw_omci_index, installed_profiles, profile_version[4];
 int snSendInO23Cnt;
 static u16 hardware_onu;
 static u64 native_epoch,native_last;
@@ -202,6 +203,11 @@ int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u
     assert(!owned && !auth_held && reg[35]==2 && sn[7]==1); derivations++; int ret=step(); if(ret) return ret;
     memset(keys,0,sizeof(*keys)); memcpy(keys->pon_tag,tag,8); memset(keys->bank[0].omci,0x30,16); memset(keys->bank[1].omci,0x31,16); return 0;
 }
+int q1000k_mac_profiles_invalidate(void) { assert(owned && install_phase); int ret=step(); if(!ret) installed_profiles=0; return ret; }
+int q1000k_phy_profile_set(const struct q1000k_pon_profile *p) { assert(owned && install_phase && q1000k_pon_profile_valid(p)); int ret=step(); if(!ret) profile_version[p->index]=p->version; return ret; }
+int q1000k_mac_profile_install(u8 index,u8 version,u16 length) {
+    assert(owned && install_phase && index<4 && version<16 && length>0 && profile_version[index]==version); int ret=step(); if(!ret) installed_profiles|=BIT(index); return ret;
+}
 int q1000k_mac_keys_install(const struct q1000k_mac_keys *keys) { assert(owned && install_phase && !auth_held); return step(); }
 int q1000k_mac_key_indices(u8 *ploam,u8 *omci) {
     assert(owned); int ret=step(); if(!ret) { *ploam=hw_ploam_index; *omci=hw_omci_index; } return ret;
@@ -217,7 +223,7 @@ static void begin(void)
 {
     static struct net_device dev;
     memset(&vendor,0,sizeof(vendor)); vendor.state=2; vendor.gponSecurity.omciIkIdx=1;
-    hw_ploam_index=hw_omci_index=0;
+    installed_profiles=0; hw_ploam_index=hw_omci_index=0;
     owned=auth_held=fault=calls=fail_at=0; native_epoch=native_last=0;
     assert(!q1000k_omci_backend_init(&dev));
 }
@@ -225,7 +231,7 @@ static void startup(void)
 {
     begin();
     assert(!q1000k_omci_cold_start());
-    assert(!qomci_current->keys_valid && !qomci_current->active && !native_epoch);
+    assert(!qomci_current->keys_valid && !qomci_current->active && !native_epoch && !installed_profiles);
     assert(vendor.state==1 && qomci_current->omci->state==1 && !optical_tx);
     assert(q1000k_omci_cold_start()==-EALREADY);
     vendor.state=2; calls=0;
@@ -233,7 +239,8 @@ static void startup(void)
 static void profile_and_assign(void)
 {
     u8 tag[8]={1,2,3,4,5,6,7,8}; int token=q1000k_protocol_enter();
-    assert(!q1000k_omci_profile(tag,7,true)); assert(!q1000k_omci_assign(17)); q1000k_protocol_leave(token);
+    struct q1000k_pon_profile profile={.repeat=2,.preamble_len=8,.delimiter_len=8,.version=1};
+    assert(!q1000k_omci_burst_profile(&profile,tag,7,true)); assert(!q1000k_omci_assign(17)); q1000k_protocol_leave(token);
     q1000k_omci_control();
 }
 static void operational(void)
@@ -248,7 +255,15 @@ int main(void)
     startup(); assert(q1000k_omci_assign(17)==-EPERM); profile_and_assign();
     struct qomci_backend *b=qomci_current;
     assert(!fault && vendor.state==4 && b->onu==17 && hardware_onu==17 && !b->active);
-    assert(ack_count==1 && b->keys_valid && !native_epoch);
+    assert(ack_count==1 && b->keys_valid && !native_epoch && installed_profiles==1 && b->burst_mask==1);
+    int same_tag_owner=q1000k_protocol_enter();
+    u8 other_tag[8]={33};
+    assert(!q1000k_omci_burst_profile(&b->burst[0],b->keys.pon_tag,8,true));
+    assert(!b->request.profile && b->request.acks==1);
+    assert(q1000k_omci_burst_profile(&b->burst[0],other_tag,9,true)==-EBUSY);
+    assert(b->request.acks==1 && !memcmp(b->request.tag,b->keys.pon_tag,8));
+    q1000k_protocol_leave(same_tag_owner); q1000k_omci_control();
+    assert(!fault && ack_count==2);
     operational(); assert(!fault && b->active && services_enabled && b->omci->epoch==b->published && native_epoch==b->published);
     int before_reconcile=reconciles;
     int owner=q1000k_protocol_enter(); assert(!q1000k_omci_alloc_changed()); q1000k_protocol_leave(owner);
@@ -267,7 +282,9 @@ int main(void)
     native_error=-ENOBUFS; p=packet(44); assert(qomci_xmit(b->omci,p,17,b->published)==-ENOBUFS && live_skb==1); dev_kfree_skb_any(p); native_error=0;
     u64 old=b->published;
     int token=q1000k_protocol_enter();
-    u8 new_tag[8]={7}; assert(!q1000k_omci_profile(new_tag,9,false));
+    u8 new_tag[8]={7};
+    struct q1000k_pon_profile new_profile=b->burst[0]; new_profile.version=2;
+    assert(!q1000k_omci_burst_profile(&new_profile,new_tag,9,false));
     q1000k_protocol_leave(token);
     assert(!b->active && !services_enabled); q1000k_omci_control();
     assert(b->active && b->published>old && b->index==0 && !fault);
@@ -316,6 +333,21 @@ int main(void)
     assert(!q1000k_omci_registration_keys() && generation==qomci_current->request.generation);
     q1000k_protocol_leave(token);
     assert(q1000k_omci_registration_keys()==-EPERM);
+    q1000k_omci_backend_cleanup();
+    startup(); token=q1000k_protocol_enter();
+    struct q1000k_pon_profile queued={.repeat=2,.preamble_len=8,.delimiter_len=8,.version=1};
+    u8 tag_a[8]={4}, tag_b[8]={5};
+    assert(!q1000k_omci_burst_profile(&queued,tag_a,1,false));
+    queued.index=3; queued.version=2;
+    assert(!q1000k_omci_burst_profile(&queued,tag_b,2,true));
+    assert(qomci_current->request.burst_mask==8 && !installed_profiles);
+    queued.version=3;
+    assert(q1000k_omci_burst_profile(&queued,tag_b,3,true)==-EBUSY);
+    queued.repeat=0;
+    assert(q1000k_omci_burst_profile(&queued,tag_b,3,true)==-EINVAL);
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && installed_profiles==8 && qomci_current->burst_mask==8 && profile_version[3]==2);
+    assert(qomci_current->keys.pon_tag[0]==5);
     q1000k_omci_backend_cleanup();
     assert(!live_skb); return 0;
 }

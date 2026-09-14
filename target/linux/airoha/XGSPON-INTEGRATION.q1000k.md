@@ -1244,3 +1244,27 @@ All 57 host tests and the AArch64 vendor build pass. Tests cover every RX drop,
 OMCI independence from data-interface state, statistics, and full startup and
 unwind with no legacy FE/QDMA hooks. PHY burst-profile programming still needs
 its checked install boundary; no device access or optical test occurred.
+
+## Verified burst-profile installation
+
+Vendor r46 carries all four upstream burst profiles through the ordered
+registration owner. PLOAM reception validates XGS line rate, destination,
+profile index, version, FEC and the supported nonzero 1–8 byte pattern lengths.
+PHY preamble, delimiter, repetition and FEC fields are written and read back
+only while physical producers are drained. The MAC publishes each profile's
+length/version/valid bit after its PHY programming succeeds. Rebuilds replay
+the complete accepted set; a changed PON tag or cold reset invalidates it.
+ONU assignment and authenticated service require an installed profile.
+
+Unicast ACKs are queued until installation succeeds. Conflicting profiles or
+tags cannot supersede an outstanding ACK, including a repeat of the current
+tag that needs no key derivation. Generic reset, mode, TX and profile SETs
+cannot bypass typed lifecycle ownership. Receive enable and FEC settings have
+checked writes and preserve peer controls without replaying clear strobes.
+
+All 58 host tests, the PHY UML callback/lifetime test and the AArch64 vendor
+build pass. Fault injection covers each profile operation, all four banks,
+MAC validity ordering, pending tag changes, and malformed FEC requests.
+This validates software ordering against simulated registers. Cold optical
+registration and interoperability with an OLT have not been tested; no device
+access or firmware installation was performed.
