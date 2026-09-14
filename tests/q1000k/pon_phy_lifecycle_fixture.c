@@ -43,6 +43,9 @@ typedef uint32_t u32;
 #define IRQF_ONESHOT 1
 #define IRQF_SHARED 2
 /* REGISTERS */
+struct task_struct { int id; };
+static struct task_struct main_task, other_task;
+static struct task_struct *current = &main_task;
 struct mutex { bool held; };
 static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=true; }
 static bool mutex_trylock(struct mutex *m) { if(m->held) return false; m->held=true; return true; }
@@ -136,6 +139,8 @@ static void free_irq(int irq,void *dev)
 static int event(char *p)
 {
     assert(qphy_callback.held);
+    assert(!q1000k_phy_callback_context());
+    current=&other_task; assert(q1000k_phy_callback_context()==-EPERM); current=&main_task;
     if(reenter) {
         struct xpon_phy_api_data_s call={.api_type=XPON_PHY_API_TYPE_GET};
         assert(q1000k_phy_start()==-EBUSY);

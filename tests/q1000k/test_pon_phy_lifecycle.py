@@ -9,8 +9,8 @@ REPO = Path(__file__).resolve().parents[2]
 BSP = REPO / 'package/kernel/airoha-pon/src/bsp'
 PHY = BSP.parent / 'xpon-en757x/xpon_phy_10g'
 
-def production_source():
-    source = (PHY / 'src/q1000k_phy.c').read_text()
+def production_source(path=None):
+    source = (path or PHY / 'src/q1000k_phy.c').read_text()
     source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
     definitions = {}
     for line in (PHY / 'inc/en7581_reg.h').read_text(encoding='latin1').splitlines():

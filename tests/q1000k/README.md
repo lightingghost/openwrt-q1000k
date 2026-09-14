@@ -359,3 +359,9 @@ timers and kthreads, with synthetic PHY state, MMIO and IRQ acquisition. It
 checks reentry and concurrent callback teardown over 50 start/stop cycles.
 No optical hardware is accessed. `Q1000K_UML_BASE` may point to an existing
 compatible UML build directory to reuse the local build artifacts.
+
+`test_pon_reset.py` verifies the actual clock reset callbacks and regmap errors.
+`test_pon_phy_reset.py` verifies the selected top/PMA reset sequences, bounded
+SCU fields and failures before reset, during reset and during restoration.
+`test_pon_phy_resources.py` also checks exclusive reset status and exclusion
+of concurrent MMIO. `Q1000K_PON_BSP` can select a prepared vendor BSP tree.

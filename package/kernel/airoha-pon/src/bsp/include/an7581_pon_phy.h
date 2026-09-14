@@ -10,5 +10,9 @@ int an7581_pon_phy_write(u32 reg, u32 value);
 int an7581_pon_phy_update(u32 reg, u32 end, u32 start, u32 value);
 /* A failed legacy access is sticky; initialization must check this status. */
 int an7581_pon_phy_status(void);
+/* Process context. Caller must quiesce PHY/MAC and gate PHY clocks first.
+ * Holds exclusive reset ownership, verifies assert/deassert and latches errors.
+ */
+int an7581_pon_phy_reset(void);
 
 #endif

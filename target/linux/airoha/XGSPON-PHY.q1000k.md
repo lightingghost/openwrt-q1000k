@@ -130,3 +130,33 @@ three banks, both polarities, several initial bit patterns, and read/update
 errors. The Linux 6.18.44 AArch64 kernel builds successfully with the patch;
 the prepared clock source matches the tested source. No reset was performed
 on the Q1000K.
+
+## Exclusive reset and callback ownership
+
+Patch 026 replaces the selected XGS-PON top reset with a checked sequence.
+It gates the digital clock, changes only WAN selection bits 7:0 to 17,
+checks the analog clock gates, pulses the exclusively acquired
+`EN7581_XPON_PHY_RST` through the kernel reset controller, restores selection
+10, then checks the digital reset pulse. Reset failure leaves the clocks
+gated. Reset-provider calls execute without an IRQ-disabled register lock;
+register accesses are rejected while a pulse is in progress. Assertion,
+deassertion and status failures are sticky. The disabled PHY DT node now
+names this reset explicitly.
+
+The shared-SCU API updates only the WAN selector or PON PBUS access bit,
+checks readback and propagates regmap errors. It never restores an old full
+SCU word. Other reset consumers keep ownership of their bits.
+
+The lifecycle records the task owning its callback mutex. Internal GET/SET
+helpers, the selected XGS IRQ/poll callbacks and reset helpers require that
+owner in process context. Their old nested IRQ spinlocks are bypassed on
+Q1000K, including the XGS handler's mismatched IRQ-save/unlock pair. PMA reset
+now propagates TX-disable, reset and restore errors and does not restore TX
+after a failed reset. Controller wiring and remaining raw API bodies are
+separate integration work; this checkpoint does not enable hardware.
+
+All 36 PON host tests pass with UBSan, including every top-reset transport
+failure, ignored clock writes, SCU field preservation and callback ownership.
+The UML PHY test passes its 50-cycle and concurrent teardown cases. Vendor
+r24 builds against Linux 6.18.44 and packages successfully (350,748 bytes).
+No reset or other write was executed on the Q1000K.

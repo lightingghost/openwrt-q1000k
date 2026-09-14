@@ -1,0 +1,267 @@
+Route Q1000K PHY reset through exclusive reset ownership and checked SCU fields.
+
+Run the selected PHY dispatch and XGS callbacks under the lifecycle mutex,
+without nested IRQ-disabled locks or spin_is_locked ownership guesses.
+
+--- a/bsp/core/ecnt_scu.c
++++ b/bsp/core/ecnt_scu.c
+@@ -43,6 +43,7 @@
+ #include <ecnt_scu_api.h>
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ #define AN7581_OPENWRT_SCU
++#include <an7581_pon_scu.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/regmap.h>
+ #endif
+@@ -229,6 +230,53 @@
+ #ifdef AN7581_OPENWRT_SCU
+ static struct regmap *an7581_np_scu, *an7581_chip_scu;
+ 
++int an7581_pon_wan_get(u32 *mode)
++{
++	u32 value;
++	int ret;
++
++	if (!mode)
++		return -EINVAL;
++	if (!an7581_np_scu)
++		return -ENODEV;
++	ret = regmap_read(an7581_np_scu, 0x70, &value);
++	if (ret)
++		return ret;
++	if (value == ~0U)
++		return -EIO;
++	*mode = value & 0xff;
++	return 0;
++}
++EXPORT_SYMBOL(an7581_pon_wan_get);
++
++static int an7581_pon_scu_update(u32 reg, u32 mask, u32 value)
++{
++	u32 actual;
++	int ret;
++
++	if (!an7581_np_scu)
++		return -ENODEV;
++	ret = regmap_update_bits(an7581_np_scu, reg, mask, value);
++	if (!ret)
++		ret = regmap_read(an7581_np_scu, reg, &actual);
++	return ret ? ret : actual == ~0U || (actual & mask) != value ? -EIO : 0;
++}
++
++int an7581_pon_wan_set(u32 mode)
++{
++	if (mode != 10 && mode != 17)
++		return -EINVAL;
++	return an7581_pon_scu_update(0x70, 0xff, mode);
++}
++EXPORT_SYMBOL(an7581_pon_wan_set);
++
++int an7581_pon_pbus_enable(void)
++{
++	return an7581_pon_scu_update(0x92c, BIT(2), 0);
++}
++EXPORT_SYMBOL(an7581_pon_pbus_enable);
++
++
+ static u32 an7581_scu_read(struct regmap *map, u32 size, u32 reg)
+ {
+ 	u32 value;
+--- a/xpon-en757x/xpon_phy_10g/Makefile
++++ b/xpon-en757x/xpon_phy_10g/Makefile
+@@ -33,7 +33,7 @@
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else	
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+-	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c
++	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c q1000k_phy_reset.c
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else
+ 	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7580.c a60972.c en7580_pma.c
+--- a/xpon-en757x/xpon_phy_10g/src/phy.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy.c
+@@ -444,6 +444,12 @@
+ 
+ void pon_phy_get_api_dispatch(xpon_phy_api_data_t * api_data)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	api_data->ret = q1000k_phy_callback_context();
++	if (api_data->ret)
++		return;
++#endif
++
+ 	static unsigned int pre_cmd_id = 0;
+ 	ulong flags;
+ 
+@@ -465,9 +471,13 @@
+ 		return;
+ 	}
+ 
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_lock_irqsave(&gpPhyPriv->pma_reset_lock, flags);
++#endif
+ 	ponPhyFunc[PHY_GET_API_DISPATCH_FUNC]((char *)api_data);
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_unlock_irqrestore(&gpPhyPriv->pma_reset_lock, flags);
++#endif
+ 
+ 	if(pre_cmd_id!=api_data->cmd_id)
+ 	{
+@@ -478,6 +488,12 @@
+ 
+ void pon_phy_set_api_dispatch(xpon_phy_api_data_t * api_data)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	api_data->ret = q1000k_phy_callback_context();
++	if (api_data->ret)
++		return;
++#endif
++
+ 	static unsigned int pre_cmd_id = 0;
+ 	ulong flags;
+ 
+@@ -502,9 +518,13 @@
+ 		handle_hw_irq_event(PHY_EVENT_TRANS_LOS_INT);   //report LOS
+ 	}
+ 	
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_lock_irqsave(&gpPhyPriv->pma_reset_lock, flags);
++#endif
+ 	ponPhyFunc[PHY_SET_API_DISPATCH_FUNC]((char *)api_data);
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_unlock_irqrestore(&gpPhyPriv->pma_reset_lock, flags);
++#endif
+ 
+ 	if(pre_cmd_id!=api_data->cmd_id)
+ 	{
+--- a/xpon-en757x/xpon_phy_10g/src/phy_init.c
++++ b/xpon-en757x/xpon_phy_10g/src/phy_init.c
+@@ -294,6 +294,9 @@
+ }
+ int phy_pma_reset(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_pma_reset();
++#else
+ 	
+ 	UINT32 read_data = 0;
+ 	UINT32 write_data = 0;
+@@ -340,10 +343,14 @@
+ #endif
+ 
+ 	return PHY_SUCCESS;
++#endif
+ }
+ 
+ int phy_pma_reset_with_lock(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_pma_reset();
++#else
+ 	
+ 	UINT32 read_data = 0;
+ 	UINT32 write_data = 0;
+@@ -371,6 +378,7 @@
+ #endif
+ 
+ 	return PHY_SUCCESS;
++#endif
+ }
+ 
+ int phy_pcs_fpgaif_reset(void)	//reset pcs and FPGA interface
+--- a/xpon-en757x/xpon_phy_10g/src/en7581.c
++++ b/xpon-en757x/xpon_phy_10g/src/en7581.c
+@@ -35,6 +35,10 @@
+ #include <linux/vmalloc.h>
+ #include <ecnt_scu_api.h>
+ #include "en7581.h"
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++#include <q1000k_phy_api.h>
++#include <an7581_pon_scu.h>
++#endif
+ #include "en7581_pma.h"
+ #include "en7581_reg.h"
+ 
+@@ -2989,6 +2993,9 @@
+ 
+ int en7581_xgpon_pon_phy_reset(char* buf)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_top_reset();
++#else
+ 	uint val = 0;
+ 	uint wan_cfg=0;
+ 
+@@ -3043,6 +3050,7 @@
+ 	IO_SPHYREG(EN7581_XGPON_PHY_XG_PHY_RST_N,EN7581_XGPON_PHY_XG_PHY_RST_N_OFF);
+ 
+ 	return PHY_SUCCESS;
++#endif
+ }
+ 
+ 
+@@ -4383,13 +4391,21 @@
+ 
+ int en7581_xgpon_phy_isr(char* buf)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	int context_error = q1000k_phy_callback_context();
++	if (context_error)
++		return context_error;
++#endif
++
+ 	ulong flags;
+ 	uint phyIntStatus, phyIntEn,read_data,write_data,read_data_1,read_data_2, phypmaIntEn, phypmaIntStatus ;
+     PON_PHY_Event_data_t phy_event = {.id = 0, .src = PON_PHY_EVENT_SOURCE_HW_IRQ };
+ 	static uint isr_cnt=0,phy_rdy_cnt=0,phy_los_cnt=0,phy_rx_rdy_cnt=0,phy_lof_cnt=0,phy_other_cnt=0,phy_fake_sync_cnt=0;
+ 	static uint trans_laser_detected = FALSE;		
+ 	isr_cnt++;
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_lock_irqsave(&gpPhyPriv->event_handle_lock, flags);
++#endif
+ 	
+ 	/*get interrupt status and clear*/
+ 	phyIntStatus=IO_GPHYREG(EN7581_XGPON_PHY_XG_PON_INT_STA);
+@@ -4596,13 +4612,21 @@
+ 	//PHY_START_TIMER(gpPhyPriv->event_poll_timer) ;	
+ 	PHY_START_TIMER(gpPhyPriv->event_poll_timer,gpPhyPriv->event_poll_timer_value); // julia_20201017 for kernel 5.4
+ 	#endif		
+-	spin_unlock(&gpPhyPriv->event_handle_lock); 
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
++	spin_unlock(&gpPhyPriv->event_handle_lock);
++#endif 
+ 	return PHY_SUCCESS;
+ 
+ }
+ 
+ int en7581_xgpon_phy_event_poll(char* buf)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	int context_error = q1000k_phy_callback_context();
++	if (context_error)
++		return context_error;
++#endif
++
+ 	ulong flags;
+ 	uint read_data,write_data ;
+ 	PON_PHY_Event_data_t phy_event = {.id = 0, .src = PON_PHY_EVENT_SOURCE_SW_POLL};
+@@ -4614,7 +4638,9 @@
+ 		return	PHY_FAILURE;	//ang_20180208
+ 	}
+ 
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_lock_irqsave(&gpPhyPriv->event_handle_lock, flags);
++#endif
+ 	
+ 	//phy_print_time();
+ 
+@@ -4835,7 +4861,9 @@
+ 	PON_PHY_PRINT(PHY_MSG_INT," - POLLING - __END__ (%d)(%d)(%d) Get phy_status = %d (%d)(%d)\r\n",poll_set_los_cnt,poll_set_ready_cnt,poll_no_ready_no_los_cnt,gpPhyPriv->phy_status,poll_los_cnt,poll_ready_cnt);
+ #endif
+ 
++#if !(defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583))
+ 	spin_unlock_irqrestore(&gpPhyPriv->event_handle_lock, flags);
++#endif
+ 
+ 	return PHY_SUCCESS;
+ 

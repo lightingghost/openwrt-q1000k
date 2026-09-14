@@ -258,6 +258,8 @@
 		reg-names = "digital", "ana", "pma";
 		interrupts = <GIC_SPI 43 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-names = "phy";
+		resets = <&scuclk EN7581_XPON_PHY_RST>;
+		reset-names = "phy";
 		/* Shares analog resources with pon_pcs: only one may bind. */
 		status = "disabled";
 	};

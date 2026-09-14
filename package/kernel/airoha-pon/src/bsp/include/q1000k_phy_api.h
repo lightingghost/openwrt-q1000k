@@ -16,4 +16,9 @@ void q1000k_phy_poll(void);
 int q1000k_phy_init(void);
 void q1000k_phy_exit(void);
 
+/* Private to phy_10g: verify process context and callback mutex ownership. */
+int q1000k_phy_callback_context(void);
+int q1000k_phy_top_reset(void);
+int q1000k_phy_pma_reset(void);
+
 #endif

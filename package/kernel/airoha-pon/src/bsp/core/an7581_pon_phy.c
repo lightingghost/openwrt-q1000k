@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Q1000K internal optical PHY resources. Probe performs no hardware writes. */
 #include <linux/io.h>
+#include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/rcupdate.h>
+#include <linux/reset.h>
 #include <linux/spinlock.h>
 #include <an7581_pon_phy.h>
 #include <ecnt_pon_phy_api.h>
@@ -12,13 +17,16 @@
 struct an7581_pon_phy {
 	struct device *dev;
 	void __iomem *base[3];
+	struct reset_control *reset;
 	int irq;
 	int fault;
+	bool resetting;
 };
 
 static const u32 phy_address[] = { 0x1faf0000, 0x1fa8a000, 0x1fa8b000 };
 static const u32 phy_size[] = { 0x1fff, 0x1000, 0x1000 };
 static DEFINE_RWLOCK(phy_lock);
+static DEFINE_MUTEX(phy_lifecycle);
 static struct an7581_pon_phy *pon_phy;
 static void an7581_phy_fault(int error);
 
@@ -51,8 +59,11 @@ int an7581_pon_phy_read(u32 reg, u32 *value)
 		return -EINVAL;
 	read_lock_irqsave(&phy_lock, flags);
 	if (pon_phy) {
-		*value = readl(pon_phy->base[bank] + offset);
-		ret = 0;
+		ret = -EBUSY;
+		if (!pon_phy->resetting) {
+			*value = readl(pon_phy->base[bank] + offset);
+			ret = 0;
+		}
 	}
 	read_unlock_irqrestore(&phy_lock, flags);
 	return ret;
@@ -71,7 +82,9 @@ static int an7581_phy_write(u32 reg, u32 mask, u32 value, bool masked)
 	if (bank < 0)
 		return bank;
 	write_lock_irqsave(&phy_lock, flags);
-	if (pon_phy) {
+	if (pon_phy && pon_phy->resetting)
+		ret = -EBUSY;
+	else if (pon_phy) {
 		if (masked)
 			value = (readl(pon_phy->base[bank] + offset) & ~mask) |
 				(value & mask);
@@ -128,7 +141,7 @@ int an7581_pon_phy_status(void)
 	int ret;
 
 	read_lock_irqsave(&phy_lock, flags);
-	ret = pon_phy ? pon_phy->fault : -ENODEV;
+	ret = pon_phy ? pon_phy->resetting ? -EBUSY : pon_phy->fault : -ENODEV;
 	read_unlock_irqrestore(&phy_lock, flags);
 	return ret;
 }
@@ -173,6 +186,57 @@ int get_pon_phy_irq(void)
 }
 EXPORT_SYMBOL(get_pon_phy_irq);
 
+int an7581_pon_phy_reset(void)
+{
+	struct an7581_pon_phy *priv;
+	unsigned long flags;
+	int ret = -ENODEV;
+
+	if (in_interrupt() || in_atomic() || irqs_disabled() ||
+	    rcu_preempt_depth() ||
+	    (IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()))
+		return -EWOULDBLOCK;
+	mutex_lock(&phy_lifecycle);
+	write_lock_irqsave(&phy_lock, flags);
+	priv = pon_phy;
+	if (priv) {
+		ret = priv->fault;
+		if (!ret)
+			priv->resetting = true;
+	}
+	write_unlock_irqrestore(&phy_lock, flags);
+	if (ret)
+		goto out;
+
+	/* Reset-controller calls may sleep. No IRQ-disabled lock is held, and
+	 * the lifecycle mutex pins the provider while MMIO access is excluded.
+	 */
+	ret = reset_control_assert(priv->reset);
+	if (!ret) {
+		ret = reset_control_status(priv->reset);
+		ret = ret < 0 ? ret : ret == 1 ? 0 : -EIO;
+	}
+	if (!ret) {
+		udelay(1);
+		ret = reset_control_deassert(priv->reset);
+	}
+	if (!ret) {
+		ret = reset_control_status(priv->reset);
+		ret = ret < 0 ? ret : ret == 0 ? 0 : -EIO;
+	}
+	if (ret)
+		reset_control_assert(priv->reset); /* Containment, never clear error. */
+	write_lock_irqsave(&phy_lock, flags);
+	if (ret && !priv->fault)
+		priv->fault = ret;
+	priv->resetting = false;
+	write_unlock_irqrestore(&phy_lock, flags);
+out:
+	mutex_unlock(&phy_lifecycle);
+	return ret;
+}
+EXPORT_SYMBOL(an7581_pon_phy_reset);
+
 void (*ledTurnOff_hook)(u8 led_no);
 EXPORT_SYMBOL(ledTurnOff_hook);
 void (*set_pon_phy_mode_config)(Xpon_Phy_Mode_t mode, int tx_enable);
@@ -215,12 +279,18 @@ static int an7581_pon_phy_probe(struct platform_device *pdev)
 	priv->irq = platform_get_irq_byname(pdev, "phy");
 	if (priv->irq < 0)
 		return priv->irq;
+	priv->reset = devm_reset_control_get_exclusive(&pdev->dev, "phy");
+	if (IS_ERR(priv->reset))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->reset),
+				     "cannot acquire optical PHY reset\n");
+	mutex_lock(&phy_lifecycle);
 	write_lock_irqsave(&phy_lock, flags);
 	if (pon_phy)
 		ret = -EBUSY;
 	else
 		pon_phy = priv;
 	write_unlock_irqrestore(&phy_lock, flags);
+	mutex_unlock(&phy_lifecycle);
 	return ret;
 }
 
@@ -228,9 +298,11 @@ static void an7581_pon_phy_remove(struct platform_device *pdev)
 {
 	unsigned long flags;
 
+	mutex_lock(&phy_lifecycle);
 	write_lock_irqsave(&phy_lock, flags);
 	pon_phy = NULL;
 	write_unlock_irqrestore(&phy_lock, flags);
+	mutex_unlock(&phy_lifecycle);
 }
 
 static const struct of_device_id an7581_pon_phy_match[] = {

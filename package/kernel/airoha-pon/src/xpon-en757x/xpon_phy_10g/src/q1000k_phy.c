@@ -5,6 +5,7 @@
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
 #include <linux/workqueue.h>
 #include <an7581_pon_phy.h>
 #include <ecnt_pon_phy_api.h>
@@ -20,6 +21,7 @@
 
 static DEFINE_MUTEX(qphy_control);
 static DEFINE_MUTEX(qphy_callback);
+static struct task_struct *qphy_owner;
 static bool qphy_active, qphy_dead;
 static int qphy_fault;
 static struct device *qphy_irq_dev;
@@ -32,6 +34,34 @@ static int qphy_context(void)
 		rcu_preempt_depth() ||
 		(IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()) ?
 		-EWOULDBLOCK : 0;
+}
+
+/* Internal vendor helpers may nest, but must belong to this callback. */
+int q1000k_phy_callback_context(void)
+{
+	int ret = qphy_context();
+
+	return ret ? ret : READ_ONCE(qphy_owner) == current ? 0 : -EPERM;
+}
+
+static void qphy_callback_lock(void)
+{
+	mutex_lock(&qphy_callback);
+	WRITE_ONCE(qphy_owner, current);
+}
+
+static bool qphy_callback_trylock(void)
+{
+	if (!mutex_trylock(&qphy_callback))
+		return false;
+	WRITE_ONCE(qphy_owner, current);
+	return true;
+}
+
+static void qphy_callback_unlock(void)
+{
+	WRITE_ONCE(qphy_owner, NULL);
+	mutex_unlock(&qphy_callback);
 }
 
 static int qphy_ready(void)
@@ -92,7 +122,7 @@ static void qphy_poll_work(struct work_struct *work)
 {
 	int ret;
 
-	mutex_lock(&qphy_callback);
+	qphy_callback_lock();
 	if (!READ_ONCE(qphy_active))
 		goto out;
 	ret = ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
@@ -104,7 +134,7 @@ static void qphy_poll_work(struct work_struct *work)
 		mod_timer(&gpPhyPriv->event_poll_timer,
 			  jiffies + msecs_to_jiffies(1500));
 out:
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 }
 static DECLARE_WORK(qphy_poll_job, qphy_poll_work);
 
@@ -120,7 +150,7 @@ static irqreturn_t qphy_irq_thread(int irq, void *data)
 	int ret;
 	irqreturn_t handled = IRQ_NONE;
 
-	mutex_lock(&qphy_callback);
+	qphy_callback_lock();
 	if (!READ_ONCE(qphy_active))
 		goto out;
 	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_XG_PON_INT_STA, &status);
@@ -149,7 +179,7 @@ fail:
 	if (ret)
 		qphy_failed(ret);
 out:
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 	return handled;
 }
 
@@ -163,7 +193,7 @@ int q1000k_phy_configure(u32 mode)
 		return -EOPNOTSUPP;
 	if (!mutex_trylock(&qphy_control))
 		return -EBUSY;
-	if (!mutex_trylock(&qphy_callback)) {
+	if (!qphy_callback_trylock()) {
 		ret = -EBUSY;
 		goto control_out;
 	}
@@ -190,7 +220,7 @@ int q1000k_phy_configure(u32 mode)
 		qphy_failed(ret);
 	}
 out:
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 control_out:
 	mutex_unlock(&qphy_control);
 	return ret;
@@ -206,7 +236,7 @@ int q1000k_phy_start(void)
 		return ret;
 	if (!mutex_trylock(&qphy_control))
 		return -EBUSY;
-	if (!mutex_trylock(&qphy_callback)) {
+	if (!qphy_callback_trylock()) {
 		ret = -EBUSY;
 		goto control_out;
 	}
@@ -263,9 +293,9 @@ int q1000k_phy_start(void)
 	if (ret) {
 		WRITE_ONCE(qphy_active, false);
 		qphy_mask();
-		mutex_unlock(&qphy_callback);
+		qphy_callback_unlock();
 		free_irq(qphy_irq, qphy_irq_dev);
-		mutex_lock(&qphy_callback);
+		qphy_callback_lock();
 		qphy_irq_dev = NULL;
 		qphy_irq = -1;
 		gpPhyPriv->is_irq_requested = FALSE;
@@ -276,7 +306,7 @@ int q1000k_phy_start(void)
 fail:
 	qphy_failed(ret);
 out:
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 control_out:
 	mutex_unlock(&qphy_control);
 	return ret;
@@ -308,7 +338,7 @@ static int qphy_stop(void)
 	cancel_work_sync(&qphy_poll_job);
 	/* A poll already running when stop began may have rearmed this timer. */
 	timer_delete_sync(&gpPhyPriv->event_poll_timer);
-	mutex_lock(&qphy_callback);
+	qphy_callback_lock();
 	if (gpPhyPriv->phy_init_done) {
 		err = qphy_mask();
 		if (!ret)
@@ -323,7 +353,7 @@ static int qphy_stop(void)
 		qphy_failed(ret);
 	if (!ret)
 		ret = qphy_fault;
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 	return ret;
 }
 
@@ -336,11 +366,11 @@ int q1000k_phy_stop(void)
 	if (!mutex_trylock(&qphy_control))
 		return -EBUSY;
 	/* A nested stop from this PHY's own callback must not wait on itself. */
-	if (!mutex_trylock(&qphy_callback)) {
+	if (!qphy_callback_trylock()) {
 		mutex_unlock(&qphy_control);
 		return -EBUSY;
 	}
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 	ret = qphy_stop();
 	mutex_unlock(&qphy_control);
 	return ret;
@@ -371,7 +401,7 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 	}
 	if (!mutex_trylock(&qphy_control))
 		return data->ret = -EBUSY;
-	if (!mutex_trylock(&qphy_callback)) {
+	if (!qphy_callback_trylock()) {
 		mutex_unlock(&qphy_control);
 		return data->ret = -EBUSY;
 	}
@@ -392,7 +422,7 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 	}
 out:
 	data->ret = ret;
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 	mutex_unlock(&qphy_control);
 	return ret;
 }
@@ -446,11 +476,11 @@ void q1000k_phy_exit(void)
 	}
 	qphy_dead = true;
 	qphy_stop();
-	mutex_lock(&qphy_callback);
+	qphy_callback_lock();
 	timer_shutdown_sync(&gpPhyPriv->event_poll_timer);
 	kfree(gpPhyPriv);
 	gpPhyPriv = NULL;
 	ponPhyFunc = NULL;
-	mutex_unlock(&qphy_callback);
+	qphy_callback_unlock();
 	mutex_unlock(&qphy_control);
 }
