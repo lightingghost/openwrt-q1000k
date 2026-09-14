@@ -123,6 +123,18 @@ static void qomci_config_changed(struct omci_device *odev, u16 key,
 	}
 }
 
+static void qomci_service_fault(struct omci_device *odev, int error)
+{
+	struct qomci_backend *b = omci_device_priv(odev);
+
+	/* The core holds its agent mutex. Close software ingress immediately;
+	 * the protocol fault worker owns subsequent physical containment.
+	 */
+	qomci_close(b);
+	WRITE_ONCE(b->service_error, error);
+	q1000k_protocol_fail(error);
+}
+
 static const struct omci_device_ops qomci_ops = {
 	.start = qomci_start, .stop = qomci_stop, .xmit = qomci_xmit,
 	.get_ani_topology = q1000k_services_topology,
@@ -131,6 +143,7 @@ static const struct omci_device_ops qomci_ops = {
 	.set_priority_queue = q1000k_services_queue,
 	.set_traffic_scheduler = q1000k_services_scheduler,
 	.config_changed = qomci_config_changed,
+	.service_fault = qomci_service_fault,
 };
 
 void q1000k_omci_receive(struct sk_buff *skb, u16 gem, bool crc_error)

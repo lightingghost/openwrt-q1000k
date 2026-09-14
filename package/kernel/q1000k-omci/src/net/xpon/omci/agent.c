@@ -67,6 +67,24 @@
 
 static void omci_agent_reset_table_snapshot_locked(struct omci_agent *agent);
 
+/* A failed undo cannot establish agreement between the MIB and hardware.
+ * Preserve diagnostic snapshots, close admission, and require a new device
+ * registration. A later successful request must not clear this condition.
+ */
+static int omci_agent_service_fault_locked(struct omci_device *odev)
+{
+	struct omci_agent *agent = &odev->agent;
+
+	agent->operational = false;
+	agent->reconcile_error = -EUCLEAN;
+	if (!agent->service_error) {
+		agent->service_error = -EUCLEAN;
+		if (odev->ops->service_fault)
+			odev->ops->service_fault(odev, -EUCLEAN);
+	}
+	return -EUCLEAN;
+}
+
 static bool omci_agent_result_can_be_faked(u8 result)
 {
 	switch (result) {
@@ -866,7 +884,10 @@ omci_agent_profile_refresh_locked(struct omci_device *odev,
 	u32 old_quirks = agent->profile_quirks;
 	u8 old_profile = agent->profile_effective;
 	bool changed;
-	int ret;
+	int ret, undo;
+
+	if (agent->service_error)
+		return agent->service_error;
 
 	omci_agent_profile_state_locked(agent, olt, &state);
 	state.quirks &= ~(OMCI_OLT_QUIRK_FAKE_UNSUPPORTED_SUCCESS |
@@ -891,6 +912,8 @@ omci_agent_profile_refresh_locked(struct omci_device *odev,
 apply_profile:
 	if (odev->ops->set_olt_profile) {
 		ret = odev->ops->set_olt_profile(odev, &state);
+		if (ret == -EUCLEAN)
+			omci_agent_service_fault_locked(odev);
 		if (ret && changed)
 			goto rollback;
 		if (ret)
@@ -917,16 +940,20 @@ apply_profile:
 	return 0;
 
 rollback:
-	omci_agent_restore_vendor_objects_locked(agent, &snapshot);
+	undo = omci_agent_restore_vendor_objects_locked(agent, &snapshot);
 	agent->profile_effective = old_profile;
 	agent->profile_quirks = old_quirks;
-	omci_agent_reconcile_services_locked(odev);
+	if (omci_agent_reconcile_services_locked(odev))
+		undo = -EUCLEAN;
 	if (odev->ops->set_olt_profile) {
 		old_state = state;
 		old_state.effective = old_profile;
 		old_state.quirks = old_quirks;
-		odev->ops->set_olt_profile(odev, &old_state);
+		if (agent->service_error || odev->ops->set_olt_profile(odev, &old_state))
+			undo = -EUCLEAN;
 	}
+	if (undo)
+		ret = omci_agent_service_fault_locked(odev);
 	omci_agent_free_object_array(&snapshot);
 
 destroy_snapshot:
@@ -2750,11 +2777,22 @@ static int omci_agent_hw_update(struct omci_device *odev,
 				struct omci_mib_object *object,
 				u8 action, const u8 *content)
 {
-	int ret = omci_agent_hw_update_apply(odev, object, action, content);
+	int ret;
+
+	if (odev->agent.service_error)
+		return odev->agent.service_error;
+	ret = omci_agent_hw_update_apply(odev, object, action, content);
 
 	if (ret == -EUCLEAN)
-		odev->agent.service_error = ret;
+		omci_agent_service_fault_locked(odev);
 	return ret;
+}
+
+static void omci_agent_hw_rollback(struct omci_device *odev,
+				 struct omci_mib_object *object, u8 action)
+{
+	if (omci_agent_hw_update(odev, object, action, object->data))
+		omci_agent_service_fault_locked(odev);
 }
 
 static bool
@@ -2790,7 +2828,7 @@ static int omci_agent_clear_services_locked(struct omci_device *odev)
 	ret = odev->ops->replace_services(odev, NULL, 0);
 	if (ret) {
 		if (ret == -EUCLEAN)
-			agent->service_error = ret;
+			omci_agent_service_fault_locked(odev);
 		return ret;
 	}
 	omci_agent_free_service_array(agent->services);
@@ -2849,7 +2887,7 @@ static int omci_agent_apply_services_locked(struct omci_device *odev,
 	ret = odev->ops->replace_services(odev, batch, count);
 	kfree(batch);
 	if (ret == -EUCLEAN)
-		agent->service_error = ret;
+		omci_agent_service_fault_locked(odev);
 	return ret;
 }
 
@@ -3303,6 +3341,8 @@ static u8 omci_agent_create_locked(struct omci_device *odev,
 	bool hardware_applied = false;
 	int ret;
 
+	if (agent->service_error)
+		return OMCI_RESULT_PROCESSING_ERROR;
 	if (!omci_me_active(agent, class_id))
 		return OMCI_RESULT_UNKNOWN_ME;
 	if (!omci_me_action_allowed(agent, class_id, OMCI_MSG_TYPE_CREATE))
@@ -3368,8 +3408,9 @@ rollback:
 		kfree(stored);
 	}
 	if (hardware_applied)
-		omci_agent_hw_update(odev, object, OMCI_MSG_TYPE_DELETE,
-				     object->data);
+		omci_agent_hw_rollback(odev, object, OMCI_MSG_TYPE_DELETE);
+	if (agent->service_error)
+		result = OMCI_RESULT_PROCESSING_ERROR;
 out:
 	kfree(object);
 	return result;
@@ -3390,6 +3431,8 @@ static u8 omci_agent_set_locked(struct omci_device *odev, u16 class_id,
 	u16 mask;
 	int ret;
 
+	if (agent->service_error)
+		return OMCI_RESULT_PROCESSING_ERROR;
 	if (content_len < 2)
 		return OMCI_RESULT_PARAMETER_ERROR;
 	if (!omci_me_active(agent, class_id))
@@ -3482,13 +3525,11 @@ rollback_processing:
 	if (existed) {
 		*object = *previous;
 		if (hardware_applied)
-			omci_agent_hw_update(odev, object, OMCI_MSG_TYPE_SET,
-					     object->data);
+			omci_agent_hw_rollback(odev, object, OMCI_MSG_TYPE_SET);
 	} else {
 		xa_erase(&agent->mib, omci_mib_key(class_id, entity_id));
 		if (hardware_applied)
-			omci_agent_hw_update(odev, object, OMCI_MSG_TYPE_DELETE,
-					     object->data);
+			omci_agent_hw_rollback(odev, object, OMCI_MSG_TYPE_DELETE);
 		kfree(object);
 	}
 	ret = OMCI_RESULT_PROCESSING_ERROR;
@@ -3507,6 +3548,8 @@ static u8 omci_agent_delete_locked(struct omci_device *odev, u16 class_id,
 	u8 restore_action;
 	int ret;
 
+	if (agent->service_error)
+		return OMCI_RESULT_PROCESSING_ERROR;
 	if (!omci_me_active(agent, class_id))
 		return OMCI_RESULT_UNKNOWN_ME;
 	if (!omci_me_action_allowed(agent, class_id, OMCI_MSG_TYPE_DELETE))
@@ -3545,12 +3588,14 @@ static u8 omci_agent_delete_locked(struct omci_device *odev, u16 class_id,
 
 rollback_services:
 	object->pending_delete = false;
-	omci_agent_hw_update(odev, object, restore_action, object->data);
-	omci_agent_reconcile_services_locked(odev);
+	omci_agent_hw_rollback(odev, object, restore_action);
+	if (omci_agent_reconcile_services_locked(odev))
+		omci_agent_service_fault_locked(odev);
 	return OMCI_RESULT_PROCESSING_ERROR;
 rollback_profile:
-	if (class_id == OMCI_CLASS_OLT_G)
-		omci_agent_profile_refresh_locked(odev, &object->olt_g, NULL);
+	if (class_id == OMCI_CLASS_OLT_G &&
+	    omci_agent_profile_refresh_locked(odev, &object->olt_g, NULL))
+		omci_agent_service_fault_locked(odev);
 rollback_mib:
 	object->pending_delete = false;
 	return OMCI_RESULT_PROCESSING_ERROR;

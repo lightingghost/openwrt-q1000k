@@ -1268,3 +1268,20 @@ MAC validity ordering, pending tag changes, and malformed FEC requests.
 This validates software ordering against simulated registers. Cold optical
 registration and interoperability with an OLT have not been tested; no device
 access or firmware installation was performed.
+
+## OMCI rollback failure containment
+
+Core r7 and vendor r47 connect a nonblocking service-fault callback. Failed
+CREATE, SET, DELETE or profile rollback now records `-EUCLEAN`, marks the
+agent nonoperational and closes Q1000K packet admission before the protocol
+worker performs physical containment. The callback does not call back into
+the OMCI core while its mutex is held. Subsequent provisioning and MIB reset
+cannot clear the fault; diagnostic snapshots remain available, and recovery
+requires a new device registration.
+
+The full core UML suite exercises actual T-CONT SET and GEM CREATE/DELETE
+transactions with service rejection, successful undo and failed undo. It
+checks preservation of the old MIB, one fault callback and rejection of later
+mutations. Backend host tests check immediate data/authentication closure.
+All 58 host tests, full OMCI core UML and matching AArch64 core/vendor builds
+pass. These tests use simulated providers, with no device connection.

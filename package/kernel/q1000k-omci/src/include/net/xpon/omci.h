@@ -327,6 +327,10 @@ struct omci_traffic_scheduler_config {
  * @set_olt_profile: apply a resolved OLT interoperability profile
  * @set_operational: report whether the in-kernel OMCI agent is operational
  * @config_changed: report a normalized runtime OMCI configuration change
+ * @service_fault: close packet admission after an unverified provisioning
+ *	rollback or -EUCLEAN. Called once with the agent mutex held; must not
+ *	call back into the core or wait for its workers. Queue physical teardown
+ *	if needed. The fault is permanent for this device registration.
  */
 struct omci_device_ops {
 	int (*start)(struct omci_device *odev);
@@ -358,6 +362,7 @@ struct omci_device_ops {
 	void (*set_operational)(struct omci_device *odev, bool operational);
 	void (*config_changed)(struct omci_device *odev, u16 key,
 			       const struct omci_identity *identity);
+	void (*service_fault)(struct omci_device *odev, int error);
 };
 
 struct omci_device *

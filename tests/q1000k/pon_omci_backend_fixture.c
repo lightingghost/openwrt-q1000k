@@ -300,6 +300,11 @@ int main(void)
     q1000k_protocol_leave(token); q1000k_omci_control();
     assert(!fault && cold_count==cold_before+1 && vendor.state==7 && b->omci->state==7 && !b->keys_valid);
     q1000k_omci_backend_cleanup(); assert(!qomci_current && !live_skb);
+    startup(); profile_and_assign(); operational(); b=qomci_current;
+    assert(b->active && services_enabled);
+    b->omci->ops->service_fault(b->omci,-EUCLEAN);
+    assert(!b->active && !services_enabled && fault==-EUCLEAN && b->service_error==-EUCLEAN);
+    q1000k_omci_backend_cleanup();
     /* A request arriving while core barriers run cannot publish stale ONU 17. */
     startup(); request_during_barrier=1; profile_and_assign();
     assert(!fault && qomci_current->onu==19 && hardware_onu==19);

@@ -11,6 +11,9 @@
 
 static unsigned int fixture_tx, fixture_stops, fixture_batch_calls;
 static int fixture_batch_error, fixture_start_error;
+static int fixture_gem_error = -EOPNOTSUPP, fixture_gem_calls;
+static int fixture_undo_error, fixture_undo_call, fixture_tcont_calls;
+static unsigned int fixture_faults;
 static size_t fixture_service_count;
 static u64 fixture_auth_epoch;
 static int fixture_rekey_result;
@@ -109,13 +112,13 @@ static int fixture_topology(struct omci_device *odev,
 
 static int fixture_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool valid)
 {
-	return -EOPNOTSUPP;
+	return ++fixture_tcont_calls == fixture_undo_call ? fixture_undo_error : fixture_gem_error;
 }
 
 static int fixture_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont,
 		       u8 direction, bool valid, bool encrypted)
 {
-	return -EOPNOTSUPP;
+	return ++fixture_gem_calls == fixture_undo_call ? fixture_undo_error : fixture_gem_error;
 }
 
 static int fixture_uni(struct omci_device *odev, u16 entity, bool enable)
@@ -151,12 +154,19 @@ static int fixture_scheduler(struct omci_device *odev, u16 entity,
 	return fixture_scheduler_error;
 }
 
+static void fixture_service_fault(struct omci_device *odev, int error)
+{
+	WARN_ON(error != -EUCLEAN || odev->agent.operational);
+	fixture_faults++;
+}
+
 static const struct omci_device_ops fixture_ops = {
 	.start = fixture_start, .stop = fixture_stop, .xmit = fixture_xmit,
 	.get_ani_topology = fixture_topology, .set_tcont = fixture_tcont,
 	.set_gem_port = fixture_gem, .set_uni = fixture_uni,
 	.replace_services = fixture_batch,
 	.set_priority_queue = fixture_queue, .set_traffic_scheduler = fixture_scheduler,
+	.service_fault = fixture_service_fault,
 };
 
 static int fixture_stop_thread(void *arg)
@@ -435,6 +445,67 @@ int q1000k_omci_core_test(void)
 		CHECK(odev->agent.service_error == -EUCLEAN);
 		fixture_scheduler_error = 0;
 		odev->agent.service_error = 0; /* The fixture explicitly models a new port. */
+	}
+
+	/* Exercise real CREATE/SET/DELETE undo paths after service rejection.
+	 * A successful undo leaves the original MIB usable; any failed undo
+	 * closes the provider once and blocks all subsequent provisioning.
+	 */
+	{
+		u8 request[] = { 0x80, 0x00, 0, 29 };
+		u8 gem_create[13] = { 0, 99, 0x80, 0, 3 };
+		bool changed = false;
+		struct omci_mib_object *q;
+		unsigned int faults;
+		int failure, action;
+
+		for (action = 0; action < 3; action++) {
+			for (failure = 0; failure < 2; failure++) {
+				service.cookie = 987;
+				CHECK(!omci_agent_stage_service(odev->agent.services, &service));
+				fixture_batch_error = action == 2 ? 0 : -ENOMEM;
+				fixture_tcont_calls = fixture_gem_calls = 0;
+				fixture_undo_call = 2;
+				fixture_undo_error = failure ? -EIO : 0;
+				fixture_gem_error = action == 2 ? -EIO : 0;
+				faults = fixture_faults;
+				odev->agent.operational = true;
+				if (action == 0) {
+					CHECK(omci_agent_set_locked(odev, OMCI_CLASS_TCONT, 0x8000,
+						OMCI_MSG_TYPE_SET, request, sizeof(request), &changed) == OMCI_RESULT_PROCESSING_ERROR);
+					q = omci_mib_lookup(&odev->agent, OMCI_CLASS_TCONT, 0x8000);
+					CHECK(q && get_unaligned_be16(q->data) == 0xffff && fixture_tcont_calls == 2);
+				} else if (action == 1) {
+					CHECK(omci_agent_create_locked(odev, OMCI_CLASS_GEM_PORT_CTP, 99,
+						gem_create, sizeof(gem_create)) == OMCI_RESULT_PROCESSING_ERROR);
+					CHECK(!omci_mib_lookup(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 99));
+					CHECK(fixture_gem_calls == 2);
+				} else {
+					q = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 99, true);
+					CHECK(q);
+					CHECK(omci_agent_delete_locked(odev, OMCI_CLASS_GEM_PORT_CTP, 99,
+						&changed) == OMCI_RESULT_PROCESSING_ERROR);
+					CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 99) == q);
+					CHECK(!q->pending_delete && fixture_gem_calls == 2);
+					kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_GEM_PORT_CTP, 99)));
+				}
+				CHECK(odev->agent.service_error == (failure ? -EUCLEAN : 0));
+				CHECK(fixture_faults == faults + failure);
+				if (failure) {
+					CHECK(!odev->agent.operational);
+					CHECK(omci_agent_set_locked(odev, OMCI_CLASS_PRIORITY_QUEUE, 0x8003,
+						OMCI_MSG_TYPE_SET, request, sizeof(request), &changed) == OMCI_RESULT_PROCESSING_ERROR);
+					CHECK(omci_agent_mib_reset(odev, true) == -EUCLEAN);
+					CHECK(fixture_faults == faults + 1);
+				}
+				/* Only this synthetic provider models replacing a failed port. */
+				odev->agent.service_error = odev->agent.reconcile_error = 0;
+				fixture_batch_error = 0;
+				CHECK(!omci_agent_clear_services_locked(odev));
+			}
+		}
+		fixture_gem_error = -EOPNOTSUPP;
+		fixture_undo_call = 0;
 	}
 
 	/* Explicit GEM upstream queue pointers override PCP fallback and must
