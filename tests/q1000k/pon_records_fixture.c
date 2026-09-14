@@ -72,7 +72,7 @@ int main(void)
     desired_table=before_table; desired_table.gem[0].alloc_id=202;
     assert(q1000k_gwan_apply(&before_table,&desired_table)==-ESTALE && !physical_ops);
     desired_table=before_table; desired_table.gem[0].encrypted=true;
-    assert(q1000k_gwan_apply(&before_table,&desired_table)==-EOPNOTSUPP && !physical_ops);
+    assert(q1000k_gwan_apply(&before_table,&desired_table)==-EINVAL && !physical_ops);
     desired_table=before_table; desired_table.gem[0].ani=257;
     assert(q1000k_gwan_apply(&before_table,&desired_table)==-EINVAL && !physical_ops);
     assert(q1000k_gwan_apply(NULL,&desired_table)==-EINVAL);
@@ -139,6 +139,17 @@ int main(void)
         assert(physical_ops==(int)n && !protocol_owned && !q1000k_gwan_changing);
         if(n>32) assert(protocol_error==-ETIMEDOUT && q1000k_gwan_error==-ETIMEDOUT);
         else assert(wan.gpon.allocId[0]==17 && hardware[500] && hardware[600]);
+    }
+    /* Retain downstream-only policy across unrelated table changes. */
+    for(int tx=0;tx<2;tx++) {
+        two_services(); desired_table=before_table;
+        desired_table.gem[0].rx_encrypted=true; desired_table.gem[0].encrypted=tx;
+        assert(!q1000k_gwan_apply(&before_table,&desired_table));
+        assert(wan.gpon.gemPort[0].info.rxEncrypt && wan.gpon.gemPort[0].info.txEncrypt==tx);
+        assert(encrypted_hardware[500]==tx);
+        assert(!gwan_remove_gemport(600));
+        assert(!q1000k_gwan_snapshot(&before_table));
+        assert(before_table.gem[0].rx_encrypted && before_table.gem[0].encrypted==tx);
     }
     return 0;
 }

@@ -14,7 +14,7 @@
 #define QS_TCONT_BASE 0x8000
 #define QS_TCONTS 31
 #define QS_MAX 256
-struct qs_gem { u16 entity, gem, tcont; u8 direction; bool valid, seeded; };
+struct qs_gem { u16 entity, gem, tcont; u8 direction, key_ring; bool valid, seeded; };
 struct qs_rules { size_t count; u8 channels[QS_MAX];
 	struct q1000k_vlan_program vlan[QS_MAX]; struct omci_service_config rule[]; };
 struct qs_scheduler { u8 policy, weight[8]; };
@@ -174,7 +174,7 @@ leave:
 }
 
 int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont,
-		       u8 direction, bool valid, bool encrypted)
+		       u8 direction, bool valid, u8 key_ring)
 {
 	struct q1000k_gwan_table *tables;
 	int token, ret, slot = -1, record = -1;
@@ -185,8 +185,8 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 	if (valid && (!gem || direction < 1 || direction > 3 ||
 		      tcont < QS_TCONT_BASE || tcont >= QS_TCONT_BASE + QS_TCONTS))
 		return -EINVAL;
-	if (encrypted)
-		return -EOPNOTSUPP;
+	if (key_ring > 3) return -EINVAL;
+	if (key_ring == 2) return -EOPNOTSUPP;
 	token = q1000k_protocol_enter();
 	if (token < 0)
 		return token;
@@ -226,6 +226,7 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 		tables[1].gem[record] = (struct q1000k_gwan_entry) {
 			.valid = true, .gem = gem, .alloc_id = alloc, .ani = 1,
 			.channel = qs_channel(&tables[1], alloc),
+			.encrypted = key_ring == 1, .rx_encrypted = key_ring != 0,
 		};
 	}
 	was_changing = READ_ONCE(qs_changing);
@@ -234,6 +235,7 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 	if (!ret) {
 		qs_gems[slot] = (struct qs_gem) {
 			.valid = valid, .entity = entity, .gem = gem, .tcont = tcont, .direction = direction,
+			.key_ring = key_ring,
 		};
 		if (valid)
 			qs_seeded_alloc[tcont - QS_TCONT_BASE] = false;
@@ -245,6 +247,20 @@ free:
 leave:
 	q1000k_protocol_leave(token);
 	return ret;
+}
+
+int q1000k_services_gem_key_ring(u16 entity, u8 *key_ring)
+{
+	unsigned int i;
+
+	if (!q1000k_protocol_owned()) return -EPERM;
+	if (!key_ring) return -EINVAL;
+	for (i = 0; i < QS_MAX; i++)
+		if (qs_gems[i].valid && qs_gems[i].entity == entity) {
+			*key_ring = qs_gems[i].key_ring;
+			return 0;
+		}
+	return -ENOENT;
 }
 
 int q1000k_services_uni(struct omci_device *odev, u16 entity, bool enabled)
@@ -451,6 +467,8 @@ static int qs_prepare_service(struct qs_replacement *p,
 	int slot = -1, record;
 	struct qs_gem *gem;
 
+	if (s->encryption_key_ring > 3) return -EINVAL;
+	if (s->encryption_key_ring == 2) return -EOPNOTSUPP;
 	if (!s->gem_port_id || s->gem_port_id == 0xffff || s->alloc_id > 0x3fff ||
 	    s->gem_port_id == p->after.alloc_id[0] || s->alloc_id == p->after.alloc_id[0])
 		return -EINVAL;
@@ -476,7 +494,7 @@ static int qs_prepare_service(struct qs_replacement *p,
 	gem = &p->gems[slot];
 	if (gem->valid) {
 		if (gem->gem != s->gem_port_id || gem->tcont != s->tcont_entity_id ||
-		    gem->direction != s->direction)
+		    gem->direction != s->direction || gem->key_ring != s->encryption_key_ring)
 			return -ESTALE;
 	} else {
 		for (i = 0; i < QS_MAX; i++)
@@ -485,6 +503,7 @@ static int qs_prepare_service(struct qs_replacement *p,
 		*gem = (struct qs_gem) {
 			.entity = s->gem_ctp_entity_id, .gem = s->gem_port_id,
 			.tcont = s->tcont_entity_id, .direction = s->direction,
+			.key_ring = s->encryption_key_ring,
 			.valid = true, .seeded = true,
 		};
 	}
@@ -494,7 +513,8 @@ static int qs_prepare_service(struct qs_replacement *p,
 		const struct q1000k_gwan_entry *e = &p->after.gem[record];
 
 		if (!e->channel || e->alloc_id != s->alloc_id || e->channel != *channel ||
-		    e->multicast || e->encrypted || e->ani != 1)
+		    e->multicast || e->encrypted != (s->encryption_key_ring == 1) ||
+		    e->rx_encrypted != (s->encryption_key_ring != 0) || e->ani != 1)
 			return -ESTALE;
 		return 0;
 	}
@@ -505,6 +525,8 @@ static int qs_prepare_service(struct qs_replacement *p,
 			p->after.gem[i] = (struct q1000k_gwan_entry) {
 				.valid = true, .gem = s->gem_port_id, .alloc_id = s->alloc_id,
 				.ani = 1, .channel = *channel,
+				.encrypted = s->encryption_key_ring == 1,
+				.rx_encrypted = s->encryption_key_ring != 0,
 			};
 			return 0;
 		}

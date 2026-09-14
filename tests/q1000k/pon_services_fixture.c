@@ -83,7 +83,7 @@ int main(void)
     assert(physical_ops==untouched && qs_schedulers[0].weight[3]==17);
     assert(!q1000k_services_tcont(NULL,0x8000,200,true));
     assert(q1000k_services_tcont(NULL,0x8001,200,true)==-EEXIST);
-    assert(q1000k_services_gem(NULL,100,500,0x8000,3,true,true)==-EOPNOTSUPP);
+    assert(q1000k_services_gem(NULL,100,500,0x8000,3,true,2)==-EOPNOTSUPP);
     assert(!q1000k_services_gem(NULL,100,500,0x8000,3,true,false));
     assert(wan.gpon.gemPort[0].info.channel==33);
     assert(!q1000k_services_replace(NULL,&s,1));
@@ -237,6 +237,27 @@ int main(void)
             if(result==-EUCLEAN) assert(qs_changing && protocol_error);
             else assert(!qs_changing);
         }
+        token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+    }
+    for(int ring=0;ring<=3;ring++) {
+        if(ring==2) continue;
+        reset_model(); q1000k_services_init();
+        assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+        assert(!gwan_create_new_tcont(200));
+        assert(!q1000k_services_gem(NULL,100,500,0x8000,3,true,ring));
+        s.encryption_key_ring=ring;
+        assert(!q1000k_services_replace(NULL,&s,1));
+        assert(qs_gems[0].key_ring==ring && encrypted_hardware[500]==(ring==1));
+        assert(wan.gpon.gemPort[0].info.rxEncrypt==(ring!=0) && wan.gpon.gemPort[0].info.txEncrypt==(ring==1));
+        u8 observed=0xff;
+        assert(q1000k_services_gem_key_ring(100,&observed)==-EPERM && observed==0xff);
+        token=q1000k_protocol_enter();
+        assert(!q1000k_services_gem_key_ring(100,&observed) && observed==ring);
+        q1000k_protocol_leave(token);
+        s.encryption_key_ring=ring ? 0 : 1;
+        untouched=physical_ops;
+        assert(q1000k_services_replace(NULL,&s,1)==-ESTALE && physical_ops==untouched);
+        for(int value=4;value<256;value++) assert(q1000k_services_gem(NULL,100,500,0x8000,3,true,value)==-EINVAL);
         token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
     }
     return 0;

@@ -15,7 +15,9 @@ void q1000k_services_enable(bool enabled);
 int q1000k_services_topology(struct omci_device *, struct omci_ani_topology *);
 int q1000k_services_tcont(struct omci_device *, u16 entity, u16 alloc, bool valid);
 int q1000k_services_gem(struct omci_device *, u16 entity, u16 gem, u16 tcont,
-		       u8 direction, bool valid, bool encrypted);
+		       u8 direction, bool valid, u8 key_ring);
+/* Protocol owner; no MMIO. */
+int q1000k_services_gem_key_ring(u16 entity, u8 *key_ring);
 int q1000k_services_uni(struct omci_device *, u16 entity, bool enabled);
 int q1000k_services_queue(struct omci_device *, u16 entity,
 			 const struct omci_priority_queue_config *);

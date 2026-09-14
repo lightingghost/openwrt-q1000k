@@ -187,10 +187,26 @@ static void qomci_service_fault(struct omci_device *odev, int error)
 	q1000k_protocol_fail(error);
 }
 
+static int qomci_gem_encryption(struct omci_device *odev, u16 entity, u8 *mode)
+{
+	struct qomci_backend *b = omci_device_priv(odev);
+	u8 ring;
+	int token, ret;
+
+	if (!mode) return -EINVAL;
+	token = q1000k_protocol_enter();
+	if (token < 0) return token;
+	ret = q1000k_services_gem_key_ring(entity, &ring);
+	if (!ret) *mode = ring && b->data.mac.rx_valid ? 1 : 0;
+	q1000k_protocol_leave(token);
+	return ret;
+}
+
 static const struct omci_device_ops qomci_ops = {
 	.start = qomci_start, .stop = qomci_stop, .xmit = qomci_xmit,
 	.get_ani_topology = q1000k_services_topology,
 	.set_tcont = q1000k_services_tcont, .set_gem_port = q1000k_services_gem,
+	.get_gem_encryption = qomci_gem_encryption,
 	.set_uni = q1000k_services_uni, .replace_services = q1000k_services_replace,
 	.set_priority_queue = q1000k_services_queue,
 	.set_traffic_scheduler = q1000k_services_scheduler,

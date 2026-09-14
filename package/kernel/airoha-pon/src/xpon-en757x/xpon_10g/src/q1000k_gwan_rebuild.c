@@ -29,7 +29,8 @@ static bool q1000k_gwan_entry_equal(const struct q1000k_gwan_entry *a,
 	return a->valid == b->valid && (!a->valid ||
 		(a->gem == b->gem && a->alloc_id == b->alloc_id &&
 		 a->ani == b->ani && a->channel == b->channel &&
-		 a->multicast == b->multicast && a->encrypted == b->encrypted));
+		 a->multicast == b->multicast && a->encrypted == b->encrypted &&
+		 a->rx_encrypted == b->rx_encrypted));
 }
 
 static bool q1000k_gwan_table_equal(const struct q1000k_gwan_table *a,
@@ -87,12 +88,13 @@ static int q1000k_gwan_validate(struct q1000k_gwan_transaction *tx)
 			return -EINVAL;
 		if (e->gem == next->alloc_id[0])
 			return -EINVAL;
-		/* Multicast receive-channel ownership and encryption key timing
-		 * are separate transactions; do not invent a working mapping.
+		/* Broadcast key distribution and multicast channel ownership are
+		 * not part of the supported unicast key-ring path.
 		 */
-		if (e->multicast || (e->encrypted &&
-		    !q1000k_gwan_entry_equal(&tx->old.gem[i], e)))
+		if (e->multicast)
 			return -EOPNOTSUPP;
+		if (e->encrypted && !e->rx_encrypted)
+			return -EINVAL; /* G.988 has no upstream-only encryption ring. */
 		if (e->alloc_id > Q1000K_ALLOC_ID_MAX ||
 		    (e->channel >= Q1000K_GWAN_CHANNELS &&
 		     e->channel != Q1000K_GWAN_UNKNOWN_CHANNEL))

@@ -59,7 +59,7 @@ static bool faulted,reenter,yield_io;
 static int write_error,quiesce_error;
 static unsigned int writes,quiesces;
 static u32 quarantine,closed;
-static bool hardware[65536];
+static bool hardware[65536], encrypted_hardware[65536];
 struct q1000k_gem_value;
 static void q1000k_tcont_quarantine(unsigned int channel);
 static int q1000k_transport_quiesce_channel(u8 channel);
@@ -172,7 +172,8 @@ int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,
     if(faulted) return -EIO;
     if(write_error) return write_error;
     if(hardware[gem] != !!expected->valid) return -ESTALE;
-    hardware[gem]=!!value->valid; return 0;
+    if(expected->valid && encrypted_hardware[gem] != !!expected->encrypted) return -ESTALE;
+    hardware[gem]=!!value->valid; encrypted_hardware[gem]=value->valid && value->encrypted; return 0;
 }
 static void q1000k_tcont_quarantine(unsigned int channel)
 {
@@ -187,6 +188,7 @@ static int q1000k_transport_quiesce_channel(u8 channel)
 }
 static void reset_model(void)
 {
+    memset(encrypted_hardware,0,sizeof(encrypted_hardware));
     assert(!held); memset(&wan,0,sizeof(wan)); memset(hardware,0,sizeof(hardware));
     for(unsigned int i=0;i<65536;i++) wan.gpon.gemIdToIndex[i]=0x7fff;
     for(unsigned int i=0;i<32;i++) wan.gpon.allocId[i]=0xffff;

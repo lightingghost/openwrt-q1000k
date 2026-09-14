@@ -11,6 +11,8 @@
 
 static unsigned int fixture_tx, fixture_stops, fixture_batch_calls;
 static int fixture_batch_error, fixture_start_error;
+static u8 fixture_key_ring;
+static int fixture_gem_mode, fixture_gem_read_error;
 static int fixture_gem_error = -EOPNOTSUPP, fixture_gem_calls;
 static int fixture_undo_error, fixture_undo_call, fixture_tcont_calls;
 static unsigned int fixture_faults;
@@ -116,9 +118,17 @@ static int fixture_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool v
 }
 
 static int fixture_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont,
-		       u8 direction, bool valid, bool encrypted)
+		       u8 direction, bool valid, u8 key_ring)
 {
+	fixture_key_ring = key_ring;
 	return ++fixture_gem_calls == fixture_undo_call ? fixture_undo_error : fixture_gem_error;
+}
+
+static int fixture_gem_encryption(struct omci_device *odev, u16 entity, u8 *mode)
+{
+	if (fixture_gem_read_error) return fixture_gem_read_error;
+	*mode = fixture_gem_mode;
+	return 0;
 }
 
 static int fixture_uni(struct omci_device *odev, u16 entity, bool enable)
@@ -163,7 +173,7 @@ static void fixture_service_fault(struct omci_device *odev, int error)
 static const struct omci_device_ops fixture_ops = {
 	.start = fixture_start, .stop = fixture_stop, .xmit = fixture_xmit,
 	.get_ani_topology = fixture_topology, .set_tcont = fixture_tcont,
-	.set_gem_port = fixture_gem, .set_uni = fixture_uni,
+	.set_gem_port = fixture_gem, .get_gem_encryption = fixture_gem_encryption, .set_uni = fixture_uni,
 	.replace_services = fixture_batch,
 	.set_priority_queue = fixture_queue, .set_traffic_scheduler = fixture_scheduler,
 	.service_fault = fixture_service_fault,
@@ -453,7 +463,7 @@ int q1000k_omci_core_test(void)
 	 */
 	{
 		u8 request[] = { 0x80, 0x00, 0, 29 };
-		u8 gem_create[13] = { 0, 99, 0x80, 0, 3 };
+		u8 gem_create[14] = { 0, 99, 0x80, 0, 3 };
 		bool changed = false;
 		struct omci_mib_object *q;
 		unsigned int faults;
@@ -582,6 +592,45 @@ int q1000k_omci_core_test(void)
 		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_VLAN_TAGGING_FILTER_DATA, lan.entity_id)));
 		put_unaligned_be16(0xffff, tcont->data);
 		xa_destroy(&desired); array_initialized = false;
+	}
+
+	/* The last GEM CTP attribute is a one-byte set-by-create key ring. */
+	{
+		const struct omci_me_desc *desc = omci_me_lookup(&odev->agent, OMCI_CLASS_GEM_PORT_CTP);
+		struct omci_mib_object candidate = { .class_id = OMCI_CLASS_GEM_PORT_CTP, .entity_id = 0xee8 };
+		struct omci_mib_object *stored;
+		u8 create[14] = {0, 99, 0x80, 0, 3};
+		u8 request[3] = {0, 0x40, 0}, answer[32];
+		size_t written = 0;
+
+		CHECK(desc && desc->data_len == 16);
+		fixture_gem_error = fixture_undo_call = 0;
+		for (i = 0; i < 4; i++) {
+			create[13] = i;
+			CHECK(!omci_me_decode_create(desc, &candidate, create, sizeof(create)));
+			CHECK(candidate.data[15] == i);
+			CHECK(!omci_agent_hw_update(odev, &candidate, OMCI_MSG_TYPE_CREATE, create));
+			CHECK(fixture_key_ring == i);
+		}
+		CHECK(!omci_me_decode_set(desc, &candidate, BIT(6), request + 2, 1));
+		CHECK(!candidate.data[15]);
+		stored = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 0xee8, true);
+		CHECK(stored); *stored = candidate;
+		put_unaligned_be16(BIT(8), request);
+		for (i = 0; i < 2; i++) {
+			fixture_gem_mode = i;
+			CHECK(omci_agent_get_locked(odev, candidate.class_id, candidate.entity_id, request, 2,
+				answer, sizeof(answer), &written) == OMCI_RESULT_SUCCESS);
+			CHECK(written == 4 && answer[3] == i);
+		}
+		fixture_gem_read_error = -EIO;
+		CHECK(omci_agent_get_locked(odev, candidate.class_id, candidate.entity_id, request, 2,
+			answer, sizeof(answer), &written) == OMCI_RESULT_PROCESSING_ERROR);
+		fixture_gem_read_error = 0;
+		candidate.data[15] = 4;
+		CHECK(omci_mib_parse_create(&candidate, candidate.data) == -EINVAL);
+		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_GEM_PORT_CTP, 0xee8)));
+		fixture_gem_error = -EOPNOTSUPP;
 	}
 
 	/* Missing provisioning callbacks cannot produce success. */

@@ -29,7 +29,9 @@ void q1000k_gwan_account(u16 gem, bool tx, unsigned int bytes);
 struct q1000k_gwan_entry {
 	u16 gem, alloc_id, ani;
 	u8 channel;
-	bool valid, multicast, encrypted;
+	bool valid, multicast;
+	bool encrypted; /* GEM table bit: upstream encryption. */
+	bool rx_encrypted; /* Downstream key-ring policy, preserved separately. */
 };
 struct q1000k_gwan_table {
 	u16 alloc_id[Q1000K_GWAN_CHANNELS];
@@ -63,7 +65,7 @@ int q1000k_gwan_refresh_checked(int (*install)(void *), int (*ready)(void *), vo
 
 /* Registration owner, after core/session and OMCI retry barriers: discard all
  * old data/OMCC records and install ONU/keys through the drained callback.
- * onu_id is 0..1022, or UNASSIGNED to remove the namespace. All queues stay
+ * onu_id is 0..1020, or UNASSIGNED to remove the namespace. All queues stay
  * closed after success; only the registration owner may open OMCC queue zero.
  */
 int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg);

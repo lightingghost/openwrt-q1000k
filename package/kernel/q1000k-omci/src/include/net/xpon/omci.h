@@ -247,6 +247,7 @@ struct omci_telemetry {
  * @vlan_id: VLAN identifier used for upstream classification
  * @pcp: IEEE 802.1p priority used for classification and queue selection
  * @queue: hardware upstream queue
+ * @encryption_key_ring: G.988 GEM key ring (0 none, 1 unicast both, 2 broadcast, 3 unicast downstream)
  * @direction: enum omci_gem_port_direction
  * @vlan_rule: complete class 171 rule, with explicit tag presence
  * @vlan_input_tpid: class 171 input TPID
@@ -265,6 +266,7 @@ struct omci_service_config {
 	struct omci_extended_vlan_rule vlan_rule;
 	u16 vlan_input_tpid, vlan_output_tpid;
 	u8 vlan_downstream_mode;
+	u8 encryption_key_ring;
 	u32 cookie;
 	u16 uni_entity_id;
 	u16 gem_ctp_entity_id;
@@ -321,7 +323,8 @@ struct omci_traffic_scheduler_config {
  * @xmit: transmit an OMCI PDU; consumes @skb only on success
  * @get_ani_topology: describe pre-existing ANI scheduling resources
  * @set_tcont: configure a T-CONT mapping
- * @set_gem_port: configure a GEM port
+ * @set_gem_port: configure a GEM port with the G.988 encryption key ring
+ * @get_gem_encryption: current GEM encryption mode (0 disabled, 1 AES-128)
  * @set_uni: enable or disable a UNI
  * @set_priority_queue: apply a complete existing upstream queue candidate
  * @set_traffic_scheduler: apply a complete existing scheduler candidate
@@ -350,7 +353,8 @@ struct omci_device_ops {
 			 u16 alloc_id, bool valid);
 	int (*set_gem_port)(struct omci_device *odev, u16 entity_id,
 			    u16 gem_port_id, u16 tcont_entity_id,
-			    u8 direction, bool valid, bool encrypted);
+			    u8 direction, bool valid, u8 encryption_key_ring);
+	int (*get_gem_encryption)(struct omci_device *odev, u16 entity_id, u8 *mode);
 	int (*set_uni)(struct omci_device *odev, u16 entity_id, bool enable);
 	int (*set_priority_queue)(struct omci_device *odev, u16 entity_id,
 			 const struct omci_priority_queue_config *config);

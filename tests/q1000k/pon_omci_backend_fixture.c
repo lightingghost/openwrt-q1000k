@@ -126,7 +126,9 @@ static void q1000k_services_reset(void) { assert(owned); service_resets++; }
 static void q1000k_services_destroy(void) { services_enabled=false; }
 static int q1000k_services_topology(struct omci_device *o,struct omci_ani_topology *t) { return 0; }
 static int q1000k_services_tcont(struct omci_device *o,u16 e,u16 a,bool v) { return 0; }
-static int q1000k_services_gem(struct omci_device *o,u16 e,u16 g,u16 t,u8 d,bool v,bool enc) { return 0; }
+static int q1000k_services_gem(struct omci_device *o,u16 e,u16 g,u16 t,u8 d,bool v,u8 enc) { return 0; }
+static u8 query_ring;
+static int q1000k_services_gem_key_ring(u16 entity,u8 *ring) { assert(owned); if(entity!=99) return -ENOENT; *ring=query_ring; return 0; }
 static int q1000k_services_queue(struct omci_device *o,u16 e,const struct omci_priority_queue_config *q) { return 0; }
 static int q1000k_services_scheduler(struct omci_device *o,u16 e,const struct omci_traffic_scheduler_config *s) { return 0; }
 static int q1000k_services_uni(struct omci_device *o,u16 e,bool enable) { return 0; }
@@ -465,6 +467,11 @@ int main(void)
     q1000k_protocol_leave(token); q1000k_omci_control();
     assert(!fault && b->active && b->data.mac.rx_valid==1 && b->data.regenerating==1 && !data_tx);
     assert(last_report[7]==5 && !last_report[8] && last_report[9]==1);
+    u8 mode=0xff;
+    query_ring=1; assert(!qomci_gem_encryption(b->omci,99,&mode) && mode==1);
+    query_ring=3; assert(!qomci_gem_encryption(b->omci,99,&mode) && mode==1);
+    query_ring=0; assert(!qomci_gem_encryption(b->omci,99,&mode) && !mode);
+    mode=0xff; assert(qomci_gem_encryption(b->omci,98,&mode)==-ENOENT && mode==0xff);
     int installed=data_installs, reported=data_reports, generated=random_calls;
     token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(false,1,16,9));
     q1000k_protocol_leave(token); q1000k_omci_control();

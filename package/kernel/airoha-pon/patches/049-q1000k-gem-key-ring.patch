@@ -1,0 +1,34 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: preserve per-direction GEM encryption policy
+
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -711,7 +711,8 @@
+ 		e->ani = info->ani;
+ 		e->channel = info->channel;
+ 		e->multicast = info->channel == GPON_MULTICAST_CHANNEL;
+-		e->encrypted = info->rxEncrypt || info->txEncrypt;
++		e->encrypted = info->txEncrypt;
++		e->rx_encrypted = info->rxEncrypt;
+ 	}
+ out:
+ 	spin_unlock_irqrestore(&q1000k_gwan_lock, flags);
+@@ -742,7 +743,7 @@
+ 		GWAN_GemInfo_T *info = &gpWanPriv->gpon.gemPort[i].info;
+ 
+ 		if (e->valid && !e->channel && info->valid && !info->channel && e->gem == info->portId &&
+-		    e->encrypted == !!(info->rxEncrypt || info->txEncrypt)) {
++		    e->encrypted == !!info->txEncrypt && e->rx_encrypted == !!info->rxEncrypt) {
+ 			gpWanPriv->gpon.gemNumbers++;
+ 			continue;
+ 		}
+@@ -756,7 +757,8 @@
+ 		info->allocId = e->alloc_id;
+ 		info->ani = e->ani;
+ 		info->channel = e->channel;
+-		info->rxEncrypt = info->txEncrypt = e->encrypted;
++		info->rxEncrypt = e->rx_encrypted;
++		info->txEncrypt = e->encrypted;
+ 		gpWanPriv->gpon.gemIdToIndex[e->gem] = i;
+ 		gpWanPriv->gpon.gemNumbers++;
+ 	}

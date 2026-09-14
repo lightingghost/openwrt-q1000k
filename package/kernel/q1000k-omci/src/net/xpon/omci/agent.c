@@ -650,6 +650,8 @@ static int omci_mib_parse_create(struct omci_mib_object *object,
 				 const u8 *content)
 {
 	switch (object->class_id) {
+	case OMCI_CLASS_GEM_PORT_CTP:
+		return object->data[15] <= 3 ? 0 : -EINVAL;
 	case OMCI_CLASS_VLAN_TAGGING_FILTER_DATA:
 		omci_vlan_filter_parse_create(object, content);
 		break;
@@ -2749,7 +2751,7 @@ static int omci_agent_hw_update_apply(struct omci_device *odev,
 					 get_unaligned_be16(object->data),
 					 get_unaligned_be16(object->data + 2),
 					 object->data[4],
-					 action != OMCI_MSG_TYPE_DELETE, false);
+					 action != OMCI_MSG_TYPE_DELETE, object->data[15]);
 	case OMCI_CLASS_PPTP_ETHERNET_UNI:
 	case OMCI_CLASS_VEIP:
 		if (!ops->set_uni)
@@ -3003,6 +3005,7 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	/* Carry the Alloc-ID: the backend may need it to rebuild the channel. */
 	service.alloc_id = get_unaligned_be16(tcont->data);
 	service.direction = gem->data[4];
+	service.encryption_key_ring = gem->data[15];
 	service.multicast = multicast;
 	service.multicast_ani_entity_id = ani_entity_id;
 	service.multicast_ani_valid = ani_valid;
@@ -3468,6 +3471,14 @@ static u8 omci_agent_set_locked(struct omci_device *odev, u16 class_id,
 	if (ret)
 		goto rollback_parameter;
 
+	/* AES-128 is the only advertised security mode. Do not acknowledge a
+	 * different mode while the provider continues using AES-128.
+	 */
+	if (class_id == OMCI_CLASS_ONU2_G && object->data[24] != OMCI_ONU2G_SECURITY_AES128)
+		goto rollback_parameter;
+	if (class_id == OMCI_CLASS_GEM_PORT_CTP && object->data[15] > 3)
+		goto rollback_parameter;
+
 	/* Keep ONU-created instances across a subsequent MIB reset. */
 	if (!existed)
 		object->origin = OMCI_MIB_ORIGIN_OLT;
@@ -3839,6 +3850,14 @@ static u8 omci_agent_get_locked(struct omci_device *odev, u16 class_id,
 					   agent->fake_omci);
 	if (!object)
 		return OMCI_RESULT_UNKNOWN_INSTANCE;
+	if (class_id == OMCI_CLASS_GEM_PORT_CTP && (mask & BIT(8))) {
+		u8 mode;
+
+		if (!odev->ops || !odev->ops->get_gem_encryption ||
+		    odev->ops->get_gem_encryption(odev, entity_id, &mode))
+			return OMCI_RESULT_PROCESSING_ERROR;
+		object->data[12] = mode;
+	}
 	if (class_id == OMCI_CLASS_NOKIA_OPTICAL_SUPERVISION &&
 	    omci_agent_refresh_nokia_optical(odev, object))
 		return OMCI_RESULT_PROCESSING_ERROR;

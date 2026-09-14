@@ -493,7 +493,7 @@ static const struct omci_attr_desc omci_gem_port_ctp_attrs[] = {
 	OMCI_ATTR(9, 10, 2, OMCI_RW_SC),
 	OMCI_ATTR(8, 12, 1, OMCI_R),
 	OMCI_ATTR(7, 13, 2, OMCI_RW_SC),
-	OMCI_ATTR(6, 15, 2, OMCI_RW),
+	OMCI_ATTR(6, 15, 1, OMCI_RW_SC),
 };
 
 static const struct omci_attr_desc omci_veip_attrs[] = {
@@ -701,7 +701,7 @@ static const struct omci_me_desc omci_me_descs[] = {
 		      omci_gem_iwtp_attrs),
 	STANDARD_DESC(OMCI_CLASS_GEM_PORT_CTP, "GEM port network CTP",
 		      OLT_CREATED_ACTIONS, OMCI_ME_F_DATAPATH,
-		      GENMASK(15, 6), GENMASK(15, 6), 17,
+		      GENMASK(15, 6), GENMASK(15, 6), 16,
 		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_PROVISIONED,
 		      omci_gem_port_ctp_attrs),
 	STANDARD_DESC(OMCI_CLASS_OMCI, "OMCI",

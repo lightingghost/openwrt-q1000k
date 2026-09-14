@@ -15,8 +15,9 @@ for the completed imports, factory/RPC/LuCI foundation, confirmed controller
 selection/power mapping and verified XGS-PON MD32 bring-up. The standalone
 controller, native FE/QDMA drain, cold MAC/PHY orchestration, ranging,
 authenticated OMCI/PLOAM, baseline unicast/QoS, userspace supervisor and class 171
-VLAN transformations are implemented locally. Data encryption, combined VLAN
-pipelines, advanced services and hardware acceptance remain pending. The numbered steps
+VLAN transformations, data-key exchange and unicast GEM encryption policy are
+implemented locally. Combined VLAN pipelines, advanced services and hardware
+acceptance remain pending. The numbered steps
 below remain the full acceptance plan; they are not all complete.
 
 The current continuation is restricted to **read-only device access and no
