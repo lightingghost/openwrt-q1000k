@@ -20,6 +20,7 @@ struct q1000k_tx_packet {
 	struct sk_buff *skb;
 	struct net_device *origin;
 	struct airoha_pon_tx_meta meta;
+	u64 auth_epoch;
 	unsigned long expires;
 };
 
@@ -27,6 +28,8 @@ struct q1000k_transport {
 	struct airoha_pon *pon;
 	q1000k_pon_receive_t receive;
 	spinlock_t lock;
+	struct mutex auth_lock;
+	u64 auth_epoch, last_auth_epoch;
 	struct list_head packets;
 	struct delayed_work work;
 	unsigned int count; /* Includes the worker's packet outside the list. */
@@ -107,14 +110,29 @@ static void q1000k_tx_work(struct work_struct *work)
 		/* Never hold our lock while entering native TX: its wake callback
 		 * may run while a DMA queue lock is held and take our lock.
 		 */
-		if (!active || time_after_eq(jiffies, packet->expires))
+		if (packet->meta.omci) {
+			/* The rekey barrier waits for this native submission to return.
+			 * Never hold the queue lock across native TX or its wake callback.
+			 */
+			mutex_lock(&transport->auth_lock);
+			if (!READ_ONCE(transport->active) || !packet->auth_epoch ||
+			    packet->auth_epoch != transport->auth_epoch ||
+			    time_after_eq(jiffies, packet->expires))
+				dev_kfree_skb_any(packet->skb);
+			else
+				ret = airoha_pon_xmit(transport->pon, packet->skb,
+						      &packet->meta);
+			mutex_unlock(&transport->auth_lock);
+		} else if (!active || time_after_eq(jiffies, packet->expires)) {
 			dev_kfree_skb_any(packet->skb);
-		else
+		} else {
 			ret = airoha_pon_xmit(transport->pon, packet->skb,
 					      &packet->meta);
+		}
 
 		spin_lock_bh(&transport->lock);
-		if (ret == NETDEV_TX_BUSY && transport->active) {
+		if (ret == NETDEV_TX_BUSY && transport->active &&
+		    (!packet->meta.omci || packet->auth_epoch == transport->auth_epoch)) {
 			list_add(&packet->list, &transport->packets);
 			/* A completion can race the failed submission. Always arm a
 			 * bounded fallback; tx_wake can expedite it but isn't required.
@@ -430,6 +448,7 @@ int q1000k_transport_start(const char *lower, q1000k_pon_receive_t receive)
 		goto unlock;
 	}
 	spin_lock_init(&transport->lock);
+	mutex_init(&transport->auth_lock);
 	INIT_LIST_HEAD(&transport->packets);
 	INIT_DELAYED_WORK(&transport->work, q1000k_tx_work);
 	transport->receive = receive;
@@ -488,7 +507,8 @@ unlock:
 	return ret;
 }
 
-int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1)
+static int q1000k_transport_queue(struct sk_buff *skb, u32 word0, u32 word1,
+				   u64 auth_epoch)
 {
 	struct airoha_pon_tx_meta meta;
 	struct q1000k_transport *transport;
@@ -498,6 +518,8 @@ int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1)
 	ret = q1000k_tx_meta(word0, word1, &meta);
 	if (ret)
 		return ret;
+	if (meta.omci != !!auth_epoch)
+		return -EKEYREJECTED;
 	if (!skb || skb_shared(skb) || !skb->len || skb->len > 16128 ||
 	    !skb_headlen(skb))
 		return -EINVAL;
@@ -516,6 +538,7 @@ int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1)
 	if (packet->origin)
 		dev_hold(packet->origin);
 	packet->meta = meta;
+	packet->auth_epoch = auth_epoch;
 	packet->expires = jiffies + msecs_to_jiffies(Q1000K_TX_AGE_MS);
 	rcu_read_lock();
 	transport = rcu_dereference(q1000k_current);
@@ -534,6 +557,8 @@ int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1)
 	spin_lock_bh(&transport->lock);
 	if (!transport->active)
 		ret = -ENODEV;
+	else if (meta.omci && auth_epoch != transport->auth_epoch)
+		ret = -EKEYREJECTED;
 	else if (transport->count == Q1000K_TX_LIMIT)
 		ret = -ENOBUFS;
 	else {
@@ -550,5 +575,77 @@ unlock:
 			dev_put(packet->origin);
 		kfree(packet);
 	}
+	return ret;
+}
+
+int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1)
+{
+	/* Unauthenticated legacy OMCI callers cannot bypass the session owner. */
+	return q1000k_transport_queue(skb, word0, word1, 0);
+}
+
+int q1000k_transport_xmit_omci(struct sk_buff *skb, u16 gem, u8 mic_index,
+			     u64 auth_epoch)
+{
+	u32 word0;
+
+	if (gem == 0xffff || mic_index > 1)
+		return -EINVAL;
+	word0 = FIELD_PREP(GENMASK(29, 14), gem) | BIT(8) |
+		(mic_index ? BIT(30) : 0);
+	/* OMCI uses channel/queue/CPU ring zero and no metering/accounting. */
+	return q1000k_transport_queue(skb, word0, 0xff2007ff, auth_epoch);
+}
+
+int q1000k_transport_set_auth_epoch(u64 auth_epoch)
+{
+	struct q1000k_transport *transport;
+	struct q1000k_tx_packet *packet, *tmp;
+	LIST_HEAD(discard);
+	int ret = 0;
+
+	if (in_interrupt() || in_atomic() || irqs_disabled() ||
+	    rcu_preempt_depth() ||
+	    (IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()))
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_transport_mutex);
+	transport = rcu_dereference_protected(q1000k_current,
+				lockdep_is_held(&q1000k_transport_mutex));
+	if (!transport) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	/* lifecycle -> authentication -> queue; native wake takes queue only. */
+	mutex_lock(&transport->auth_lock);
+	spin_lock_bh(&transport->lock);
+	if (!transport->active)
+		ret = -ENODEV;
+	else if (auth_epoch == transport->auth_epoch)
+		goto complete;
+	else if (auth_epoch && auth_epoch <= transport->last_auth_epoch)
+		ret = -ESTALE;
+	if (ret)
+		goto complete;
+	transport->auth_epoch = auth_epoch;
+	if (auth_epoch)
+		transport->last_auth_epoch = auth_epoch;
+	list_for_each_entry_safe(packet, tmp, &transport->packets, list) {
+		if (!packet->meta.omci)
+			continue;
+		list_move_tail(&packet->list, &discard);
+		transport->count--;
+	}
+complete:
+	spin_unlock_bh(&transport->lock);
+	list_for_each_entry_safe(packet, tmp, &discard, list) {
+		list_del(&packet->list);
+		dev_kfree_skb_any(packet->skb);
+		if (packet->origin)
+			dev_put(packet->origin);
+		kfree(packet);
+	}
+	mutex_unlock(&transport->auth_lock);
+unlock:
+	mutex_unlock(&q1000k_transport_mutex);
 	return ret;
 }

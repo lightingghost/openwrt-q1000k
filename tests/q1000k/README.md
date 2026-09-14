@@ -411,3 +411,7 @@ length, caller bounds, cache invalidation and parameter-buffer independence.
 requirements, stale snapshots, all queue words, FE masks, readback faults,
 unchanged output on error, and isolation from QDMA0. The native UML guest also
 changes frame limits and weight units between retirement and RX reactivation.
+
+The adapter UML fixture also checks authenticated OMCI retries: 20 rekey cycles
+with mixed data packets, no token refresh on BUSY, preserved caller ownership
+on rejection, and a barrier held across a simulated native submission.

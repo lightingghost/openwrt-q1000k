@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Real Linux workqueues/RCU/skbs; synthetic lower and native DMA provider. */
 #include <linux/module.h>
+#include <linux/completion.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
@@ -56,6 +57,17 @@ static bool early_rx, record_order;
 static int quiesce_error, channel_quiesce_error, tx_channel_error;
 static atomic_t allocations, destructions, accepted, received, busy_calls, violations;
 static unsigned int order[256];
+static unsigned int expected_omci_mark;
+static bool block_omci_submission;
+static DECLARE_COMPLETION(omci_submission_entered);
+static DECLARE_COMPLETION(omci_submission_release);
+static DECLARE_COMPLETION(omci_epoch_closed);
+static int omci_epoch_result;
+static int close_auth_thread(void *unused)
+{
+    omci_epoch_result=q1000k_transport_set_auth_epoch(0);
+    kthread_complete_and_exit(&omci_epoch_closed,0);
+}
 static u32 test_word0 = 0xfedcu << 14 | 27u << 3 | 5u;
 static u32 test_word1 = 0x7f2007dfu | 27u << 15;
 
@@ -304,6 +316,12 @@ netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
     struct airoha_pon *active_pon;
     unsigned int i, n;
 
+    /* A stalled call models submission already inside the adapter barrier.
+     * Sleep before RCU/queue locks; no hardware or native DMA is executed. */
+    if(meta->omci && READ_ONCE(block_omci_submission)) {
+        complete(&omci_submission_entered);
+        wait_for_completion(&omci_submission_release);
+    }
     rcu_read_lock();
     active_pon = rcu_dereference(fake_current);
     if (active_pon != pon) {
@@ -323,9 +341,14 @@ netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
         ret = NETDEV_TX_BUSY;
         goto unlock_queue;
     }
-    if (meta->gem != 0xfedc || meta->channel != 27 || meta->queue != 5 ||
-        meta->cpu_queue || meta->omci || meta->mic_index || skb->len != 60)
+    if(meta->omci) {
+        if(meta->gem!=17 || meta->channel || meta->queue || meta->cpu_queue ||
+           meta->mic_index!=1 || skb->mark!=expected_omci_mark || skb->len!=60)
+            atomic_inc(&violations);
+    } else if (meta->gem != 0xfedc || meta->channel != 27 || meta->queue != 5 ||
+        meta->cpu_queue || meta->mic_index || skb->len != 60) {
         atomic_inc(&violations);
+    }
     for (i = 0; i < skb->len; i++)
         if (skb->data[i] != 0x5a)
             atomic_inc(&violations);
@@ -467,6 +490,7 @@ static int run_tests(void)
     CHECK(!metadata_test());
     CHECK(!q1000k_transport_stop());
     CHECK(q1000k_transport_get_queue_close(27,&closed)==-ENODEV && closed==0xa5);
+    CHECK(q1000k_transport_set_auth_epoch(1)==-ENODEV);
     CHECK(q1000k_transport_set_queue_close(27,0)==-ENODEV);
     CHECK(q1000k_transport_quiesce_channel(27)==-ENODEV);
     CHECK(q1000k_transport_set_tx_channel(29,true)==-ENODEV);
@@ -576,6 +600,66 @@ static int run_tests(void)
     ret=q1000k_transport_xmit(skb,test_word0,test_word1);
     if(ret) kfree_skb(skb);
     CHECK(!ret && !wait_empty(500) && atomic_read(&accepted)==count+1);
+
+    /* Old authenticated OMCI retries are purged; data packets survive rekey. */
+    CHECK(!q1000k_transport_set_queue_close(0,0));
+    skb=packet_new(1); CHECK(skb);
+    CHECK(q1000k_transport_xmit(skb,BIT(8)|(17U<<14),0xff2007ff)==-EKEYREJECTED);
+    CHECK(q1000k_transport_xmit_omci(skb,17,1,0)==-EKEYREJECTED);
+    CHECK(q1000k_transport_xmit_omci(skb,17,1,1)==-EKEYREJECTED);
+    CHECK(skb->len==60 && skb->cb[0]==0xa5); kfree_skb(skb);
+    for(unsigned int epoch=1;epoch<=20;epoch++) {
+        unsigned int old_count=atomic_read(&accepted);
+        CHECK(!q1000k_transport_set_auth_epoch(epoch));
+        CHECK(!q1000k_transport_set_auth_epoch(epoch));
+        WRITE_ONCE(fake_busy,true); wake_during_busy=true;
+        for(unsigned int n=0;n<20;n++) {
+            skb=packet_new(epoch); CHECK(skb);
+            ret=(n&1) ? q1000k_transport_xmit(skb,test_word0,test_word1) :
+                q1000k_transport_xmit_omci(skb,17,1,epoch);
+            if(ret) kfree_skb(skb);
+            CHECK(!ret);
+        }
+        msleep(2);
+        CHECK(!q1000k_transport_set_auth_epoch(0));
+        CHECK(q1000k_transport_set_auth_epoch(epoch)==-ESTALE);
+        skb=packet_new(epoch); CHECK(skb);
+        CHECK(q1000k_transport_xmit_omci(skb,17,1,epoch)==-EKEYREJECTED);
+        kfree_skb(skb);
+        wake_during_busy=false; WRITE_ONCE(fake_busy,false);
+        CHECK(!wait_empty(500));
+        CHECK(atomic_read(&accepted)==old_count+10);
+    }
+    CHECK(!q1000k_transport_set_auth_epoch(21)); expected_omci_mark=21;
+    skb=packet_new(21); CHECK(skb);
+    ret=q1000k_transport_xmit_omci(skb,17,1,21);
+    if(ret) kfree_skb(skb);
+    CHECK(!ret && !wait_empty(500));
+    /* An in-progress submission cannot outlive the software close barrier. */
+    WRITE_ONCE(block_omci_submission,true);
+    reinit_completion(&omci_submission_entered);
+    reinit_completion(&omci_submission_release);
+    reinit_completion(&omci_epoch_closed);
+    skb=packet_new(21); CHECK(skb);
+    ret=q1000k_transport_xmit_omci(skb,17,1,21);
+    if(ret) kfree_skb(skb);
+    CHECK(!ret);
+    count=wait_for_completion_timeout(&omci_submission_entered,HZ);
+    if(!count) { complete(&omci_submission_release); CHECK(count); }
+    producer=kthread_run(close_auth_thread,NULL,"pon-auth-close");
+    if(IS_ERR(producer)) { complete(&omci_submission_release); CHECK(!IS_ERR(producer)); }
+    msleep(5); count=completion_done(&omci_epoch_closed);
+    complete(&omci_submission_release);
+    wait_for_completion(&omci_epoch_closed);
+    WRITE_ONCE(block_omci_submission,false);
+    CHECK(!count && !omci_epoch_result && !wait_empty(500));
+    CHECK(!q1000k_transport_set_auth_epoch(22)); expected_omci_mark=22;
+    skb=packet_new(21); CHECK(skb);
+    CHECK(q1000k_transport_xmit_omci(skb,17,1,21)==-EKEYREJECTED); kfree_skb(skb);
+    skb=packet_new(22); CHECK(skb);
+    ret=q1000k_transport_xmit_omci(skb,17,1,22);
+    if(ret) kfree_skb(skb);
+    CHECK(!ret && !wait_empty(500));
 
     /* Expiry bounds memory and time during a permanently full native ring. */
     fake_busy = true; count = atomic_read(&accepted);

@@ -70,4 +70,17 @@ int q1000k_transport_quiesce_channel(u8 channel);
  */
 int q1000k_transport_xmit(struct sk_buff *skb, u32 word0, u32 word1);
 
+/* Process context. Zero closes OMCI admission and waits for any current native
+ * submission before purging old software retries. A nonzero epoch must be
+ * strictly newer than any previously published epoch on this attachment.
+ * Does not drain descriptors already accepted by native DMA or optical FIFOs.
+ * Call outside backend locks acquired by RX/TX callbacks.
+ */
+int q1000k_transport_set_auth_epoch(u64 auth_epoch);
+/* The skb must already carry its MIC for this exact epoch. Ownership and
+ * retry expiry follow xmit; no automatic key-generation refresh is allowed.
+ */
+int q1000k_transport_xmit_omci(struct sk_buff *skb, u16 gem, u8 mic_index,
+			     u64 auth_epoch);
+
 #endif

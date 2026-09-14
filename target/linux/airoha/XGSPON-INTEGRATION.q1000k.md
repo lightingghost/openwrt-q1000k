@@ -953,3 +953,21 @@ and the existing stop/service fault tests. The package now declares its actual
 kernel module subdirectory for OpenWrt symbol collection and stages provider
 symbols for the MAC backend. These are local checks, with mock provisioning;
 MAC key publication and the actual backend remain to be connected.
+
+## Authenticated MAC retry admission
+
+Vendor r33 adds a dedicated OMCI transmit entry point carrying the verified
+authentication epoch. The legacy packet entry point rejects OMCI without this
+token. The bounded queue captures the token once; BUSY retries never refresh
+it. A process-context epoch barrier waits for an in-progress native OMCI
+submission, purges old OMCI retries, and leaves data packets intact. Old tokens
+cannot be republished on the attachment. The lock order permits native wake
+callbacks without holding the adapter queue lock across native TX.
+
+The real-workqueue UML adapter suite passes 20 mixed data/OMCI rekey cycles,
+BUSY wake races, an in-flight native submission barrier, stale-token rejection,
+and existing attachment/expiry/unload races. All 44 host PON tests and the r33
+AArch64 package build pass. This barrier covers software retries and native
+submission calls. Descriptors already accepted by DMA and optical FIFOs still
+require the physical drain sequence before namespace reuse or hardware reset.
+The OMCI backend must coordinate both core and adapter epoch barriers.
