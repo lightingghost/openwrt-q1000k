@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include "common/q1000k_gwan.h"
+#include "common/q1000k_mac_cold.h"
 #include "common/q1000k_gem.h"
 #include "common/q1000k_tcont.h"
 #include "common/q1000k_protocol.h"
@@ -16,7 +17,7 @@ struct q1000k_gwan_transaction {
 	struct airoha_pon_qos qos[Q1000K_GWAN_CHANNELS];
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
-	bool registration;
+	bool registration, cold;
 	int (*install)(void *arg);
 	void *install_arg;
 };
@@ -120,6 +121,14 @@ static int q1000k_gwan_clear(void *arg)
 		if (ret)
 			return ret;
 	}
+	if (tx->cold) {
+		ret = q1000k_protocol_reset_jobs();
+		if (!ret)
+			ret = q1000k_mac_cold_release();
+		if (!ret)
+			ret = q1000k_gem_clear_namespace(Q1000K_GWAN_UNASSIGNED);
+		return ret ?: q1000k_tcont_clear_namespace();
+	}
 	for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
 		const struct q1000k_gwan_entry *e = &tx->old.gem[i];
 		struct q1000k_gem_value expected = {
@@ -180,7 +189,7 @@ static const struct q1000k_pipeline_ops q1000k_gwan_pipeline_ops = {
 };
 
 enum q1000k_gwan_edit { Q1000K_GWAN_APPLY, Q1000K_GWAN_DELETE_GEM,
-	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH, Q1000K_GWAN_REGISTER };
+	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH, Q1000K_GWAN_REGISTER, Q1000K_GWAN_COLD };
 
 static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			      const struct q1000k_gwan_table *desired,
@@ -188,6 +197,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			      int (*install)(void *), void *install_arg)
 {
 	struct q1000k_gwan_transaction *tx;
+	struct q1000k_pipeline_ops ops = q1000k_gwan_pipeline_ops;
 	unsigned int i;
 	bool found = all;
 	int ret, token;
@@ -206,7 +216,9 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		ret = -ENOMEM;
 		goto end;
 	}
-	tx->registration = edit == Q1000K_GWAN_REGISTER;
+	tx->cold = edit == Q1000K_GWAN_COLD;
+	tx->registration = edit == Q1000K_GWAN_REGISTER || tx->cold;
+	ops.reset_mac = tx->cold;
 	tx->install = install;
 	tx->install_arg = install_arg;
 	ret = q1000k_gwan_snapshot(&tx->old);
@@ -220,7 +232,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		tx->next = *desired;
 	} else {
 		tx->next = tx->old;
-		if (edit == Q1000K_GWAN_REGISTER) {
+		if (tx->registration) {
 			memset(&tx->next, 0, sizeof(tx->next));
 			for (i = 0; i < Q1000K_GWAN_CHANNELS; i++)
 				tx->next.alloc_id[i] = Q1000K_GWAN_UNASSIGNED;
@@ -295,7 +307,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	 * otherwise it could submit old metadata with the next native epoch.
 	 */
 	synchronize_rcu();
-	ret = q1000k_pipeline_reconfigure(&q1000k_gwan_pipeline_ops, tx, tx->channels);
+	ret = q1000k_pipeline_reconfigure(&ops, tx, tx->channels);
 	if (ret)
 		goto failed;
 	/* Receive DMA is still closed. Publish a complete record set before
@@ -386,4 +398,12 @@ int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg)
 	if ((onu_id >= 1023 && onu_id != Q1000K_GWAN_UNASSIGNED) || !install)
 		return -EINVAL;
 	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REGISTER, onu_id, true, install, arg);
+}
+
+int q1000k_gwan_cold_reset(int (*install)(void *arg), void *arg)
+{
+	if (!install)
+		return -EINVAL;
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_COLD,
+		Q1000K_GWAN_UNASSIGNED, true, install, arg);
 }

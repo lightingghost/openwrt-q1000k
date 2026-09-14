@@ -190,6 +190,29 @@ static int run_test(void)
 	CHECK(thread_ret >= 0 && !timer_pending(&sample_timer)); kthread_stop(thread);
 	WRITE_ONCE(block_kind,0);
 
+	/* Cold reset drops old deferred work, retaining registration for reuse.
+	 * It must preserve queued IRQ/control jobs and the disabled IRQ depth.
+	 */
+	CHECK(q1000k_protocol_reset_jobs() == -EPERM);
+	CHECK(!q1000k_protocol_pause());
+	{
+		int old_seen=seen_count, old_tasks=task_count, old_timers=timer_count;
+		int old_irq=irq_count, old_control=control_count;
+		CHECK(!q1000k_protocol_phy(7,99));
+		q1000k_protocol_task_schedule(&sample_task);
+		mod_timer(&sample_timer,jiffies+1); msleep(30);
+		inject_irq(); CHECK(irq_depth == 1);
+		CHECK(!q1000k_protocol_control());
+		CHECK(!q1000k_protocol_reset_jobs() && !timer_pending(&sample_timer));
+		CHECK(!q1000k_protocol_resume()); flush_workqueue(qprotocol_wq);
+		CHECK(seen_count==old_seen && task_count==old_tasks && timer_count==old_timers);
+		CHECK(irq_count==old_irq+1 && control_count==old_control+1 && !irq_depth);
+		q1000k_protocol_task_schedule(&sample_task);
+		mod_timer(&sample_timer,jiffies+1); msleep(30); flush_workqueue(qprotocol_wq);
+		CHECK(task_count==old_tasks+1 && timer_count==old_timers+1);
+		CHECK(q1000k_protocol_timer_delete(&sample_timer,true,false)>=0);
+	}
+
 	/* Stop must not return while a callback still owns module state. */
 	reset_barriers(2); CHECK(!q1000k_protocol_phy(7,13));
 	CHECK(wait_for_completion_timeout(&entered,HZ));

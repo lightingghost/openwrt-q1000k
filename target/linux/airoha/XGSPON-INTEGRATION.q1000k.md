@@ -1139,3 +1139,27 @@ is supported, so the normal diagnostics package does not force experimental
 kernel modules into an image. All 13 factory/backend tests and the LuCI view
 fixtures pass. Matching PON/core/CLI/backend/LuCI AArch64 packages build locally;
 no package was installed on the device.
+
+## Checked cold-reset primitives
+
+Vendor r42 adds a cold-reset variant of the existing physical namespace
+transaction. It drains CPU/FE/MAC/RX/PHY first, resets the exclusive MAC,
+releases its local reset while MPI/MBI remain stopped, and verifies/clears
+all 65,535 usable GEM IDs plus the data T-CONT namespace. It publishes an
+empty ONU/OMCC/data record set and resumes receive only, with every packet
+queue and controller TX closed. The authentication owner must supply the
+complete MAC install callback after its core/retry barriers.
+
+The new install primitives program and verify full serial/registration data,
+AN7581 XGS response time and FEC, software OMCI MIC mode, dying-gasp count,
+idle threshold, invalid data AES banks, invalid ONU, cleared ranging delay
+and burst-profile validity, and O1/O7 state. Key selection verifies both the
+SW command and actual current bank-one selectors. AN7581-specific mixed
+register fields exclude read-only status and software triggers from writes.
+
+Cold reset also cancels old deferred timer/task/PHY events without destroying
+their registrations or losing queued IRQ/control jobs. Real Linux UML tests
+verify cancellation, reuse and balanced IRQ disable depth. All 54 host tests
+and the AArch64 vendor build pass. Legacy startup/reset/PHY callers are the
+next integration stage; their startup gate remains in place. No device access
+occurred.

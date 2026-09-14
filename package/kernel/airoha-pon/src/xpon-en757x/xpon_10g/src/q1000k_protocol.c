@@ -387,6 +387,36 @@ int q1000k_protocol_timer_delete(struct timer_list *timer, bool sync, bool shutd
 	return ret;
 }
 
+int q1000k_protocol_reset_jobs(void)
+{
+	unsigned long flags;
+	unsigned int i;
+	int ret;
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	ret = q1000k_protocol_status();
+	if (ret)
+		return ret;
+	/* Timer callbacks only enqueue under qprotocol_lock; none can wait
+	 * for the executor held here. Synchronous cancellation closes that
+	 * enqueue race before the old job list is removed.
+	 */
+	for (i = 0; i < Q1000K_PROTOCOL_TIMERS; i++)
+		if (qprotocol_timers[i].timer.timer)
+			timer_delete_sync(qprotocol_timers[i].timer.timer);
+	spin_lock_irqsave(&qprotocol_lock, flags);
+	for (i = 0; i < Q1000K_PROTOCOL_TIMERS; i++)
+		qprotocol_remove(&qprotocol_timers[i]);
+	for (i = 0; i < Q1000K_PROTOCOL_TASKS; i++)
+		qprotocol_remove(&qprotocol_tasks[i]);
+	for (i = 0; i < Q1000K_PROTOCOL_EVENTS; i++)
+		qprotocol_remove(&qprotocol_events[i]);
+	ret = qprotocol_error;
+	spin_unlock_irqrestore(&qprotocol_lock, flags);
+	return ret;
+}
+
 static struct q1000k_protocol_job *qprotocol_find_task(struct tasklet_struct *task)
 {
 	unsigned int i;

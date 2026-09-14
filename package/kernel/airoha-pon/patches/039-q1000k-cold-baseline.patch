@@ -1,0 +1,14 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: build checked XGS cold-start register programming
+
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_protocol.o $(SRCDIR)/q1000k_gwan_rebuild.o $(SRCDIR)/q1000k_mac_keys.o $(SRCDIR)/q1000k_services.o $(SRCDIR)/q1000k_omci_backend.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_protocol.o $(SRCDIR)/q1000k_gwan_rebuild.o $(SRCDIR)/q1000k_mac_keys.o $(SRCDIR)/q1000k_mac_cold.o $(SRCDIR)/q1000k_services.o $(SRCDIR)/q1000k_omci_backend.o
+ endif
+ endif
+ 

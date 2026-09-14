@@ -46,6 +46,11 @@ void q1000k_protocol_fail(int error);
  * for it; it must never call stop or retain borrowed event storage.
  */
 int q1000k_protocol_control(void);
+/* Cold-reset owner, while PHY and packet producers are stopped: cancel old
+ * timer/task/PHY jobs without destroying their registrations. IRQ/control
+ * jobs remain queued so their disable depth and generation are preserved.
+ */
+int q1000k_protocol_reset_jobs(void);
 
 int q1000k_protocol_timer_init(struct timer_list *timer,
 			     void (*callback)(struct timer_list *), unsigned long expires);

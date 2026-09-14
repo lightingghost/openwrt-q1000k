@@ -66,6 +66,14 @@ int q1000k_gwan_refresh(int (*install)(void *arg), void *arg);
  */
 int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg);
 
+/* Cold startup/recovery: reset the exclusive MAC only after the complete
+ * drain, verify the entire GEM address space is empty, discard ONU/OMCC/data
+ * records and run install. Caller restores ALL required MAC state and keys.
+ * Success resumes receive only, with every queue and controller TX closed.
+ * Core/session barriers are the same as for registration replacement.
+ */
+int q1000k_gwan_cold_reset(int (*install)(void *arg), void *arg);
+
 /* Private record-owner bridge. The nonblocking transaction guard must remain
  * held across snapshot, physical replacement and publication. begin closes
  * data binding snapshots until end; no state lock spans hardware callbacks.

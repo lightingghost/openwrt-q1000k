@@ -68,7 +68,7 @@ static struct airoha_pon_qos qos_model[32];
 static u16 tcont_model[32];
 static u8 queue_model[32];
 static int physical_ops,physical_fail,physical_phase,protocol_error,async_protocol_fault_step;
-static bool physical_started, producers_drained;
+static bool physical_started, producers_drained, cold_expected, reset_done, receive_only;
 static u32 rx_channels;
 static pthread_mutex_t protocol_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local int protocol_owned;
@@ -107,12 +107,21 @@ static int q1000k_tcont_install(unsigned int ch,u16 alloc,u16 onu) {
     assert(physical_phase==2 && ch>0 && ch<32 && onu==17 && tcont_model[ch]==0xffff);
     int ret=physical_step(); if(!ret) tcont_model[ch]=alloc; return ret;
 }
+static int q1000k_protocol_reset_jobs(void) { assert(physical_phase==1 && reset_done); return physical_step(); }
+static int q1000k_mac_cold_release(void) {
+    assert(physical_phase==1 && reset_done); return physical_step();
+}
+static int q1000k_gem_clear_namespace(u16 preserve) {
+    assert(physical_phase==1 && reset_done && preserve==0xffff);
+    int ret=physical_step(); if(!ret) memset(hardware,0,sizeof(hardware)); return ret;
+}
 /* PRODUCTION */
 int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,void *arg,u32 channels)
 {
-    assert(producers_drained && q1000k_gwan_changing && !ops->reset_mac && atomic_load(&q1000k_tcont_config_busy)==1);
+    assert(producers_drained && q1000k_gwan_changing && ops->reset_mac==cold_expected && atomic_load(&q1000k_tcont_config_busy)==1);
     physical_started=true; int ret=physical_step(); if(ret) return ret;
     memset(queue_model,255,sizeof(queue_model)); physical_phase=1;
+    if(ops->reset_mac) { ret=physical_step(); if(ret) return ret; reset_done=true; }
     ret=ops->clear(arg); if(ret) return ret;
     ret=physical_step(); if(ret) return ret; /* The separate namespace fixture tests real FCS/epoch commands. */
     physical_phase=2; ret=ops->install(arg); if(ret) return ret;
@@ -125,7 +134,7 @@ int q1000k_pipeline_activate(void)
     int ret=physical_step(); if(!ret) physical_phase=3; return ret;
 }
 
-int q1000k_pipeline_activate_receive_only(void) { return q1000k_pipeline_activate(); }
+int q1000k_pipeline_activate_receive_only(void) { receive_only=true; return q1000k_pipeline_activate(); }
 
 bool q1000k_gem_faulted(void) { return faulted; }
 int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,
@@ -175,7 +184,7 @@ static void reset_model(void)
     atomic_store(&q1000k_tcont_config_busy,0);
     faulted=reenter=yield_io=false; writes=quiesces=0; write_error=quiesce_error=0;
     q1000k_gwan_error=0; q1000k_gwan_changing=false;
-    physical_ops=physical_fail=physical_phase=protocol_error=async_protocol_fault_step=0; physical_started=producers_drained=false; rx_channels=0;
+    physical_ops=physical_fail=physical_phase=protocol_error=async_protocol_fault_step=0; physical_started=producers_drained=cold_expected=reset_done=receive_only=false; rx_channels=0;
     memset(queue_model,0,sizeof(queue_model)); memset(qos_model,0,sizeof(qos_model));
     for(unsigned int i=0;i<32;i++) { tcont_model[i]=wan.gpon.allocId[i]; qos_model[i].mode=i%8; qos_model[i].weights[0]=i+1; }
 }
@@ -226,6 +235,11 @@ static void *creator(void *arg)
         assert(!ret);
     }
     return NULL;
+}
+static int cold_install(void *arg) {
+    assert(arg==&wan && reset_done && physical_phase==2);
+    for(unsigned int i=0;i<65535;i++) assert(!hardware[i]);
+    return physical_step();
 }
 int main(void)
 {
@@ -326,5 +340,20 @@ int main(void)
     assert(!gwan_remove_all_gemport() && !wan.gpon.gemNumbers);
     atomic_store(&finished,true);
     for(unsigned int i=0;i<4;i++) assert(!pthread_join(readers[i],NULL));
+    reset_model(); cold_expected=true;
+    create_ready(500,4,200,7); hardware[65534]=hardware[0]=true;
+    physical_ops=0;
+    assert(!q1000k_gwan_cold_reset(cold_install,&wan));
+    int cold_steps=physical_ops;
+    assert(reset_done && receive_only && !wan.gpon.gemNumbers && rx_channels==1);
+    for(int i=0;i<32;i++) assert(wan.gpon.allocId[i]==0xffff && queue_model[i]==255);
+    for(int n=1;n<=cold_steps;n++) {
+        reset_model(); cold_expected=true; create_ready(500,4,200,7);
+        hardware[65534]=true; physical_ops=0; physical_fail=n;
+        int ret=q1000k_gwan_cold_reset(cold_install,&wan);
+        assert(ret==(physical_started ? -EUCLEAN : -ETIMEDOUT));
+        if(!physical_started) assert(wan.gpon.gemNumbers==1 && hardware[500] && hardware[65534]);
+        else assert(protocol_error);
+    }
     return 0;
 }
