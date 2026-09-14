@@ -1,0 +1,62 @@
+Drain protocol producers and the complete physical PON pipeline before detach.
+
+Keep native DMA and all callback state alive until coordinated shutdown
+finishes. Preserve original failure and block reload through BSP health.
+
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1,3 +1,7 @@
++#ifdef Q1000K_PON_IDENTITY
++#include <an7581_xpon.h>
++#include "common/q1000k_pipeline.h"
++#endif
+ /***************************************************************
+ Copyright Statement:
+ 
+@@ -1239,7 +1243,8 @@
+ 	}
+ 	if (xpon_owned.wan)
+ 		pwan_quiesce();
+-	xpondrv_qdma_deinit();
++	/* Keep native DMA alive until protocol producers and the physical
++	 * pipeline are drained. Closed ready gates reject new callbacks. */
+ 	/* In-flight RX/event wrappers may have observed ready before closure. */
+ 	synchronize_rcu();
+ 	if (xpon_owned.proc) {
+@@ -1262,6 +1267,15 @@
+ 	}
+ 	if (xpon_owned.gpon)
+ 		gpon_stop_work();
++#ifdef Q1000K_PON_IDENTITY
++	if (xpon_owned.gpon && xpon_owned.qdma) {
++		int ret = q1000k_pipeline_shutdown();
++
++		if (ret)
++			pr_err("Q1000K physical shutdown failed: %d\n", ret);
++	}
++#endif
++	xpondrv_qdma_deinit();
+ 	if (xpon_owned.wan) {
+ 		pwan_destroy();
+ 		xpon_owned.wan = false;
+@@ -1326,6 +1340,9 @@
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ 	if (!get_xpon_dev() || get_xpon_irq(0) < 0 || get_xpon_irq(1) < 0)
+ 		return -ENODEV;
++	ret = an7581_xpon_status();
++	if (ret)
++		return ret;
+ 	/* ECNT still supplies control/QoS operations, never native packet DMA. */
+ 	if (!ecnt_hook_is_registered(ECNT_QDMA_WAN, ECNT_DRIVER_API) ||
+ 	    !ecnt_hook_is_registered(ECNT_FE, ECNT_FE_API))

@@ -219,6 +219,29 @@ struct device *get_xpon_dev(void)
 }
 EXPORT_SYMBOL(get_xpon_dev);
 
+int an7581_xpon_status(void)
+{
+	unsigned long flags;
+	int ret;
+
+	read_lock_irqsave(&xpon_lock, flags);
+	ret = xpon ? xpon->resetting ? -EBUSY : xpon->mac_fault ? -EIO : 0 : -ENODEV;
+	read_unlock_irqrestore(&xpon_lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL(an7581_xpon_status);
+
+void an7581_xpon_invalidate(void)
+{
+	unsigned long flags;
+
+	write_lock_irqsave(&xpon_lock, flags);
+	if (xpon)
+		xpon->mac_fault = true;
+	write_unlock_irqrestore(&xpon_lock, flags);
+}
+EXPORT_SYMBOL(an7581_xpon_invalidate);
+
 int an7581_xpon_reset(void)
 {
 	struct an7581_xpon *priv;

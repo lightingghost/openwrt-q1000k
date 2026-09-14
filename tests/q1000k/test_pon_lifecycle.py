@@ -326,7 +326,7 @@ static void *gpWanPriv,*gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
 enum { ID=1, UNION, ALLOC, ATTACH, GLOBALS, WAN, MCI, GPON, GASP, PROC, HOOK, API, WORKER, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
-static int ready_published,rcu_drained,tx_stopped;
+static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error;
 static bool xpon_is_ready(void); /* production definition is non-static */
 static int acquire(int id) {
     assert(!xpon_ready && id==++step && !live[id]);
@@ -338,6 +338,7 @@ static int q1000k_pon_identity_init(void) { return acquire(ID); }
 static void *get_xpon_dev(void) { return irq_resources ? &system_data : NULL; }
 static int get_xpon_irq(int n) { return irq_resources ? 100+n : -ENODEV; }
 static int ecnt_hook_is_registered(int a,int b) { return providers; }
+static int an7581_xpon_status(void) { return mac_error; }
 static void INIT_LIST_HEAD(int *p) { assert(!xpon_ready); }
 static int init_union_ic_function(void) { return acquire(UNION); }
 static void *kzalloc(unsigned n,int flags) {
@@ -385,7 +386,7 @@ static void ecnt_unregister_hook(void *p) { assert(!xpon_ready); release(HOOK); 
 static void xpon_api_deinit(void) { assert(!xpon_ready); release(API); }
 static void free_irq(int irq,void *p) { assert(irq==101); release(GASP); }
 static void pwan_quiesce(void) { assert(live[WAN] && !xpon_ready); tx_stopped=1; }
-static void synchronize_rcu(void) { assert(!live[ATTACH]); rcu_drained=1; }
+static void synchronize_rcu(void) { assert(!xpon_ready); rcu_drained=1; }
 static void xpon_proc_dest(void) { assert(rcu_drained); release(PROC); }
 static void xpon_mci_destroy(void) { assert(rcu_drained); release(MCI); }
 static int stopped_timers;
@@ -395,6 +396,11 @@ static void xpon_daemon_quit(void) {
     gpPonSysData->xpon_daemon.task=NULL;
 }
 static void stop_omci_oam_monitor(void) { assert(!live[WORKER]); }
+static int q1000k_pipeline_shutdown(void) {
+    assert(rcu_drained && live[ATTACH] && live[GPON] && live[WAN]);
+    assert(!live[WORKER] && !live[API] && !live[HOOK] && !live[MCI]);
+    return pipeline_error;
+}
 static void gpon_deinit(void) { assert(!live[WAN] && !live[ATTACH]); release(GPON); }
 static void epon_deinit(void) { assert(0); }
 static void pwan_destroy(void) { assert(rcu_drained && tx_stopped); release(WAN); }
@@ -420,6 +426,11 @@ int main(void) {
         reset(0); assert(!xpondrv_init() && xpon_is_ready() && ready_published==1);
         xpondrv_cleanup(); clean(); /* complete startup and teardown after every failure */
     }
+    for(pipeline_error=-1;pipeline_error>=-10;pipeline_error--) {
+        reset(0); assert(!xpondrv_init()); xpondrv_cleanup(); clean();
+    }
+    pipeline_error=0; mac_error=-EIO;
+    reset(0); assert(xpondrv_init()==-EIO && step==ID); clean(); mac_error=0;
     reset(0); irq_resources=0; assert(xpondrv_init()==-ENODEV && step==ID); clean();
     reset(0); irq_resources=1; providers=0; assert(xpondrv_init()==-ENODEV && step==ID); clean();
     reset(0); providers=1; mode=6; assert(xpondrv_init()==-EOPNOTSUPP && step==ID); clean();

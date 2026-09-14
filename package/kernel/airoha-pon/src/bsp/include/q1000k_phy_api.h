@@ -10,6 +10,8 @@ struct xpon_phy_api_data_s;
 int q1000k_phy_configure(u32 mode);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);
+/* Lifecycle owner: wait for callbacks; rejects invocation by a callback. */
+int q1000k_phy_quiesce(void);
 /* Final coordinated optical TX enable/disable, after successful PHY start. */
 int q1000k_phy_set_tx(bool enable);
 int q1000k_phy_call(struct xpon_phy_api_data_s *data);

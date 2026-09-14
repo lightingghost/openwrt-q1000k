@@ -392,3 +392,10 @@ reactivation. The adapter UML test verifies both sleepable wrappers.
 `test_pon_mac_reset.py` checks production exclusive-reset context, lock order,
 assert/release verification, containment and sticky failures. Resource tests
 also check that read/write/stop/FIFO APIs are excluded during a reset.
+
+`test_pon_pipeline.py` checks complete physical-shutdown ordering and every
+stage crossed with every containment failure. The MAC lifecycle fixture
+checks that daemon/control/event work is gone while the native attachment
+and protocol state remain alive during physical shutdown. PHY UML tests
+hold real poll/IRQ callbacks while the blocking quiescence worker waits;
+self-invocation is rejected without waiting on its own callback.

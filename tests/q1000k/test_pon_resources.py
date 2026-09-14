@@ -98,7 +98,13 @@ int main(void) {
     set_xpon_data(0xbfb65000, 1);
     assert(get_xpon_data(UINT32_MAX)==UINT32_MAX);
     assert(reads==last_reads && writes==last_writes);
+    assert(!an7581_xpon_status());
+    an7581_xpon_invalidate();
+    assert(an7581_xpon_status()==-EIO);
+    assert(an7581_xpon_mac_stop(1,false)==-EIO);
+    assert(reads==last_reads && writes==last_writes);
     xpon=NULL;
+    assert(an7581_xpon_status()==-ENODEV);
     assert(get_xpon_irq(1)==-ENODEV && !get_xpon_dev());
     set_xpon_data(0x5000, 0);
     assert(get_xpon_data(0x5000)==UINT32_MAX);

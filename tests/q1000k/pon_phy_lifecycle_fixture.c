@@ -173,6 +173,7 @@ static int event(char *p)
         struct xpon_phy_api_data_s call={.api_type=XPON_PHY_API_TYPE_GET};
         assert(q1000k_phy_start()==-EBUSY);
         assert(q1000k_phy_stop()==-EBUSY);
+        assert(q1000k_phy_quiesce()==-EDEADLK);
         assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EBUSY);
         assert(q1000k_phy_call(&call)==-EBUSY);
     }
@@ -218,6 +219,7 @@ int main(void)
         atomic_context=n==0; irq_context=n==1; preempt_rcu=n==2;
         assert(q1000k_phy_start()==-EWOULDBLOCK);
         assert(q1000k_phy_stop()==-EWOULDBLOCK);
+        assert(q1000k_phy_quiesce()==-EWOULDBLOCK);
         assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EWOULDBLOCK);
         assert(q1000k_phy_call(&data)==-EWOULDBLOCK);
     }

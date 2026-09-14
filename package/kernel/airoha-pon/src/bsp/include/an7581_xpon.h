@@ -28,5 +28,8 @@ int an7581_xpon_mac_wait_tx_empty(void);
 /* Process context only. Caller must quiesce MAC callbacks and the physical
  * pipeline first. Reset is exclusive to PON; errors remain latched. */
 int an7581_xpon_reset(void);
+int an7581_xpon_status(void);
+/* Latch a failed physical transaction; this does not itself stop hardware. */
+void an7581_xpon_invalidate(void);
 
 #endif

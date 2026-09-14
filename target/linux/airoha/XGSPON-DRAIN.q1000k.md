@@ -231,3 +231,33 @@ All 41 PON host tests pass, including reset errors and wrong status at each
 assert/release stage, sticky-fault rejection and register-access exclusion.
 The updated DT compiles, and vendor r28 builds for Linux 6.18.44/AArch64.
 No hardware reset or other device operation was performed.
+
+## Coordinated physical shutdown
+
+Vendor r29 joins the stages in `q1000k_pipeline_shutdown`: pause CPU admission
+and drain native mappings; stop MPI RX ingress; retire all 32 FE channels;
+stop MBI TX and wait for the transmit alignment FIFO; stop MPI TX and MBI RX;
+drain downstream FE/QDMA1; then stop PHY callbacks and disable FW-ready and
+the owned EN7573 transmitter. No service record, identity or key is cleared
+by this routine. It records the last completed stage and exact retired bitmap.
+
+The outer MAC teardown closes readiness and unregisters control/event paths,
+drains RCU and protocol timers/tasklets, and stops the daemon before invoking
+this sequence. The native attachment and all protocol state remain alive until
+physical shutdown returns. Only then does teardown detach native packet DMA
+and free software state. Failed startup unwinds only resources it acquired.
+
+A failure preserves the original error, independently attempts all native TX
+channel disables, MAC stops and PHY quiescence, and records containment errors
+separately. It invalidates the BSP MAC provider so a subsequent MAC load cannot
+silently reuse a partially drained device. Repeated calls do not clear faults
+or repeat a successful shutdown. Runtime service replacement and coordinated
+restart still need to use the stopped namespace explicitly.
+
+The new blocking PHY quiescence entry point rejects calls from its own callback
+and waits for callbacks from an external lifecycle worker. UML tests pass for
+both poll and IRQ callbacks held across shutdown, alongside 50 start/stop
+cycles and the existing unload races. All 42 host tests pass, including every
+physical-stage failure crossed with all 34 containment failures and outer
+teardown fault paths. Linux 6.18.44/AArch64 vendor r29 builds successfully.
+Hardware stages in tests are mocked; no device access was performed.

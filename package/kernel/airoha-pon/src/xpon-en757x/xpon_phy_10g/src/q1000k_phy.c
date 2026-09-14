@@ -467,6 +467,25 @@ int q1000k_phy_stop(void)
 }
 EXPORT_SYMBOL(q1000k_phy_stop);
 
+/* The MAC lifecycle worker has drained event/control producers before entry.
+ * Unlike the nonblocking control API, this waits for an existing PHY callback
+ * to finish. A callback cannot wait on its own IRQ/work completion.
+ */
+int q1000k_phy_quiesce(void)
+{
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	ret = qphy_stop();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_quiesce);
+
 int q1000k_phy_set_tx(bool enable)
 {
 	int ret = qphy_context();

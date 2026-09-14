@@ -107,6 +107,7 @@ static int handle_event(char *p)
     check(!in_atomic() && !irqs_disabled() && !rcu_read_lock_held());
     check(q1000k_phy_start()==-EBUSY);
     check(q1000k_phy_stop()==-EBUSY);
+    check(q1000k_phy_quiesce()==-EDEADLK);
     check(q1000k_phy_call(&query)==-EBUSY);
     complete(&event_entered);
     if(READ_ONCE(hold_event)) wait_for_completion(&event_release);
@@ -121,9 +122,11 @@ static int irq_task(void *unused)
     __set_current_state(TASK_RUNNING);
     return 0;
 }
-static int exit_task(void *unused)
+static int exit_task(void *quiesce)
 {
-    q1000k_phy_exit(); complete(&exit_done);
+    if (quiesce) check(!q1000k_phy_quiesce());
+    else q1000k_phy_exit();
+    complete(&exit_done);
     while(!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
     __set_current_state(TASK_RUNNING);
     return 0;
@@ -135,7 +138,7 @@ static void start_session(void)
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
     check(!q1000k_phy_start());
 }
-static void stop_during_callback(bool irq)
+static void stop_during_callback(bool irq, bool quiesce)
 {
     struct task_struct *task;
     unsigned int n;
@@ -150,14 +153,19 @@ static void stop_during_callback(bool irq)
         q1000k_phy_poll();
     }
     check(wait_for_completion_timeout(&event_entered,5*HZ));
-    task=kthread_run(exit_task,NULL,"qphy-exit-test"); check(!IS_ERR(task));
-    for(n=0;n<500 && !READ_ONCE(qphy_dead);n++) msleep(1);
-    check(READ_ONCE(qphy_dead));
+    task=kthread_run(exit_task,(void *)(unsigned long)quiesce,"qphy-exit-test"); check(!IS_ERR(task));
+    for(n=0;n<500 && READ_ONCE(qphy_active);n++) msleep(1);
+    check(!READ_ONCE(qphy_active));
+    check(READ_ONCE(qphy_dead)==!quiesce);
     /* The callback is still using this state: exit must remain blocked. */
     check(gpPhyPriv && !completion_done(&exit_done));
     WRITE_ONCE(hold_event,false); complete(&event_release);
     check(wait_for_completion_timeout(&exit_done,5*HZ));
     kthread_stop(task);
+    if (quiesce) {
+        check(gpPhyPriv && !controller.tx && !qphy_active);
+        q1000k_phy_exit();
+    }
     check(!gpPhyPriv && !fake_irq_owned && !fake_irq_task && !work_busy(&qphy_poll_job));
 }
 static int __init phy_test_init(void)
@@ -183,9 +191,11 @@ static int __init phy_test_init(void)
         check(!qphy_active && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
     }
     q1000k_phy_exit();
-    stop_during_callback(false);
-    stop_during_callback(true);
-    check(polls==51 && irqs==1);
+    stop_during_callback(false,false);
+    stop_during_callback(true,false);
+    stop_during_callback(false,true);
+    stop_during_callback(true,true);
+    check(polls==52 && irqs==2);
     pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 cycles, RCU guards, concurrent poll and IRQ teardown\n");
     return 0;
 }
