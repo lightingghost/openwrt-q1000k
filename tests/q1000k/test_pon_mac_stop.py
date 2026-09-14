@@ -13,6 +13,8 @@ class MacStopTests(unittest.TestCase):
     def test_stop_acknowledgments_and_pipeline_preconditions(self):
         src = (BSP / 'core/an7581_xpon.c').read_text()
         body = src[src.index('struct an7581_xpon {'):src.index('static int an7581_xpon_probe')]
+        body = body[:body.index("int an7581_xpon_reset(void)")]
+        body = body.replace("static DEFINE_MUTEX(xpon_lifecycle);", "")
         fixture = Path(__file__).with_name('pon_mac_stop_fixture.c').read_text()
         with tempfile.TemporaryDirectory(prefix='q1000k-mac-stop-') as tmp:
             c, exe = Path(tmp) / 'test.c', Path(tmp) / 'test'

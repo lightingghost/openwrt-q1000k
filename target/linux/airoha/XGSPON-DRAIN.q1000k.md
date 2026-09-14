@@ -215,3 +215,19 @@ receive drain, generation replacement and reactivation, including stale TX/RX
 rejection with real RTNL/RCU. Adapter UML verifies context and error forwarding.
 Linux 6.18.44 and vendor r27 build successfully. These are local tests with
 mocked hardware; no device access or physical acceptance was performed.
+
+## Exclusive PON MAC reset
+
+The MAC resource provider now acquires the exclusive `EN7581_XPON_MAC_RST`
+line without changing its state during probe. The Q1000K reset adapter uses
+that line instead of replaying the shared SCU reset word. It rejects IRQ/RCU
+contexts, pins the provider with a lifecycle mutex and excludes register/stop
+operations while reset-controller calls execute without an IRQ lock.
+Assertion and release are verified. Failure attempts asserted containment and
+leaves a sticky fault; a subsequent reset cannot clear it. Probe/remove use
+the same lifecycle mutex, and the disabled board node declares the reset.
+
+All 41 PON host tests pass, including reset errors and wrong status at each
+assert/release stage, sticky-fault rejection and register-access exclusion.
+The updated DT compiles, and vendor r28 builds for Linux 6.18.44/AArch64.
+No hardware reset or other device operation was performed.

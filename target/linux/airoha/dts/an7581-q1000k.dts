@@ -281,7 +281,9 @@
 		interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>,
 			     <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-names = "mac", "dying-gasp";
-		/* Resource provider only; PHY/reset/QDMA startup is not ready. */
+		resets = <&scuclk EN7581_XPON_MAC_RST>;
+		reset-names = "mac";
+		/* Coordinated startup requires an explicitly enabled experiment. */
 		status = "disabled";
 	};
 };

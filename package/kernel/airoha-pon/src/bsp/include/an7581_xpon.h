@@ -25,4 +25,8 @@ void set_xpon_data(u32 reg, u32 value);
 int an7581_xpon_mac_stop(u32 controls, bool hold);
 int an7581_xpon_mac_wait_tx_empty(void);
 
+/* Process context only. Caller must quiesce MAC callbacks and the physical
+ * pipeline first. Reset is exclusive to PON; errors remain latched. */
+int an7581_xpon_reset(void);
+
 #endif

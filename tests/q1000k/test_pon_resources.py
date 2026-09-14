@@ -24,6 +24,8 @@ class PonResourceTests(unittest.TestCase):
     def test_register_windows_and_absent_provider(self):
         source = (SRC / 'core/an7581_xpon.c').read_text()
         body = source[source.index('struct an7581_xpon {'):source.index('static int an7581_xpon_probe')]
+        body = body[:body.index("int an7581_xpon_reset(void)")]
+        body = body.replace("static DEFINE_MUTEX(xpon_lifecycle);", "")
         run_c(r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -85,6 +87,13 @@ int main(void) {
         assert(writes-last_writes==(unsigned)(valid && reg!=0x5004));
     }
     last_reads=reads; last_writes=writes;
+    provider.resetting=true;
+    assert(get_xpon_data(0x5000)==UINT32_MAX);
+    set_xpon_data(0x5000, 1);
+    assert(an7581_xpon_mac_stop(1,true)==-EBUSY);
+    assert(an7581_xpon_mac_wait_tx_empty()==-EBUSY);
+    assert(reads==last_reads && writes==last_writes);
+    provider.resetting=false;
     set_xpon_data(0x1fb65000, 1); /* Reject physical and old KSEG addresses. */
     set_xpon_data(0xbfb65000, 1);
     assert(get_xpon_data(UINT32_MAX)==UINT32_MAX);

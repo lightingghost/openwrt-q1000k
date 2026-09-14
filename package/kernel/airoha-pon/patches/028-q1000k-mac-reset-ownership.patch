@@ -1,0 +1,32 @@
+Own the AN7581 PON MAC reset through its exclusive reset-controller line.
+
+No replay of the shared reset word; process-context and readback failures
+propagate through the typed provider.
+
+--- a/xpon-en757x/xpon_10g/src/ic/AN7581.c
++++ b/xpon-en757x/xpon_10g/src/ic/AN7581.c
+@@ -1,3 +1,6 @@
++#ifdef Q1000K_PON_IDENTITY
++#include <an7581_xpon.h>
++#endif
+ /***************************************************************
+ Copyright Statement:
+ 
+@@ -1012,6 +1015,9 @@
+ 
+ int an7581_pon_mac_scu_reset(const void *in, void *out)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return an7581_xpon_reset();
++#else
+ 	uint32_t Raw = 0;
+ 
+ 	/* reset mac */
+@@ -1024,6 +1030,7 @@
+ 	Raw &= ~SCU_PON_MAC_RESET ;
+ 	SET_SCU_RSTCTRL1(Raw);
+ 	return 0;
++#endif
+ }
+ 
+ int an7581_epon_mac_logic_reset(const void *in, void *out)

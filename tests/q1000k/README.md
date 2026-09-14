@@ -388,3 +388,7 @@ activation, including missing physical-retirement bits, live DMA, every epoch
 overflow position and failed enable/readback. The native UML test joins these
 operations to pause/FE/RX drain and checks rejection of stale TX and RX after
 reactivation. The adapter UML test verifies both sleepable wrappers.
+
+`test_pon_mac_reset.py` checks production exclusive-reset context, lock order,
+assert/release verification, containment and sticky failures. Resource tests
+also check that read/write/stop/FIFO APIs are excluded during a reset.
