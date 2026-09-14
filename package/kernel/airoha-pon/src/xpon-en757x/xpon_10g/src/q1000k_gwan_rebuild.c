@@ -16,6 +16,8 @@ struct q1000k_gwan_transaction {
 	struct airoha_pon_qos qos[Q1000K_GWAN_CHANNELS];
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
+	int (*install)(void *arg);
+	void *install_arg;
 };
 
 static bool q1000k_gwan_entry_equal(const struct q1000k_gwan_entry *a,
@@ -85,7 +87,8 @@ static int q1000k_gwan_validate(struct q1000k_gwan_transaction *tx)
 		/* Multicast receive-channel ownership and encryption key timing
 		 * are separate transactions; do not invent a working mapping.
 		 */
-		if (e->multicast || e->encrypted)
+		if (e->multicast || (e->encrypted &&
+		    !q1000k_gwan_entry_equal(&tx->old.gem[i], e)))
 			return -EOPNOTSUPP;
 		if (e->alloc_id > Q1000K_ALLOC_ID_MAX ||
 		    (e->channel >= Q1000K_GWAN_CHANNELS &&
@@ -150,6 +153,11 @@ static int q1000k_gwan_install(void *arg)
 		if (ret)
 			return ret;
 	}
+	if (tx->install) {
+		ret = tx->install(tx->install_arg);
+		if (ret)
+			return ret;
+	}
 	for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
 		const struct q1000k_gwan_entry *e = &tx->next.gem[i];
 		struct q1000k_gem_value value = {
@@ -171,11 +179,12 @@ static const struct q1000k_pipeline_ops q1000k_gwan_pipeline_ops = {
 };
 
 enum q1000k_gwan_edit { Q1000K_GWAN_APPLY, Q1000K_GWAN_DELETE_GEM,
-	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT };
+	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH };
 
 static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			      const struct q1000k_gwan_table *desired,
-			      enum q1000k_gwan_edit edit, u16 id, bool all)
+			      enum q1000k_gwan_edit edit, u16 id, bool all,
+			      int (*install)(void *), void *install_arg)
 {
 	struct q1000k_gwan_transaction *tx;
 	unsigned int i;
@@ -196,6 +205,8 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		ret = -ENOMEM;
 		goto end;
 	}
+	tx->install = install;
+	tx->install_arg = install_arg;
 	ret = q1000k_gwan_snapshot(&tx->old);
 	if (ret)
 		goto free;
@@ -207,7 +218,9 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		tx->next = *desired;
 	} else {
 		tx->next = tx->old;
-		if (edit == Q1000K_GWAN_ADD_TCONT) {
+		if (edit == Q1000K_GWAN_REFRESH) {
+			found = true;
+		} else if (edit == Q1000K_GWAN_ADD_TCONT) {
 			unsigned int channel = 0;
 
 			for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
@@ -257,7 +270,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		}
 	}
 	ret = q1000k_gwan_validate(tx);
-	if (ret || q1000k_gwan_table_equal(&tx->old, &tx->next))
+	if (ret || (edit != Q1000K_GWAN_REFRESH && q1000k_gwan_table_equal(&tx->old, &tx->next)))
 		goto free;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
 		ret = q1000k_transport_get_queue_close(i, &tx->closed[i]);
@@ -314,26 +327,33 @@ int q1000k_gwan_apply(const struct q1000k_gwan_table *expected,
 {
 	if (!expected || !desired)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false);
+	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, NULL, NULL);
 }
 
 int q1000k_gwan_delete_gem(u16 gem, bool all)
 {
 	if (!all && gem > Q1000K_GEM_ID_MAX)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_GEM, gem, all);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_GEM, gem, all, NULL, NULL);
 }
 
 int q1000k_gwan_delete_tcont(u16 alloc_id, bool all)
 {
 	if (!all && alloc_id > Q1000K_ALLOC_ID_MAX)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_TCONT, alloc_id, all);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_TCONT, alloc_id, all, NULL, NULL);
 }
 
 int q1000k_gwan_add_tcont(u16 alloc_id)
 {
 	if (alloc_id > Q1000K_ALLOC_ID_MAX)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_ADD_TCONT, alloc_id, false);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_ADD_TCONT, alloc_id, false, NULL, NULL);
+}
+
+int q1000k_gwan_refresh(int (*install)(void *arg), void *arg)
+{
+	if (!install)
+		return -EINVAL;
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REFRESH, 0, true, install, arg);
 }

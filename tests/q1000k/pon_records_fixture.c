@@ -6,6 +6,8 @@ static void two_services(void)
     queue_model[0]=0xfe; queue_model[4]=0xf0; queue_model[6]=0x00;
     assert(!q1000k_gwan_snapshot(&before_table));
 }
+static int refresh_called;
+static int refresh_install(void *arg) { assert(physical_phase==2); refresh_called++; return *(int *)arg; }
 int main(void)
 {
     struct q1000k_gwan_binding b;
@@ -89,5 +91,13 @@ int main(void)
     two_services(); async_protocol_fault_step=34;
     assert(gwan_remove_gemport(500)==-EUCLEAN && protocol_error==-ENOSPC);
     assert(physical_phase==2); /* No activation after a lost protocol event. */
+    two_services(); int refresh_error=0;
+    assert(!q1000k_gwan_refresh(refresh_install,&refresh_error) && refresh_called==1);
+    assert(!q1000k_gwan_snapshot(&desired_table));
+    assert(q1000k_gwan_table_equal(&before_table,&desired_table));
+    assert(queue_model[4]==0xf0 && queue_model[6]==0);
+    two_services(); refresh_error=-EIO;
+    assert(q1000k_gwan_refresh(refresh_install,&refresh_error)==-EUCLEAN);
+    assert(protocol_error==-EIO && q1000k_gwan_error==-EIO);
     return 0;
 }

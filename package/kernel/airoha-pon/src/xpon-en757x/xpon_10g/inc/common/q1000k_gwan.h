@@ -47,6 +47,11 @@ int q1000k_gwan_apply(const struct q1000k_gwan_table *expected,
 int q1000k_gwan_delete_gem(u16 gem, bool all);
 int q1000k_gwan_delete_tcont(u16 alloc_id, bool all);
 int q1000k_gwan_add_tcont(u16 alloc_id);
+/* Authentication owner: after closing/draining OMCI core and retry admission,
+ * refresh an unchanged data namespace and run install while hardware is fully
+ * drained. The callback must only install MAC state; no core session calls.
+ */
+int q1000k_gwan_refresh(int (*install)(void *arg), void *arg);
 
 /* Private record-owner bridge. The nonblocking transaction guard must remain
  * held across snapshot, physical replacement and publication. begin closes

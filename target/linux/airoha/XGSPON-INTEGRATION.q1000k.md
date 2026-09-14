@@ -971,3 +971,23 @@ AArch64 package build pass. This barrier covers software retries and native
 submission calls. Descriptors already accepted by DMA and optical FIFOs still
 require the physical drain sequence before namespace reuse or hardware reset.
 The OMCI backend must coordinate both core and adapter epoch barriers.
+
+## Verified integrity key-bank programming
+
+The r37 MAC code derives both XGS-PON integrity/wrapping banks in software,
+using all 36 registration bytes for bank zero and the default MSK for bank
+one. Bank one's PLOAM key is the specified constant. Programming requires the
+physical transaction's INSTALL owner, disables hardware OMCI MIC processing,
+preserves unrelated control bits and key-selector policy, and verifies every
+PON-tag/key register write. Key-word all-ones values are valid data; control
+register all-ones reads remain errors. Software publication belongs to the
+session owner after the complete transaction succeeds.
+
+An unchanged-record refresh now runs a key installation callback after the
+CPU, FE, MAC, RX and PHY drains and before GEM replay/reactivation. Existing
+queue closures and service records survive a successful refresh; a failed
+installation poisons the port. This closes the physical boundary missing from
+software-only authentication barriers. The key fixture injects all 27 write
+failures and all nine derivation failures; the record fixture checks refresh
+ordering, service preservation and containment. This is local validation,
+not hardware acceptance or an already connected OMCI session backend.
