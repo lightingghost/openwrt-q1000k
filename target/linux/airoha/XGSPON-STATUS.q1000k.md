@@ -31,6 +31,12 @@ See [integration details](XGSPON-INTEGRATION.q1000k.md),
 The separate [experimental builder](XGSPON-BUILD.q1000k.md) now provides an
 explicit branch/revision selection and package profile; normal builds still
 use `q1000k-dev`. Its seven guard tests and real Kconfig selection check pass.
+Full experimental initramfs and sysupgrade images also build at
+`cb0853acbc5b5ef178f7419b9926a6722f58df9f`. FIT hashes, embedded disabled PON
+nodes and extracted rootfs contents pass offline inspection. The original
+development configuration was restored, and no image was installed or booted.
+The [build record](XGSPON-BUILD.q1000k.md#full-experimental-image-build) contains
+artifact sizes, checksums and the exact validation boundary.
 
 Vendor r54 connected authenticated Key_Control to the registration owner.
 Generate/Confirm use explicit key contexts, separate ECB/CMAC transforms,

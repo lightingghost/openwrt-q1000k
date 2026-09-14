@@ -30,16 +30,19 @@ below remain the full acceptance plan; they are not all complete.
 | Plan step | Local implementation/evidence | Remaining acceptance |
 | --- | --- | --- |
 | 1. Hardware and dependencies | OEM inventory, controller mapping, firmware/calibration format and native resource ownership are documented. | Electrical calibration, cold-start timing and current production DT behavior require hardware evidence. |
-| 2. Imports and build | Vendor and LuCI imports retain provenance; native adaptations and the generic OMCI core build without unresolved symbols. | Full experimental image/release validation remains separate from package compilation. |
+| 2. Imports and build | Vendor and LuCI imports retain provenance; native adaptations and the generic OMCI core build without unresolved symbols. Full experimental initramfs/sysupgrade builds and offline FIT/rootfs inspection pass. | Hardware acceptance and any release/publication remain separate. |
 | 3. Factory data and controller | Read-only extraction, exact controller selection and checked firmware/calibration loading are implemented; historical controller-only bench tests are recorded. | Current stack cold boot and rollback are untested on hardware. |
 | 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Physical FIFO/DMA retirement, optical burst/ranging timing and copper regression checks need hardware. Advanced rate shaping/policing remains unsupported. |
 | 5. OMCI and subscriber | Generic core, authenticated PLOAM/OMCI, unicast data keys, supported VLAN/bridge/GEM provisioning and identity parameters are implemented. | The subscriber's actual identity and OLT service MIB are unknown; registration, encryption and DHCP are unproven. Advanced/multicast service modes remain unsupported. |
-| 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested. | Browser QA, full image testing and actual netifd/firewall traffic require separate validation. |
+| 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
 
 Current local evidence: 80 PON/WAN host tests, the complete OMCI core UML
 suite and matching AN7581 package builds. The builder's seven tests and real
-Kconfig resolution retain every experimental package. See
+Kconfig resolution retain every experimental package. A full cached build at
+`cb0853acbc5b5ef178f7419b9926a6722f58df9f` produces both Q1000K UBI images;
+offline inspection verifies FIT payload hashes, disabled PON nodes and the
+packaged modules/userspace defaults. It has not been booted or flashed. See
 [build preparation](XGSPON-BUILD.q1000k.md) and the
 [current checkpoint](XGSPON-STATUS.q1000k.md) for validation limits.
 

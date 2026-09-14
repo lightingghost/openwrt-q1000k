@@ -1,5 +1,23 @@
 # Q1000K app checks
 
+## Experimental image inspection
+
+After a complete local experimental image build, run:
+
+```sh
+python3 tests/q1000k/check_pon_images.py ARTIFACT_DIRECTORY FULL_SOURCE_REVISION
+```
+
+The directory must contain the Q1000K UBI initramfs recovery and squashfs
+sysupgrade FITs. This uses the checkout's built host `unsquashfs4`; it never
+boots an image or executes extracted files. It verifies each FIT payload hash,
+the four disabled PON resource nodes in both embedded device trees, exact
+source metadata, installed module/userspace files, disabled service defaults
+and absence of PON module autoload entries. Only relevant directories are
+extracted into temporary storage. Success writes `inspection.json` with
+checksums and results. It does not test hardware, the initramfs's embedded
+rootfs at runtime or the normal boot/upgrade path.
+
 ## XGS-PON development
 
 ```sh
