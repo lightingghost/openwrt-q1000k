@@ -126,7 +126,7 @@ static void q1000k_services_reset(void) { assert(owned); service_resets++; }
 static void q1000k_services_destroy(void) { services_enabled=false; }
 static int q1000k_services_topology(struct omci_device *o,struct omci_ani_topology *t) { return 0; }
 static int q1000k_services_tcont(struct omci_device *o,u16 e,u16 a,bool v) { return 0; }
-static int q1000k_services_gem(struct omci_device *o,u16 e,u16 g,u16 t,u8 d,bool v,u8 enc) { return 0; }
+static int q1000k_services_gem_config(struct omci_device *o,u16 e,const struct omci_gem_port_config *cfg,bool valid) { return 0; }
 static u8 query_ring;
 static int q1000k_services_gem_key_ring(u16 entity,u8 *ring) { assert(owned); if(entity!=99) return -ENOENT; *ring=query_ring; return 0; }
 static int q1000k_services_queue(struct omci_device *o,u16 e,const struct omci_priority_queue_config *q) { return 0; }

@@ -249,6 +249,41 @@ leave:
 	return ret;
 }
 
+static bool qs_pointer(u16 pointer)
+{
+	return pointer && pointer != 0xffff;
+}
+
+static int qs_gem_qos(u16 tcont, const struct omci_gem_qos *qos)
+{
+	/* Native SP/WRR controls upstream T-CONT queues. Rate descriptors and
+	 * downstream queue ownership need separate implementations; they must
+	 * not disappear at the core/provider boundary.
+	 */
+	if (qos->traffic_management_option != 0 && qos->traffic_management_option != 2)
+		return -EOPNOTSUPP;
+	if (qs_pointer(qos->upstream_descriptor) || qs_pointer(qos->downstream_descriptor) ||
+	    qs_pointer(qos->downstream_queue)) return -EOPNOTSUPP;
+	if (qs_pointer(qos->upstream_queue) &&
+	    (qos->upstream_queue < 0x8000 || qos->upstream_queue >= 0x8000 + QS_TCONTS * 8 ||
+	     (qos->upstream_queue - 0x8000) / 8 != tcont - QS_TCONT_BASE)) return -EINVAL;
+	return 0;
+}
+
+int q1000k_services_gem_config(struct omci_device *odev, u16 entity,
+		const struct omci_gem_port_config *config, bool valid)
+{
+	int ret;
+
+	if (!config) return -EINVAL;
+	if (valid) {
+		ret = qs_gem_qos(config->tcont_entity_id, &config->qos);
+		if (ret) return ret;
+	}
+	return q1000k_services_gem(odev, entity, config->port_id,
+		config->tcont_entity_id, config->direction, valid, config->encryption_key_ring);
+}
+
 int q1000k_services_gem_key_ring(u16 entity, u8 *key_ring)
 {
 	unsigned int i;
@@ -466,7 +501,11 @@ static int qs_prepare_service(struct qs_replacement *p,
 	unsigned int i, index = s->tcont_entity_id - QS_TCONT_BASE;
 	int slot = -1, record;
 	struct qs_gem *gem;
+	int ret = qs_gem_qos(s->tcont_entity_id, &s->gem_qos);
 
+	if (ret) return ret;
+	if (qs_pointer(s->gem_qos.upstream_queue) &&
+	    (s->gem_qos.upstream_queue - 0x8000) % 8 != s->queue) return -EINVAL;
 	if (s->encryption_key_ring > 3) return -EINVAL;
 	if (s->encryption_key_ring == 2) return -EOPNOTSUPP;
 	if (!s->gem_port_id || s->gem_port_id == 0xffff || s->alloc_id > 0x3fff ||

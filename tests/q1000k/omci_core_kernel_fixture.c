@@ -117,10 +117,12 @@ static int fixture_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool v
 	return ++fixture_tcont_calls == fixture_undo_call ? fixture_undo_error : fixture_gem_error;
 }
 
-static int fixture_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont,
-		       u8 direction, bool valid, u8 key_ring)
+static struct omci_gem_port_config fixture_gem_config;
+static int fixture_gem(struct omci_device *odev, u16 entity,
+		       const struct omci_gem_port_config *config, bool valid)
 {
-	fixture_key_ring = key_ring;
+	fixture_key_ring = config->encryption_key_ring;
+	fixture_gem_config = *config;
 	return ++fixture_gem_calls == fixture_undo_call ? fixture_undo_error : fixture_gem_error;
 }
 
@@ -557,7 +559,10 @@ int q1000k_omci_core_test(void)
 		mapper->data[18] = 1; mapper->data[43] = 5;
 		put_unaligned_be16(500, gem->data);
 		put_unaligned_be16(0x8000, gem->data + 2); gem->data[4] = 3;
-		put_unaligned_be16(0, gem->data + 5);
+		put_unaligned_be16(0x8003, gem->data + 5);
+		put_unaligned_be16(0x1234, gem->data + 7);
+		put_unaligned_be16(0x5678, gem->data + 10);
+		put_unaligned_be16(0x9abc, gem->data + 13);
 		put_unaligned_be16(0xee1, iwtp->data);
 		put_unaligned_be16(200, tcont->data);
 		vlan->extended_vlan.valid = true;
@@ -575,6 +580,11 @@ int q1000k_omci_core_test(void)
 		xa_for_each(&desired, index, state) {
 			CHECK(state->config.vlan_treatment_valid && !state->config.default_service);
 			CHECK(!state->config.vlan_valid && !state->config.pcp_valid);
+			CHECK(state->config.gem_qos.upstream_queue == 0x8003 && state->config.queue == 3);
+			CHECK(state->config.gem_qos.upstream_descriptor == 0x1234);
+			CHECK(state->config.gem_qos.downstream_queue == 0x5678);
+			CHECK(state->config.gem_qos.downstream_descriptor == 0x9abc);
+			CHECK(state->config.gem_qos.traffic_management_option == odev->agent.config.traffic_mgmt_option);
 			CHECK(state->config.vlan_input_tpid == 0x88a8 && state->config.vlan_output_tpid == 0x8100);
 			CHECK(!memcmp(state->config.vlan_rule.raw, raw, 16));
 			CHECK(state->config.vlan_rule.filter_inner_pbit == 15 && state->config.vlan_rule.treat_inner_vid == 123);
@@ -685,7 +695,7 @@ int q1000k_omci_core_test(void)
 		const struct omci_me_desc *desc = omci_me_lookup(&odev->agent, OMCI_CLASS_GEM_PORT_CTP);
 		struct omci_mib_object candidate = { .class_id = OMCI_CLASS_GEM_PORT_CTP, .entity_id = 0xee8 };
 		struct omci_mib_object *stored;
-		u8 create[14] = {0, 99, 0x80, 0, 3};
+		u8 create[14] = {0, 99, 0x80, 0, 3, 0x80, 3, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc};
 		u8 request[3] = {0, 0x40, 0}, answer[32];
 		size_t written = 0;
 
@@ -697,6 +707,23 @@ int q1000k_omci_core_test(void)
 			CHECK(candidate.data[15] == i);
 			CHECK(!omci_agent_hw_update(odev, &candidate, OMCI_MSG_TYPE_CREATE, create));
 			CHECK(fixture_key_ring == i);
+			CHECK(fixture_gem_config.port_id == 99 && fixture_gem_config.tcont_entity_id == 0x8000);
+			CHECK(fixture_gem_config.direction == 3);
+			CHECK(fixture_gem_config.qos.upstream_queue == 0x8003);
+			CHECK(fixture_gem_config.qos.upstream_descriptor == 0x1234);
+			CHECK(fixture_gem_config.qos.downstream_queue == 0x5678);
+			CHECK(fixture_gem_config.qos.downstream_descriptor == 0x9abc);
+			CHECK(fixture_gem_config.qos.traffic_management_option == odev->agent.config.traffic_mgmt_option);
+		}
+		{
+			u8 qos_set[] = {0x80, 6, 0xff, 0xff, 0x12, 0x34, 0x56, 0x78};
+			CHECK(!omci_me_decode_set(desc, &candidate, BIT(12) | BIT(11) | BIT(9) | BIT(7),
+				qos_set, sizeof(qos_set)));
+			CHECK(!omci_agent_hw_update(odev, &candidate, OMCI_MSG_TYPE_SET, qos_set));
+			CHECK(fixture_gem_config.qos.upstream_queue == 0x8006);
+			CHECK(fixture_gem_config.qos.upstream_descriptor == 0xffff);
+			CHECK(fixture_gem_config.qos.downstream_queue == 0x1234);
+			CHECK(fixture_gem_config.qos.downstream_descriptor == 0x5678);
 		}
 		CHECK(!omci_me_decode_set(desc, &candidate, BIT(6), request + 2, 1));
 		CHECK(!candidate.data[15]);

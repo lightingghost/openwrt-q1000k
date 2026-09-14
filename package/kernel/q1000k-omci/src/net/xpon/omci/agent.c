@@ -2689,6 +2689,25 @@ static int omci_agent_mib_reset_locked(struct omci_device *odev, bool all,
 	return ret;
 }
 
+static void omci_agent_gem_config(const struct omci_agent *agent,
+		const struct omci_mib_object *object, struct omci_gem_port_config *config)
+{
+	const u8 *d = object->data;
+
+	*config = (struct omci_gem_port_config) {
+		.port_id = get_unaligned_be16(d),
+		.tcont_entity_id = get_unaligned_be16(d + 2),
+		.direction = d[4], .encryption_key_ring = d[15],
+		.qos = {
+			.upstream_queue = get_unaligned_be16(d + 5),
+			.upstream_descriptor = get_unaligned_be16(d + 7),
+			.downstream_queue = get_unaligned_be16(d + 10),
+			.downstream_descriptor = get_unaligned_be16(d + 13),
+			.traffic_management_option = agent->config.traffic_mgmt_option,
+		},
+	};
+}
+
 static int omci_agent_hw_update_apply(struct omci_device *odev,
 				struct omci_mib_object *object,
 				u8 action, const u8 *content)
@@ -2748,14 +2767,15 @@ static int omci_agent_hw_update_apply(struct omci_device *odev,
 					      false);
 		value = get_unaligned_be16(object->data);
 		return ops->set_tcont(odev, object->entity_id, value, true);
-	case OMCI_CLASS_GEM_PORT_CTP:
+	case OMCI_CLASS_GEM_PORT_CTP: {
+		struct omci_gem_port_config config;
+
 		if (!ops->set_gem_port)
 			return -EOPNOTSUPP;
-		return ops->set_gem_port(odev, object->entity_id,
-					 get_unaligned_be16(object->data),
-					 get_unaligned_be16(object->data + 2),
-					 object->data[4],
-					 action != OMCI_MSG_TYPE_DELETE, object->data[15]);
+		omci_agent_gem_config(&odev->agent, object, &config);
+		return ops->set_gem_port(odev, object->entity_id, &config,
+					action != OMCI_MSG_TYPE_DELETE);
+	}
 	case OMCI_CLASS_PPTP_ETHERNET_UNI:
 	case OMCI_CLASS_VEIP:
 		if (!ops->set_uni)
@@ -2943,7 +2963,7 @@ static int omci_agent_service_queue_locked(struct omci_device *odev,
 	if (!pointer || pointer == 0xffff)
 		return 0;
 	if (odev->agent.config.traffic_mgmt_option == 1)
-		return -EOPNOTSUPP; /* Rate-controlled traffic descriptor pointer. */
+		return -EOPNOTSUPP; /* Rate-controlled mode points to a T-CONT, not a queue. */
 	pq = omci_mib_lookup(&odev->agent, OMCI_CLASS_PRIORITY_QUEUE, pointer);
 	if (!pq)
 		return -ENOENT;
@@ -3004,6 +3024,7 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	struct omci_mib_object *gem;
 	struct omci_mib_object *tcont;
 	struct omci_service_config service = {};
+	struct omci_gem_port_config gem_config;
 	const struct omci_extended_vlan *vlan = vlan_object ? &vlan_object->extended_vlan : NULL;
 	u16 gem_ctp_entity;
 	int ret;
@@ -3030,7 +3051,9 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	/* Carry the Alloc-ID: the backend may need it to rebuild the channel. */
 	service.alloc_id = get_unaligned_be16(tcont->data);
 	service.direction = gem->data[4];
-	service.encryption_key_ring = gem->data[15];
+	omci_agent_gem_config(agent, gem, &gem_config);
+	service.encryption_key_ring = gem_config.encryption_key_ring;
+	service.gem_qos = gem_config.qos;
 	service.multicast = multicast;
 	service.multicast_ani_entity_id = ani_entity_id;
 	service.multicast_ani_valid = ani_valid;

@@ -205,7 +205,7 @@ static int qomci_gem_encryption(struct omci_device *odev, u16 entity, u8 *mode)
 static const struct omci_device_ops qomci_ops = {
 	.start = qomci_start, .stop = qomci_stop, .xmit = qomci_xmit,
 	.get_ani_topology = q1000k_services_topology,
-	.set_tcont = q1000k_services_tcont, .set_gem_port = q1000k_services_gem,
+	.set_tcont = q1000k_services_tcont, .set_gem_port = q1000k_services_gem_config,
 	.get_gem_encryption = qomci_gem_encryption,
 	.set_uni = q1000k_services_uni, .replace_services = q1000k_services_replace,
 	.set_priority_queue = q1000k_services_queue,

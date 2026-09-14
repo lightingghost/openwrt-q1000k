@@ -1,5 +1,21 @@
 # Q1000K PON integration audit
 
+## Complete GEM QoS candidate checkpoint — 2026-09-14
+
+Vendor r58/core r12 stop losing GEM queue/descriptor pointers at the provider
+boundary. Create/Set and normalized profile reconciliation carry every QoS
+reference and the traffic-management mode. The native adapter validates
+upstream queue ownership and rejects unsupported rate/descriptors/downstream
+queues before physical programming. Failed updates retain the installed
+service; Delete can still remove an unsupported candidate.
+
+All 77 host tests, the complete OMCI core UML suite and matching AN7581
+core/vendor package builds pass. Tests include distinct pointer values through
+real OMCI Create/Set decoding and MIB resolution, failed provider updates,
+profile rejection with no physical operations and successful teardown. No
+device access occurred. Advanced rate policy remains separate work; see the
+[QoS contract](XGSPON-QOS.q1000k.md).
+
 ## UNI VLAN transformation checkpoint — 2026-09-14
 
 Vendor r52 and OMCI core r8 preserve class 171 filters/treatments and apply

@@ -10,7 +10,7 @@ def vlan_types():
     header = (ROOT / 'package/kernel/q1000k-omci/src/include/net/xpon/omci.h').read_text()
     return '#define OMCI_EXT_VLAN_RULE_LEN 16\n#define OMCI_VLAN_FILTER_MAX_ENTRIES 12\n' + '\n'.join(
         re.search(r'struct ' + name + r' \{.*?\n\};', header, re.S).group(0)
-        for name in ('omci_vlan_filter_entry', 'omci_vlan_tagging_filter', 'omci_extended_vlan_rule', 'omci_service_config'))
+        for name in ('omci_gem_qos', 'omci_gem_port_config', 'omci_vlan_filter_entry', 'omci_vlan_tagging_filter', 'omci_extended_vlan_rule', 'omci_service_config'))
 def vlan_source():
     source = (MAC / 'inc/common/q1000k_vlan.h').read_text() + (MAC / 'src/q1000k_vlan.c').read_text()
     return re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)

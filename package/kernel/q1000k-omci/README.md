@@ -55,10 +55,15 @@ be used as evidence that PON service is ready.
   are retained in the imported structure but are not used for Q1000K commits.
 - Class 171 service records carry the complete filter/treatment, input/output
   TPIDs and downstream mode. The provider must validate the whole operation;
-  `pon0` now represents the customer/UNI side. Missing/unsupported rules cannot
+  `pon` represents the customer/UNI side. Missing/unsupported rules cannot
   fall back to a broad classifier. An empty configured table installs no
-  service. Combined class 84/171 paths are rejected until both filter stages
-  are represented. See the [VLAN contract](../../../target/linux/airoha/XGSPON-VLAN.q1000k.md).
+  service. Both bridge-port class 84 filters are carried alongside one class
+  171 table, with explicit UNI/ANI association. See the
+  [VLAN contract](../../../target/linux/airoha/XGSPON-VLAN.q1000k.md).
+- `set_gem_port` receives the complete GEM candidate, including queue and
+  traffic-descriptor references. Normalized service records carry the same QoS
+  attributes; unsupported policies must return an error before mutation. See
+  the [QoS contract](../../../target/linux/airoha/XGSPON-QOS.q1000k.md).
 - Failed service removal preserves the previous records and aborts MIB reset.
   Session-transition removal failure latches an error rather than reopening
   admission with unaccounted hardware state. Provider teardown remains

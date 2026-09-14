@@ -83,6 +83,50 @@ int main(void)
     assert(physical_ops==untouched && qs_schedulers[0].weight[3]==17);
     assert(!q1000k_services_tcont(NULL,0x8000,200,true));
     assert(q1000k_services_tcont(NULL,0x8001,200,true)==-EEXIST);
+    /* The adapter must see every GEM QoS pointer before programming a GEM.
+     * Failed updates and profile reconciliation retain the installed intent.
+     */
+    {
+        struct omci_gem_port_config c={.port_id=500,.tcont_entity_id=0x8000,.direction=3};
+        struct omci_gem_qos rejected[]={
+            {.upstream_descriptor=1}, {.downstream_descriptor=0x1234},
+            {.downstream_queue=1}, {.traffic_management_option=1},
+            {.traffic_management_option=255}, {.upstream_queue=0x7fff},
+            {.upstream_queue=0x8008}, {.upstream_queue=0x80f8},
+        };
+        int ops=physical_ops;
+        assert(q1000k_services_gem_config(NULL,100,NULL,true)==-EINVAL);
+        for(unsigned int j=0;j<sizeof(rejected)/sizeof(rejected[0]);j++) {
+            int expected=j<5 ? -EOPNOTSUPP : -EINVAL;
+            c.qos=rejected[j];
+            assert(q1000k_services_gem_config(NULL,100,&c,true)==expected);
+            rules[0]=s; rules[0].gem_qos=c.qos;
+            assert(q1000k_services_replace(NULL,rules,1)==expected);
+            assert(physical_ops==ops && !hardware[500] && !qs_gems[0].valid);
+        }
+        c.qos=(struct omci_gem_qos){.upstream_queue=0x8003,
+            .upstream_descriptor=0xffff,.downstream_queue=0xffff,
+            .downstream_descriptor=0xffff,.traffic_management_option=2};
+        assert(!q1000k_services_gem_config(NULL,100,&c,true));
+        rules[0]=s; rules[0].gem_qos=c.qos;
+        assert(!q1000k_services_replace(NULL,rules,1));
+        struct qs_rules *installed=qs_current;
+        ops=physical_ops;
+        for(unsigned int j=0;j<sizeof(rejected)/sizeof(rejected[0]);j++) {
+            int expected=j<5 ? -EOPNOTSUPP : -EINVAL;
+            c.qos=rejected[j];
+            assert(q1000k_services_gem_config(NULL,100,&c,true)==expected);
+            rules[0].gem_qos=c.qos;
+            assert(q1000k_services_replace(NULL,rules,1)==expected);
+            assert(physical_ops==ops && qs_current==installed && qs_gems[0].valid);
+        }
+        rules[0].gem_qos=(struct omci_gem_qos){.upstream_queue=0x8004};
+        assert(q1000k_services_replace(NULL,rules,1)==-EINVAL && physical_ops==ops);
+        /* Even a now-unsupported candidate can be removed. */
+        assert(!q1000k_services_gem_config(NULL,100,&c,false));
+        assert(!hardware[500] && !qs_gems[0].valid);
+        assert(!q1000k_services_replace(NULL,NULL,0));
+    }
     assert(q1000k_services_gem(NULL,100,500,0x8000,3,true,2)==-EOPNOTSUPP);
     assert(!q1000k_services_gem(NULL,100,500,0x8000,3,true,false));
     assert(wan.gpon.gemPort[0].info.channel==33);

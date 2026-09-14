@@ -16,6 +16,8 @@ int q1000k_services_topology(struct omci_device *, struct omci_ani_topology *);
 int q1000k_services_tcont(struct omci_device *, u16 entity, u16 alloc, bool valid);
 int q1000k_services_gem(struct omci_device *, u16 entity, u16 gem, u16 tcont,
 		       u8 direction, bool valid, u8 key_ring);
+int q1000k_services_gem_config(struct omci_device *, u16 entity,
+		const struct omci_gem_port_config *, bool valid);
 /* Protocol owner; no MMIO. */
 int q1000k_services_gem_key_ring(u16 entity, u8 *key_ring);
 int q1000k_services_uni(struct omci_device *, u16 entity, bool enabled);
@@ -24,7 +26,7 @@ int q1000k_services_queue(struct omci_device *, u16 entity,
 int q1000k_services_scheduler(struct omci_device *, u16 entity,
 			 const struct omci_traffic_scheduler_config *);
 int q1000k_services_replace(struct omci_device *, const struct omci_service_config *, size_t count);
-/* ANI-side Ethernet frames carry the network VLAN selected by the core. The
+/* UNI-side Ethernet frames undergo the provisioned VLAN pipeline. The
  * caller holds RCU across classification, binding lookup and native enqueue.
  * tx consumes skb only on success. rx leaves ownership with the caller.
  */

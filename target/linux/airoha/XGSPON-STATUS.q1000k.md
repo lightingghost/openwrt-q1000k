@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r57 and OMCI core r11 implement the native packet path,
+ demonstrated.** Vendor r58 and OMCI core r12 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -69,6 +69,16 @@ longer runs the upstream priority selector. Nonconstant DSCP maps are rejected
 rather than acknowledged and ignored. Tests cover all eight implied priorities,
 a changed last DSCP entry, retained untagged DHCP/ARP, stacked tags and downstream
 frames whose PCP has no upstream mapping. Hardware acceptance is unchanged.
+
+Vendor r58/core r12 carry all GEM queue and traffic-descriptor references to
+the provider on Create/Set and through normalized profile reconciliation.
+Native upstream queue pointers must belong to the GEM's T-CONT and match the
+resolved queue. Unsupported descriptors, downstream queues and rate-only
+management cannot be acknowledged after discarding their attributes. Tests
+check rejection before physical operations, preservation of installed intent
+and deletion despite unsupported candidate attributes. The user's BGW320-500
+with Nokia 3FE46901AC optic identifies an XGS-PON setup; the actual subscriber
+identity and OLT service remain unknown. See the [QoS contract](XGSPON-QOS.q1000k.md).
 
 ## Imported references
 

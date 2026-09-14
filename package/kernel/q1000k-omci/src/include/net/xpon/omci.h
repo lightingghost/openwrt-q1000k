@@ -235,11 +235,27 @@ struct omci_telemetry {
  * Traffic Scheduler managed entities before the first MIB upload. Entity IDs
  * are allocated contiguously. Queue entity IDs are grouped by T-CONT.
  */
+/* Complete GEM QoS references, retained even when a provider rejects them.
+ * Null optional pointers may be encoded as zero or 0xffff by OLT profiles.
+ */
+struct omci_gem_qos {
+	u16 upstream_queue, upstream_descriptor;
+	u16 downstream_queue, downstream_descriptor;
+	u8 traffic_management_option;
+};
+
+struct omci_gem_port_config {
+	struct omci_gem_qos qos;
+	u16 port_id, tcont_entity_id;
+	u8 direction, encryption_key_ring;
+};
+
 /**
  * struct omci_service_config - normalized upstream OMCI service
  * @cookie: stable identifier used to replace or delete one service rule
  * @uni_entity_id: normalized PPTP Ethernet UNI or VEIP entity
  * @gem_ctp_entity_id: GEM port network CTP managed entity
+ * @gem_qos: complete GEM scheduling and descriptor references
  * @gem_port_id: GEM port identifier programmed in the GPON MAC
  * @tcont_entity_id: T-CONT managed entity associated with the GEM port
  * @alloc_id: Alloc-ID of that T-CONT, so a backend whose entity map was
@@ -268,6 +284,7 @@ struct omci_telemetry {
  * @default_service: fallback service when no VLAN/PCP rule matches
  */
 struct omci_service_config {
+	struct omci_gem_qos gem_qos;
 	struct omci_vlan_tagging_filter vlan_filter[2];
 	struct omci_extended_vlan_rule vlan_rule;
 	u16 vlan_entity_id;
@@ -333,7 +350,8 @@ struct omci_traffic_scheduler_config {
  * @xmit: transmit an OMCI PDU; consumes @skb only on success
  * @get_ani_topology: describe pre-existing ANI scheduling resources
  * @set_tcont: configure a T-CONT mapping
- * @set_gem_port: configure a GEM port with the G.988 encryption key ring
+ * @set_gem_port: validate and configure the complete GEM candidate; reject
+ *	unimplemented QoS references before modifying hardware
  * @get_gem_encryption: current GEM encryption mode (0 disabled, 1 AES-128)
  * @set_uni: enable or disable a UNI
  * @set_priority_queue: apply a complete existing upstream queue candidate
@@ -362,8 +380,7 @@ struct omci_device_ops {
 	int (*set_tcont)(struct omci_device *odev, u16 entity_id,
 			 u16 alloc_id, bool valid);
 	int (*set_gem_port)(struct omci_device *odev, u16 entity_id,
-			    u16 gem_port_id, u16 tcont_entity_id,
-			    u8 direction, bool valid, u8 encryption_key_ring);
+			    const struct omci_gem_port_config *config, bool valid);
 	int (*get_gem_encryption)(struct omci_device *odev, u16 entity_id, u8 *mode);
 	int (*set_uni)(struct omci_device *odev, u16 entity_id, bool enable);
 	int (*set_priority_queue)(struct omci_device *odev, u16 entity_id,
