@@ -56,6 +56,12 @@ static u32 IO_GREG(unsigned int reg)
 }
 static void udelay(unsigned int usec) { assert(held && usec==1); delays++; }
 
+enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL };
+static _Thread_local int table_phase=-1;
+static int q1000k_pipeline_table_context(enum q1000k_table_phase phase)
+{
+    assert(!held); return table_phase==(int)phase ? 0 : -EPERM;
+}
 /* PRODUCTION */
 
 /* Simulate a fresh module and reset hardware between independent cases.
@@ -173,5 +179,33 @@ int main(void)
         for(unsigned int ch=1;ch<32;ch++) for(unsigned int other=ch+1;other<32;other++)
             assert(!table[ch].valid || !table[other].valid || table[ch].id!=table[other].id);
     }
+    reset_model();
+    assert(q1000k_tcont_clear_namespace()==-EPERM && !commands);
+    assert(q1000k_tcont_install(1,100,10)==-EPERM && !commands);
+    table_phase=Q1000K_TABLE_CLEAR;
+    for(unsigned int i=1;i<32;i++) table[i]=(struct slot){true,100+i};
+    q1000k_tcont_quarantined=~0U;
+    assert(!q1000k_tcont_clear_namespace() && !q1000k_tcont_quarantined);
+    for(unsigned int i=1;i<32;i++) assert(!table[i].valid);
+    table_phase=Q1000K_TABLE_INSTALL;
+    for(unsigned int i=1;i<32;i++) assert(!q1000k_tcont_install(i,100+i,10));
+    for(unsigned int i=1;i<32;i++) {
+        assert(table[i].valid && table[i].id==100+i);
+        assert(!q1000k_tcont_install(i,100+i,10));
+    }
+    assert(q1000k_tcont_install(1,102,10)==-EBUSY);
+    assert(q1000k_tcont_install(2,101,10)==-EEXIST);
+    assert(q1000k_tcont_install(0,500,10)==-EINVAL);
+    assert(q1000k_tcont_install(32,500,10)==-EINVAL);
+    assert(q1000k_tcont_install(1,10,10)==-EINVAL);
+    q1000k_tcont_quarantine(1);
+    assert(q1000k_tcont_install(1,101,10)==-EBUSY);
+    for(unsigned int n=1;n<=62;n++) {
+        reset_model(); table_phase=Q1000K_TABLE_CLEAR;
+        q1000k_tcont_quarantined=~0U; absent_command=n;
+        assert(q1000k_tcont_clear_namespace()==-EIO && commands==n);
+        assert(q1000k_tcont_quarantined==~0U && q1000k_tcont_fault);
+    }
+    table_phase=-1;
     return 0;
 }

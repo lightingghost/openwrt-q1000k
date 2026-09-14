@@ -51,6 +51,13 @@ static u32 IO_GREG(unsigned int reg)
     return BIT(31) | (table[command&0xffff] ^ (corrupt_read && writes ? 1 : 0));
 }
 static void udelay(unsigned int us) { assert(held && us==1); delays++; }
+enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL };
+static _Thread_local int table_phase=-1;
+static int q1000k_pipeline_table_context(enum q1000k_table_phase phase)
+{
+    assert(!held); return table_phase==(int)phase ? 0 : -EPERM;
+}
+static void cond_resched(void) { assert(!held); }
 /* PRODUCTION */
 /* A new independent case models reset hardware plus a fresh module instance. */
 static void reset_model(void)
@@ -150,5 +157,18 @@ int main(void)
         }
         assert(successes==(different ? 32u : 1u) && writes==successes);
     }
+    reset_model();
+    assert(q1000k_gem_clear_namespace(0xffff)==-EPERM && !commands);
+    table_phase=Q1000K_TABLE_CLEAR;
+    table[0]=7; table[17]=6; table[65534]=5;
+    assert(!q1000k_gem_clear_namespace(17));
+    assert(!(table[0]&4) && table[17]==6 && !(table[65534]&4));
+    assert(!q1000k_gem_clear_namespace(0xffff) && !(table[17]&4));
+    for(unsigned int n=1;n<=65535;n=n<4?n+1:n==4?32768:65535) {
+        reset_model(); table_phase=Q1000K_TABLE_CLEAR; absent_command=n;
+        assert(q1000k_gem_clear_namespace(0xffff)==-EIO && commands==n && q1000k_gem_fault);
+        if(n==65535) break;
+    }
+    table_phase=-1;
     return 0;
 }

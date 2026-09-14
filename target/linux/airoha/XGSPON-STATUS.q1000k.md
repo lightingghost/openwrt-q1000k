@@ -11,8 +11,10 @@ complete PM/DM/calibration readback, MCU enable and asserted TX-disable.
 The new controller module was loaded only from RAM for testing, then
 powered off and removed; the temporary harness restored GPIO/mux state.
 No firmware image was flashed or package persistently installed. The
-vendor packet adapter now builds and passes host/UML lifetime tests; physical
-PHY/MAC integration and OMCI/service provisioning remain unimplemented.
+vendor packet adapter now builds and passes host/UML lifetime tests. Native
+FE/QoS, physical shutdown, owned PHY resources, a namespace transaction
+coordinator, and OMCI authentication barriers are implemented locally. Startup,
+resumable protocol events and the actual OMCI/service backend remain unfinished.
 BSP, PHY and MAC compile and pass modpost, and the
 experimental vendor package builds with no unresolved symbols.
 
@@ -45,12 +47,12 @@ OMCI daemon and unrelated PR changes were not imported.
 | Optical GPIOs and I2C | Force-GPIO mux plus active-low enables resolve ENXIO. Both paths return `0x1388`; power-off tests distinguish ownership. DT GPIO descriptors and pinctrl fixes added. | Boot-test the compiled production DT and pinctrl changes. GPON LOS is still based on OEM mapping. |
 | MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
 | EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
-| BSP/PHY modules | AN7581 builds the hook, shared SCU, PON MAC resource and PON PHY BSP modules plus `phy_10g.ko`; all pass Linux 6.18.44 modpost. | Complete reset/clock ownership and analog/startup sequencing before loading. |
-| PON MAC | Runtime state/event dispatch and native packet attachment are integrated; startup/teardown fault fixtures and module modpost pass. | Complete native control/QoS/FE operations, physical interrupt/drain/PHY coordination and service-level management traffic. |
-| Native packet transport | Native metadata/raw RX, bounded vendor TX retries, callback lifetime, queue closure and verified GDM2 TX-channel control pass host/UML tests. The GDM2 board node stays disabled. | Remaining FE/QoS operations, physical FIFO/RX drain and provisioning; verify descriptor/padding behavior on hardware. |
-| T-CONTs | Serialized table commands, verified writes, duplicate preservation, native FE TX setup/rollback and per-channel native TX drain are implemented. Removal preserves bindings and reports incomplete retirement. | FE/optical FIFO drain and ONU/OMCC assignment. |
-| GEM bindings | Serialized verified commands, shared GEM/T-CONT publication, bounded packet snapshots and retirement containment pass host/UML tests. | Physical retirement, encrypted activation, ONU/OMCC identity, live replacement and recovery. |
-| OMCI | PR #24577's daemon and the alternative generic kernel OMCI core cross-compile for AArch64. Neither has a working Q1000K adapter. | See the [transport and OMCI audit](XGSPON-INTEGRATION.q1000k.md) for missing callbacks, authentication and service validation. |
+| BSP/PHY modules | Exclusive resets, mapped optical resources, pinctrl/PBUS profile, controller lease, checked TX-disable and callback drains are implemented and build for AN7581. | Connect complete MAC startup and resumable events; hardware PHY/analog acceptance remains outstanding. |
+| PON MAC | Physical shutdown and clear/install/reactivation coordinator have ordered failure fixtures; MMIO, stops and exclusive reset belong to the PON provider. | Own the MAC IRQ and resumable protocol/event lifecycle, bind the coordinator to actual service records, and replace legacy reset/ONU transactions. |
+| Native packet transport | Raw RX/TX, bounded retries, per-channel QoS, global units/frame limits, FE retirement, physical RX drain and checked generation replacement are implemented. Authenticated OMCI retries retain their epoch. | Connect provisioning/startup callers; verify descriptors and physical timing on hardware. The board node remains disabled. |
+| T-CONTs | Serialized verified commands and duplicate checks; only a physical clear callback may release quarantine, and installation can select an explicit data channel. | Bind complete replacement to the software records and OMCI entities; finish the separate ONU-ID/OMCC assignment. |
+| GEM bindings | Verified commands, shared binding snapshots, containment and a guarded complete cold-start clear are implemented. | Bind physical replacement to records, encrypted activation, ONU/OMCC identity and recovery. |
+| OMCI | Generic kernel core, full 36-byte registration identity, software key/MIC helpers, explicit authentication epochs and core/MAC retry barriers build and pass local tests. | Connect MAC key/session publication, actual RX/TX backend and provisioning callbacks; then the launcher and LuCI state. See the [integration audit](XGSPON-INTEGRATION.q1000k.md). |
 | LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
 | Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
 

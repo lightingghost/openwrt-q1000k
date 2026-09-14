@@ -6,11 +6,10 @@ import unittest
 from pon_test_utils import run_c
 REPO=Path(__file__).resolve().parents[2]
 MAC=REPO/'package/kernel/airoha-pon/src/xpon-en757x/xpon_10g'
-class PipelineTests(unittest.TestCase):
-    def test_shutdown_orders_physical_stages_and_preserves_failure(self):
+class NamespaceTests(unittest.TestCase):
+    def test_clear_install_activate_and_every_boundary_failure(self):
         source=(MAC/'inc/common/q1000k_pipeline.h').read_text()+(MAC/'src/q1000k_pipeline.c').read_text()
-        source=source.split('/* Service namespace transaction.')[0]
         source=re.sub(r'^#include[^\n]*\n','',source,flags=re.M)
-        fixture=Path(__file__).with_name('pon_pipeline_fixture.c').read_text()
+        fixture=Path(__file__).with_name('pon_namespace_fixture.c').read_text()
         run_c(fixture.replace('/* PRODUCTION */',source))
 if __name__=='__main__': unittest.main()

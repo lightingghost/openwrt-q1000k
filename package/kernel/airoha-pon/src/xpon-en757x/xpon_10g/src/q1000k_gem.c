@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* AN7581 GEM commands; the existing MAC provider owns the mapped registers. */
 #include <linux/delay.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include "common/xpon_global.h"
+#include "common/q1000k_pipeline.h"
 #include "common/q1000k_gem.h"
 
 #define GEM_CMD_WRITE BIT(31)
@@ -126,4 +128,33 @@ int q1000k_gem_replace(u16 id, const struct q1000k_gem_value *expected,
 out:
 	spin_unlock_irqrestore(&q1000k_gem_lock, flags);
 	return ret;
+}
+
+/* Cold start verifies the complete address space. Runtime transactions can
+ * instead clear their tracked old bindings while preserving the active OMCC.
+ */
+int q1000k_gem_clear_namespace(u16 preserve)
+{
+	const struct q1000k_gem_value empty = {};
+	struct q1000k_gem_value value;
+	unsigned int id;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_CLEAR);
+
+	if (ret)
+		return ret;
+	for (id = 0; id <= Q1000K_GEM_ID_MAX; id++) {
+		if (id == preserve)
+			continue;
+		ret = q1000k_gem_read(id, &value);
+		if (ret)
+			return ret;
+		if (value.valid) {
+			ret = q1000k_gem_replace(id, &value, &empty);
+			if (ret)
+				return ret;
+		}
+		if (!(id & 63))
+			cond_resched();
+	}
+	return 0;
 }

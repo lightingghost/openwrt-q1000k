@@ -2,8 +2,10 @@
 /* AN7581 indirect T-CONT table: the MAC owner supplies its mapped registers. */
 #include <linux/bitfield.h>
 #include <linux/delay.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include "common/xpon_global.h"
+#include "common/q1000k_pipeline.h"
 #include "common/q1000k_tcont.h"
 
 #define TCONT_CMD_WRITE BIT(31)
@@ -211,4 +213,68 @@ void q1000k_tcont_quarantine(unsigned int channel)
 	spin_lock_irqsave(&q1000k_tcont_lock, flags);
 	q1000k_tcont_quarantined |= BIT(channel);
 	spin_unlock_irqrestore(&q1000k_tcont_lock, flags);
+}
+
+/* Only the serialized physical namespace transaction may release quarantine. */
+int q1000k_tcont_clear_namespace(void)
+{
+	unsigned long flags;
+	unsigned int channel;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_CLEAR);
+
+	if (ret)
+		return ret;
+	spin_lock_irqsave(&q1000k_tcont_lock, flags);
+	for (channel = 1; channel < Q1000K_TCONT_COUNT; channel++) {
+		ret = q1000k_tcont_write_locked(channel, false, 0);
+		if (ret)
+			goto out;
+	}
+	/* Channel zero remains the separate ONU-ID/OMCC shadow. */
+	q1000k_tcont_quarantined = 0;
+out:
+	spin_unlock_irqrestore(&q1000k_tcont_lock, flags);
+	return ret;
+}
+
+int q1000k_tcont_install(unsigned int channel, u16 alloc_id, u16 onu_id)
+{
+	unsigned long flags;
+	unsigned int i;
+	bool valid, occupied = false;
+	u16 id;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	if (ret)
+		return ret;
+	if (!channel || channel >= Q1000K_TCONT_COUNT ||
+	    alloc_id > Q1000K_ALLOC_ID_MAX ||
+	    (onu_id < GPON_UNASSIGN_ONU_ID && alloc_id == onu_id))
+		return -EINVAL;
+	spin_lock_irqsave(&q1000k_tcont_lock, flags);
+	if (q1000k_tcont_quarantined & BIT(channel)) {
+		ret = -EBUSY;
+		goto out;
+	}
+	for (i = 1; i < Q1000K_TCONT_COUNT; i++) {
+		ret = q1000k_tcont_read_locked(i, &valid, &id);
+		if (ret)
+			goto out;
+		if (valid && i != channel && id == alloc_id) {
+			ret = -EEXIST;
+			goto out;
+		}
+		if (valid && i == channel) {
+			if (id != alloc_id) {
+				ret = -EBUSY;
+				goto out;
+			}
+			occupied = true;
+		}
+	}
+	if (!occupied)
+		ret = q1000k_tcont_write_locked(channel, true, alloc_id);
+out:
+	spin_unlock_irqrestore(&q1000k_tcont_lock, flags);
+	return ret;
 }

@@ -291,3 +291,37 @@ lockdep/RCU checks; the native kernel and r32 vendor packages build for AArch64.
 The PHY shutdown now relies on actual controller TX disable and callback drain:
 the imported XGS `FW_READY` command was a no-op and is explicitly unsupported.
 No hardware was accessed for these checks.
+
+## Namespace replacement and reactivation
+
+Vendor r34 adds a physical reconfiguration coordinator. It completes shutdown,
+optionally resets only the PON MAC for cold start, calls the old-table clear
+callback, changes native RX/TX generations, checks the 60/2000-byte frame limits,
+calls the replacement-table installer, and verifies the requested TX channels.
+Channel zero must be included for OMCC. Activation then enables RX DMA, PHY
+callbacks, MAC transfers, controller TX and CPU admission in that order. CPU
+queues remain closed until explicitly provisioned. Any failed stage contains
+the port and retains the original failure; a partially changed service namespace
+must be reported as `EUCLEAN` by the service owner.
+
+Table callback permission belongs to the current task and clear/install phase.
+An interrupt of that same task cannot inherit permission. The T-CONT clear
+primitive verifies all 31 data-channel invalidations before releasing quarantine;
+the ONU-ID shadow is separate. Installation uses an explicit channel and rejects
+duplicate Alloc-IDs, occupied slots and quarantined channels. The cold-start GEM
+clear scans every usable ID with bounded commands and scheduling points, optionally
+preserving an unchanged OMCC. Runtime callbacks can instead clear tracked old GEMs.
+
+Host fixtures exercise every boundary in both cold-reset and preserved-MAC
+sequences, containment failures, callback ownership/phase, every T-CONT clear
+command, complete GEM scans and selected late failures. All 46 PON host tests
+pass. The vendor package builds for AArch64; its module subdirectories are now
+explicit for correct OpenWrt symbol collection. No hardware acceptance was run.
+
+The coordinator's clear/install callbacks still need the actual service-record
+owner and resumable protocol/event pause. The existing outer teardown is wired
+to physical shutdown; the new reconfiguration/activation functions are not yet
+used by startup or runtime service replacement. Imported `gwan_init` now checks
+native frame-limit errors and unwinds its interface/timer/tasklet allocations.
+Legacy global FE counter polling and its Q1000K control knob are disabled because
+native software packet accounting is authoritative with hardware forwarding off.

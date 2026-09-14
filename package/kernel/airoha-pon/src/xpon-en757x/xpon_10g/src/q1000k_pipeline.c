@@ -3,6 +3,7 @@
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
+#include <linux/sched.h>
 #include <an7581_xpon.h>
 #include <q1000k_phy_api.h>
 #include "common/q1000k_transport.h"
@@ -104,4 +105,140 @@ void q1000k_pipeline_status(struct q1000k_pipeline_status *status)
 	mutex_lock(&q1000k_pipeline_lock);
 	*status = q1000k_pipeline;
 	mutex_unlock(&q1000k_pipeline_lock);
+}
+
+/* Service namespace transaction. The caller has drained protocol/control
+ * producers; only this task may issue table-replacement commands in callbacks.
+ */
+static struct task_struct *q1000k_table_owner;
+static enum q1000k_table_phase q1000k_table_phase;
+
+int q1000k_pipeline_table_context(enum q1000k_table_phase phase)
+{
+	/* A hard IRQ may interrupt the owner with the same current pointer. */
+	if (in_interrupt() || in_atomic() || irqs_disabled() ||
+	    rcu_preempt_depth() ||
+	    (IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()))
+		return -EWOULDBLOCK;
+	if (READ_ONCE(q1000k_table_owner) != current)
+		return -EPERM;
+	return q1000k_table_phase == phase ? 0 : -EPERM;
+}
+
+int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
+			       void *arg, u32 channels)
+{
+	struct airoha_pon_port_config old, config;
+	unsigned int channel;
+	int ret;
+
+	if (!ops || !ops->clear || !ops->install || !(channels & BIT(0)))
+		return -EINVAL;
+	ret = q1000k_pipeline_shutdown();
+	if (ret)
+		return ret;
+	mutex_lock(&q1000k_pipeline_lock);
+	ret = q1000k_pipeline.error;
+	if (ret)
+		goto out;
+	if (q1000k_pipeline.stage != Q1000K_PIPELINE_PHY_STOPPED) {
+		ret = -EBUSY;
+		goto out;
+	}
+	ret = q1000k_transport_get_port_config(&old);
+	if (ret)
+		goto fail;
+	if (ops->reset_mac) {
+		ret = an7581_xpon_reset();
+		if (!ret)
+			ret = an7581_xpon_mac_stop(Q1000K_MAC_ALL_STOPS, true);
+		if (ret)
+			goto fail;
+	}
+	q1000k_pipeline.stage = Q1000K_PIPELINE_TABLES_CHANGING;
+	q1000k_table_phase = Q1000K_TABLE_CLEAR;
+	WRITE_ONCE(q1000k_table_owner, current);
+	ret = ops->clear(arg);
+	WRITE_ONCE(q1000k_table_owner, NULL);
+	if (ret)
+		goto fail;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_TABLES_CLEARED;
+	ret = q1000k_transport_reset_epoch();
+	if (ret)
+		goto fail;
+	q1000k_pipeline.retired = 0;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_EPOCH_READY;
+	config = old;
+	config.min_len = 60;
+	config.max_len = 2000;
+	ret = q1000k_transport_configure_port(&old, &config);
+	if (ret)
+		goto fail;
+	q1000k_table_phase = Q1000K_TABLE_INSTALL;
+	WRITE_ONCE(q1000k_table_owner, current);
+	ret = ops->install(arg);
+	WRITE_ONCE(q1000k_table_owner, NULL);
+	if (ret)
+		goto fail;
+	for (channel = 0; channel < 32; channel++) {
+		if (!(channels & BIT(channel)))
+			continue;
+		ret = q1000k_transport_set_tx_channel(channel, true);
+		if (ret)
+			goto fail;
+	}
+	q1000k_pipeline.channels = channels;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_PREPARED;
+	goto out;
+fail:
+	q1000k_pipeline.error = ret;
+	q1000k_pipeline_contain();
+out:
+	mutex_unlock(&q1000k_pipeline_lock);
+	return ret;
+}
+
+int q1000k_pipeline_activate(void)
+{
+	int ret;
+
+	if (in_interrupt() || in_atomic() || irqs_disabled() ||
+	    rcu_preempt_depth() ||
+	    (IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()))
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_pipeline_lock);
+	ret = q1000k_pipeline.error;
+	if (ret)
+		goto out;
+	if (q1000k_pipeline.stage != Q1000K_PIPELINE_PREPARED) {
+		ret = -EINVAL;
+		goto out;
+	}
+	ret = q1000k_transport_activate_rx(q1000k_pipeline.channels);
+	if (ret)
+		goto fail;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_RX_ACTIVE;
+	ret = q1000k_phy_start();
+	if (ret)
+		goto fail;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_PHY_ACTIVE;
+	ret = an7581_xpon_mac_stop(Q1000K_MAC_ALL_STOPS, false);
+	if (ret)
+		goto fail;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_MAC_ACTIVE;
+	ret = q1000k_phy_set_tx(true);
+	if (ret)
+		goto fail;
+	ret = q1000k_transport_resume();
+	if (ret)
+		goto fail;
+	/* CPU queues still need explicit provisioning after this succeeds. */
+	q1000k_pipeline.stage = Q1000K_PIPELINE_UNDRAINED;
+	goto out;
+fail:
+	q1000k_pipeline.error = ret;
+	q1000k_pipeline_contain();
+out:
+	mutex_unlock(&q1000k_pipeline_lock);
+	return ret;
 }

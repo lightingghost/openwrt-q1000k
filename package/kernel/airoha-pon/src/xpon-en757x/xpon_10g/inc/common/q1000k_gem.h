@@ -28,4 +28,9 @@ bool q1000k_gem_faulted(void);
 int q1000k_gem_replace(u16 id, const struct q1000k_gem_value *expected,
 			const struct q1000k_gem_value *value);
 
+/* Internal namespace-clear callback only. Verify/clear all usable GEM IDs,
+ * except an unchanged OMCC to preserve. 0xffff means preserve no entry.
+ */
+int q1000k_gem_clear_namespace(u16 preserve);
+
 #endif

@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=33
+PKG_RELEASE:=34
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -78,6 +78,7 @@ PON_V2_CPU_CFLAGS:= \
 PON_V2_CPU_MAKE:=TCSUPPORT_CPU_EN7581=1 $(if $(CONFIG_TARGET_airoha_an7583),TCSUPPORT_CPU_AN7583=1)
 
 ifeq ($(BUILD_VARIANT),v1)
+PKG_EXTMOD_SUBDIRS:=gpon-en757x/xpon_phy gpon-en757x/xpon
 define Build/Compile
 	+$(KERNEL_MAKE) $(PKG_JOBS) M="$(PKG_BUILD_DIR)/gpon-en757x/xpon_phy" \
 		KCFLAGS="$(PON_INCLUDE_FLAGS) -DTCSUPPORT_CPU_EN7521=1" \
@@ -98,6 +99,7 @@ endef
 endif
 
 ifeq ($(BUILD_VARIANT),v2)
+PKG_EXTMOD_SUBDIRS:=bsp xpon-en757x/xpon_phy_10g xpon-en757x/xpon_10g
 define Build/Compile
 	+$(KERNEL_MAKE) $(PKG_JOBS) M="$(PON_BSP_DIR)" \
 		AIROHA_PON_CFLAGS="$(PON_INCLUDE_FLAGS) $(PON_V2_CPU_CFLAGS)" \

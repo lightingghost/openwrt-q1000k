@@ -19,11 +19,18 @@ int q1000k_tcont_find(u16 alloc_id, u16 onu_id, u8 *channel);
 int q1000k_tcont_enable(u16 alloc_id, u16 onu_id);
 int q1000k_tcont_disable(u16 alloc_id, u16 onu_id);
 
-/* Prevent slot reuse after uncertain setup/removal. Quarantine is permanent
- * for this module instance; neither a successful read nor an invalid MAC entry
+/* Prevent slot reuse after uncertain setup/removal. Quarantine is released only by the
+ * owning physical namespace-clear callback; neither a successful read nor an invalid MAC entry
  * proves that previously submitted traffic has left the native/FE pipeline.
  * Reads and invalidation remain available unless a command fault is latched.
  */
 void q1000k_tcont_quarantine(unsigned int channel);
+
+/* Internal namespace callbacks only. Clearing verifies all data channels before
+ * releasing quarantine; install uses an explicit data channel and rejects a
+ * duplicate allocation or occupied slot. Neither writes the ONU-ID shadow.
+ */
+int q1000k_tcont_clear_namespace(void);
+int q1000k_tcont_install(unsigned int channel, u16 alloc_id, u16 onu_id);
 
 #endif

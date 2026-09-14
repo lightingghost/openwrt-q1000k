@@ -168,14 +168,14 @@ struct wan {
     int dropUnknownPackets,dropForHookBuf,activeChannelNum,greenMaxthreshold,rxLock;
 } wan, *gpWanPriv=&wan;
 static bool pwan_gwan_initialized;
-static int clear_channel_task,live_timer,live_task,creates,fail_at,destroys,channels;
+static int clear_channel_task,live_timer,live_task,creates,fail_at,destroys,channels,channel_error;
 static void spin_lock_init(int *p) { *p=1; }
 static void xmcs_get_onu_type(int *p) { *p=XMCS_IF_ONU_TYPE_SFU; }
 #define GPON_CREATE_TIMER(t,fn,n) do { assert(!live_timer); live_timer=1; } while(0)
 #define tasklet_init(t,fn,n) do { assert(!live_task); live_task=1; } while(0)
 static void timer_shutdown_sync(int *t) { assert(live_timer); live_timer=0; }
 static void tasklet_kill(int *t) { assert(live_task && !live_timer); live_task=0; }
-static void gwan_channel_init(void) { assert(live_task && live_timer); channels++; }
+static int gwan_channel_init(void) { assert(live_task && live_timer); channels++; return channel_error; }
 static int pwan_create_net_interface(int i) {
     assert(!wan.pPonNetDev[i] && wan.rxLock && !wan.devCfg.flags.isQosUp);
     if(++creates==fail_at) return -EEXIST;
@@ -197,6 +197,9 @@ int main(void) {
         assert(pwan_init()==-EEXIST && creates==fail_at && destroys==fail_at-1);
         assert(channels==(fail_at>1)); clean();
     }
+    fail_at=0; creates=destroys=channels=0; channel_error=-EBUSY;
+    assert(pwan_init()==-EBUSY && creates==1 && destroys==1 && channels==1);
+    clean(); channel_error=0;
     for(int n=0;n<2;n++) {
         fail_at=0; creates=destroys=0;
         assert(!pwan_init() && creates==4 && pwan_gwan_initialized);

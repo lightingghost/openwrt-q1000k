@@ -1,0 +1,94 @@
+Subject: [PATCH] q1000k: propagate native frame setup and keep software accounting
+
+Frame limits belong to the drained native port transaction. Unwind WAN setup
+on error and reject legacy hardware-counter control without a hardware owner.
+
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -1915,12 +1915,28 @@
+ }
+ /*****************************************************************************
+ ******************************************************************************/
+-void gwan_channel_init(void){
+-    
+-    feDevGdm2Cdm2Stop(XPON_RESET_HOLD_ON);
+-    feDevGdm2Cdm2Stop(XPON_RESET_RELEASE);
+-    /* set GPON packet length */
+-    FE_API_SET_PACKET_LENGTH(FE_GDM_SEL_GDMA2, GPON_PACKET_LEN_UPPER_LIMIT, GPON_PACKET_LEN_LOWER_LIMIT);
++static int gwan_channel_init(void)
++{
++#ifdef Q1000K_PON_IDENTITY
++	struct airoha_pon_port_config old, config;
++	int ret = q1000k_transport_get_port_config(&old);
++
++	if (ret)
++		return ret;
++	config = old;
++	config.min_len = GPON_PACKET_LEN_LOWER_LIMIT;
++	config.max_len = GPON_PACKET_LEN_UPPER_LIMIT;
++	return q1000k_transport_configure_port(&old, &config);
++#else
++	int ret = feDevGdm2Cdm2Stop(XPON_RESET_HOLD_ON);
++
++	if (!ret)
++		ret = feDevGdm2Cdm2Stop(XPON_RESET_RELEASE);
++	if (!ret)
++		ret = FE_API_SET_PACKET_LENGTH(FE_GDM_SEL_GDMA2,
++			GPON_PACKET_LEN_UPPER_LIMIT, GPON_PACKET_LEN_LOWER_LIMIT);
++	return ret;
++#endif
+ }
+ /*****************************************************************************
+ ******************************************************************************/
+@@ -1990,7 +2006,12 @@
+ 		gwan_deinit();
+ 		return ret;
+ 	}
+-    gwan_channel_init();
++	ret = gwan_channel_init();
++	if (ret) {
++		pwan_delete_net_interface(PWAN_IF_OMCI);
++		gwan_deinit();
++		return ret;
++	}
+ 	return 0 ;	
+ }
+ /*****************************************************************************
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -359,6 +359,12 @@
+ 
+ void gpon_act_hardware_timer(TIMER_FUN_PAAM arg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Native software RX/TX owns packet accounting; PON hardware forwarding
++	 * remains disabled. Legacy global FE counters would double count it.
++	 */
++	return;
++#else
+ 	PWAN_NetPriv_T *pNetPriv = NULL;
+ 	FE_RxCnt_t rxCnt = {0};
+ 	FE_TxCnt_t txCnt = {0};
+@@ -450,6 +456,7 @@
+ 	{
+ 		GPON_START_TIMER(gpGponPriv->hardware_timer, gpGponPriv->gponCfg.hardware_timer);
+ 	}
++#endif
+ }
+ 
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_proc.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_proc.c
+@@ -1103,8 +1103,12 @@
+ 	{
+ 		if(!strcmp(subcmd, "enable"))
+ 		{
++#ifdef Q1000K_PON_IDENTITY
++			return -EOPNOTSUPP;
++#else
+ 			hw_cnt_enable = action;
+ 			printk("hw_cnt_enable = %d\r\n",hw_cnt_enable);
++#endif
+ 		}
+ 	}
+ 	else{

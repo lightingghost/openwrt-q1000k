@@ -415,3 +415,9 @@ changes frame limits and weight units between retirement and RX reactivation.
 The adapter UML fixture also checks authenticated OMCI retries: 20 rekey cycles
 with mixed data packets, no token refresh on BUSY, preserved caller ownership
 on rejection, and a barrier held across a simulated native submission.
+
+`test_pon_namespace.py` exercises the physical clear/install/activate coordinator,
+with and without the exclusive cold-start MAC reset, and injects failure at every
+stage. Table fixtures verify guarded quarantine release, explicit channel install,
+complete GEM clearing and preservation of the ONU/OMCC exception. `test_pon_fe_bridge.py`
+checks the actual imported frame/weight callers and native error propagation.

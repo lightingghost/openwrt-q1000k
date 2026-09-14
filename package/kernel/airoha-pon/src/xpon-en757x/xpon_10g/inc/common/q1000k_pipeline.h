@@ -13,11 +13,19 @@ enum q1000k_pipeline_stage {
 	Q1000K_PIPELINE_MAC_STOPPED,
 	Q1000K_PIPELINE_RX_DRAINED,
 	Q1000K_PIPELINE_PHY_STOPPED,
+	Q1000K_PIPELINE_TABLES_CHANGING,
+	Q1000K_PIPELINE_TABLES_CLEARED,
+	Q1000K_PIPELINE_EPOCH_READY,
+	Q1000K_PIPELINE_PREPARED,
+	Q1000K_PIPELINE_RX_ACTIVE,
+	Q1000K_PIPELINE_PHY_ACTIVE,
+	Q1000K_PIPELINE_MAC_ACTIVE,
 };
 
 struct q1000k_pipeline_status {
 	enum q1000k_pipeline_stage stage;
 	u32 retired;
+	u32 channels;
 	int error;
 	int containment_error;
 };
@@ -30,5 +38,29 @@ struct q1000k_pipeline_status {
  */
 int q1000k_pipeline_shutdown(void);
 void q1000k_pipeline_status(struct q1000k_pipeline_status *status);
+
+/* After the caller drains all protocol/control producers, reconfigure first
+ * completes physical shutdown. clear removes the old reusable table entries;
+ * install programs and verifies replacement tables after native epoch reset.
+ * Preserved ONU/OMCC/key state must never refer to a reused entry. reset_mac
+ * requests the exclusive cold-start reset and requires install to restore all
+ * needed MAC configuration. Callback failure leaves the pipeline poisoned;
+ * the service owner must report EUCLEAN if the old hardware state is lost.
+ * Neither callback may re-enter lifecycle APIs or start producers/queues.
+ */
+struct q1000k_pipeline_ops {
+	bool reset_mac;
+	int (*clear)(void *arg);
+	int (*install)(void *arg);
+};
+enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL };
+/* Internal table primitives: permission exists only in the owning callback. */
+int q1000k_pipeline_table_context(enum q1000k_table_phase phase);
+int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
+			       void *arg, u32 channels);
+/* Restore receive DMA, PHY callbacks, MAC transfers and controller TX in order.
+ * CPU queues remain closed for explicit provisioning after success.
+ */
+int q1000k_pipeline_activate(void);
 
 #endif
