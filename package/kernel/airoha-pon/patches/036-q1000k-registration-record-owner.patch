@@ -1,0 +1,26 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: publish changed OMCC lookup records after physical replacement
+
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -726,7 +726,9 @@
+ 	spin_lock_irqsave(&q1000k_gwan_lock, flags);
+ 	/* Clear old lookup slots before installing any reused GEM identifiers. */
+ 	for (i = 0; i < Q1000K_GWAN_GEMS; i++)
+-		if (gpWanPriv->gpon.gemPort[i].info.valid && gpWanPriv->gpon.gemPort[i].info.channel)
++		if (gpWanPriv->gpon.gemPort[i].info.valid &&
++		    (gpWanPriv->gpon.gemPort[i].info.channel || !table->gem[i].valid ||
++		     table->gem[i].channel || table->gem[i].gem != gpWanPriv->gpon.gemPort[i].info.portId))
+ 			gpWanPriv->gpon.gemIdToIndex[gpWanPriv->gpon.gemPort[i].info.portId] = GPON_GEM_IDX_MASK;
+ 	gpWanPriv->activeChannelNum = 0;
+ 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
+@@ -739,7 +741,8 @@
+ 		const struct q1000k_gwan_entry *e = &table->gem[i];
+ 		GWAN_GemInfo_T *info = &gpWanPriv->gpon.gemPort[i].info;
+ 
+-		if (e->valid && !e->channel) {
++		if (e->valid && !e->channel && info->valid && !info->channel && e->gem == info->portId &&
++		    e->encrypted == !!(info->rxEncrypt || info->txEncrypt)) {
+ 			gpWanPriv->gpon.gemNumbers++;
+ 			continue;
+ 		}

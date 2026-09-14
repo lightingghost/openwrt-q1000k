@@ -99,5 +99,30 @@ int main(void)
     two_services(); refresh_error=-EIO;
     assert(q1000k_gwan_refresh(refresh_install,&refresh_error)==-EUCLEAN);
     assert(protocol_error==-EIO && q1000k_gwan_error==-EIO);
+    two_services(); refresh_error=0;
+    wan.gpon.gemPort[250].info=(GWAN_GemInfo_T){.valid=1,.portId=17,.allocId=17,.ani=0x1ff,.channel=0,.rxEncrypt=1};
+    wan.gpon.gemIdToIndex[17]=250|0x8000; wan.gpon.gemNumbers++; hardware[17]=true;
+    assert(!q1000k_gwan_register(18,refresh_install,&refresh_error));
+    assert(!hardware[17] && !hardware[500] && !hardware[600] && hardware[18]);
+    assert(wan.gpon.gemIdToIndex[17]==GPON_GEM_IDX_MASK && wan.gpon.gemIdToIndex[18]==0);
+    assert(wan.gpon.allocId[0]==18 && wan.gpon.gemNumbers==1 && wan.activeChannelNum==1);
+    assert(wan.gpon.gemPort[0].info.portId==18 && wan.gpon.gemPort[0].info.ani==0x1ff);
+    assert(wan.gpon.gemPort[0].info.valid && !wan.gpon.gemPort[0].info.rxEncrypt);
+    for(unsigned int i=0;i<32;i++) assert(queue_model[i]==255);
+    assert(!q1000k_gwan_register(0xffff,refresh_install,&refresh_error));
+    assert(!hardware[18] && !wan.gpon.gemNumbers && !wan.activeChannelNum);
+    assert(wan.gpon.gemIdToIndex[18]==GPON_GEM_IDX_MASK && wan.gpon.allocId[0]==0xffff);
+    assert(!q1000k_gwan_register(0,refresh_install,&refresh_error));
+    assert(hardware[0] && wan.gpon.gemPort[0].info.valid && wan.gpon.allocId[0]==0);
+    assert(q1000k_gwan_register(1023,refresh_install,&refresh_error)==-EINVAL);
+    assert(q1000k_gwan_register(1,NULL,&refresh_error)==-EINVAL);
+    two_services(); assert(!q1000k_gwan_register(19,refresh_install,&refresh_error)); steps=physical_ops;
+    for(unsigned int n=1;n<=steps;n++) {
+        two_services(); physical_fail=n;
+        assert(q1000k_gwan_register(19,refresh_install,&refresh_error)==(n<=32 ? -ETIMEDOUT : -EUCLEAN));
+        assert(physical_ops==(int)n && !protocol_owned && !q1000k_gwan_changing);
+        if(n>32) assert(protocol_error==-ETIMEDOUT && q1000k_gwan_error==-ETIMEDOUT);
+        else assert(wan.gpon.allocId[0]==17 && hardware[500] && hardware[600]);
+    }
     return 0;
 }

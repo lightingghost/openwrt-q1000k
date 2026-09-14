@@ -53,6 +53,13 @@ int q1000k_gwan_add_tcont(u16 alloc_id);
  */
 int q1000k_gwan_refresh(int (*install)(void *arg), void *arg);
 
+/* Registration owner, after core/session and OMCI retry barriers: discard all
+ * old data/OMCC records and install ONU/keys through the drained callback.
+ * onu_id is 0..1022, or UNASSIGNED to remove the namespace. All queues stay
+ * closed after success; only the registration owner may open OMCC queue zero.
+ */
+int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg);
+
 /* Private record-owner bridge. The nonblocking transaction guard must remain
  * held across snapshot, physical replacement and publication. begin closes
  * data binding snapshots until end; no state lock spans hardware callbacks.

@@ -991,3 +991,16 @@ software-only authentication barriers. The key fixture injects all 27 write
 failures and all nine derivation failures; the record fixture checks refresh
 ordering, service preservation and containment. This is local validation,
 not hardware acceptance or an already connected OMCI session backend.
+
+## Registration namespace owner
+
+The r38 registration entry point replaces the complete ONU/OMCC/data
+namespace under the physical drain coordinator. It accepts ONU IDs 0..1022
+or an explicit unassigned value, clears old OMCC lookup slots, verifies the
+10-bit ONU register and validity flag while preserving unrelated bits, and
+leaves every queue closed until registration explicitly enables OMCC traffic.
+An unchanged OMCC in a data-only transaction retains its distinct RX/TX flags;
+a changed registration publishes the newly programmed record. All 50 host
+fixtures and the AArch64 package build pass, including failure injection at
+every registration replacement step. The PLOAM caller connection follows in
+the OMCI session owner; the helper alone does not establish a usable session.

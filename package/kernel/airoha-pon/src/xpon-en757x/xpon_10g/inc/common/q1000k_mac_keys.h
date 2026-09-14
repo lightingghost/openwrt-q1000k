@@ -24,4 +24,6 @@ int q1000k_mac_keys_install(const struct q1000k_mac_keys *keys);
  * These are observations, not authorization to authenticate with a key.
  */
 int q1000k_mac_key_indices(u8 *ploam, u8 *omci);
+/* ONU register ownership: valid assignment 0..1022; UNASSIGNED removes it. */
+int q1000k_mac_onu_install(u16 onu_id);
 #endif

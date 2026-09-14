@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 typedef uint32_t u32;
+typedef uint16_t u16;
 #define BIT(n) (1U<<(n))
 #define GFP_KERNEL 0
 #define Q1000K_TABLE_INSTALL 2
@@ -64,5 +65,17 @@ int main(void)
         registers[0x5318/4]=(n&1)|((n>>1)<<16);
         assert(!q1000k_mac_key_indices(&pik,&oik) && pik==(n&1) && oik==(n>>1));
     }
+    writes=0; phase=0;
+    assert(q1000k_mac_onu_install(17)==-EPERM && !writes);
+    phase=2;
+    assert(q1000k_mac_onu_install(1023)==-EINVAL && !writes);
+    registers[0x5014/4]=0x55555555;
+    assert(!q1000k_mac_onu_install(0) && registers[0x5014/4]==0x5555d400);
+    assert(!q1000k_mac_onu_install(1022) && registers[0x5014/4]==0x5555d7fe);
+    assert(!q1000k_mac_onu_install(0xffff) && registers[0x5014/4]==0x555557ff);
+    writes=0; fail_write=1;
+    assert(q1000k_mac_onu_install(18)==-EIO && writes==1);
+    fail_write=0; registers[0x5014/4]=~0U; writes=0;
+    assert(q1000k_mac_onu_install(18)==-EIO && !writes);
     return 0;
 }

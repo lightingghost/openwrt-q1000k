@@ -16,6 +16,7 @@ struct q1000k_gwan_transaction {
 	struct airoha_pon_qos qos[Q1000K_GWAN_CHANNELS];
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
+	bool registration;
 	int (*install)(void *arg);
 	void *install_arg;
 };
@@ -48,7 +49,7 @@ static int q1000k_gwan_validate(struct q1000k_gwan_transaction *tx)
 	const struct q1000k_gwan_table *next = &tx->next;
 	unsigned int i, j;
 
-	if (next->alloc_id[0] != tx->old.alloc_id[0])
+	if (!tx->registration && next->alloc_id[0] != tx->old.alloc_id[0])
 		return -EPERM;
 	tx->channels = BIT(0);
 	for (i = 1; i < Q1000K_GWAN_CHANNELS; i++) {
@@ -67,13 +68,13 @@ static int q1000k_gwan_validate(struct q1000k_gwan_transaction *tx)
 		const struct q1000k_gwan_entry *e = &next->gem[i];
 
 		/* Channel zero and its OMCC are owned by registration. */
-		if (tx->old.gem[i].valid && tx->old.gem[i].channel == 0 &&
+		if (!tx->registration && tx->old.gem[i].valid && tx->old.gem[i].channel == 0 &&
 		    !q1000k_gwan_entry_equal(&tx->old.gem[i], e))
 			return -EPERM;
 		if (!e->valid)
 			continue;
 		if (!e->channel) {
-			if (!q1000k_gwan_entry_equal(&tx->old.gem[i], e))
+			if (!tx->registration && !q1000k_gwan_entry_equal(&tx->old.gem[i], e))
 				return -EPERM;
 			if (e->gem != next->alloc_id[0] || e->gem > Q1000K_GEM_ID_MAX ||
 			    e->ani != 0x1ff)
@@ -125,7 +126,7 @@ static int q1000k_gwan_clear(void *arg)
 			.valid = 1, .multicast = e->multicast, .encrypted = e->encrypted,
 		};
 
-		if (!e->valid || !e->channel)
+		if (!e->valid || (!e->channel && !tx->registration))
 			continue;
 		ret = q1000k_gem_replace(e->gem, &expected, &empty);
 		if (ret)
@@ -164,7 +165,7 @@ static int q1000k_gwan_install(void *arg)
 			.valid = 1, .multicast = e->multicast, .encrypted = e->encrypted,
 		};
 
-		if (!e->valid || !e->channel)
+		if (!e->valid || (!e->channel && !tx->registration))
 			continue;
 		ret = q1000k_gem_replace(e->gem, &empty, &value);
 		if (ret)
@@ -179,7 +180,7 @@ static const struct q1000k_pipeline_ops q1000k_gwan_pipeline_ops = {
 };
 
 enum q1000k_gwan_edit { Q1000K_GWAN_APPLY, Q1000K_GWAN_DELETE_GEM,
-	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH };
+	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH, Q1000K_GWAN_REGISTER };
 
 static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			      const struct q1000k_gwan_table *desired,
@@ -205,6 +206,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		ret = -ENOMEM;
 		goto end;
 	}
+	tx->registration = edit == Q1000K_GWAN_REGISTER;
 	tx->install = install;
 	tx->install_arg = install_arg;
 	ret = q1000k_gwan_snapshot(&tx->old);
@@ -218,7 +220,18 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		tx->next = *desired;
 	} else {
 		tx->next = tx->old;
-		if (edit == Q1000K_GWAN_REFRESH) {
+		if (edit == Q1000K_GWAN_REGISTER) {
+			memset(&tx->next, 0, sizeof(tx->next));
+			for (i = 0; i < Q1000K_GWAN_CHANNELS; i++)
+				tx->next.alloc_id[i] = Q1000K_GWAN_UNASSIGNED;
+			if (id != Q1000K_GWAN_UNASSIGNED) {
+				tx->next.alloc_id[0] = id;
+				tx->next.gem[0] = (struct q1000k_gwan_entry) {
+					.valid = true, .gem = id, .alloc_id = id, .ani = 0x1ff,
+				};
+			}
+			found = true;
+		} else if (edit == Q1000K_GWAN_REFRESH) {
 			found = true;
 		} else if (edit == Q1000K_GWAN_ADD_TCONT) {
 			unsigned int channel = 0;
@@ -270,7 +283,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		}
 	}
 	ret = q1000k_gwan_validate(tx);
-	if (ret || (edit != Q1000K_GWAN_REFRESH && q1000k_gwan_table_equal(&tx->old, &tx->next)))
+	if (ret || (edit != Q1000K_GWAN_REFRESH && !tx->registration && q1000k_gwan_table_equal(&tx->old, &tx->next)))
 		goto free;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
 		ret = q1000k_transport_get_queue_close(i, &tx->closed[i]);
@@ -299,7 +312,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		if (!(tx->channels & BIT(i)))
 			continue;
 		/* New/reassigned T-CONTs require explicit provisioning to open. */
-		if (tx->old.alloc_id[i] != tx->next.alloc_id[i])
+		if (tx->registration || tx->old.alloc_id[i] != tx->next.alloc_id[i])
 			continue;
 		ret = q1000k_transport_set_queue_close(i, tx->closed[i]);
 		if (ret)
@@ -356,4 +369,11 @@ int q1000k_gwan_refresh(int (*install)(void *arg), void *arg)
 	if (!install)
 		return -EINVAL;
 	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REFRESH, 0, true, install, arg);
+}
+
+int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg)
+{
+	if ((onu_id >= 1023 && onu_id != Q1000K_GWAN_UNASSIGNED) || !install)
+		return -EINVAL;
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REGISTER, onu_id, true, install, arg);
 }

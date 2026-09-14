@@ -90,8 +90,9 @@ int q1000k_mac_keys_install(const struct q1000k_mac_keys *keys)
 	if (ret)
 		return ret;
 	config = get_xpon_data(QMAC_CAP_SETTING);
-	if (config == ~0U)
-		return -EIO;
+	ret = an7581_xpon_status();
+	if (ret || config == ~0U)
+		return ret ?: -EIO;
 	ret = q1000k_mac_key_write(QMAC_CAP_SETTING, config & ~QMAC_HW_OMCI_MIC);
 	if (!ret)
 		ret = q1000k_mac_key_write(QMAC_PON_TAG0, get_unaligned_be32(keys->pon_tag + 4));
@@ -128,4 +129,25 @@ int q1000k_mac_key_indices(u8 *ploam, u8 *omci)
 	*ploam = !!(value & BIT(0));
 	*omci = !!(value & BIT(16));
 	return 0;
+}
+
+int q1000k_mac_onu_install(u16 onu_id)
+{
+	u32 value;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	if (ret)
+		return ret;
+	if (onu_id >= 1023 && onu_id != 0xffff)
+		return -EINVAL;
+	ret = an7581_xpon_status();
+	if (ret)
+		return ret;
+	value = get_xpon_data(0x5014);
+	ret = an7581_xpon_status();
+	if (ret || value == ~0U)
+		return ret ?: -EIO;
+	value &= ~(BIT(15) | 0x3ff);
+	value |= onu_id == 0xffff ? 0x3ff : BIT(15) | onu_id;
+	return q1000k_mac_key_write(0x5014, value);
 }
