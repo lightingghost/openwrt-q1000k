@@ -1,5 +1,33 @@
 # Q1000K PON integration audit
 
+## Authenticated PLOAM and recovery checkpoint — 2026-09-14
+
+Vendor r51 authenticates every dispatched downstream PLOAM message using
+AES-CMAC over the downstream direction byte and 40 wire bytes, with an
+eight-byte constant-time MIC comparison. The FIFO status word is excluded.
+Reserved destination bits remain authenticated and are masked only for
+dispatch. Broadcasts and directed Deactivate/Request_Registration use the
+default key; other directed messages require the current registered session.
+There is no fallback after a MIC failure. ONU assignment is limited to
+0–1020; 1022 is accepted only for broadcast Burst_Profile messages.
+
+Emergency disable is latched immediately while physical reset remains
+deferred. Re-enable restarts receive-only, and Deactivate cannot clear an
+emergency stop. Late-transmit recovery requests the checked cold reset.
+The dispatcher rejects unintegrated data-key, power-saving, reboot and private
+controls before their legacy handlers. Cached rejection count/last errno are
+available in `/proc/xgpon/status` without exposing keys or packet contents.
+
+All 69 PON host tests and the matching AN7581 vendor build pass. The tests
+include the published G.9807.1 C.IV.8 PLOAM vector, every single-bit corruption,
+wrong-direction/unprefixed MICs, all destination/type values, extracted vendor
+handlers and recovery failures. This verifies software paths, not optical
+interoperability. Data-key exchange and encrypted services remain unfinished.
+No device connection, installation or activation occurred.
+
+Normative reference: [ITU-T G.9807.1](https://www.itu.int/epublications/es/publication/itu-t-g-9807-1-2023-amd-1-2025-05),
+C.11.2, C.15.6, C.15.8 and C.IV.8.
+
 ## Optional supervisor checkpoint — 2026-09-14
 
 Vendor r50 exposes the cached protocol fault through `/proc/xgpon/status`.

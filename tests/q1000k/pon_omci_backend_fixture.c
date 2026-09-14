@@ -78,7 +78,7 @@ typedef struct { u8 msk[16],sk[16],ploamIk[2][16],omciIk[2][16],kek[2][16];
 } GPON_Security_t;
 static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl,usOmciMicCtrl,dsOmciMicCtrl; u32 eqd,eqd_olt_absolute,eqd_olt_init; } gponCfg;
     GPON_Security_t gponSecurity;
-    u8 state, prePloamMsg[52]; int swreplyploam_task, gpon_traffic_status,gemUpAESMode; bool typeBOnGoing;
+    u8 state, prePloamMsg[52]; int swreplyploam_task, gpon_traffic_status,gemUpAESMode; bool typeBOnGoing,emergencyState;
 } vendor,*gpGponPriv=&vendor;
 static struct { int traffic_status_refresh_timer; } phy,*gpPhyData=&phy;
 #define GPON_CURR_STATE (vendor.state)
@@ -225,6 +225,10 @@ int q1000k_auth_omci_mic(struct crypto_lskcipher *tfm,const u8 key[16],const str
 int q1000k_auth_omci_verify(struct crypto_lskcipher *tfm,const u8 key[16],const struct sk_buff *skb) {
     assert(auth_held); return skb->len==48 && skb->data[47]==key[0] ? 0 : -EBADMSG;
 }
+int q1000k_auth_ploam_verify(struct crypto_lskcipher *tfm,const u8 key[16],const u8 *message,size_t length) {
+    assert(owned && tfm && key && message && length==48);
+    return message[47]==key[0] ? 0 : -EBADMSG;
+}
 static void begin(void)
 {
     static struct net_device dev;
@@ -257,10 +261,50 @@ static void operational(void)
 }
 int main(void)
 {
-    startup(); assert(q1000k_omci_assign(17)==-EPERM); profile_and_assign();
+    startup(); assert(q1000k_omci_assign(17)==-EPERM);
+    u8 ploam[48]={3,255}; ploam[47]=0x55;
+    assert(q1000k_omci_ploam_verify(ploam,48)==-EPERM);
+    int verify_owner=q1000k_protocol_enter();
+    assert(!q1000k_omci_ploam_verify(ploam,48)); /* Broadcast before profiles. */
+    assert(q1000k_omci_ploam_verify(ploam,52)==-EMSGSIZE);
+    assert(q1000k_omci_ploam_verify(NULL,48)==-EMSGSIZE);
+    ploam[0]=0; ploam[1]=17;
+    assert(q1000k_omci_ploam_verify(ploam,48)==-ENOKEY);
+    q1000k_protocol_leave(verify_owner);
+    profile_and_assign();
     struct qomci_backend *b=qomci_current;
     assert(!fault && vendor.state==4 && b->onu==17 && hardware_onu==17 && !b->active);
     assert(ack_count==1 && b->keys_valid && !native_epoch && installed_profiles==1 && b->burst_mask==1);
+    verify_owner=q1000k_protocol_enter();
+    assert(q1000k_omci_ploam_verify(ploam,48)==-EBADMSG); /* No default-key fallback. */
+    ploam[47]=b->keys.bank[0].ploam[0];
+    assert(!q1000k_omci_ploam_verify(ploam,48));
+    for(unsigned int type=0;type<256;type++) {
+        ploam[2]=type; ploam[47]=b->keys.bank[0].ploam[0];
+        assert(q1000k_omci_ploam_verify(ploam,48)==((type==5||type==9) ? -EBADMSG : 0));
+        ploam[47]=0x55;
+        assert(q1000k_omci_ploam_verify(ploam,48)==((type==5||type==9) ? 0 : -EBADMSG));
+    }
+    for(unsigned int type=0;type<=1;type++) for(unsigned int id=0;id<65536;id++) {
+        unsigned int dest=id&1023;
+        ploam[0]=id>>8; ploam[1]=id; ploam[2]=type;
+        ploam[47]=0x55;
+        if(dest==1022 && !type) assert(q1000k_omci_ploam_verify(ploam,48)==-EINVAL);
+        else if(dest==1023 || dest==1022) assert(!q1000k_omci_ploam_verify(ploam,48));
+        else if(dest!=17) assert(q1000k_omci_ploam_verify(ploam,48)==-ENOKEY);
+        else {
+            assert(q1000k_omci_ploam_verify(ploam,48)==-EBADMSG);
+            ploam[47]=b->keys.bank[0].ploam[0];
+            assert(!q1000k_omci_ploam_verify(ploam,48));
+        }
+    }
+    b->request.reset=true; ploam[0]=0; ploam[1]=17; ploam[2]=0;
+    assert(q1000k_omci_ploam_verify(ploam,48)==-ENOKEY);
+    bool valid=b->keys_valid; b->keys_valid=false; ploam[47]=0x55;
+    ploam[2]=5; assert(!q1000k_omci_ploam_verify(ploam,48));
+    ploam[2]=9; assert(!q1000k_omci_ploam_verify(ploam,48));
+    b->keys_valid=valid; b->request.reset=false;
+    q1000k_protocol_leave(verify_owner);
     int same_tag_owner=q1000k_protocol_enter();
     u8 other_tag[8]={33};
     assert(!q1000k_omci_burst_profile(&b->burst[0],b->keys.pon_tag,8,true));
@@ -312,7 +356,7 @@ int main(void)
     assert(q1000k_omci_profile(rejected_tag,9,true)==-EAGAIN);
     assert(q1000k_omci_assign(20)==-EAGAIN);
     q1000k_protocol_leave(token); q1000k_omci_control();
-    assert(!fault && cold_count==cold_before+1 && vendor.state==7 && b->omci->state==7 && !b->keys_valid);
+    assert(!fault && cold_count==cold_before+1 && vendor.state==7 && b->omci->state==7 && !b->keys_valid && vendor.emergencyState);
     q1000k_omci_backend_cleanup(); assert(!qomci_current && !live_skb);
     startup(); profile_and_assign(); operational(); b=qomci_current;
     assert(b->active && services_enabled);

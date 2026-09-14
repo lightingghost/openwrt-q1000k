@@ -48,6 +48,41 @@ int main(void)
     struct sk_buff skb={.len=48,.split=48,.head=data,.tail=tail};
     assert(!q1000k_auth_derive(&cipher,auth_msk,auth_serial,auth_pon_tag,&keys));
     assert(!memcmp(&keys,&auth_expected,sizeof(keys)));
+    /* Independent OpenSSL CMAC supplies a downstream PLOAM vector. Mutate
+     * every bit of its body/MIC; no altered message may authenticate.
+     */
+    {
+        /* G.9807.1 C.IV.8 published Assign_Alloc-ID vector. */
+        u8 message[48]={0,0x13,0x0a,3,4,0x45,1}, digest[16], directed[41]={1};
+        const u8 mic[]={0x46,0x39,0x87,0x56,0x28,0x08,0x14,0xe6};
+        memcpy(message+40,mic,8);
+        assert(!q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48));
+        for(unsigned int i=0;i<40;i++) message[i]=(u8)(i*13+7);
+        memcpy(directed+1,message,40);
+        assert(!gpon_aes_cmac_encrypt(&cipher,auth_expected.ploam,directed,41,digest));
+        memcpy(message+40,digest,8);
+        assert(!q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48));
+        for(unsigned int i=0;i<48;i++) for(unsigned int bit=0;bit<8;bit++) {
+            message[i]^=1U<<bit;
+            assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48)==-EBADMSG);
+            message[i]^=1U<<bit;
+        }
+        directed[0]=2;
+        assert(!gpon_aes_cmac_encrypt(&cipher,auth_expected.ploam,directed,41,digest));
+        memcpy(message+40,digest,8);
+        assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48)==-EBADMSG);
+        assert(!gpon_aes_cmac_encrypt(&cipher,auth_expected.ploam,message,40,digest));
+        memcpy(message+40,digest,8);
+        assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48)==-EBADMSG);
+        for(unsigned int n=0;n<=52;n++) if(n!=48)
+            assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,n)==-EMSGSIZE);
+        assert(q1000k_auth_ploam_verify(NULL,auth_expected.ploam,message,48)==-EINVAL);
+        assert(q1000k_auth_ploam_verify(&cipher,NULL,message,48)==-EINVAL);
+        assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,NULL,48)==-EINVAL);
+        crypto_fail=crypto_calls+1;
+        assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48)==-EIO);
+        crypto_fail=0;
+    }
     for(int failure=1;failure<=5;failure++) {
         crypto_calls=0; crypto_fail=failure; memset(&keys,0xa5,sizeof(keys)); before=keys;
         assert(q1000k_auth_registration(&cipher,registration,auth_serial,auth_pon_tag,&keys)==-EIO);

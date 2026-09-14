@@ -40,4 +40,9 @@ int q1000k_auth_omci_mic(struct crypto_lskcipher *tfm, const u8 key[16],
 			u8 mic[4]);
 int q1000k_auth_omci_verify(struct crypto_lskcipher *tfm, const u8 key[16],
 			   const struct sk_buff *skb);
+/* Exactly 40 PLOAM message bytes followed by the 8-byte MIC. Any device
+ * FIFO trailer is outside this authenticated wire message and must be omitted.
+ */
+int q1000k_auth_ploam_verify(struct crypto_lskcipher *tfm, const u8 key[16],
+			    const u8 *message, size_t length);
 #endif

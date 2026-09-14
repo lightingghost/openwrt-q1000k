@@ -138,7 +138,7 @@ int q1000k_mac_onu_install(u16 onu_id)
 
 	if (ret)
 		return ret;
-	if (onu_id >= 1023 && onu_id != 0xffff)
+	if (onu_id > 1020 && onu_id != 0xffff)
 		return -EINVAL;
 	ret = an7581_xpon_status();
 	if (ret)

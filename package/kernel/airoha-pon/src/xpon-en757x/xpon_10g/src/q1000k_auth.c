@@ -64,6 +64,28 @@ int q1000k_auth_registration(struct crypto_lskcipher *tfm,
 	return ret;
 }
 
+int q1000k_auth_ploam_verify(struct crypto_lskcipher *tfm, const u8 key[16],
+			    const u8 *message, size_t length)
+{
+	u8 digest[16] = {}, authenticated[41];
+	int ret;
+
+	if (!tfm || !key || !message)
+		return -EINVAL;
+	if (length != 48)
+		return -EMSGSIZE;
+	/* G.9807.1 C.15.6.2: direction byte followed by all 40 body bytes. */
+	authenticated[0] = 0x01;
+	memcpy(authenticated + 1, message, 40);
+	ret = gpon_aes_cmac_encrypt(tfm, key, authenticated,
+				    sizeof(authenticated), digest);
+	if (!ret && crypto_memneq(digest, message + 40, 8))
+		ret = -EBADMSG;
+	memzero_explicit(digest, sizeof(digest));
+	memzero_explicit(authenticated, sizeof(authenticated));
+	return ret;
+}
+
 int q1000k_auth_omci_mic(struct crypto_lskcipher *tfm, const u8 key[16],
 			const struct sk_buff *skb, bool has_mic, u8 direction,
 			u8 mic[4])

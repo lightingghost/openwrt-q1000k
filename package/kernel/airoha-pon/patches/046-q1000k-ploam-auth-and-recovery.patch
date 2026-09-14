@@ -1,0 +1,230 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: authenticate downstream PLOAM and contain legacy controls
+
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -328,6 +328,11 @@
+ 	gpGponPriv->usPloamCounter[PLOAM_UP_TUNING_RESPONSE] ++;
+ }
+ 
++#ifdef Q1000K_PON_IDENTITY
++u32 q1000k_ploam_rejected;
++int q1000k_ploam_last_error;
++#endif
++
+ int ploam_recv_asb_priv_msg(PLOAM_RAW_General_T *pGenPloamMsg)
+ {	
+ 	unsigned char ploam_msg[XMCS_MAX_BUFFER_LEN] = {0};
+@@ -356,6 +361,56 @@
+ **____________________________________________________________________________*/
+ int ploam_parser_down_message(PLOAM_RAW_General_T *pGenPloamMsg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	PLOAM_RAW_General_T decoded;
++	unsigned int id;
++	int ret;
++
++	if (!q1000k_protocol_owned())
++		return -EPERM;
++	if (!pGenPloamMsg || !gpGponPriv)
++		return -EINVAL;
++	/* Authenticate all 48 wire bytes before any legacy handler, including
++	 * broadcasts. The final FIFO status word is not a MIC substitute.
++	 */
++	ret = q1000k_omci_ploam_verify((const u8 *)pGenPloamMsg, 48);
++	if (ret)
++		goto rejected;
++	id = pGenPloamMsg->raw.msg_id;
++	switch (id) {
++	case PLOAM_DOWN_MSG_PROFILE:
++	case PLOAM_DOWN_MSG_ASSIGN_ONUID:
++	case PLOAM_DOWN_MSG_RANGING_TIME:
++	case PLOAM_DOWN_MSG_DEACTIVATE_ONUID:
++	case PLOAM_DOWN_MSG_DISABLE_SERIAL_NUM:
++	case PLOAM_DOWN_MSG_REQUEST_REGISTRATION:
++	case PLOAM_DOWN_MSG_ASSIGN_ALLOCID:
++		break;
++	default:
++		/* Data-key exchange, remote reboot, private vendor controls,
++		 * power saving and NG-PON2 need their own checked integrations.
++		 */
++		ret = -EOPNOTSUPP;
++		goto rejected;
++	}
++	if (!gpGponPriv->ploamRecvHandler[id]) {
++		ret = -EOPNOTSUPP;
++		goto rejected;
++	}
++	/* Ignore reserved destination bits only after authenticating the wire. */
++	decoded = *pGenPloamMsg;
++	decoded.raw.dest_id[0] &= 0x03;
++	gpGponPriv->dsPloamCounter[id]++;
++	ret = gpGponPriv->ploamRecvHandler[id](&decoded);
++	if (!ret)
++		return 0;
++rejected:
++	q1000k_ploam_rejected++;
++	WRITE_ONCE(q1000k_ploam_last_error, ret);
++	if (ret == -EIO || ret == -ENODEV || ret == -ETIMEDOUT || ret == -EUCLEAN)
++		q1000k_protocol_fail(ret);
++	return ret;
++#else
+ 	int ret = 0 ;
+ 	uint msgId = pGenPloamMsg->raw.msg_id ;
+ 	ploam_recv_handler_t ploam_recv_handler ;
+@@ -379,6 +434,8 @@
+ 	ret = ploam_recv_handler(pGenPloamMsg) ;
+ 
+ 	return ret ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -847,6 +904,20 @@
+ **____________________________________________________________________________*/
+ static int ploam_recv_deactivate_onu(PLOAM_RAW_Deactivate_OnuID_T *pDeactMsg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	u16 dest;
++
++	if (!pDeactMsg)
++		return -EINVAL;
++	if (!q1000k_protocol_owned())
++		return -EPERM;
++	dest = (u16)pDeactMsg->raw.dest_id[0] << 8 | pDeactMsg->raw.dest_id[1];
++	if (dest != GPON_ONU_ID && dest != PLOAM_BROADCAST_ADDR)
++		return -EINVAL;
++	if (GPON_CURR_STATE == GPON_10G_STATE_O7 || gpGponPriv->emergencyState)
++		return 0; /* Deactivate cannot cancel an emergency disable. */
++	return q1000k_omci_reset(false, false);
++#else
+ 	uint msgDestId = 0;
+ 	
+ 	GPON_PLOAM_MSG_RAW(MSG_OAM,"PLOAM: Receive deactivate onu ploam message:", pDeactMsg->value,PLOAM_DOWN_MSG_LENGTH);
+@@ -879,6 +950,8 @@
+         /*Do nothing*/
+ 	}
+ 	return 0 ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -901,6 +974,33 @@
+ **____________________________________________________________________________*/
+ int ploam_recv_disable_serial_number(PLOAM_RAW_Disable_SN_T *pDisSnMsg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	u16 dest;
++	bool disable, specific;
++
++	if (!pDisSnMsg)
++		return -EINVAL;
++	if (!q1000k_protocol_owned())
++		return -EPERM;
++	dest = (u16)pDisSnMsg->raw.dest_id[0] << 8 | pDisSnMsg->raw.dest_id[1];
++	if (dest != PLOAM_BROADCAST_ADDR)
++		return -EINVAL;
++	switch (pDisSnMsg->raw.mode) {
++	case PLOAM_DISABLE_DENIED_ALL: disable = true; specific = false; break;
++	case PLOAM_DISABLE_DENIED_SPECIFIC: disable = true; specific = true; break;
++	case PLAOM_DISABLE_ALLOWED_ALL: disable = false; specific = false; break;
++	case PLAOM_DISABLE_ALLOWED_SPECIFIC: disable = false; specific = true; break;
++	default: return -EOPNOTSUPP; /* Disable_Discovery is not used in XGS-PON. */
++	}
++	if (specific && memcmp(gpGponPriv->gponCfg.sn, pDisSnMsg->raw.sn, 8))
++		return 0;
++	if (!disable && GPON_CURR_STATE != GPON_10G_STATE_O7 && !gpGponPriv->emergencyState)
++		return 0;
++	/* Reset closes TX immediately. Re-enable also restarts receive-only;
++	 * the checked PHY-ready/registration path owns subsequent TX enable.
++	 */
++	return q1000k_omci_reset(disable, false);
++#else
+ 
+ 	uint msgDestId = 0;
+ 	
+@@ -968,6 +1068,8 @@
+         PON_MSG((MSG_OAM), "PLOAM: ignore disable SN ploam in state O:%d \n",GPON_CURR_STATE) ;
+ 	}
+ 	return 0 ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -1135,6 +1237,9 @@
+ **____________________________________________________________________________*/
+ static int ploam_recv_key_control(PLOAM_RAW_Key_Control_T *pKeyControl)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 	uint msgDestId = 0 ;
+ 	
+ 	GPON_PLOAM_MSG_RAW(MSG_OAM,"PLOAM: Receive key control ploam message:", pKeyControl->value,PLOAM_DOWN_MSG_LENGTH);
+@@ -1159,6 +1264,8 @@
+         PON_MSG((MSG_OAM), "PLOAM: ignore key control ploam in state O:%d \n",GPON_CURR_STATE) ;
+ 	}
+ 	return 0 ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -2304,6 +2304,9 @@
+ /******************************************************************************
+ ******************************************************************************/
+ void gponDevUnicastKeyExchange(unsigned long data){
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 
+     unchar dataKey[GPON_DATA_ENCRYPT_KEY_LENS]={0};
+     unchar dataKeyIndex =0;
+@@ -2474,6 +2477,8 @@
+         }
+    
+     }
++
++#endif
+ }
+ /******************************************************************************
+ Descriptor:    get the tx phy ready status
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -906,7 +906,12 @@
+ 			if(intStatus.Bits.tx_err_int) {
+ 				PON_MSG((MSG_INT|MSG_ERR), "XGPON IRQ: tx error interrupt,status:%.8x\n",status.gponTxErrSts.Raw) ;
+ 				if((status.gponTxErrSts.Bits.tx_late_start_err) && (sw_resync_flag)){
++#ifdef Q1000K_PON_IDENTITY
++					/* A late burst must retire the old ranging and namespace. */
++					q1000k_protocol_fail(q1000k_omci_reset(gpGponPriv->emergencyState, false));
++#else
+ 					gponDevSwResyncCompleteProcess();
++#endif
+ 					PON_MSG((MSG_INT|MSG_ERR), "XGPON IRQ: Tx late happen, trigger sw resync\n") ; 			
+ 				}
+ 				gpGponPriv->gponCfg.intErrStatus.gponTxErrSts.Raw |= status.gponTxErrSts.Raw;
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_runtime.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_runtime.c
+@@ -49,6 +49,7 @@
+ #include "gpon/gpon_runtime.h"
+ #ifdef Q1000K_PON_IDENTITY
+ #include "common/q1000k_protocol.h"
++#include "common/q1000k_omci_backend.h"
+ #endif
+ 
+ /* 0: slow mode,  1: fast mode */
+@@ -114,6 +115,8 @@
+ 		   READ_ONCE(omciMicErrSwCnt));
+ #ifdef Q1000K_PON_IDENTITY
+ 	seq_printf(seq, "protocol_error=%d\n", q1000k_protocol_status());
++	seq_printf(seq, "ploam_rejected=%u\nploam_last_error=%d\n",
++		READ_ONCE(q1000k_ploam_rejected), READ_ONCE(q1000k_ploam_last_error));
+ #endif
+ 	return 0;
+ }

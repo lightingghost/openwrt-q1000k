@@ -54,6 +54,46 @@ struct qomci_backend {
 };
 static struct qomci_backend __rcu *qomci_current;
 
+int q1000k_omci_ploam_verify(const u8 *message, size_t length)
+{
+	static const u8 broadcast_key[16] = { [0 ... 15] = 0x55 };
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+	const u8 *key;
+	u16 dest;
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	if (!b || !b->cold_started)
+		return -ENODEV;
+	if (!message || length != 48)
+		return -EMSGSIZE;
+	/* The top six bits are reserved, but remain covered by the MIC. */
+	dest = ((u16)message[0] << 8 | message[1]) & 0x3ff;
+	if (dest == 0x3fe && message[2] != 0x01)
+		return -EINVAL; /* This broadcast address is for Burst_Profile only. */
+	if (dest == 0x3ff || dest == 0x3fe) {
+		key = broadcast_key;
+	} else {
+		if (dest != b->onu || dest > 1020)
+			return -ENOKEY;
+		/* Deactivate and Request_Registration always use the default key,
+		 * even when keys are established or the peers no longer agree.
+		 */
+		if (message[2] == 0x05 || message[2] == 0x09) {
+			key = broadcast_key;
+		} else {
+			if (!b->keys_valid || b->request.reset ||
+			    (GPON_CURR_STATE != GPON_10G_STATE_O4 && GPON_CURR_STATE != GPON_10G_STATE_O5))
+				return -ENOKEY;
+			/* Mutual-authentication rekey is not yet supported. No implicit
+			 * fallback or key selection from the untrusted FIFO trailer.
+			 */
+			key = b->keys.bank[0].ploam;
+		}
+	}
+	return q1000k_auth_ploam_verify(b->cipher, key, message, length);
+}
+
 static void qomci_close(struct qomci_backend *b)
 {
 	spin_lock_bh(&b->auth_lock);
@@ -210,6 +250,10 @@ int q1000k_omci_reset(bool emergency, bool reset_phy)
 	b->request.reset = true;
 	b->request.reset_phy |= reset_phy;
 	b->request.emergency = emergency;
+	/* Latch policy as soon as TX is off, including multiple commands in
+	 * one receive batch. The activation state changes after physical reset.
+	 */
+	gpGponPriv->emergencyState = emergency;
 	b->request.onu = 0xffff;
 	b->request.assign = b->request.profile = false;
 	b->request.acks = 0;
@@ -283,7 +327,7 @@ int q1000k_omci_assign(u16 onu)
 		return -EPERM;
 	if (!b)
 		return -ENODEV;
-	if (onu >= 1023)
+	if (onu > 1020)
 		return -EINVAL;
 	if (b->request.reset)
 		return -EAGAIN;
@@ -496,6 +540,7 @@ static void qomci_reset_legacy(bool emergency)
 	gpGponPriv->gponCfg.usOmciMicCtrl = XGPON_SW;
 	gpGponPriv->gponCfg.dsOmciMicCtrl = XGPON_SW;
 	gpGponPriv->typeBOnGoing = false;
+	gpGponPriv->emergencyState = emergency;
 	gpGponPriv->gpon_traffic_status = TRAFFIC_DOWN;
 	gpGponPriv->gemUpAESMode = UPAES_MODE_NONE;
 	memzero_explicit(security->aesUcKey, sizeof(security->aesUcKey));

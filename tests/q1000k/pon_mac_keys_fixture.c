@@ -68,10 +68,11 @@ int main(void)
     writes=0; phase=0;
     assert(q1000k_mac_onu_install(17)==-EPERM && !writes);
     phase=2;
-    assert(q1000k_mac_onu_install(1023)==-EINVAL && !writes);
+    for(unsigned int id=1021;id<65535;id++)
+        assert(q1000k_mac_onu_install(id)==-EINVAL && !writes);
     registers[0x5014/4]=0x55555555;
     assert(!q1000k_mac_onu_install(0) && registers[0x5014/4]==0x5555d400);
-    assert(!q1000k_mac_onu_install(1022) && registers[0x5014/4]==0x5555d7fe);
+    assert(!q1000k_mac_onu_install(1020) && registers[0x5014/4]==0x5555d7fc);
     assert(!q1000k_mac_onu_install(0xffff) && registers[0x5014/4]==0x555557ff);
     writes=0; fail_write=1;
     assert(q1000k_mac_onu_install(18)==-EIO && writes==1);

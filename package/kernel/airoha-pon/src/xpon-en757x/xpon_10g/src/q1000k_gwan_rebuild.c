@@ -405,7 +405,7 @@ int q1000k_gwan_refresh(int (*install)(void *arg), void *arg)
 
 int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg)
 {
-	if ((onu_id >= 1023 && onu_id != Q1000K_GWAN_UNASSIGNED) || !install)
+	if ((onu_id > 1020 && onu_id != Q1000K_GWAN_UNASSIGNED) || !install)
 		return -EINVAL;
 	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REGISTER, onu_id, true, install, arg, NULL);
 }

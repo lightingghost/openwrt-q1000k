@@ -10,6 +10,13 @@ int q1000k_omci_backend_init(struct net_device *dev);
 int q1000k_omci_cold_start(void);
 /* Deferred cold reset: only protocol owner, no core barrier in this caller. */
 int q1000k_omci_reset(bool emergency, bool reset_phy);
+/* Authenticate a complete downstream wire PLOAM before any handler runs.
+ * Broadcast uses the default integrity key; directed registration/operational
+ * traffic requires the current ONU's installed registration-derived bank.
+ */
+int q1000k_omci_ploam_verify(const u8 *message, size_t length);
+extern u32 q1000k_ploam_rejected;
+extern int q1000k_ploam_last_error;
 /* Protocol stopped and RX admission closed before cleanup. */
 void q1000k_omci_backend_cleanup(void);
 /* These request functions require protocol ownership and copy their inputs. */
