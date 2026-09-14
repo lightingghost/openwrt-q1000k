@@ -525,6 +525,65 @@ int q1000k_omci_core_test(void)
 		CHECK(omci_agent_service_queue_locked(odev, &gem, &queue) == -ENOENT);
 	}
 
+	/* Class 171 stays a complete operation through the real MIB resolver.
+	 * An empty configured table cannot fall back to an unrestricted service.
+	 */
+	{
+		struct omci_mib_object *gem, *iwtp, *vlan, *filter, *tcont;
+		struct omci_mib_object lan = { .entity_id = 0xee0 };
+		struct omci_service_state *state;
+		bool fallback = false;
+		unsigned long index;
+		unsigned int count = 0;
+		u8 raw[16] = { 0xf8, 0, 0, 0, 0xf8, 0, 0, 0, 0, 0x0f, 0, 0, 0, 0, 3, 0xdc };
+
+		xa_init(&desired); array_initialized = true;
+		gem = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 0xee1, true);
+		iwtp = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_GEM_IWTP, 0xee2, true);
+		vlan = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_EXTENDED_VLAN, 0xee3, true);
+		tcont = omci_mib_lookup(&odev->agent, OMCI_CLASS_TCONT, 0x8000);
+		CHECK(gem && iwtp && vlan && tcont);
+		put_unaligned_be16(500, gem->data);
+		put_unaligned_be16(0x8000, gem->data + 2); gem->data[4] = 3;
+		put_unaligned_be16(0, gem->data + 5);
+		put_unaligned_be16(0xee1, iwtp->data);
+		put_unaligned_be16(200, tcont->data);
+		vlan->extended_vlan.valid = true;
+		vlan->extended_vlan.associated_me = lan.entity_id;
+		vlan->extended_vlan.input_tpid = 0x88a8;
+		vlan->extended_vlan.output_tpid = 0x8100;
+		vlan->extended_vlan.rule_count = 0;
+		CHECK(!omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 0, false, false, 0, false, &fallback));
+		CHECK(xa_empty(&desired) && !fallback);
+		vlan->extended_vlan.rule_count = 1;
+		omci_ext_vlan_parse_rule(&vlan->extended_vlan.rules[0], raw);
+		CHECK(!omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 0, false, false, 0, false, &fallback));
+		xa_for_each(&desired, index, state) {
+			CHECK(state->config.vlan_treatment_valid && !state->config.default_service);
+			CHECK(!state->config.vlan_valid && !state->config.pcp_valid);
+			CHECK(state->config.vlan_input_tpid == 0x88a8 && state->config.vlan_output_tpid == 0x8100);
+			CHECK(!memcmp(state->config.vlan_rule.raw, raw, 16));
+			CHECK(state->config.vlan_rule.filter_inner_pbit == 15 && state->config.vlan_rule.treat_inner_vid == 123);
+			count++;
+		}
+		CHECK(count == 1 && !fallback);
+		omci_agent_free_service_array(&desired);
+		filter = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_VLAN_TAGGING_FILTER_DATA, lan.entity_id, true);
+		CHECK(filter);
+		CHECK(omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 0, false, false, 0, false, &fallback) == -EOPNOTSUPP);
+		CHECK(xa_empty(&desired));
+		CHECK(omci_agent_service_vlan_valid(0) && !omci_agent_service_vlan_valid(4095));
+		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_GEM_PORT_CTP, 0xee1)));
+		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_GEM_IWTP, 0xee2)));
+		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_EXTENDED_VLAN, 0xee3)));
+		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_VLAN_TAGGING_FILTER_DATA, lan.entity_id)));
+		put_unaligned_be16(0xffff, tcont->data);
+		xa_destroy(&desired); array_initialized = false;
+	}
+
 	/* Missing provisioning callbacks cannot produce success. */
 	incomplete = fixture_ops;
 	incomplete.set_tcont = NULL;

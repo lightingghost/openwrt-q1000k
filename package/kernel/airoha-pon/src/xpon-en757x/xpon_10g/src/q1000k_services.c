@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* OMCI entities and ANI-side service selection for the native PON datapath. */
+/* OMCI entities and UNI-side service selection for the native PON datapath. */
 #include <linux/errno.h>
 #include <linux/if_vlan.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 #include "common/q1000k_services.h"
+#include "common/q1000k_vlan.h"
 #include "common/q1000k_gwan.h"
 #include "common/q1000k_protocol.h"
 #include "common/q1000k_transport.h"
@@ -14,7 +15,8 @@
 #define QS_TCONTS 31
 #define QS_MAX 256
 struct qs_gem { u16 entity, gem, tcont; u8 direction; bool valid, seeded; };
-struct qs_rules { size_t count; u8 channels[QS_MAX]; struct omci_service_config rule[]; };
+struct qs_rules { size_t count; u8 channels[QS_MAX];
+	struct q1000k_vlan_program vlan[QS_MAX]; struct omci_service_config rule[]; };
 struct qs_scheduler { u8 policy, weight[8]; };
 static u16 qs_alloc[QS_TCONTS];
 static bool qs_seeded_alloc[QS_TCONTS];
@@ -545,9 +547,14 @@ int q1000k_services_replace(struct omci_device *odev,
 		    (s->vlan_valid && s->vlan_id > 4094) || s->direction < 1 || s->direction > 3) {
 			ret = -EINVAL; goto free;
 		}
-		if (s->default_service && (s->vlan_valid || s->pcp_valid)) { ret = -EINVAL; goto free; }
-		if (s->multicast || s->vlan_treatment_valid || s->multicast_ani_valid) {
+		if (s->default_service && (s->vlan_valid || s->pcp_valid || s->vlan_treatment_valid)) { ret = -EINVAL; goto free; }
+		if (s->multicast || s->multicast_ani_valid) {
 			ret = -EOPNOTSUPP; goto free;
+		}
+		if (s->vlan_treatment_valid) {
+			if (s->vlan_valid) { ret = -EINVAL; goto free; }
+			ret = q1000k_vlan_compile(s, &next->vlan[i]);
+			if (ret) goto free;
 		}
 		ret = qs_prepare_service(replacement, s, &next->channels[i]);
 		if (ret)
@@ -560,7 +567,9 @@ int q1000k_services_replace(struct omci_device *odev,
 			 */
 			if (s->cookie == p->cookie ||
 			    (s->default_service && p->default_service) ||
-			    (s->vlan_valid == p->vlan_valid && s->pcp_valid == p->pcp_valid &&
+			    (s->vlan_treatment_valid == p->vlan_treatment_valid &&
+			     (!s->vlan_treatment_valid || !memcmp(s->vlan_rule.raw, p->vlan_rule.raw, 8)) &&
+			     s->vlan_valid == p->vlan_valid && s->pcp_valid == p->pcp_valid &&
 			     (!s->vlan_valid || s->vlan_id == p->vlan_id) &&
 			     (!s->pcp_valid || s->pcp == p->pcp))) {
 				ret = -EEXIST; goto free;
@@ -624,12 +633,72 @@ static int qs_tag(const struct sk_buff *skb, bool *tagged, u16 *vid, u8 *pcp)
 	return 0;
 }
 
+/* Decode the complete L2 header, including an offloaded outer VLAN tag. */
+static int qs_frame(const struct sk_buff *skb, struct q1000k_vlan_frame *frame)
+{
+	u8 bytes[14];
+	unsigned int offset = 14;
+	u16 type;
+
+	memset(frame, 0, sizeof(*frame));
+	if (skb_copy_bits(skb, 0, bytes, 14)) return -EMSGSIZE;
+	type = get_unaligned_be16(bytes + 12);
+	if (skb_vlan_tag_present(skb)) {
+		frame->tag[0].tpid = ntohs(skb->vlan_proto);
+		frame->tag[0].tci = skb_vlan_tag_get(skb);
+		frame->count = 1;
+	}
+	while (type == 0x8100 || type == 0x88a8 || type == 0x9100) {
+		if (frame->count == 2) return -EOPNOTSUPP;
+		if (skb_copy_bits(skb, offset, bytes, 4)) return -EMSGSIZE;
+		frame->tag[frame->count].tpid = type;
+		frame->tag[frame->count++].tci = get_unaligned_be16(bytes);
+		type = get_unaligned_be16(bytes + 2);
+		offset += 4;
+	}
+	frame->ethertype = type;
+	return 0;
+}
+
+static int qs_rewrite(struct sk_buff *skb, const struct q1000k_vlan_frame *input,
+		       const struct q1000k_vlan_frame *output)
+{
+	unsigned int i, inline_tags = input->count - !!skb_vlan_tag_present(skb);
+	u16 ignored;
+	int ret;
+
+	if (skb_shared(skb) || skb_is_gso(skb)) return -EOPNOTSUPP;
+	if (skb_linearize(skb)) return -ENOMEM;
+	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_checksum_help(skb)) return -EINVAL;
+	skb->ip_summed = CHECKSUM_NONE;
+	skb_reset_mac_header(skb);
+	__vlan_hwaccel_clear_tag(skb);
+	for (i = 0; i < inline_tags; i++) {
+		ret = __skb_vlan_pop(skb, &ignored);
+		if (ret) return ret;
+	}
+	for (i = output->count; i; i--) {
+		ret = __vlan_insert_tag(skb, htons(output->tag[i - 1].tpid), output->tag[i - 1].tci);
+		if (ret) return ret;
+	}
+	skb->protocol = htons(output->count ? output->tag[0].tpid : output->ethertype);
+	return 0;
+}
+
+static bool qs_precedes(const struct omci_service_config *s,
+			const struct omci_service_config *selected)
+{
+	return s->vlan_treatment_valid && selected && selected->vlan_treatment_valid &&
+		memcmp(s->vlan_rule.raw, selected->vlan_rule.raw, 8) < 0;
+}
+
 int q1000k_services_tx(struct sk_buff *skb)
 {
 	const struct omci_service_config *selected = NULL;
 	struct qs_rules *rules = rcu_dereference(qs_current);
 	struct q1000k_gwan_binding binding;
-	int score = -1, ret;
+	struct q1000k_vlan_frame input, output, selected_output = {};
+	int score = -1, ret, selected_result = 0;
 	unsigned int bytes;
 	size_t i;
 	u16 vid;
@@ -643,20 +712,38 @@ int q1000k_services_tx(struct sk_buff *skb)
 		return ret;
 	if (!rules)
 		return -ENODATA;
+	ret = qs_frame(skb, &input);
+	if (ret) return ret;
 	for (i = 0; i < rules->count; i++) {
 		const struct omci_service_config *s = &rules->rule[i];
 		int rank = (s->vlan_valid ? 2 : 0) + s->pcp_valid;
 
 		if (!READ_ONCE(qs_uni[qs_uni_index(s->uni_entity_id)]) ||
-		    s->direction == OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI ||
-		    (s->vlan_valid && (!tagged || s->vlan_id != vid)) ||
-		    (s->pcp_valid && (!tagged || s->pcp != pcp)))
+		    s->direction == OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
 			continue;
-		if (s->default_service) rank = 0;
-		if (rank > score) { score = rank; selected = s; }
+		ret = 0;
+		if (s->vlan_treatment_valid) {
+			ret = q1000k_vlan_apply(&rules->vlan[i], true, &input, &output);
+			if (ret && ret != -EPERM) continue;
+			if (!ret && s->pcp_valid && (!output.count ||
+			    s->pcp != output.tag[output.count - 1].tci >> 13)) continue;
+			rank = rules->vlan[i].fallback ? 4 : 8;
+		} else {
+			if ((s->vlan_valid && (!tagged || s->vlan_id != vid)) ||
+			    (s->pcp_valid && (!tagged || s->pcp != pcp))) continue;
+			if (s->default_service) rank = 0;
+		}
+		if (rank > score || (rank == score && qs_precedes(s, selected))) {
+			score = rank; selected = s; selected_result = ret;
+			if (s->vlan_treatment_valid && !ret) selected_output = output;
+		}
 	}
-	if (!selected)
-		return -ENOENT;
+	if (!selected) return -ENOENT;
+	if (selected_result) return selected_result;
+	if (selected->vlan_treatment_valid) {
+		ret = qs_rewrite(skb, &input, &selected_output);
+		if (ret) return ret;
+	}
 	if (skb_shared(skb) || skb_is_gso(skb))
 		return -EOPNOTSUPP;
 	if (skb_linearize(skb))
@@ -693,7 +780,10 @@ int q1000k_services_tx(struct sk_buff *skb)
 int q1000k_services_rx(struct sk_buff *skb, u16 gem)
 {
 	struct qs_rules *rules = rcu_dereference(qs_current);
+	const struct omci_service_config *selected = NULL;
 	struct q1000k_gwan_binding binding;
+	struct q1000k_vlan_frame input, output, selected_output = {};
+	unsigned int bytes = skb->len;
 	size_t i;
 	u16 vid;
 	u8 pcp;
@@ -703,23 +793,35 @@ int q1000k_services_rx(struct sk_buff *skb, u16 gem)
 	if (!READ_ONCE(qs_enabled) || READ_ONCE(qs_changing) || q1000k_protocol_status())
 		return -ENOLINK;
 	ret = qs_tag(skb, &tagged, &vid, &pcp);
-	if (ret)
-		return ret;
+	if (ret) return ret;
+	ret = qs_frame(skb, &input);
+	if (ret) return ret;
 	ret = q1000k_gwan_binding(gem, false, &binding);
-	if (ret)
-		return ret;
+	if (ret) return ret;
 	if (rules)
 		for (i = 0; i < rules->count; i++) {
 			const struct omci_service_config *s = &rules->rule[i];
 
-			if (s->gem_port_id == gem && s->alloc_id == binding.alloc_id &&
-			    s->direction != OMCI_GEM_PORT_DIRECTION_UNI_TO_ANI &&
-			    (!s->vlan_valid || (tagged && vid == s->vlan_id)) &&
-			    (!s->pcp_valid || (tagged && pcp == s->pcp)) &&
-			    READ_ONCE(qs_uni[qs_uni_index(s->uni_entity_id)])) {
-				q1000k_gwan_account(gem, false, skb->len);
-				return 0;
+			if (s->gem_port_id != gem || s->alloc_id != binding.alloc_id ||
+			    s->direction == OMCI_GEM_PORT_DIRECTION_UNI_TO_ANI ||
+			    !READ_ONCE(qs_uni[qs_uni_index(s->uni_entity_id)])) continue;
+			if (s->vlan_treatment_valid) {
+				if (s->pcp_valid && (!input.count ||
+				    s->pcp != input.tag[input.count - 1].tci >> 13)) continue;
+				ret = q1000k_vlan_apply(&rules->vlan[i], false, &input, &output);
+				if (ret) continue;
+			} else if ((s->vlan_valid && (!tagged || vid != s->vlan_id)) ||
+				   (s->pcp_valid && (!tagged || pcp != s->pcp))) continue;
+			if (!selected || qs_precedes(s, selected)) {
+				selected = s;
+				if (s->vlan_treatment_valid) selected_output = output;
 			}
 		}
-	return -ENOENT;
+	if (!selected) return -ENOENT;
+	if (selected->vlan_treatment_valid) {
+		ret = qs_rewrite(skb, &input, &selected_output);
+		if (ret) return ret;
+	}
+	q1000k_gwan_account(gem, false, bytes);
+	return 0;
 }

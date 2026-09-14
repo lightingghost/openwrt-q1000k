@@ -1,5 +1,19 @@
 # Q1000K PON integration audit
 
+## UNI VLAN transformation checkpoint — 2026-09-14
+
+Vendor r52 and OMCI core r8 preserve class 171 filters/treatments and apply
+supported tag operations between UNI-facing `pon0` and the optical GEM.
+VID zero is distinct from an untagged frame. Unsupported and empty configured
+paths cannot become a broad default service. See the [VLAN contract](XGSPON-VLAN.q1000k.md)
+for supported operations and the remaining combined-filter/advanced-mode work.
+
+All 70 PON host tests, the complete OMCI core UML suite and the new real-skb
+VLAN UML test pass. Matching AN7581 core/vendor packages build successfully.
+The packet test covers fragmentation, clones, headroom and offloaded tags;
+the core test verifies the actual MIB resolver. No device was accessed or
+changed. Data encryption and actual OLT service acceptance remain unfinished.
+
 ## Authenticated PLOAM and recovery checkpoint — 2026-09-14
 
 Vendor r51 authenticates every dispatched downstream PLOAM message using

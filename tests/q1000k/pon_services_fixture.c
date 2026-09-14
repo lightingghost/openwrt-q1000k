@@ -12,6 +12,9 @@
 #define kcalloc(n,z,f) calloc(n,z)
 #define struct_size(p,member,n) (sizeof(*(p))+(n)*sizeof((p)->member[0]))
 #define ETH_HLEN 14
+#define htons(x) (x)
+#define ntohs(x) (x)
+#define skb_reset_mac_header(skb) ((void)(skb))
 #define ETH_ZLEN 60
 #define CHECKSUM_NONE 0
 #define CHECKSUM_PARTIAL 1
@@ -45,6 +48,12 @@ static int __vlan_insert_tag(struct sk_buff *skb,u16 protocol,u16 tag) {
     skb->data[12]=protocol>>8; skb->data[13]=protocol; skb->data[14]=tag>>8; skb->data[15]=tag; skb->len+=4; return 0;
 }
 static void __vlan_hwaccel_clear_tag(struct sk_buff *skb) { skb->vlan=false; }
+static int __skb_vlan_pop(struct sk_buff *skb,u16 *tci) {
+    if(skb->len<18) return -EMSGSIZE;
+    *tci=get_unaligned_be16(skb->data+14);
+    memmove(skb->data+12,skb->data+16,skb->len-16); skb->len-=4;
+    skb->protocol=get_unaligned_be16(skb->data+12); return 0;
+}
 /* SERVICES */
 static void make_tag(struct sk_buff *skb,u16 vid,u8 pcp)
 {
@@ -123,6 +132,46 @@ int main(void)
     assert(!q1000k_services_replace(NULL,rules,2));
     make_tag(&skb,1894,5); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==6);
     make_tag(&skb,1894,4); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==3);
+    /* A provisioned UNI rewrite carries DHCP/ARP/IP frames untagged on
+     * pon0 and tagged on the optical GEM; a literal VLAN 0 is distinct.
+     */
+    {
+        struct omci_service_config tag=s;
+        tag.vlan_valid=false; tag.vlan_treatment_valid=true;
+        tag.vlan_input_tpid=tag.vlan_output_tpid=0x8100;
+        tag.vlan_rule=(struct omci_extended_vlan_rule){.filter_outer_pbit=15,
+            .filter_inner_pbit=15,.treat_outer_pbit=15,.treat_inner_pbit=0,
+            .treat_inner_vid=123,.treat_inner_tpid_dei=4,.raw={0xf8,0,0,0,0xf8}};
+        assert(!q1000k_services_replace(NULL,&tag,1));
+        memset(&skb,0,sizeof(skb)); skb.len=60; skb.data[12]=8; skb.data[13]=6;
+        for(unsigned int j=0;j<12;j++) skb.data[j]=j+7;
+        memset(skb.data+14,0x5a,46);
+        assert(!q1000k_services_tx(&skb) && skb.len==64);
+        assert(skb.data[12]==0x81 && skb.data[13]==0 && skb.data[15]==123 && skb.data[17]==6);
+        assert(!q1000k_services_rx(&skb,500) && skb.len==60);
+        assert(skb.data[12]==8 && skb.data[13]==6);
+        for(unsigned int j=0;j<12;j++) assert(skb.data[j]==j+7);
+        for(unsigned int j=14;j<60;j++) assert(skb.data[j]==0x5a);
+        skb.vlan=true; skb.vlan_proto=0x8100; skb.tci=0;
+        assert(q1000k_services_tx(&skb)==-ENOENT);
+        tag.vlan_rule.filter_inner_pbit=8; tag.vlan_rule.filter_inner_vid=0;
+        tag.vlan_rule.tags_to_remove=1; tag.vlan_rule.treat_inner_pbit=8;
+        tag.vlan_rule.raw[4]=0x80;
+        assert(!q1000k_services_replace(NULL,&tag,1));
+        skb.tci=5<<13; assert(!q1000k_services_tx(&skb) && !skb.vlan && skb.len==64);
+        assert(get_unaligned_be16(skb.data+14)==((5<<13)|123));
+        assert(!q1000k_services_rx(&skb,500) && skb.len==64 && get_unaligned_be16(skb.data+14)==(5<<13));
+        int saved_ops=physical_ops;
+        tag.vlan_downstream_mode=2;
+        assert(q1000k_services_replace(NULL,&tag,1)==-EOPNOTSUPP && physical_ops==saved_ops);
+        assert(!q1000k_services_tx(&skb)); /* Prior complete table remains. */
+        tag.vlan_downstream_mode=0; tag.vlan_rule.tags_to_remove=3;
+        assert(!q1000k_services_replace(NULL,&tag,1));
+        make_tag(&skb,0,0); int sent=transmit_count;
+        assert(q1000k_services_tx(&skb)==-EPERM && transmit_count==sent);
+        assert(!q1000k_services_replace(NULL,rules,2));
+        make_tag(&skb,1894,4);
+    }
     int before=physical_ops;
     rules[1].pcp_valid=false;
     assert(q1000k_services_replace(NULL,rules,2)==-EEXIST && physical_ops==before && !qs_changing);

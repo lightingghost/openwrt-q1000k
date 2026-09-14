@@ -248,6 +248,10 @@ struct omci_telemetry {
  * @pcp: IEEE 802.1p priority used for classification and queue selection
  * @queue: hardware upstream queue
  * @direction: enum omci_gem_port_direction
+ * @vlan_rule: complete class 171 rule, with explicit tag presence
+ * @vlan_input_tpid: class 171 input TPID
+ * @vlan_output_tpid: class 171 output TPID
+ * @vlan_downstream_mode: class 171 downstream processing mode
  * @vlan_treatment: raw class 171 treatment words for the backend
  * @multicast_ani_entity_id: Dasan WAN bridge port used as multicast ANI
  * @vlan_valid: @vlan_id participates in classification
@@ -258,6 +262,9 @@ struct omci_telemetry {
  * @default_service: fallback service when no VLAN/PCP rule matches
  */
 struct omci_service_config {
+	struct omci_extended_vlan_rule vlan_rule;
+	u16 vlan_input_tpid, vlan_output_tpid;
+	u8 vlan_downstream_mode;
 	u32 cookie;
 	u16 uni_entity_id;
 	u16 gem_ctp_entity_id;

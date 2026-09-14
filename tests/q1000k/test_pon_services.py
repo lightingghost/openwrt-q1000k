@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import unittest
 from pon_test_utils import run_c
+from test_pon_vlan import vlan_types, vlan_source
 from test_pon_gem import MAC, binding_source
 ROOT=Path(__file__).resolve().parents[2]
 class ServiceTests(unittest.TestCase):
@@ -15,8 +16,8 @@ class ServiceTests(unittest.TestCase):
         base=base.replace('assert(physical_phase==2 && !memcmp(qos,&qos_model[ch],sizeof(*qos))); return physical_step();',
                           'assert(physical_phase==2); int ret=physical_step(); if(!ret) qos_model[ch]=*qos; return ret;')
         header=(ROOT/'package/kernel/q1000k-omci/src/include/net/xpon/omci.h').read_text()
-        types='struct omci_device;\n'
-        for name in ['omci_service_config','omci_ani_topology','omci_priority_queue_config','omci_traffic_scheduler_config']:
+        types='struct omci_device;\n'+vlan_types()+vlan_source()
+        for name in ['omci_ani_topology','omci_priority_queue_config','omci_traffic_scheduler_config']:
             types+=re.search(r'struct '+name+r' \{.*?\n\};',header,re.S).group(0)+'\n'
         code=(MAC/'src/q1000k_services.c').read_text()
         code=re.sub(r'^#include[^\n]*\n','',code,flags=re.M)

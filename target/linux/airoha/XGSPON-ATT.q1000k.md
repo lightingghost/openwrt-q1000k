@@ -30,8 +30,10 @@ identity and VLAN values explicit; do not copy an example subscriber's serial,
 equipment ID or credentials. Q1000K factory identity is not proof of AT&T
 authorization. The supervisor currently does not create a WAN interface.
 
-The current service classifier exposes network-side frames on `pon0`; it does
-not yet implement the customer-side class 171 transformations needed to make
-the default router WAN untagged. Completing that translation, data encryption
-and OLT interoperability is required before DHCP can establish Internet access.
+Vendor r52 and core r8 apply supported class 171 transformations with `pon0`
+facing the UNI/customer side. An OLT-provisioned untagged-to-tagged rule can
+therefore present an untagged DHCP WAN without a hard-coded optical VLAN.
+This is tested locally, not against AT&T. Combined class 84/171 pipelines,
+data encryption and actual OLT interoperability still need completion before
+DHCP can establish Internet access. See the [VLAN contract](XGSPON-VLAN.q1000k.md).
 The device remains restricted to read-only access, with no firmware flashing.

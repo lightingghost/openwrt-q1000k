@@ -1,0 +1,30 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef Q1000K_VLAN_H
+#define Q1000K_VLAN_H
+#include <linux/types.h>
+struct omci_service_config;
+/* Host-endian tag words, ordered outermost first. */
+struct q1000k_vlan_tag { u16 tpid, tci; };
+struct q1000k_vlan_frame {
+	struct q1000k_vlan_tag tag[2];
+	u16 ethertype;
+	u8 count;
+};
+struct q1000k_vlan_match { u16 value[2], mask[2]; };
+struct q1000k_vlan_expr { u16 value[2], copy[2][2]; };
+struct q1000k_vlan_direction {
+	struct q1000k_vlan_match match[2];
+	struct q1000k_vlan_expr output[2];
+	u8 input_count, output_count;
+};
+struct q1000k_vlan_program {
+	struct q1000k_vlan_direction up, down;
+	u8 ethertype;
+	bool drop, fallback, downstream_passthrough;
+};
+int q1000k_vlan_compile(const struct omci_service_config *service,
+			struct q1000k_vlan_program *program);
+int q1000k_vlan_apply(const struct q1000k_vlan_program *program, bool upstream,
+		      const struct q1000k_vlan_frame *input,
+		      struct q1000k_vlan_frame *output);
+#endif

@@ -13,8 +13,10 @@ claim functioning optical service.
 Implementation has started. See the [current implementation checkpoint](XGSPON-STATUS.q1000k.md)
 for the completed imports, factory/RPC/LuCI foundation, confirmed controller
 selection/power mapping and verified XGS-PON MD32 bring-up. The standalone
-controller and pinctrl/DT changes are implemented; full-image cold boot,
-remaining analog/PHY work, MAC/QDMA and OMCI are still pending. The numbered steps
+controller, native FE/QDMA drain, cold MAC/PHY orchestration, ranging,
+authenticated OMCI/PLOAM, baseline unicast/QoS, userspace supervisor and class 171
+VLAN transformations are implemented locally. Data encryption, combined VLAN
+pipelines, advanced services and hardware acceptance remain pending. The numbered steps
 below remain the full acceptance plan; they are not all complete.
 
 The current continuation is restricted to **read-only device access and no
@@ -272,9 +274,12 @@ implemented and historically bench-tested. The BSP/PHY/MAC package now
 builds without suppressed or unresolved symbols. The MAC uses validated
 identity parameters and rejects absent runtime providers; unrelated OEM
 debug and EPON interfaces are omitted or explicitly unsupported.
-The remaining dependencies are production-DT/cold-boot validation, complete
-analog/PHY startup, shared-resource/QDMA integration and OMCI service support.
-Keep `pon_pcs` and `gdm2` disabled until those runtime dependencies are resolved.
+The remaining dependencies are data-key/encrypted-service support, combined
+VLAN pipelines and advanced provisioning, the remaining analog/PHY audit and
+hardware acceptance of production DT, cold boot, registration and traffic.
+Keep `pon_pcs` and `gdm2` disabled until their runtime dependencies are resolved.
+The [AT&T notes](XGSPON-ATT.q1000k.md) record DHCP and the requirement to derive
+optical VLAN handling from the actual OLT provisioning.
 
 Evidence available locally: [PON data inventory](../../../../http-uboot-q1000k/doc/board/airoha/q1000k-pon-data.md),
 [current Q1000K DTS](dts/an7581-q1000k.dts),

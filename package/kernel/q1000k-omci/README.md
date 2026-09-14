@@ -53,6 +53,12 @@ be used as evidence that PON service is ready.
   The core preallocates the software snapshot before calling the backend and
   publishes it without allocating after success. Legacy per-rule callbacks
   are retained in the imported structure but are not used for Q1000K commits.
+- Class 171 service records carry the complete filter/treatment, input/output
+  TPIDs and downstream mode. The provider must validate the whole operation;
+  `pon0` now represents the customer/UNI side. Missing/unsupported rules cannot
+  fall back to a broad classifier. An empty configured table installs no
+  service. Combined class 84/171 paths are rejected until both filter stages
+  are represented. See the [VLAN contract](../../../target/linux/airoha/XGSPON-VLAN.q1000k.md).
 - Failed service removal preserves the previous records and aborts MIB reset.
   Session-transition removal failure latches an error rather than reopening
   admission with unaccounted hardware state. Provider teardown remains

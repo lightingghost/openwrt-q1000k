@@ -1,26 +1,32 @@
 # Q1000K XGS-PON implementation checkpoint
 
-2026-09-13, branch `q1000k-xgspon`, based on `q1000k-dev` at
-`c526db0e25fa159ca79b60125741afd4e08440c9` after the support/profile rebase.
+2026-09-14, branch `q1000k-xgspon`, based on `q1000k-dev` at
+`c526db0e25fa159ca79b60125741afd4e08440c9`.
 
-**Both controller paths detect and XGS-PON MD32 bring-up works; optical
-service does not.** The new `kmod-q1000k-pon-control`, factory backend and
-adapted LuCI app build for AN7581. With the fiber disconnected, live tests
-confirmed the GPIO mapping, both family IDs, exact OEM firmware loading,
-complete PM/DM/calibration readback, MCU enable and asserted TX-disable.
-The new controller module was loaded only from RAM for testing, then
-powered off and removed; the temporary harness restored GPIO/mux state.
-No firmware image was flashed or package persistently installed. The
-vendor packet adapter now builds and passes host/UML lifetime tests. Native
-FE/QoS, physical shutdown, owned PHY resources, a namespace transaction
-coordinator, and OMCI authentication barriers are implemented locally. The owned MAC IRQ and resumable protocol executor are also implemented. Authenticated OMCI RX/TX, ordered key/ONU/OMCC publication and a baseline unicast service backend are now connected locally. Strict-priority and WRR managed-entity controls are connected to verified drained QoS updates. Profile-seeded unicast services and PLOAM allocation reconciliation are also connected. The q1000k-omci userspace command and read-only LuCI status/MIB integration are implemented and tested against the kernel core in UML. Cold startup/reset and advanced service paths remain unfinished.
-BSP, PHY and MAC compile and pass modpost, and the
-experimental vendor package builds with no unresolved symbols.
+**Local integration is progressing; working optical service has not been
+ demonstrated.** Vendor r52 and OMCI core r8 implement the native packet path,
+physical drain and namespace replacement, checked cold startup/reset, burst
+profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
+SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
+`q1000k-omci` userspace command and read-only LuCI status/MIB are implemented.
+Data-key/encrypted-service support, combined VLAN filter pipelines and the
+remaining advanced service paths are still incomplete.
 
-**Current device restriction: read-only access, never flash firmware.**
-The initialization results below are historical, from before this restriction.
-The resource integration continuation used cached inventories and local builds
-only; it made no device connection or change.
+**Device access is read-only; never flash firmware.** No device access or
+activation occurred during this continuation. The controller bring-up tests
+below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
+and calibration read back correctly, and TX-disable remained asserted. Those
+historical RAM tests do not verify the current MAC/PHY/OMCI integration.
+
+The current local evidence is 70 passing PON host tests, the complete OMCI
+core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
+package builds. Earlier checkpoints contain the native drain, protocol,
+cryptography and PHY concurrency results. Hardware cold boot, OLT registration,
+optical traffic and recovery remain acceptance gates. PON board nodes remain
+disabled and the experimental packages remain optional/BROKEN.
+
+See [integration details](XGSPON-INTEGRATION.q1000k.md),
+[VLAN contract](XGSPON-VLAN.q1000k.md) and [AT&T research](XGSPON-ATT.q1000k.md).
 
 ## Imported references
 
@@ -38,22 +44,22 @@ OMCI daemon and unrelated PR changes were not imported.
 
 ## Dependency matrix
 
-| Component | Evidence and current state | Required next work |
+| Component | Implemented and locally verified | Remaining acceptance or work |
 | --- | --- | --- |
-| Hardware | AN7581SIT and two EN7573AN. Linux identifies `quantum,q1000k-ubi`. GPON/XGS-PON selector and enable wiring confirmed by independent power tests. | Verify remaining analog/SoC PHY signals and cold-boot behavior. |
-| Factory identity/calibration | Read-only C reader finds the unique `factory` volume by name under the `ubi` MTD parent. Live serial, WAN MAC and all 513 calibration bytes match the original NAND backup. | Retain this data path for the loader; verify cold-boot and upgrade preservation when images are tested. |
-| Original DSD fallback | Offline `--dsd-file` input is implemented and tested. Automatic raw MTD fallback is excluded. | Establish the logical NAND/BBT/BMT view before adding direct DSD fallback on older installations. |
-| Optical GPIOs and I2C | Force-GPIO mux plus active-low enables resolve ENXIO. Both paths return `0x1388`; power-off tests distinguish ownership. DT GPIO descriptors and pinctrl fixes added. | Boot-test the compiled production DT and pinctrl changes. GPON LOS is still based on OEM mapping. |
-| MD32 firmware | Exact OEM pair passes size/SHA-256 checks and full hardware memory readback, including zero padding. | Retain local extraction; no firmware redistribution is included. |
-| EN7573 loader | New standalone GPL controller package uses Linux I2C/GPIO APIs. PM/DM and this unit's calibration verify before MCU enable; TX-disable remains asserted in live samples. | Cold boot, analog tuning/alarm behavior and long-running firmware health. The proprietary reference loader was not imported or linked. |
-| BSP/PHY modules | Exclusive resets, mapped optical resources, pinctrl/PBUS profile, controller lease, checked TX-disable and callback drains are implemented and build for AN7581. | Connect complete MAC startup and registration; hardware PHY/analog acceptance remains outstanding. |
-| PON MAC | Physical shutdown and clear/install/reactivation coordinator have ordered failure fixtures. Owned IRQ, queued PHY events, timers and tasks share a resumable process executor; MMIO, stops and exclusive reset belong to the PON provider. | The public T-CONT creation and data GEM/T-CONT removal paths use physical record replacement. Finish legacy reset/ONU transactions and OMCI ownership. |
-| Native packet transport | Raw RX/TX, bounded retries, per-channel QoS, global units/frame limits, FE retirement, physical RX drain and checked generation replacement are implemented. Authenticated OMCI retries retain their epoch. | Connect provisioning/startup callers; verify descriptors and physical timing on hardware. The board node remains disabled. |
-| T-CONTs | Serialized verified commands and duplicate checks; only a physical clear callback may release quarantine, and installation can select an explicit data channel. | Complete replacement is bound to software records and actual creation/removal callers. Finish OMCI entities and separate ONU-ID/OMCC assignment. |
-| GEM bindings | Verified commands, shared binding snapshots, containment and a guarded complete cold-start clear are implemented. | Physical replacement is bound to records and actual removal callers. Finish encrypted activation, multicast receive ownership, ONU/OMCC identity and recovery. |
-| OMCI | Generic kernel core, full 36-byte registration identity, software key/MIC helpers, explicit authentication epochs and core/MAC retry barriers build and pass local tests. | Connect MAC key/session publication, actual RX/TX backend and provisioning callbacks; then the launcher and LuCI state. See the [integration audit](XGSPON-INTEGRATION.q1000k.md). |
-| LuCI/RPC | Driver detection, initialization, MCU enable, TX-disable and LOS feed the backend and status view. Unknown values remain null; failed polling clears old data. | Browser QA after installation; add MAC/OMCI status when implemented. |
-| Experimental builds | Optional configuration selects the standalone controller module without autoload. Normal builder remains on `q1000k-dev`. | Full image boot and complete PON service integration. |
+| Board/controller | AN7581SIT, two EN7573AN; exclusive resources, checked controller lease/TX state, factory identity and calibration, SHA-checked OEM firmware | Production DT/pinctrl cold boot, analog tuning/alarm behavior, long-running firmware health |
+| Factory data | Named UBI factory reader and offline DSD fallback; no automatic raw MTD fallback | Establish logical NAND/BBT view before supporting direct legacy DSD reads |
+| Native packet transport | Native FE/QDMA ownership, TX/RX retirement, bounded retries, epochs, verified queue closure | Hardware descriptor, timing and loaded traffic validation |
+| PHY/MAC lifecycle | Owned IRQ/protocol executor, physical clear/install/reactivation, cold receive-only startup, reset, full burst profiles and checked ranging | Hardware synchronization, burst timing, full analog/PHY audit and interoperability |
+| GEM/T-CONT | Full namespace replacement, quarantined failures, PLOAM allocation reconciliation, separate ONU/OMCC publication | Encrypted GEM activation, multicast channel ownership and hardware validation |
+| FE/QoS | Checked native frame/queue controls, SP and WRR managed entities, drained scheduler replacement | Advanced shaping/backpressure and hardware throughput tests |
+| Authentication | 36-byte registration derivation, software OMCI/PLOAM MICs, key/epoch barriers, recovery containment | Unicast data-key exchange, encrypted service and secure mutual-authentication rekey |
+| OMCI services | Generic core, topology, unicast GEM/bridge/mapper provisioning, class 171 tag processing on UNI-facing pon0 | Combined class 84/171 pipeline, advanced VLAN modes, multicast and actual OLT identity/MIB compatibility |
+| Userspace/LuCI | q1000k-omci status/MIB/get/set; read-only LuCI; optional explicit supervisor with owned teardown | Browser QA on an installed image, final netifd/firewall integration and hardware lifecycle acceptance |
+| AT&T WAN | DHCP identified; optical VLAN must come from provisioning, with local tag handling defined by OMCI | Actual gateway/line identity, OLT provisioning, successful DHCP and IPv4/IPv6 tests |
+| Builds | Matching experimental modules/packages; normal builder remains on q1000k-dev | Experimental image boot/recovery acceptance; never flash under the present restriction |
+
+The following entries are historical checkpoints. Their outstanding-work lists
+describe their original dates; use the matrix above for the current state.
 
 The 2026-09-13 continuation adds exclusive native QDMA1 queue configuration,
 verified queue-close writes and packet admission epochs. The adapter rejects
