@@ -1,0 +1,46 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: reconcile OMCI services after PLOAM allocation changes
+
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -737,21 +737,31 @@
+ int gponDevAssignNewAllocId(unsigned long data){
+ #ifdef Q1000K_PON_IDENTITY
+ 	AllocId_Config_t *cfg = (void *)data;
+-	int ret;
+-
+-	/* Validate the full-width request before converting to a register ID. */
+-	if (!cfg || cfg->allocId > Q1000K_ALLOC_ID_MAX)
++	int ret, token;
++
++	if (!cfg || cfg->allocId > Q1000K_ALLOC_ID_MAX ||
++	    (cfg->allocIdType != PLOAM_ALLOC_ID_ASSIGN && cfg->allocIdType != PLOAM_ALLOC_ID_DEALLOCATE))
+ 		return -EINVAL;
++	token = q1000k_protocol_enter();
++	if (token < 0)
++		return token;
+ 	if (cfg->allocIdType == PLOAM_ALLOC_ID_ASSIGN) {
+ 		ret = gwan_create_new_tcont(cfg->allocId);
++		/* Duplicate PLOAM assignments acknowledge the existing namespace. */
++		if (ret == -EEXIST)
++			ret = 0;
+ 		if (!ret)
+ 			xmcs_report_event(XMCS_EVENT_TYPE_GPON,
+ 				XMCS_EVENT_GPON_TCONT_ALLOCED, cfg->allocId);
+-		return ret;
+-	}
+-	if (cfg->allocIdType == PLOAM_ALLOC_ID_DEALLOCATE)
+-		return gwan_remove_tcont(cfg->allocId);
+-	return -EINVAL;
++	} else {
++		ret = gwan_remove_tcont(cfg->allocId);
++		if (ret == -ENOENT)
++			ret = 0;
++	}
++	if (!ret)
++		ret = q1000k_omci_alloc_changed();
++	q1000k_protocol_leave(token);
++	return ret;
+ #else
+ 
+ 	AllocId_Config_t * gponConfig = (AllocId_Config_t *)data ;

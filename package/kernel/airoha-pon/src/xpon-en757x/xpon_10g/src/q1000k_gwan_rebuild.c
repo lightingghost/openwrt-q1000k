@@ -283,7 +283,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 		}
 	}
 	ret = q1000k_gwan_validate(tx);
-	if (ret || (edit != Q1000K_GWAN_REFRESH && !tx->registration && q1000k_gwan_table_equal(&tx->old, &tx->next)))
+	if (ret || (!install && !tx->registration && q1000k_gwan_table_equal(&tx->old, &tx->next)))
 		goto free;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
 		ret = q1000k_transport_get_queue_close(i, &tx->closed[i]);
@@ -342,6 +342,15 @@ int q1000k_gwan_apply(const struct q1000k_gwan_table *expected,
 	if (!expected || !desired)
 		return -EINVAL;
 	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, NULL, NULL);
+}
+
+int q1000k_gwan_apply_install(const struct q1000k_gwan_table *expected,
+			    const struct q1000k_gwan_table *desired,
+			    int (*install)(void *), void *arg)
+{
+	if (!expected || !desired || !install)
+		return -EINVAL;
+	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, install, arg);
 }
 
 int q1000k_gwan_delete_gem(u16 gem, bool all)

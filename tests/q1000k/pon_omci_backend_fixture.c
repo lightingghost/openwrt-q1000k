@@ -66,6 +66,7 @@ static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl; } gponCfg
 } vendor,*gpGponPriv=&vendor;
 #define GPON_CURR_STATE (vendor.state)
 static int owned, auth_held, fault, calls, fail_at, native_count, core_count, rejected_count;
+static int reconciles, reconcile_error;
 static int ack_count, resets, service_resets, live_skb, native_error, derivations;
 static int request_during_barrier, assign_count, refresh_count;
 static bool services_enabled, install_phase;
@@ -138,6 +139,7 @@ static int omci_device_reset_registration(struct omci_device *o) {
 }
 static void omci_device_set_onu_id(struct omci_device *o,u16 onu) { assert(!owned); o->onu=onu; }
 static void omci_device_set_channel(struct omci_device *o,u16 gem,bool up) { assert(!owned); o->gem=gem; o->channel=up; }
+static int omci_device_reconcile_services(struct omci_device *o) { assert(!owned); reconciles++; return reconcile_error; }
 static void omci_device_set_state(struct omci_device *o,u8 state) { assert(!owned); }
 static struct sk_buff *packet(unsigned int n) { struct sk_buff *p=calloc(1,sizeof(*p)); assert(p); p->len=n; live_skb++; return p; }
 static void dev_kfree_skb_any(struct sk_buff *skb) { assert(live_skb>0); live_skb--; free(skb); }
@@ -199,6 +201,14 @@ int main(void)
     assert(!fault && vendor.state==4 && b->onu==17 && hardware_onu==17 && !b->active);
     assert(ack_count==1 && b->keys_valid && !native_epoch);
     operational(); assert(!fault && b->active && services_enabled && b->omci->epoch==b->published && native_epoch==b->published);
+    int before_reconcile=reconciles;
+    int owner=q1000k_protocol_enter(); assert(!q1000k_omci_alloc_changed()); q1000k_protocol_leave(owner);
+    q1000k_omci_control(); assert(reconciles==before_reconcile+1 && b->active && services_enabled);
+    reconcile_error=-EOPNOTSUPP;
+    owner=q1000k_protocol_enter(); assert(!q1000k_omci_alloc_changed()); q1000k_protocol_leave(owner);
+    q1000k_omci_control(); assert(b->active && b->service_error==-EOPNOTSUPP && !fault);
+    reconcile_error=0;
+
     struct sk_buff *p=packet(48); p->data[47]=0x31; q1000k_omci_receive(p,17,false);
     assert(core_count==1 && !live_skb);
     p=packet(48); p->data[47]=0x30; q1000k_omci_receive(p,17,false); assert(core_count==1 && !live_skb);

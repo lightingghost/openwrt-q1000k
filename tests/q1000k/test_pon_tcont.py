@@ -41,7 +41,11 @@ typedef uint16_t ushort;
 typedef unsigned int uint;
 typedef struct { unsigned int allocId; unsigned char allocIdType; } AllocId_Config_t;
 struct XMCS_TcontCfg_S { u16 allocId; };
-static int result, creates, deletes, events;
+static int result, creates, deletes, events, notify_count, notify_error;
+static bool owned;
+static int q1000k_protocol_enter(void) { assert(!owned); owned=true; return 0; }
+static void q1000k_protocol_leave(int token) { assert(!token && owned); owned=false; }
+static int q1000k_omci_alloc_changed(void) { assert(owned); notify_count++; return notify_error; }
 static int gwan_create_new_tcont(u16 id) { assert(id==200); creates++; return result; }
 static int gwan_remove_tcont(u16 id) { assert(id==200); deletes++; return result; }
 static void xmcs_report_event(unsigned int type,unsigned int event,unsigned int id) {
@@ -63,7 +67,13 @@ int main(void) {
     }
     result=0; config.allocIdType=PLOAM_ALLOC_ID_ASSIGN;
     assert(!gponDevAssignNewAllocId((unsigned long)&config) && events==1);
-    assert(creates==13 && deletes==12);
+    assert(creates==13 && deletes==12 && notify_count==1 && !owned);
+    result=-EEXIST;
+    assert(!gponDevAssignNewAllocId((unsigned long)&config) && notify_count==2);
+    result=-ENOENT; config.allocIdType=PLOAM_ALLOC_ID_DEALLOCATE;
+    assert(!gponDevAssignNewAllocId((unsigned long)&config) && notify_count==3);
+    result=0; notify_error=-ENOSPC;
+    assert(gponDevAssignNewAllocId((unsigned long)&config)==-ENOSPC && !owned);
     return 0;
 }
 ''')

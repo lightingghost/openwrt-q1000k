@@ -44,6 +44,12 @@ struct q1000k_gwan_table {
 int q1000k_gwan_snapshot(struct q1000k_gwan_table *table);
 int q1000k_gwan_apply(const struct q1000k_gwan_table *expected,
 		      const struct q1000k_gwan_table *desired);
+/* Apply a complete record candidate and its QoS in the same drain. Even an
+ * identical record set executes install, before any packet producer resumes.
+ */
+int q1000k_gwan_apply_install(const struct q1000k_gwan_table *expected,
+			    const struct q1000k_gwan_table *desired,
+			    int (*install)(void *), void *arg);
 int q1000k_gwan_delete_gem(u16 gem, bool all);
 int q1000k_gwan_delete_tcont(u16 alloc_id, bool all);
 int q1000k_gwan_add_tcont(u16 alloc_id);

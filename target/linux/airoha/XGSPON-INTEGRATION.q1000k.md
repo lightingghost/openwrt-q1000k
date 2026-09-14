@@ -1073,3 +1073,31 @@ modeled physical failure. All 52 host tests, the full OMCI UML suite, and the
 AArch64 MAC/core builds pass. No device access occurred. Startup/reset, PHY
 ready/loss callers, profile-seeded services and advanced data service support
 remain the next integration work; optical service is not established.
+
+## Profile-seeded services and PLOAM reconciliation
+
+MAC r41 and core r5 install normalized profile-created GEM/T-CONT intent,
+including profiles that seed their MIB without explicit OMCI Create requests.
+The replacement candidate includes records, entity mappings, classifier rules
+and channel QoS; its installation runs inside one physical drain. Missing
+PLOAM allocation produces a dormant GEM mapping with no open data queue.
+A later Alloc-ID assignment schedules ordered core reconciliation, resolves
+the actual channel and installs its scheduler before queue admission. Removal
+and reassignment cannot retain an open old channel. Explicit OMCI-created
+GEMs retain their independent Create/Delete lifetime; profile-owned records
+follow the complete service set.
+
+A GEM's explicit upstream Priority Queue pointer now overrides PCP fallback
+and must identify a queue on its T-CONT. Nonfatal preparation errors do not
+permanently poison core service state; uncertain physical replacement still
+returns EUCLEAN and contains the port. PLOAM allocation callers propagate
+notification failures and handle duplicate assignment/deallocation requests
+without repeating an invalid namespace change.
+
+All 52 host tests pass, including seeded/dormant services, actual reassigned
+channels, profile deletion, conflicting entities, error forwarding and ordered
+backend reconciliation. The full core UML suite and AArch64 core/MAC package
+builds also pass. No device access occurred. The next work includes the
+userspace q1000k-omci command requested by the user, complete startup/reset and
+PHY-ready/loss integration. Advanced encryption and multicast remain separate
+from this unicast path.

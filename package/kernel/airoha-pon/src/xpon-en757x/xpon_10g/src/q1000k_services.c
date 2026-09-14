@@ -13,10 +13,11 @@
 #define QS_TCONT_BASE 0x8000
 #define QS_TCONTS 31
 #define QS_MAX 256
-struct qs_gem { u16 entity, gem, tcont; u8 direction; bool valid; };
+struct qs_gem { u16 entity, gem, tcont; u8 direction; bool valid, seeded; };
 struct qs_rules { size_t count; u8 channels[QS_MAX]; struct omci_service_config rule[]; };
 struct qs_scheduler { u8 policy, weight[8]; };
 static u16 qs_alloc[QS_TCONTS];
+static bool qs_seeded_alloc[QS_TCONTS];
 static struct qs_scheduler qs_schedulers[QS_TCONTS];
 static struct qs_gem qs_gems[QS_MAX];
 static bool qs_uni[4];
@@ -36,6 +37,7 @@ static int qs_uni_index(u16 entity)
 void q1000k_services_init(void)
 {
 	memset(qs_alloc, 0xff, sizeof(qs_alloc));
+	memset(qs_seeded_alloc, 0, sizeof(qs_seeded_alloc));
 	memset(qs_schedulers, 1, sizeof(qs_schedulers));
 	memset(qs_gems, 0, sizeof(qs_gems));
 	memset(qs_uni, 1, sizeof(qs_uni));
@@ -68,6 +70,7 @@ void q1000k_services_reset(void)
 	synchronize_rcu();
 	kfree(old);
 	memset(qs_alloc, 0xff, sizeof(qs_alloc));
+	memset(qs_seeded_alloc, 0, sizeof(qs_seeded_alloc));
 	memset(qs_schedulers, 1, sizeof(qs_schedulers));
 	memset(qs_gems, 0, sizeof(qs_gems));
 	memset(qs_uni, 1, sizeof(qs_uni));
@@ -125,8 +128,10 @@ int q1000k_services_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool 
 	if (token < 0)
 		return token;
 	ret = 0;
-	if (qs_alloc[index] == alloc)
+	if (qs_alloc[index] == alloc) {
+		qs_seeded_alloc[index] = false;
 		goto leave;
+	}
 	for (i = 0; i < QS_TCONTS; i++)
 		if (i != index && alloc != 0xffff && qs_alloc[i] == alloc) {
 			ret = -EEXIST;
@@ -152,8 +157,10 @@ int q1000k_services_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool 
 	was_changing = READ_ONCE(qs_changing);
 	WRITE_ONCE(qs_changing, true);
 	ret = q1000k_gwan_apply(&tables[0], &tables[1]);
-	if (!ret)
+	if (!ret) {
 		qs_alloc[index] = alloc;
+		qs_seeded_alloc[index] = false;
+	}
 	/* The core reconciles the resulting complete service set next. */
 	if (ret && ret != -EUCLEAN)
 		WRITE_ONCE(qs_changing, was_changing);
@@ -222,10 +229,13 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 	was_changing = READ_ONCE(qs_changing);
 	WRITE_ONCE(qs_changing, true);
 	ret = q1000k_gwan_apply(&tables[0], &tables[1]);
-	if (!ret)
+	if (!ret) {
 		qs_gems[slot] = (struct qs_gem) {
 			.valid = valid, .entity = entity, .gem = gem, .tcont = tcont, .direction = direction,
 		};
+		if (valid)
+			qs_seeded_alloc[tcont - QS_TCONT_BASE] = false;
+	}
 	if (ret && ret != -EUCLEAN)
 		WRITE_ONCE(qs_changing, was_changing);
 free:
@@ -380,7 +390,7 @@ static int qs_service_qos_install(void *arg)
 		int ret;
 		unsigned int channel = rules->channels[i];
 
-		if (installed[channel])
+		if (channel >= 32 || installed[channel])
 			continue;
 		update.channel = channel;
 		update.scheduler = qs_schedulers[s->tcont_entity_id - QS_TCONT_BASE];
@@ -392,10 +402,117 @@ static int qs_service_qos_install(void *arg)
 	return 0;
 }
 
+struct qs_replacement {
+	struct q1000k_gwan_table before, after;
+	u16 alloc[QS_TCONTS];
+	bool seeded_alloc[QS_TCONTS];
+	struct qs_gem gems[QS_MAX];
+};
+
+static int qs_prepare_replacement(struct qs_replacement *p)
+{
+	unsigned int i;
+	int ret = q1000k_gwan_snapshot(&p->before);
+
+	if (ret)
+		return ret;
+	p->after = p->before;
+	memcpy(p->alloc, qs_alloc, sizeof(p->alloc));
+	memcpy(p->seeded_alloc, qs_seeded_alloc, sizeof(p->seeded_alloc));
+	memcpy(p->gems, qs_gems, sizeof(p->gems));
+	/* Profile-created resources follow the complete normalized service set.
+	 * Explicit OMCI-created GEMs remain until their own Delete transaction.
+	 */
+	for (i = 0; i < QS_MAX; i++) {
+		int record;
+
+		if (!p->gems[i].valid || !p->gems[i].seeded)
+			continue;
+		record = qs_record(&p->after, p->gems[i].gem);
+		if (record < 0 || !p->after.gem[record].channel)
+			return -ESTALE;
+		p->after.gem[record].valid = false;
+		p->gems[i].valid = false;
+	}
+	for (i = 0; i < QS_TCONTS; i++)
+		if (p->seeded_alloc[i]) {
+			p->alloc[i] = 0xffff;
+			p->seeded_alloc[i] = false;
+		}
+	return 0;
+}
+
+static int qs_prepare_service(struct qs_replacement *p,
+			      const struct omci_service_config *s, u8 *channel)
+{
+	unsigned int i, index = s->tcont_entity_id - QS_TCONT_BASE;
+	int slot = -1, record;
+	struct qs_gem *gem;
+
+	if (!s->gem_port_id || s->gem_port_id == 0xffff || s->alloc_id > 0x3fff ||
+	    s->gem_port_id == p->after.alloc_id[0] || s->alloc_id == p->after.alloc_id[0])
+		return -EINVAL;
+	if (p->alloc[index] != 0xffff && p->alloc[index] != s->alloc_id)
+		return -ESTALE;
+	for (i = 0; i < QS_TCONTS; i++)
+		if (i != index && p->alloc[i] == s->alloc_id)
+			return -EEXIST;
+	if (p->alloc[index] == 0xffff) {
+		p->alloc[index] = s->alloc_id;
+		p->seeded_alloc[index] = true;
+	}
+	for (i = 0; i < QS_MAX; i++) {
+		if (p->gems[i].valid && p->gems[i].entity == s->gem_ctp_entity_id) {
+			slot = i;
+			break;
+		}
+		if (!p->gems[i].valid && slot < 0)
+			slot = i;
+	}
+	if (slot < 0)
+		return -ENOSPC;
+	gem = &p->gems[slot];
+	if (gem->valid) {
+		if (gem->gem != s->gem_port_id || gem->tcont != s->tcont_entity_id ||
+		    gem->direction != s->direction)
+			return -ESTALE;
+	} else {
+		for (i = 0; i < QS_MAX; i++)
+			if (p->gems[i].valid && p->gems[i].gem == s->gem_port_id)
+				return -EEXIST;
+		*gem = (struct qs_gem) {
+			.entity = s->gem_ctp_entity_id, .gem = s->gem_port_id,
+			.tcont = s->tcont_entity_id, .direction = s->direction,
+			.valid = true, .seeded = true,
+		};
+	}
+	*channel = qs_channel(&p->after, s->alloc_id);
+	record = qs_record(&p->after, s->gem_port_id);
+	if (record >= 0) {
+		const struct q1000k_gwan_entry *e = &p->after.gem[record];
+
+		if (!e->channel || e->alloc_id != s->alloc_id || e->channel != *channel ||
+		    e->multicast || e->encrypted || e->ani != 1)
+			return -ESTALE;
+		return 0;
+	}
+	if (!gem->seeded)
+		return -ESTALE;
+	for (i = 0; i < QS_MAX; i++)
+		if (!p->after.gem[i].valid) {
+			p->after.gem[i] = (struct q1000k_gwan_entry) {
+				.valid = true, .gem = s->gem_port_id, .alloc_id = s->alloc_id,
+				.ani = 1, .channel = *channel,
+			};
+			return 0;
+		}
+	return -ENOSPC;
+}
+
 int q1000k_services_replace(struct omci_device *odev,
 		const struct omci_service_config *services, size_t count)
 {
-	struct q1000k_gwan_binding binding;
+	struct qs_replacement *replacement;
 	struct qs_rules *next, *old;
 	u8 closed[32];
 	size_t i, j;
@@ -407,12 +524,17 @@ int q1000k_services_replace(struct omci_device *odev,
 	next = kzalloc(struct_size(next, rule, count), GFP_KERNEL);
 	if (!next)
 		return -ENOMEM;
+	replacement = kzalloc(sizeof(*replacement), GFP_KERNEL);
+	if (!replacement) { kfree(next); return -ENOMEM; }
 	next->count = count;
 	if (count)
 		memcpy(next->rule, services, count * sizeof(*services));
 	token = q1000k_protocol_enter();
-	if (token < 0) { kfree(next); return token; }
+	if (token < 0) { kfree(next); kfree(replacement); return token; }
 	was_changing = READ_ONCE(qs_changing);
+	ret = qs_prepare_replacement(replacement);
+	if (ret)
+		goto free;
 	memset(closed, 255, sizeof(closed));
 	for (i = 0; i < count; i++) {
 		const struct omci_service_config *s = &services[i];
@@ -427,12 +549,9 @@ int q1000k_services_replace(struct omci_device *odev,
 		if (s->multicast || s->vlan_treatment_valid || s->multicast_ani_valid) {
 			ret = -EOPNOTSUPP; goto free;
 		}
-		ret = q1000k_gwan_binding(s->gem_port_id, true, &binding);
+		ret = qs_prepare_service(replacement, s, &next->channels[i]);
 		if (ret)
 			goto free;
-		if (binding.alloc_id != s->alloc_id) { ret = -ESTALE; goto free; }
-		if (qs_alloc[s->tcont_entity_id - QS_TCONT_BASE] != s->alloc_id) { ret = -ESTALE; goto free; }
-		next->channels[i] = binding.channel;
 		for (j = 0; j < i; j++) {
 			const struct omci_service_config *p = &services[j];
 
@@ -447,14 +566,15 @@ int q1000k_services_replace(struct omci_device *odev,
 				ret = -EEXIST; goto free;
 			}
 		}
-		if (s->direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
-			closed[binding.channel] &= ~BIT(s->queue);
+		if (next->channels[i] < 32 && s->direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
+			closed[next->channels[i]] &= ~BIT(s->queue);
 	}
 	WRITE_ONCE(qs_changing, true);
 	/* Retire old classifier-selected traffic, including native retries and
 	 * downstream frames, even when the GEM record set itself is identical.
 	 */
-	ret = q1000k_gwan_refresh(qs_service_qos_install, next);
+	ret = q1000k_gwan_apply_install(&replacement->before, &replacement->after,
+				       qs_service_qos_install, next);
 	if (ret) {
 		if (ret != -EUCLEAN) WRITE_ONCE(qs_changing, was_changing);
 		goto free;
@@ -467,12 +587,16 @@ int q1000k_services_replace(struct omci_device *odev,
 			goto free;
 		}
 	}
+	memcpy(qs_alloc, replacement->alloc, sizeof(qs_alloc));
+	memcpy(qs_seeded_alloc, replacement->seeded_alloc, sizeof(qs_seeded_alloc));
+	memcpy(qs_gems, replacement->gems, sizeof(qs_gems));
 	old = rcu_replace_pointer(qs_current, next, q1000k_protocol_owned());
 	next = NULL;
 	synchronize_rcu();
 	kfree(old);
 	WRITE_ONCE(qs_changing, false);
 free:
+	kfree(replacement);
 	kfree(next);
 	q1000k_protocol_leave(token);
 	return ret;

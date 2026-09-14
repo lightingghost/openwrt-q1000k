@@ -2888,6 +2888,40 @@ static bool omci_agent_service_vlan_valid(u16 vid)
 	return vid > 0 && vid < VLAN_VID_MASK;
 }
 
+static int omci_agent_service_queue_locked(struct omci_device *odev,
+					 const struct omci_mib_object *gem, u8 *queue)
+{
+	struct omci_ani_topology topology;
+	struct omci_mib_object *pq;
+	u16 pointer = get_unaligned_be16(gem->data + 5);
+	u16 tcont = get_unaligned_be16(gem->data + 2);
+	unsigned int index;
+	int ret;
+
+	/* Profiles may leave the optional upstream pointer unset. Preserve their
+	 * PCP queue selection; an explicit pointer takes precedence over PCP.
+	 */
+	if (!pointer || pointer == 0xffff)
+		return 0;
+	if (odev->agent.config.traffic_mgmt_option == 1)
+		return -EOPNOTSUPP; /* Rate-controlled traffic descriptor pointer. */
+	pq = omci_mib_lookup(&odev->agent, OMCI_CLASS_PRIORITY_QUEUE, pointer);
+	if (!pq)
+		return -ENOENT;
+	ret = omci_agent_get_ani_topology(odev, &topology);
+	if (ret)
+		return ret;
+	if (pointer < topology.queue_base || tcont < topology.tcont_base ||
+	    get_unaligned_be16(pq->data + 9) != tcont)
+		return -EINVAL;
+	index = pointer - topology.queue_base;
+	if (index >= topology.tcont_count * topology.queues_per_tcont ||
+	    index / topology.queues_per_tcont != tcont - topology.tcont_base)
+		return -EINVAL;
+	*queue = index % topology.queues_per_tcont;
+	return 0;
+}
+
 static int
 omci_agent_stage_service_rule_locked(struct omci_device *odev,
 				     struct xarray *services,
@@ -2906,6 +2940,7 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	struct omci_mib_object *tcont;
 	struct omci_service_config service = {};
 	u16 gem_ctp_entity;
+	int ret;
 
 	iwtp = omci_mib_lookup(agent, OMCI_CLASS_GEM_IWTP, gem_iwtp_entity);
 	if (!iwtp)
@@ -2997,6 +3032,9 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 		service.default_service = true;
 		*default_installed = true;
 	}
+	ret = omci_agent_service_queue_locked(odev, gem, &service.queue);
+	if (ret)
+		return ret;
 	service.cookie = omci_agent_service_cookie(lan_port_entity,
 			gem_ctp_entity, service.gem_port_id, selector);
 
@@ -4396,12 +4434,12 @@ void omci_agent_channel_changed(struct omci_device *odev, bool valid)
 
 		agent->alarm_sequence = 0;
 		ret = omci_agent_clear_services_locked(odev);
-		if (ret)
+		if (ret == -EUCLEAN)
 			agent->service_error = ret;
 	} else {
 		int ret = omci_agent_reconcile_services_locked(odev);
 
-		if (ret)
+		if (ret == -EUCLEAN)
 			agent->service_error = ret;
 	}
 	mutex_unlock(&agent->lock);

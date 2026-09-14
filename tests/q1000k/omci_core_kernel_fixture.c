@@ -437,6 +437,23 @@ int q1000k_omci_core_test(void)
 		odev->agent.service_error = 0; /* The fixture explicitly models a new port. */
 	}
 
+	/* Explicit GEM upstream queue pointers override PCP fallback and must
+	 * resolve to a real queue on the same T-CONT.
+	 */
+	{
+		u8 queue = 6;
+		struct omci_mib_object gem = {};
+
+		CHECK(!omci_agent_service_queue_locked(odev, &gem, &queue) && queue == 6);
+		put_unaligned_be16(0x8000, gem.data + 2);
+		put_unaligned_be16(0x8003, gem.data + 5);
+		CHECK(!omci_agent_service_queue_locked(odev, &gem, &queue) && queue == 3);
+		put_unaligned_be16(0x8001, gem.data + 2);
+		CHECK(omci_agent_service_queue_locked(odev, &gem, &queue) == -EINVAL);
+		put_unaligned_be16(0x9000, gem.data + 5);
+		CHECK(omci_agent_service_queue_locked(odev, &gem, &queue) == -ENOENT);
+	}
+
 	/* Missing provisioning callbacks cannot produce success. */
 	incomplete = fixture_ops;
 	incomplete.set_tcont = NULL;

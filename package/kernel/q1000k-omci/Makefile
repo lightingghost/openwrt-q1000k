@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=q1000k-omci
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_EXTMOD_SUBDIRS:=net/xpon
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Matheus Sampaio Queiroga <srherobrine20@gmail.com>

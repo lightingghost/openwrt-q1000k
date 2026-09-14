@@ -38,6 +38,7 @@ struct qomci_backend {
 	u16 onu;
 	u64 epoch, published;
 	bool keys_valid, active, started;
+	int service_error;
 };
 static struct qomci_backend __rcu *qomci_current;
 
@@ -234,6 +235,15 @@ void q1000k_omci_state(void)
 	qomci_request(b);
 }
 
+int q1000k_omci_alloc_changed(void)
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	return b ? qomci_request(b) : -ENODEV;
+}
+
 struct qomci_install {
 	struct q1000k_mac_keys keys;
 	u16 onu;
@@ -359,6 +369,17 @@ again:
 	omci_device_set_onu_id(b->omci, install->onu);
 	omci_device_set_state(b->omci, request.state);
 	omci_device_set_channel(b->omci, install->onu, up);
+	/* An Alloc-ID notification does not change the OMCC ID. Reconcile the
+	 * MIB explicitly so dormant/profile-seeded GEMs use the new physical
+	 * channel and scheduler before their queues open. Ordinary preparation
+	 * errors remain repairable through OMCI; uncertain hardware is fatal.
+	 */
+	if (up) {
+		ret = omci_device_reconcile_services(b->omci);
+		WRITE_ONCE(b->service_error, ret);
+		if (ret == -EUCLEAN)
+			goto failed;
+	}
 	xpon_device_report_registration(b->xpon, up ? XPON_REGISTRATION_OPERATIONAL :
 		install->onu == 0xffff ? XPON_REGISTRATION_DISCOVERY : XPON_REGISTRATION_REGISTERING);
 	xpon_device_report_carrier(b->xpon, up);

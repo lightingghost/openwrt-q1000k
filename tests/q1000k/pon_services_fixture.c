@@ -77,7 +77,10 @@ int main(void)
     assert(q1000k_services_gem(NULL,100,500,0x8000,3,true,true)==-EOPNOTSUPP);
     assert(!q1000k_services_gem(NULL,100,500,0x8000,3,true,false));
     assert(wan.gpon.gemPort[0].info.channel==33);
-    assert(q1000k_services_replace(NULL,&s,1)==-ENODATA);
+    assert(!q1000k_services_replace(NULL,&s,1));
+    assert(qs_current->channels[0]==33 && queue_model[1]==255);
+    struct q1000k_gwan_binding dormant;
+    assert(q1000k_gwan_binding(500,true,&dormant)==-ENODATA);
     assert(!gwan_create_new_tcont(200));
     assert(!q1000k_services_uni(NULL,1,true));
     assert(!q1000k_services_replace(NULL,&s,1));
@@ -136,6 +139,33 @@ int main(void)
     assert(q1000k_services_tx(&skb)==-ENOENT);
     /* Teardown follows stopped packet and protocol producers. */
     int token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+    /* The normalized profile alone creates its GEM/T-CONT intent. Missing
+     * PLOAM allocation is dormant, with no open queue or fabricated channel.
+     */
+    reset_model(); q1000k_services_init();
+    assert(!q1000k_services_replace(NULL,&s,1));
+    assert(qs_alloc[0]==200 && qs_seeded_alloc[0] && qs_gems[0].seeded);
+    assert(hardware[500] && wan.gpon.gemPort[0].info.channel==33);
+    q1000k_services_enable(true); make_tag(&skb,1894,0);
+    assert(q1000k_services_tx(&skb)==-ENODATA && q1000k_services_rx(&skb,500)==-ENODATA);
+    assert(!gwan_create_new_tcont(200));
+    assert(!q1000k_services_replace(NULL,&s,1));
+    assert(!q1000k_services_tx(&skb) && ((tx_word0>>3)&31)==1);
+    assert(!gwan_remove_tcont(200));
+    assert(q1000k_services_tx(&skb)==-ENODATA && queue_model[1]==255);
+    assert(!gwan_create_new_tcont(201));
+    assert(!gwan_create_new_tcont(200));
+    assert(queue_model[2]==255);
+    assert(!q1000k_services_replace(NULL,&s,1));
+    assert(queue_model[1]==255 && queue_model[2]==(255^BIT(3)));
+    assert(!q1000k_services_tx(&skb) && ((tx_word0>>3)&31)==2);
+    rules[0]=s; rules[1]=s; rules[1].cookie=7; rules[1].gem_ctp_entity_id=101;
+    untouched=physical_ops;
+    assert(q1000k_services_replace(NULL,rules,2)==-EEXIST && physical_ops==untouched);
+    assert(!q1000k_services_tx(&skb));
+    assert(!q1000k_services_replace(NULL,NULL,0));
+    assert(!hardware[500] && qs_alloc[0]==0xffff && queue_model[2]==255);
+    token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
     /* Every physical scheduler operation may fail. Software intent changes
      * only on complete success; uncertain hardware remains contained.
      */
