@@ -26,6 +26,7 @@ static struct slot table[32];
 static u32 pending_command;
 static unsigned int commands, data_writes, polls, delays;
 static unsigned int fail_command, delay_polls, poll_index;
+static unsigned int absent_command;
 static bool ignore_write, corrupt_read, yield_io;
 static void IO_SREG(unsigned int reg,u32 value)
 {
@@ -47,6 +48,7 @@ static u32 IO_GREG(unsigned int reg)
     assert(held && reg==0x5254);
     unsigned int channel=(pending_command>>20)&31;
     polls++;
+    if(commands==absent_command) return UINT32_MAX;
     if(commands==fail_command || poll_index++<delay_polls) return 0;
     if(yield_io) sched_yield();
     return UINT32_C(0x80000000) | (table[channel].valid ? 0x10000 : 0) |
@@ -64,6 +66,7 @@ static void reset_model(void)
     memset(table,0,sizeof(table));
     q1000k_tcont_fault=false; q1000k_tcont_quarantined=0;
     commands=data_writes=polls=delays=fail_command=delay_polls=poll_index=0;
+    absent_command=0;
     ignore_write=corrupt_read=yield_io=false;
     assert(!held);
 }
@@ -132,6 +135,11 @@ int main(void)
         reset_model(); fail_command=fail;
         assert(q1000k_tcont_enable(100,10)==-ETIMEDOUT);
         assert(commands==fail && delays==3000);
+        failed_outputs();
+    }
+    for(unsigned int failure=1;failure<=33;failure++) {
+        reset_model(); absent_command=failure;
+        assert(q1000k_tcont_enable(100,10)==-EIO && commands==failure);
         failed_outputs();
     }
     reset_model(); ignore_write=true;

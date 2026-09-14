@@ -125,8 +125,7 @@ int an7581_xpon_mac_wait_tx_empty(void)
 		goto fault;
 	/* Stop ingress from FE, but leave the optical side able to drain. */
 	ret = -EBUSY;
-	if (!(stop & AN7581_XPON_MBI_TX_STOP) || !(stop & (1U << 15)) ||
-	    (stop & AN7581_XPON_MPI_TX_STOP))
+	if (!(stop & AN7581_XPON_MBI_TX_STOP) || !(stop & (1U << 15)))
 		goto out;
 	ret = -ETIMEDOUT;
 	for (retry = 0; retry < AN7581_XPON_STOP_POLLS; retry++) {
@@ -137,6 +136,13 @@ int an7581_xpon_mac_wait_tx_empty(void)
 		}
 		if (!(value & 0xffff)) {
 			ret = 0;
+			goto out;
+		}
+		/* An already stopped transmitter may be empty at startup. If it
+		 * contains data, never reopen it implicitly to force a drain.
+		 */
+		if (stop & AN7581_XPON_MPI_TX_STOP) {
+			ret = -EBUSY;
 			goto out;
 		}
 		udelay(1);

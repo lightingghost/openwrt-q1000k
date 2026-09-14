@@ -261,3 +261,10 @@ cycles and the existing unload races. All 42 host tests pass, including every
 physical-stage failure crossed with all 34 containment failures and outer
 teardown fault paths. Linux 6.18.44/AArch64 vendor r29 builds successfully.
 Hardware stages in tests are mocked; no device access was performed.
+
+The r30 review closes two shutdown edge cases. T-CONT/GEM status `0xffffffff`
+is now a sticky I/O failure, never a valid command-complete response. Tests
+inject it into every allocation and replacement command position. A transmit
+FIFO already empty with MPI TX stopped can establish emptiness without
+releasing that stop; a stopped FIFO containing data returns `-EBUSY` rather
+than reopening egress. All 42 host tests and the AArch64 vendor build pass.

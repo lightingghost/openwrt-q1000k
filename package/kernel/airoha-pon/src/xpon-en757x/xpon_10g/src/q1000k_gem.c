@@ -31,6 +31,10 @@ static int q1000k_gem_command(u32 command, u32 *status)
 	IO_SREG(GEM_PORT_CFG, command);
 	for (retry = 0; retry < GEM_POLL_LIMIT; retry++) {
 		value = IO_GREG(GEM_PORT_STS);
+		if (value == ~0U) {
+			q1000k_gem_fault = true;
+			return -EIO;
+		}
 		if (value & GEM_STS_DONE) {
 			*status = value;
 			return 0;

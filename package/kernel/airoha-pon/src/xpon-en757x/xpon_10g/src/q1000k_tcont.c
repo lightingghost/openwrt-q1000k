@@ -29,6 +29,10 @@ static int q1000k_tcont_command(u32 command, u32 *status)
 	IO_SREG(TCONT_ID_CFG, command);
 	for (retry = 0; retry < TCONT_POLL_LIMIT; retry++) {
 		value = IO_GREG(TCONT_ID_STS);
+		if (value == ~0U) {
+			q1000k_tcont_fault = true;
+			return -EIO;
+		}
 		if (value & TCONT_STS_DONE) {
 			*status = value;
 			return 0;

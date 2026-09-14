@@ -104,6 +104,8 @@ int main(void)
     stop|=(1U<<15)|(1U<<24); assert(an7581_xpon_mac_wait_tx_empty()==-EBUSY);
     stop&=~(1U<<24); fifo_after=9;
     assert(!an7581_xpon_mac_wait_tx_empty() && ticks==9 && !writes);
+    reset(); stop=(1U<<8)|(1U<<15)|(1U<<24)|(1U<<31); fifo_after=0;
+    assert(!an7581_xpon_mac_wait_tx_empty() && !ticks && !writes);
     reset(); stop=(1U<<8)|(1U<<15); bad_after=5;
     assert(an7581_xpon_mac_wait_tx_empty()==-EIO && ticks==5 && provider.mac_fault);
     reset(); stop=(1U<<8)|(1U<<15);

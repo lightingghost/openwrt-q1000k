@@ -29,6 +29,7 @@ static _Thread_local bool held;
 static u8 table[65536];
 static u32 command;
 static unsigned int commands,writes,polls,delays,fail_command,delay_polls,poll_index;
+static unsigned int absent_command;
 static bool ignore_write,corrupt_read,yield_io;
 static void IO_SREG(unsigned int reg,u32 value)
 {
@@ -44,6 +45,7 @@ static void IO_SREG(unsigned int reg,u32 value)
 static u32 IO_GREG(unsigned int reg)
 {
     assert(held && reg==0x5278); polls++;
+    if(commands==absent_command) return UINT32_MAX;
     if(commands==fail_command || poll_index++<delay_polls) return 0;
     if(yield_io) sched_yield();
     return BIT(31) | (table[command&0xffff] ^ (corrupt_read && writes ? 1 : 0));
@@ -55,6 +57,7 @@ static void reset_model(void)
 {
     assert(!held); memset(table,0,sizeof(table)); q1000k_gem_fault=false;
     commands=writes=polls=delays=fail_command=delay_polls=poll_index=0;
+    absent_command=0;
     ignore_write=corrupt_read=yield_io=false;
 }
 static const struct q1000k_gem_value empty={0}, unicast={1,0,0}, multicast={1,1,1};
@@ -119,6 +122,11 @@ int main(void)
         reset_model(); fail_command=failure;
         assert(q1000k_gem_replace(65534,&empty,&unicast)==-ETIMEDOUT);
         assert(commands==failure && delays==3000); latched();
+    }
+    for(unsigned int failure=1;failure<=3;failure++) {
+        reset_model(); absent_command=failure;
+        assert(q1000k_gem_replace(65534,&empty,&unicast)==-EIO && commands==failure);
+        latched();
     }
     reset_model(); ignore_write=true;
     assert(q1000k_gem_replace(7,&empty,&unicast)==-EIO); latched();
