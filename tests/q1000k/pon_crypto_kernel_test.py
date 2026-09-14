@@ -60,6 +60,26 @@ static int auth_vectors(struct crypto_lskcipher *tfm)
     ret=q1000k_auth_derive(tfm,auth_msk,auth_serial,auth_pon_tag,&keys);
     if(ret || memcmp(&keys,&auth_expected,sizeof(keys))) return -EBADMSG;
     memzero_explicit(&keys,sizeof(keys));
+    {
+        u8 ploam[48]={0,0x13,0x0a,3,4,0x45,1};
+        const u8 expected_mic[8]={0x46,0x39,0x87,0x56,0x28,0x08,0x14,0xe6};
+        u8 report[32], expected[16], named[32];
+        memcpy(ploam+40,expected_mic,8);
+        ret=q1000k_auth_ploam_verify(tfm,auth_expected.ploam,ploam,48);
+        if(ret) return ret;
+        ploam[3]^=1;
+        if(q1000k_auth_ploam_verify(tfm,auth_expected.ploam,ploam,48)!=-EBADMSG) return -EINVAL;
+        ret=q1000k_auth_key_report(tfm,key,message,false,report);
+        if(ret || memcmp(report,ecb,16)) return -EBADMSG;
+        for(split=16;split<32;split++) if(report[split]) return -EINVAL;
+        memcpy(named,message,16); memcpy(named+16,"3141592653589793",16);
+        ret=gpon_aes_cmac_encrypt(tfm,key,named,32,expected);
+        if(!ret) ret=q1000k_auth_key_report(tfm,key,message,true,report);
+        if(ret || memcmp(report,expected,16)) return -EBADMSG;
+        for(split=16;split<32;split++) if(report[split]) return -EINVAL;
+        memzero_explicit(report,sizeof(report));
+        memzero_explicit(named,sizeof(named));
+    }
     for(split=0;split<=sizeof(auth_baseline);split++) {
         skb=alloc_skb(sizeof(auth_baseline),GFP_KERNEL);
         tail=alloc_skb(sizeof(auth_baseline),GFP_KERNEL);

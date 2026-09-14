@@ -24,6 +24,18 @@ int q1000k_mac_keys_install(const struct q1000k_mac_keys *keys);
  * These are observations, not authorization to authenticate with a key.
  */
 int q1000k_mac_key_indices(u8 *ploam, u8 *omci);
-/* ONU register ownership: valid assignment 0..1022; UNASSIGNED removes it. */
+/* ONU register ownership: valid assignment 0..1020; UNASSIGNED removes it. */
 int q1000k_mac_onu_install(u16 onu_id);
+
+struct q1000k_mac_data_keys {
+	u8 key[2][16];
+	u8 rx_valid; /* Bitmap for the two unicast banks. */
+	u8 tx_index; /* Zero disables encryption; wire key indices are 1 and 2. */
+};
+/* INSTALL programs a complete unicast snapshot with physical traffic stopped.
+ * ACTIVATE must observe the switch before CPU/optical admission can reopen.
+ */
+int q1000k_mac_data_keys_install(const struct q1000k_mac_data_keys *keys,
+				bool *switch_pending);
+int q1000k_mac_data_keys_ready(bool switch_pending);
 #endif

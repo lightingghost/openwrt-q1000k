@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Verified XG PLOAM/OMCI integrity and key-encryption bank programming. */
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -150,4 +151,80 @@ int q1000k_mac_onu_install(u16 onu_id)
 	value &= ~(BIT(15) | 0x3ff);
 	value |= onu_id == 0xffff ? 0x3ff : BIT(15) | onu_id;
 	return q1000k_mac_key_write(0x5014, value);
+}
+
+static int qdata_read(u32 reg, u32 *value)
+{
+	int ret = an7581_xpon_status();
+
+	if (ret) return ret;
+	*value = get_xpon_data(reg);
+	ret = an7581_xpon_status();
+	return ret ?: *value == ~0U ? -EIO : 0;
+}
+
+static int qdata_ack_switch(void)
+{
+	u32 value;
+	int ret;
+
+	/* INT_STATUS is W1C. Acknowledge only our switch event. */
+	set_xpon_data(0x5044, BIT(7));
+	ret = qdata_read(0x5044, &value);
+	return ret ?: value & BIT(7) ? -EIO : 0;
+}
+
+int q1000k_mac_data_keys_install(const struct q1000k_mac_data_keys *keys,
+				bool *switch_pending)
+{
+	static const u8 empty[16];
+	u32 tx, rx, cap;
+	unsigned int i;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	if (ret) return ret;
+	if (!keys || !switch_pending || keys->rx_valid > 3 || keys->tx_index > 2 ||
+	    (keys->tx_index && !(keys->rx_valid & BIT(keys->tx_index - 1))))
+		return -EINVAL;
+	ret = qdata_read(0x5200, &tx);
+	if (!ret) ret = qdata_read(0x5204, &rx);
+	if (!ret) ret = qdata_read(QMAC_CAP_SETTING, &cap);
+	if (ret) return ret;
+	/* Revoke both directions before overwriting any key material. */
+	tx &= ~(BIT(31) | BIT(0));
+	ret = q1000k_mac_key_write(0x5200, tx);
+	if (!ret) ret = q1000k_mac_key_write(0x5204, rx & ~3U);
+	for (i = 0; !ret && i < 2; i++)
+		ret = q1000k_mac_key_bank(0x5210 + 16 * i,
+			(keys->rx_valid & BIT(i)) ? keys->key[i] : empty);
+	/* XGS AES-128 counter mode; reject invalid receive keys and mirror
+	 * downstream encryption on the default (OMCC) XGEM port upstream.
+	 */
+	if (!ret) ret = q1000k_mac_key_write(QMAC_CAP_SETTING,
+		(cap & ~BIT(9)) | BIT(12) | BIT(13));
+	if (!ret) ret = q1000k_mac_key_write(0x5204, (rx & ~3U) | keys->rx_valid);
+	if (!ret) ret = qdata_ack_switch();
+	if (keys->tx_index) {
+		tx |= keys->tx_index - 1;
+		if (!ret) ret = q1000k_mac_key_write(0x5200, tx);
+		if (!ret) ret = q1000k_mac_key_write(0x5200, tx | BIT(31));
+	}
+	if (!ret) *switch_pending = keys->tx_index != 0;
+	return ret;
+}
+
+int q1000k_mac_data_keys_ready(bool switch_pending)
+{
+	u32 status;
+	unsigned int retry;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_ACTIVATE);
+
+	if (ret || !switch_pending) return ret;
+	for (retry = 0; retry < 3000; retry++) {
+		ret = qdata_read(0x5044, &status);
+		if (ret) return ret;
+		if (status & BIT(7)) return qdata_ack_switch();
+		udelay(1);
+	}
+	return -ETIMEDOUT;
 }

@@ -38,6 +38,18 @@ int gpon_aes_cmac_encrypt(struct crypto_lskcipher *tfm,const u8 *key,const u8 *d
     assert(EVP_MAC_final(ctx,out,&produced,16)==1 && produced==16);
     EVP_MAC_CTX_free(ctx); EVP_MAC_free(alg); return 0;
 }
+int gpon_aes_ecb_encrypt(struct crypto_lskcipher *tfm,const u8 *key,const u8 *data,size_t len,u8 *out)
+{
+    EVP_CIPHER_CTX *ctx; int produced,final;
+    assert(tfm && key && data && len==16);
+    if(++crypto_calls==crypto_fail) { memset(out,0xee,16); return -EIO; }
+    ctx=EVP_CIPHER_CTX_new(); assert(ctx);
+    assert(EVP_EncryptInit_ex(ctx,EVP_aes_128_ecb(),NULL,key,NULL)==1);
+    assert(EVP_CIPHER_CTX_set_padding(ctx,0)==1);
+    assert(EVP_EncryptUpdate(ctx,out,&produced,data,16)==1 && produced==16);
+    assert(EVP_EncryptFinal_ex(ctx,out+produced,&final)==1 && !final);
+    EVP_CIPHER_CTX_free(ctx); return 0;
+}
 /* PRODUCTION */
 /* VECTORS */
 int main(void)
@@ -82,6 +94,30 @@ int main(void)
         crypto_fail=crypto_calls+1;
         assert(q1000k_auth_ploam_verify(&cipher,auth_expected.ploam,message,48)==-EIO);
         crypto_fail=0;
+    }
+    {
+        const u8 kek[]={0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c};
+        const u8 key[]={0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a};
+        const u8 wrapped[]={0x3a,0xd7,0x7b,0xb4,0x0d,0x7a,0x36,0x60,0xa8,0x9e,0xca,0xf3,0x24,0x66,0xef,0x97};
+        u8 report[32], prior[32], message[32], expected[16];
+        assert(!q1000k_auth_key_report(&cipher,kek,key,false,report));
+        assert(!memcmp(report,wrapped,16));
+        for(unsigned int i=16;i<32;i++) assert(!report[i]);
+        memcpy(message,key,16); memcpy(message+16,"3141592653589793",16);
+        assert(!gpon_aes_cmac_encrypt(&cipher,kek,message,32,expected));
+        assert(!q1000k_auth_key_report(&cipher,kek,key,true,report));
+        assert(!memcmp(report,expected,16));
+        for(unsigned int i=16;i<32;i++) assert(!report[i]);
+        for(unsigned int confirm=0;confirm<2;confirm++) {
+            memset(report,0xa5,sizeof(report)); memcpy(prior,report,32);
+            crypto_fail=crypto_calls+1;
+            assert(q1000k_auth_key_report(&cipher,kek,key,confirm,report)==-EIO);
+            assert(!memcmp(report,prior,32)); crypto_fail=0;
+        }
+        assert(q1000k_auth_key_report(NULL,kek,key,false,report)==-EINVAL);
+        assert(q1000k_auth_key_report(&cipher,NULL,key,false,report)==-EINVAL);
+        assert(q1000k_auth_key_report(&cipher,kek,NULL,false,report)==-EINVAL);
+        assert(q1000k_auth_key_report(&cipher,kek,key,false,NULL)==-EINVAL);
     }
     for(int failure=1;failure<=5;failure++) {
         crypto_calls=0; crypto_fail=failure; memset(&keys,0xa5,sizeof(keys)); before=keys;

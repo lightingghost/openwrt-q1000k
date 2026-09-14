@@ -45,4 +45,11 @@ int q1000k_auth_omci_verify(struct crypto_lskcipher *tfm, const u8 key[16],
  */
 int q1000k_auth_ploam_verify(struct crypto_lskcipher *tfm, const u8 key[16],
 			    const u8 *message, size_t length);
+/* Key_Report payload: encrypted new key or existing-key name, padded to
+ * 32 bytes. No key validity or protocol state changes occur here.
+ * Use separate transforms for ECB and CMAC if calls can overlap: the
+ * imported helpers serialize each algorithm, not both algorithms together.
+ */
+int q1000k_auth_key_report(struct crypto_lskcipher *tfm, const u8 kek[16],
+			   const u8 data_key[16], bool confirm, u8 report[32]);
 #endif

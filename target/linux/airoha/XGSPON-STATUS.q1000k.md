@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r52 and OMCI core r8 implement the native packet path,
+ demonstrated.** Vendor r53 and OMCI core r8 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -18,7 +18,7 @@ below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 70 passing PON host tests, the complete OMCI
+The current local evidence is 71 passing PON host tests, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,
 cryptography and PHY concurrency results. Hardware cold boot, OLT registration,
@@ -27,6 +27,14 @@ disabled and the experimental packages remain optional/BROKEN.
 
 See [integration details](XGSPON-INTEGRATION.q1000k.md),
 [VLAN contract](XGSPON-VLAN.q1000k.md) and [AT&T research](XGSPON-ATT.q1000k.md).
+
+Vendor r53 adds checked AES-128 unicast key-bank writes and key-switch
+completion primitives. Both directions are revoked before bank replacement;
+invalid banks are erased, and only the switch interrupt is acknowledged.
+AES-ECB key wrapping and CMAC key-name reports pass published crypto vectors
+in real Linux UML. These helpers are not yet connected to Key_Control or
+OMCI encrypted GEM provisioning. ECB and CMAC users must own separate crypto
+transforms because the imported helpers have separate locks.
 
 ## Imported references
 

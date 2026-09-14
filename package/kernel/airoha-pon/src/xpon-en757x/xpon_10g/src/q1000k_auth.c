@@ -10,6 +10,28 @@
 /* The existing synchronous AES helper serializes its shared transform. */
 int gpon_aes_cmac_encrypt(struct crypto_lskcipher *tfm, const u8 *key,
 			  const u8 *data, size_t data_len, u8 *mac);
+int gpon_aes_ecb_encrypt(struct crypto_lskcipher *tfm, const u8 *key,
+			 const u8 *data, size_t data_len, u8 *mac);
+
+int q1000k_auth_key_report(struct crypto_lskcipher *tfm, const u8 kek[16],
+			   const u8 data_key[16], bool confirm, u8 report[32])
+{
+	u8 result[32] = {}, message[32];
+	int ret;
+
+	if (!tfm || !kek || !data_key || !report) return -EINVAL;
+	if (confirm) {
+		memcpy(message, data_key, 16);
+		memcpy(message + 16, "3141592653589793", 16);
+		ret = gpon_aes_cmac_encrypt(tfm, kek, message, sizeof(message), result);
+	} else {
+		ret = gpon_aes_ecb_encrypt(tfm, kek, data_key, 16, result);
+	}
+	if (!ret) memcpy(report, result, sizeof(result));
+	memzero_explicit(message, sizeof(message));
+	memzero_explicit(result, sizeof(result));
+	return ret;
+}
 
 int q1000k_auth_derive(struct crypto_lskcipher *tfm, const u8 msk[16],
 		       const u8 serial[8], const u8 pon_tag[8],

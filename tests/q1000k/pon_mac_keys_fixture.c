@@ -4,6 +4,8 @@ typedef uint16_t u16;
 #define BIT(n) (1U<<(n))
 #define GFP_KERNEL 0
 #define Q1000K_TABLE_INSTALL 2
+#define Q1000K_TABLE_ACTIVATE 3
+static void udelay(unsigned int usec) { assert(usec==1); }
 static void *kzalloc(size_t n,int flags) { void *p=kmalloc(n,flags); if(p) memset(p,0,n); return p; }
 static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|(u32)p[2]<<8|p[3]; }
 static u32 registers[0x6000/4];
