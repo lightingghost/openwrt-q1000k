@@ -448,7 +448,21 @@ static const struct omci_attr_desc omci_extended_vlan_attrs[] = {
 static const struct omci_attr_desc omci_tcont_attrs[] = {
 	OMCI_ATTR(15, 0, 2, OMCI_RW),
 	OMCI_ATTR(14, 2, 1, OMCI_R),
-	OMCI_ATTR(13, 3, 1, OMCI_RW),
+	OMCI_ATTR(13, 3, 1, OMCI_R),
+};
+
+static const struct omci_attr_desc omci_priority_queue_attrs[] = {
+	OMCI_ATTR(15, 0, 1, OMCI_R), OMCI_ATTR(14, 1, 2, OMCI_R),
+	OMCI_ATTR(13, 3, 2, OMCI_R), OMCI_ATTR(12, 5, 2, OMCI_R),
+	OMCI_ATTR(11, 7, 2, OMCI_R), OMCI_ATTR(10, 9, 4, OMCI_R),
+	OMCI_ATTR(9, 13, 2, OMCI_R), OMCI_ATTR(8, 15, 1, OMCI_RW),
+	OMCI_ATTR(7, 16, 2, OMCI_R), OMCI_ATTR(6, 18, 4, OMCI_R),
+	OMCI_ATTR(5, 22, 2, OMCI_R), OMCI_ATTR(4, 24, 2, OMCI_R),
+};
+
+static const struct omci_attr_desc omci_traffic_scheduler_attrs[] = {
+	OMCI_ATTR(15, 0, 2, OMCI_R), OMCI_ATTR(14, 2, 2, OMCI_R),
+	OMCI_ATTR(13, 4, 1, OMCI_RW), OMCI_ATTR(12, 5, 1, OMCI_R),
 };
 
 static const struct omci_attr_desc omci_uni_g_attrs[] = {
@@ -668,6 +682,14 @@ static const struct omci_me_desc omci_me_descs[] = {
 		      GENMASK(15, 13), GENMASK(15, 13), 4,
 		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_NATIVE,
 		      omci_tcont_attrs),
+	STANDARD_DESC(OMCI_CLASS_PRIORITY_QUEUE, "Priority queue", STANDARD_ACTIONS,
+		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 4), BIT(8), 26,
+		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_PROVISIONED,
+		      omci_priority_queue_attrs),
+	STANDARD_DESC(OMCI_CLASS_TRAFFIC_SCHEDULER, "Traffic scheduler", STANDARD_ACTIONS,
+		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 12), BIT(13), 6,
+		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_PROVISIONED,
+		      omci_traffic_scheduler_attrs),
 	STANDARD_DESC(OMCI_CLASS_UNI_G, "UNI-G", STANDARD_ACTIONS,
 		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 12), GENMASK(15, 12),
 		      6, OMCI_CLASS_CATEGORY_UNI, OMCI_CLASS_SUPPORT_NATIVE,

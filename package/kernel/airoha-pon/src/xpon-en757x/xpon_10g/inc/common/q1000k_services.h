@@ -17,6 +17,10 @@ int q1000k_services_tcont(struct omci_device *, u16 entity, u16 alloc, bool vali
 int q1000k_services_gem(struct omci_device *, u16 entity, u16 gem, u16 tcont,
 		       u8 direction, bool valid, bool encrypted);
 int q1000k_services_uni(struct omci_device *, u16 entity, bool enabled);
+int q1000k_services_queue(struct omci_device *, u16 entity,
+			 const struct omci_priority_queue_config *);
+int q1000k_services_scheduler(struct omci_device *, u16 entity,
+			 const struct omci_traffic_scheduler_config *);
 int q1000k_services_replace(struct omci_device *, const struct omci_service_config *, size_t count);
 /* ANI-side Ethernet frames carry the network VLAN selected by the core. The
  * caller holds RCU across classification, binding lookup and native enqueue.

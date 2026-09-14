@@ -135,11 +135,28 @@ static int fixture_batch(struct omci_device *odev,
 	return 0;
 }
 
+static int fixture_scheduler_error;
+static struct omci_priority_queue_config fixture_queue_value;
+static struct omci_traffic_scheduler_config fixture_scheduler_value;
+static int fixture_queue(struct omci_device *odev, u16 entity,
+                         const struct omci_priority_queue_config *q)
+{
+	fixture_queue_value = *q;
+	return fixture_scheduler_error;
+}
+static int fixture_scheduler(struct omci_device *odev, u16 entity,
+                             const struct omci_traffic_scheduler_config *s)
+{
+	fixture_scheduler_value = *s;
+	return fixture_scheduler_error;
+}
+
 static const struct omci_device_ops fixture_ops = {
 	.start = fixture_start, .stop = fixture_stop, .xmit = fixture_xmit,
 	.get_ani_topology = fixture_topology, .set_tcont = fixture_tcont,
 	.set_gem_port = fixture_gem, .set_uni = fixture_uni,
 	.replace_services = fixture_batch,
+	.set_priority_queue = fixture_queue, .set_traffic_scheduler = fixture_scheduler,
 };
 
 static int fixture_stop_thread(void *arg)
@@ -381,12 +398,57 @@ int q1000k_omci_core_test(void)
 		CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
 	}
 
+	/* Real OMCI SET decoding must reach scheduling hardware and preserve the
+	 * previous MIB when the backend rejects the write.
+	 */
+	{
+		u8 request[] = { 0x01, 0x00, 17 };
+		bool changed = false;
+		struct omci_mib_object *q;
+
+		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_PRIORITY_QUEUE, 0x8003, OMCI_MSG_TYPE_SET,
+			request, sizeof(request), &changed) == OMCI_RESULT_SUCCESS);
+		q = omci_mib_lookup(&odev->agent, OMCI_CLASS_PRIORITY_QUEUE, 0x8003);
+		CHECK(q && q->data[15] == 17 && fixture_queue_value.weight == 17);
+		CHECK(fixture_queue_value.priority == 4 && fixture_queue_value.tcont_entity_id == 0x8000);
+		CHECK(fixture_queue_value.maximum_size == 16 && fixture_queue_value.allocated_size == 4);
+		CHECK(fixture_queue_value.backpressure_occur == 0xffff);
+		fixture_scheduler_error = -EIO;
+		request[2] = 29;
+		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_PRIORITY_QUEUE, 0x8003, OMCI_MSG_TYPE_SET,
+			request, sizeof(request), &changed) == OMCI_RESULT_PROCESSING_ERROR);
+		CHECK(q->data[15] == 17);
+		fixture_scheduler_error = 0;
+		request[0] = 0x20; request[1] = 0; request[2] = 2;
+		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_TRAFFIC_SCHEDULER, 0x8000, OMCI_MSG_TYPE_SET,
+			request, sizeof(request), &changed) == OMCI_RESULT_SUCCESS);
+		CHECK(fixture_scheduler_value.policy == 2 && fixture_scheduler_value.tcont_entity_id == 0x8000);
+		request[0] = 0x80;
+		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_TRAFFIC_SCHEDULER, 0x8000, OMCI_MSG_TYPE_SET,
+			request, sizeof(request), &changed) == OMCI_RESULT_PARAMETER_ERROR);
+		q = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU2_G, 0);
+		CHECK(q && get_unaligned_be16(q->data + 38) == BIT(3));
+		fixture_scheduler_error = -EUCLEAN;
+		request[0] = 0x20; request[2] = 1;
+		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_TRAFFIC_SCHEDULER, 0x8000, OMCI_MSG_TYPE_SET,
+			request, sizeof(request), &changed) == OMCI_RESULT_PROCESSING_ERROR);
+		CHECK(odev->agent.service_error == -EUCLEAN);
+		fixture_scheduler_error = 0;
+		odev->agent.service_error = 0; /* The fixture explicitly models a new port. */
+	}
+
 	/* Missing provisioning callbacks cannot produce success. */
 	incomplete = fixture_ops;
 	incomplete.set_tcont = NULL;
 	incomplete.set_gem_port = NULL;
 	incomplete.set_uni = NULL;
+	incomplete.set_priority_queue = NULL;
+	incomplete.set_traffic_scheduler = NULL;
 	odev->ops = &incomplete;
+	object.class_id = OMCI_CLASS_PRIORITY_QUEUE;
+	CHECK(omci_agent_hw_update(odev, &object, OMCI_MSG_TYPE_SET, NULL) == -EOPNOTSUPP);
+	object.class_id = OMCI_CLASS_TRAFFIC_SCHEDULER;
+	CHECK(omci_agent_hw_update(odev, &object, OMCI_MSG_TYPE_SET, NULL) == -EOPNOTSUPP);
 	object.class_id = OMCI_CLASS_TCONT;
 	CHECK(omci_agent_hw_update(odev, &object, OMCI_MSG_TYPE_SET, NULL) == -EOPNOTSUPP);
 	object.class_id = OMCI_CLASS_GEM_PORT_CTP;

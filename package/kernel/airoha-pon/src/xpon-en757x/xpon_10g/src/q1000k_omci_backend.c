@@ -119,6 +119,8 @@ static const struct omci_device_ops qomci_ops = {
 	.get_ani_topology = q1000k_services_topology,
 	.set_tcont = q1000k_services_tcont, .set_gem_port = q1000k_services_gem,
 	.set_uni = q1000k_services_uni, .replace_services = q1000k_services_replace,
+	.set_priority_queue = q1000k_services_queue,
+	.set_traffic_scheduler = q1000k_services_scheduler,
 	.config_changed = qomci_config_changed,
 };
 

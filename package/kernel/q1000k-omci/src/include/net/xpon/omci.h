@@ -290,6 +290,23 @@ struct omci_ani_topology {
 	u8 scheduler_policy;
 };
 
+/* Complete decoded candidates. Providers must reject fields they cannot apply;
+ * returning an error leaves the previous configuration intact, or EUCLEAN
+ * contains the datapath if physical restoration cannot be proven.
+ */
+struct omci_priority_queue_config {
+	u16 maximum_size, allocated_size, discard_reset, discard_threshold;
+	u16 tcont_entity_id, priority, scheduler_entity_id;
+	u16 backpressure_operation, backpressure_occur, backpressure_clear;
+	u32 backpressure_time;
+	u8 configuration, weight;
+};
+
+struct omci_traffic_scheduler_config {
+	u16 tcont_entity_id, parent_entity_id;
+	u8 policy, priority;
+};
+
 /**
  * struct omci_device_ops - hardware transport and provisioning operations
  * @start: acquire and start the OMCI transport independently of netdev state
@@ -299,6 +316,8 @@ struct omci_ani_topology {
  * @set_tcont: configure a T-CONT mapping
  * @set_gem_port: configure a GEM port
  * @set_uni: enable or disable a UNI
+ * @set_priority_queue: apply a complete existing upstream queue candidate
+ * @set_traffic_scheduler: apply a complete existing scheduler candidate
  * @replace_services: atomically replace the entire service set; an error must
  *	leave the previous set intact, or return -EUCLEAN if that cannot be proven.
  *	The array is borrowed for this call only; NULL with count zero removes all.
@@ -322,6 +341,10 @@ struct omci_device_ops {
 			    u16 gem_port_id, u16 tcont_entity_id,
 			    u8 direction, bool valid, bool encrypted);
 	int (*set_uni)(struct omci_device *odev, u16 entity_id, bool enable);
+	int (*set_priority_queue)(struct omci_device *odev, u16 entity_id,
+			 const struct omci_priority_queue_config *config);
+	int (*set_traffic_scheduler)(struct omci_device *odev, u16 entity_id,
+			 const struct omci_traffic_scheduler_config *config);
 	int (*replace_services)(struct omci_device *odev,
 				const struct omci_service_config *services,
 				size_t count);

@@ -46,6 +46,8 @@ typedef uint64_t u64;
 #define IS_ERR(p) ((uintptr_t)(p)>(uintptr_t)-4096)
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 struct omci_device;
+struct omci_priority_queue_config;
+struct omci_traffic_scheduler_config;
 struct omci_ani_topology;
 struct omci_service_config;
 struct omci_telemetry;
@@ -96,6 +98,8 @@ static void q1000k_services_destroy(void) { services_enabled=false; }
 static int q1000k_services_topology(struct omci_device *o,struct omci_ani_topology *t) { return 0; }
 static int q1000k_services_tcont(struct omci_device *o,u16 e,u16 a,bool v) { return 0; }
 static int q1000k_services_gem(struct omci_device *o,u16 e,u16 g,u16 t,u8 d,bool v,bool enc) { return 0; }
+static int q1000k_services_queue(struct omci_device *o,u16 e,const struct omci_priority_queue_config *q) { return 0; }
+static int q1000k_services_scheduler(struct omci_device *o,u16 e,const struct omci_traffic_scheduler_config *s) { return 0; }
 static int q1000k_services_uni(struct omci_device *o,u16 e,bool enable) { return 0; }
 static int q1000k_services_replace(struct omci_device *o,const struct omci_service_config *s,size_t n) { return 0; }
 static int q1000k_pon_get_serial(u8 *s,int n) { assert(n==8); memset(s,1,n); return 0; }

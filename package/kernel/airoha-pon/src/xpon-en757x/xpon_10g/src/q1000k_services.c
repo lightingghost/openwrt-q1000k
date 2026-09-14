@@ -14,8 +14,10 @@
 #define QS_TCONTS 31
 #define QS_MAX 256
 struct qs_gem { u16 entity, gem, tcont; u8 direction; bool valid; };
-struct qs_rules { size_t count; struct omci_service_config rule[]; };
+struct qs_rules { size_t count; u8 channels[QS_MAX]; struct omci_service_config rule[]; };
+struct qs_scheduler { u8 policy, weight[8]; };
 static u16 qs_alloc[QS_TCONTS];
+static struct qs_scheduler qs_schedulers[QS_TCONTS];
 static struct qs_gem qs_gems[QS_MAX];
 static bool qs_uni[4];
 static bool qs_enabled, qs_changing;
@@ -34,6 +36,7 @@ static int qs_uni_index(u16 entity)
 void q1000k_services_init(void)
 {
 	memset(qs_alloc, 0xff, sizeof(qs_alloc));
+	memset(qs_schedulers, 1, sizeof(qs_schedulers));
 	memset(qs_gems, 0, sizeof(qs_gems));
 	memset(qs_uni, 1, sizeof(qs_uni));
 	qs_enabled = qs_changing = false;
@@ -65,6 +68,7 @@ void q1000k_services_reset(void)
 	synchronize_rcu();
 	kfree(old);
 	memset(qs_alloc, 0xff, sizeof(qs_alloc));
+	memset(qs_schedulers, 1, sizeof(qs_schedulers));
 	memset(qs_gems, 0, sizeof(qs_gems));
 	memset(qs_uni, 1, sizeof(qs_uni));
 	WRITE_ONCE(qs_changing, false);
@@ -245,7 +249,148 @@ int q1000k_services_uni(struct omci_device *odev, u16 entity, bool enabled)
 	return 0;
 }
 
-static int qs_no_install(void *arg) { return 0; }
+struct qs_qos_update {
+	u8 channel;
+	struct qs_scheduler scheduler;
+};
+
+/* The namespace owner invokes this only after full physical drain, with
+ * queues closed. Read the actual global units instead of guessing byte/packet
+ * policy or changing units shared with OMCC and other Alloc-IDs.
+ */
+static int qs_qos_install(void *arg)
+{
+	const struct qs_qos_update *update = arg;
+	struct airoha_pon_qos qos;
+	unsigned int i;
+	int ret = q1000k_transport_get_qos(update->channel, &qos);
+
+	if (ret)
+		return ret;
+	qos.mode = update->scheduler.policy == 1 ? 1 : 0;
+	for (i = 0; i < 8; i++)
+		qos.weights[i] = qos.mode == 1 ? 0 : update->scheduler.weight[i];
+	return q1000k_transport_set_qos(update->channel, &qos);
+}
+
+static int qs_scheduler_update(unsigned int index, const struct qs_scheduler *candidate)
+{
+	struct q1000k_gwan_table *table;
+	struct qs_qos_update update = { .scheduler = *candidate };
+	bool was_changing;
+	int ret, channel;
+
+	if (!memcmp(&qs_schedulers[index], candidate, sizeof(*candidate)))
+		return 0;
+	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	if (!table)
+		return -ENOMEM;
+	ret = q1000k_gwan_snapshot(table);
+	if (ret)
+		goto free;
+	channel = qs_alloc[index] == 0xffff ? Q1000K_GWAN_UNKNOWN_CHANNEL :
+		qs_channel(table, qs_alloc[index]);
+	if (channel != Q1000K_GWAN_UNKNOWN_CHANNEL) {
+		update.channel = channel;
+		was_changing = READ_ONCE(qs_changing);
+		WRITE_ONCE(qs_changing, true);
+		ret = q1000k_gwan_refresh(qs_qos_install, &update);
+		if (ret != -EUCLEAN)
+			WRITE_ONCE(qs_changing, was_changing);
+		if (ret)
+			goto free;
+	}
+	/* Unassigned T-CONTs retain their scheduler intent. Service activation
+	 * programs it into the PLOAM-selected channel before opening queues.
+	 */
+	qs_schedulers[index] = *candidate;
+free:
+	kfree(table);
+	return ret;
+}
+
+int q1000k_services_queue(struct omci_device *odev, u16 entity,
+			 const struct omci_priority_queue_config *q)
+{
+	struct qs_scheduler candidate;
+	unsigned int index, queue;
+	int token, ret;
+
+	if (!q || entity < 0x8000 || entity >= 0x8000 + QS_TCONTS * 8)
+		return -EINVAL;
+	index = (entity - 0x8000) / 8;
+	queue = (entity - 0x8000) % 8;
+	/* Shared buffers and fixed queue wiring have no per-queue reservation,
+ * discard-reset or backpressure implementation. Do not acknowledge changes.
+ */
+	if (q->configuration != 1 || q->maximum_size != 0xffff ||
+	    q->allocated_size || q->discard_reset || q->discard_threshold ||
+	    q->backpressure_operation || q->backpressure_time ||
+	    q->backpressure_occur != 0xffff || q->backpressure_clear ||
+	    q->tcont_entity_id != QS_TCONT_BASE + index ||
+	    q->scheduler_entity_id != 0x8000 + index || q->priority != 7 - queue)
+		return -EOPNOTSUPP;
+	if (!q->weight || q->weight > 127)
+		return -ERANGE;
+	token = q1000k_protocol_enter();
+	if (token < 0)
+		return token;
+	candidate = qs_schedulers[index];
+	candidate.weight[queue] = q->weight;
+	ret = qs_scheduler_update(index, &candidate);
+	q1000k_protocol_leave(token);
+	return ret;
+}
+
+int q1000k_services_scheduler(struct omci_device *odev, u16 entity,
+			 const struct omci_traffic_scheduler_config *s)
+{
+	struct qs_scheduler candidate;
+	unsigned int index;
+	int token, ret;
+
+	if (!s || entity < 0x8000 || entity >= 0x8000 + QS_TCONTS)
+		return -EINVAL;
+	index = entity - 0x8000;
+	if (s->tcont_entity_id != QS_TCONT_BASE + index || s->parent_entity_id ||
+	    s->priority || (s->policy != 1 && s->policy != 2))
+		return -EOPNOTSUPP;
+	token = q1000k_protocol_enter();
+	if (token < 0)
+		return token;
+	candidate = qs_schedulers[index];
+	candidate.policy = s->policy;
+	ret = qs_scheduler_update(index, &candidate);
+	q1000k_protocol_leave(token);
+	return ret;
+}
+
+static int qs_service_qos_install(void *arg)
+{
+	const struct qs_rules *rules = arg;
+	bool installed[32] = { false };
+	size_t i;
+
+	for (i = 0; i < rules->count; i++) {
+		const struct omci_service_config *s = &rules->rule[i];
+		struct qs_qos_update update;
+		/* The caller captured channel IDs while it owned the namespace.
+		 * Binding lookup is closed inside the installation phase.
+		 */
+		int ret;
+		unsigned int channel = rules->channels[i];
+
+		if (installed[channel])
+			continue;
+		update.channel = channel;
+		update.scheduler = qs_schedulers[s->tcont_entity_id - QS_TCONT_BASE];
+		ret = qs_qos_install(&update);
+		if (ret)
+			return ret;
+		installed[channel] = true;
+	}
+	return 0;
+}
 
 int q1000k_services_replace(struct omci_device *odev,
 		const struct omci_service_config *services, size_t count)
@@ -274,6 +419,7 @@ int q1000k_services_replace(struct omci_device *odev,
 		int uni = qs_uni_index(s->uni_entity_id);
 
 		if (uni < 0 || s->queue > 7 || (s->pcp_valid && s->pcp > 7) ||
+		    s->tcont_entity_id < QS_TCONT_BASE || s->tcont_entity_id >= QS_TCONT_BASE + QS_TCONTS ||
 		    (s->vlan_valid && s->vlan_id > 4094) || s->direction < 1 || s->direction > 3) {
 			ret = -EINVAL; goto free;
 		}
@@ -285,6 +431,8 @@ int q1000k_services_replace(struct omci_device *odev,
 		if (ret)
 			goto free;
 		if (binding.alloc_id != s->alloc_id) { ret = -ESTALE; goto free; }
+		if (qs_alloc[s->tcont_entity_id - QS_TCONT_BASE] != s->alloc_id) { ret = -ESTALE; goto free; }
+		next->channels[i] = binding.channel;
 		for (j = 0; j < i; j++) {
 			const struct omci_service_config *p = &services[j];
 
@@ -306,7 +454,7 @@ int q1000k_services_replace(struct omci_device *odev,
 	/* Retire old classifier-selected traffic, including native retries and
 	 * downstream frames, even when the GEM record set itself is identical.
 	 */
-	ret = q1000k_gwan_refresh(qs_no_install, NULL);
+	ret = q1000k_gwan_refresh(qs_service_qos_install, next);
 	if (ret) {
 		if (ret != -EUCLEAN) WRITE_ONCE(qs_changing, was_changing);
 		goto free;

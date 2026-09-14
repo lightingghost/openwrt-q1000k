@@ -55,6 +55,10 @@ static void make_tag(struct sk_buff *skb,u16 vid,u8 pcp)
 }
 int main(void)
 {
+    struct omci_priority_queue_config q={.configuration=1,.maximum_size=0xffff,
+        .tcont_entity_id=0x8000,.priority=4,.scheduler_entity_id=0x8000,
+        .weight=17,.backpressure_occur=0xffff};
+    struct omci_traffic_scheduler_config scheduler={.tcont_entity_id=0x8000,.policy=2};
     struct omci_ani_topology topology;
     struct sk_buff skb;
     struct omci_service_config s={.cookie=1,.uni_entity_id=1,.gem_ctp_entity_id=100,
@@ -64,6 +68,10 @@ int main(void)
     reset_model(); q1000k_services_init();
     assert(!q1000k_services_topology(NULL,&topology) && topology.tcont_count==31 && topology.queues_per_tcont==8);
     assert(q1000k_services_tcont(NULL,0x7fff,200,true)==-EINVAL);
+    int untouched=physical_ops;
+    assert(!q1000k_services_queue(NULL,0x8003,&q));
+    assert(!q1000k_services_scheduler(NULL,0x8000,&scheduler));
+    assert(physical_ops==untouched && qs_schedulers[0].weight[3]==17);
     assert(!q1000k_services_tcont(NULL,0x8000,200,true));
     assert(q1000k_services_tcont(NULL,0x8001,200,true)==-EEXIST);
     assert(q1000k_services_gem(NULL,100,500,0x8000,3,true,true)==-EOPNOTSUPP);
@@ -74,6 +82,26 @@ int main(void)
     assert(!q1000k_services_uni(NULL,1,true));
     assert(!q1000k_services_replace(NULL,&s,1));
     assert(queue_model[1]==(255^BIT(3)) && !qs_changing);
+    assert(qos_model[1].mode==0 && qos_model[1].weights[3]==17 && qos_model[1].weights[2]==1);
+    struct airoha_pon_qos previous=qos_model[1];
+    scheduler.policy=1; assert(!q1000k_services_scheduler(NULL,0x8000,&scheduler));
+    assert(qos_model[1].mode==1 && !qos_model[1].weights[3]);
+    assert(qos_model[1].byte_mode==previous.byte_mode && qos_model[1].scale16==previous.scale16);
+    q.weight=127; assert(!q1000k_services_queue(NULL,0x8003,&q));
+    scheduler.policy=2; assert(!q1000k_services_scheduler(NULL,0x8000,&scheduler));
+    assert(qos_model[1].mode==0 && qos_model[1].weights[3]==127);
+    untouched=physical_ops;
+    q.weight=128; assert(q1000k_services_queue(NULL,0x8003,&q)==-ERANGE);
+    q.weight=0; assert(q1000k_services_queue(NULL,0x8003,&q)==-ERANGE);
+    q.weight=17; q.priority=3; assert(q1000k_services_queue(NULL,0x8003,&q)==-EOPNOTSUPP);
+    q.priority=4; q.allocated_size=1; assert(q1000k_services_queue(NULL,0x8003,&q)==-EOPNOTSUPP);
+    q.allocated_size=0; scheduler.parent_entity_id=0x8001;
+    assert(q1000k_services_scheduler(NULL,0x8000,&scheduler)==-EOPNOTSUPP);
+    scheduler.parent_entity_id=0; assert(physical_ops==untouched);
+    physical_fail=physical_ops+1;
+    assert(q1000k_services_queue(NULL,0x8003,&q)==-ETIMEDOUT);
+    assert(qs_schedulers[0].weight[3]==127 && !qs_changing);
+    physical_fail=0;
     make_tag(&skb,1894,0);
     assert(q1000k_services_tx(&skb)==-ENOLINK);
     q1000k_services_enable(true);
@@ -108,5 +136,27 @@ int main(void)
     assert(q1000k_services_tx(&skb)==-ENOENT);
     /* Teardown follows stopped packet and protocol producers. */
     int token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+    /* Every physical scheduler operation may fail. Software intent changes
+     * only on complete success; uncertain hardware remains contained.
+     */
+    int operations=0;
+    for(int fail_at=0; fail_at<=operations; fail_at++) {
+        reset_model(); q1000k_services_init();
+        assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+        assert(!gwan_create_new_tcont(200));
+        assert(!q1000k_services_replace(NULL,NULL,0));
+        int start=physical_ops;
+        physical_fail=fail_at ? start+fail_at : 0;
+        int result=q1000k_services_scheduler(NULL,0x8000,&scheduler);
+        if(!fail_at) {
+            assert(!result && qs_schedulers[0].policy==2);
+            operations=physical_ops-start;
+        } else {
+            assert(result<0 && qs_schedulers[0].policy==1);
+            if(result==-EUCLEAN) assert(qs_changing && protocol_error);
+            else assert(!qs_changing);
+        }
+        token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+    }
     return 0;
 }

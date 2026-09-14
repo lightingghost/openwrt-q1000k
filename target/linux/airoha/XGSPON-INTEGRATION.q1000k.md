@@ -1047,3 +1047,29 @@ managed-entity controls, encrypted/multicast data and profile-seeded services
 still need their final integration. The existing startup gate, BROKEN marking,
 disabled PON node and lack of autoload remain until that work is complete. These
 local test results do not establish optical service or hardware timing.
+
+## OMCI scheduler controls
+
+MAC r40 and OMCI core r4 connect the Priority Queue and Traffic Scheduler
+managed entities to native QDMA1 QoS. A policy change or weight update on an
+assigned T-CONT retires the complete physical namespace, reads the actual
+shared units, programs and verifies the channel scheduler, then restores queue
+admission. Unassigned entities retain their policy and weights; service
+activation installs them into the PLOAM-selected channel before queue opening.
+The native mode mapping is strict priority (1) or eight-queue WRR (0), with
+weights 1..127. Queue entity order preserves the advertised reversed priority
+order. Mixed native modes remain internal rather than claiming an unsupported
+OMCI scheduler hierarchy.
+
+The core now decodes complete scheduling candidates, rejects missing hardware
+callbacks, preserves the previous MIB after rejection, and records EUCLEAN for
+an uncertain hardware result. Fixed queue wiring, shared-buffer allocation,
+backpressure and T-CONT policy are read-only. ONU2-G advertises only scheduler
+policy flexibility. Policy values follow [ITU-T G.988 section 9.2.11](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-G.988-202403-I%21Amd1%21PDF-E&lang=s&type=items).
+
+Validation includes the actual provider with unassigned/assigned entities,
+WRR limits, strict-priority transitions, shared-unit preservation and every
+modeled physical failure. All 52 host tests, the full OMCI UML suite, and the
+AArch64 MAC/core builds pass. No device access occurred. Startup/reset, PHY
+ready/loss callers, profile-seeded services and advanced data service support
+remain the next integration work; optical service is not established.

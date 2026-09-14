@@ -231,7 +231,7 @@ static const struct omci_get_attr_layout omci_onu2_g_attr_layout[] = {
 	{ BIT(6), OMCI_ATTR_VALUE_ZERO, 4 },	/* System uptime */
 	{ BIT(5), OMCI_ATTR_VALUE_ZERO, 2 },	/* Connectivity capability */
 	{ BIT(4), 31, 1 },		/* Connectivity mode */
-	{ BIT(3), OMCI_ATTR_VALUE_ZERO, 2 },	/* QoS configuration */
+	{ BIT(3), 38, 2 },		/* QoS configuration */
 	{ BIT(2), OMCI_ATTR_VALUE_ZERO, 2 },	/* Priority queue scale */
 };
 
@@ -1420,6 +1420,7 @@ static u16 omci_mib_count_class(struct omci_agent *agent, u16 class_id)
 
 static void omci_agent_refresh_identity_locked(struct omci_agent *agent)
 {
+	const struct omci_device *odev = container_of(agent, struct omci_device, agent);
 	struct omci_mib_object *object;
 	unsigned long index;
 	u16 queues, schedulers;
@@ -1484,6 +1485,11 @@ static void omci_agent_refresh_identity_locked(struct omci_agent *agent)
 		put_unaligned_be16(OMCI_ONU2G_CONNECTIVITY_CAPABILITY,
 				   object->data + 35);
 		put_unaligned_be16(1, object->data + 40);
+		/* G.988 ONU2-G flexibility bit 4 (one based): scheduler policy
+		 * may be changed. Queue wiring and T-CONT policy stay fixed.
+		 */
+		put_unaligned_be16(odev->ops->set_traffic_scheduler ? BIT(3) : 0,
+				   object->data + 38);
 	}
 
 	object = omci_mib_lookup(agent, OMCI_CLASS_HUAWEI_SW_IMAGE_EXT, 0);
@@ -2650,7 +2656,7 @@ static int omci_agent_mib_reset_locked(struct omci_device *odev, bool all,
 	return ret;
 }
 
-static int omci_agent_hw_update(struct omci_device *odev,
+static int omci_agent_hw_update_apply(struct omci_device *odev,
 				struct omci_mib_object *object,
 				u8 action, const u8 *content)
 {
@@ -2669,6 +2675,38 @@ static int omci_agent_hw_update(struct omci_device *odev,
 		return -EOPNOTSUPP;
 
 	switch (object->class_id) {
+	case OMCI_CLASS_PRIORITY_QUEUE: {
+		struct omci_priority_queue_config q;
+		const u8 *d = object->data;
+
+		if (!ops->set_priority_queue || action != OMCI_MSG_TYPE_SET)
+			return -EOPNOTSUPP;
+		q = (struct omci_priority_queue_config) {
+			.configuration = d[0], .maximum_size = get_unaligned_be16(d + 1),
+			.allocated_size = get_unaligned_be16(d + 3),
+			.discard_reset = get_unaligned_be16(d + 5),
+			.discard_threshold = get_unaligned_be16(d + 7),
+			.tcont_entity_id = get_unaligned_be16(d + 9),
+			.priority = get_unaligned_be16(d + 11),
+			.scheduler_entity_id = get_unaligned_be16(d + 13), .weight = d[15],
+			.backpressure_operation = get_unaligned_be16(d + 16),
+			.backpressure_time = get_unaligned_be32(d + 18),
+			.backpressure_occur = get_unaligned_be16(d + 22),
+			.backpressure_clear = get_unaligned_be16(d + 24),
+		};
+		return ops->set_priority_queue(odev, object->entity_id, &q);
+	}
+	case OMCI_CLASS_TRAFFIC_SCHEDULER: {
+		struct omci_traffic_scheduler_config s = {
+			.tcont_entity_id = get_unaligned_be16(object->data),
+			.parent_entity_id = get_unaligned_be16(object->data + 2),
+			.policy = object->data[4], .priority = object->data[5],
+		};
+
+		if (!ops->set_traffic_scheduler || action != OMCI_MSG_TYPE_SET)
+			return -EOPNOTSUPP;
+		return ops->set_traffic_scheduler(odev, object->entity_id, &s);
+	}
 	case OMCI_CLASS_TCONT:
 		if (!ops->set_tcont)
 			return -EOPNOTSUPP;
@@ -2706,6 +2744,17 @@ static int omci_agent_hw_update(struct omci_device *odev,
 	default:
 		return 0;
 	}
+}
+
+static int omci_agent_hw_update(struct omci_device *odev,
+				struct omci_mib_object *object,
+				u8 action, const u8 *content)
+{
+	int ret = omci_agent_hw_update_apply(odev, object, action, content);
+
+	if (ret == -EUCLEAN)
+		odev->agent.service_error = ret;
+	return ret;
 }
 
 static bool
