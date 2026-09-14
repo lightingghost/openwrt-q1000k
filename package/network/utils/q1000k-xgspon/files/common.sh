@@ -122,6 +122,33 @@ omci_field() {
 	fi
 }
 
+supervisor_status() {
+	local available=0 enabled=0 data version type stage= error= previous
+	[ -x /etc/init.d/q1000k-xgspon ] && available=1
+	[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] && enabled=1
+	# This is the last recorded state, which can survive an abrupt process exit.
+	# It does not prove that a supervisor is alive or that optical service works.
+	json_set_namespace q1000k_supervisor previous
+	json_init
+	if data=$(cat /var/run/q1000k-xgspon/status.json 2>/dev/null) && json_load "$data"; then
+		json_get_type type schema_version
+		json_get_var version schema_version
+		if [ "$type" = int ] && [ "$version" = 1 ]; then
+			json_get_type type stage
+			[ "$type" != string ] || json_get_var stage stage
+			json_get_type type error
+			[ "$type" != int ] || json_get_var error error
+		fi
+	fi
+	json_set_namespace "$previous"
+	json_add_object supervisor
+	json_add_boolean available "$available"
+	json_add_boolean enabled "$enabled"
+	if [ -n "$stage" ]; then json_add_string last_stage "$stage"; else json_add_null last_stage; fi
+	if [ -n "$error" ]; then json_add_int last_error "$error"; else json_add_null last_error; fi
+	json_close_object
+}
+
 xgspon_status() {
 	local phy=0 mac=0 uptime=0
 	read_identity
@@ -139,7 +166,8 @@ xgspon_status() {
 	json_add_string optics '2 × EN7573AN'
 	json_add_string mode 'XGS-PON'
 	json_add_boolean activation_supported 0
-	json_add_string limitation 'OMCI diagnostics are available when the experimental core is loaded; optical startup and hardware acceptance remain pending.'
+	json_add_string limitation 'The optional supervisor supports explicit experimental startup; optical operation and hardware acceptance remain unverified.'
+	supervisor_status
 	json_add_object factory
 	json_add_boolean available "${factory_available:-0}"
 	json_add_string source "$factory_source"

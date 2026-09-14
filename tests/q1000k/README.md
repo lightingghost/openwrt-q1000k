@@ -4,6 +4,7 @@
 
 ```sh
 python3 tests/q1000k/test_xgspon.py
+python3 tests/q1000k/test_pon_service.py
 node tests/q1000k/test_xgspon_views.cjs
 ```
 
@@ -16,6 +17,12 @@ optical states, firmware integrity, private RAM staging and cleanup on a
 failed read. Extraction tests check complete publication and rejection of
 wrong firmware; synthetic firmware hashes replace the OEM hashes only inside
 fixtures. No OEM firmware or device-specific calibration is part of the tests.
+
+The service fixture rewrites every loader/CLI invocation to an absolute fake
+program and all hardware paths to temporary files. It exercises preflight,
+identity arguments, all module-load failures, controller verification,
+reverse shutdown, failed unload retention, duplicate starts, health failures,
+no respawn and typed last-state diagnostics. No host or device module is loaded.
 
 The LuCI fixtures exercise unavailable/LOS states, failed refreshes, schema
 validation and identity validation. They do not establish optical service or

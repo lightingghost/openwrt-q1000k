@@ -1,5 +1,23 @@
 # Q1000K PON integration audit
 
+## Optional supervisor checkpoint — 2026-09-14
+
+Vendor r50 exposes the cached protocol fault through `/proc/xgpon/status`.
+The new optional `q1000k-xgspon-service` r1 implements explicit, disabled-by-default
+procd startup and reverse ownership-based teardown. Diagnostics r4 delegates
+lifecycle commands when the optional service exists and reports its last stage
+without claiming optical readiness. See the [service contract](../../../package/network/utils/q1000k-xgspon-service/README.md).
+
+All 68 PON host tests, 13 factory/backend tests and the LuCI view fixtures pass.
+Matching AN7581 vendor, controller, OMCI core, CLI, diagnostics, supervisor and
+LuCI package builds pass. The nine supervisor tests use only fake absolute
+loader commands and temporary controller/module paths. No device access or
+activation occurred. Data-key/encrypted-service integration, remaining legacy
+control auditing and hardware acceptance are still outstanding.
+
+The sections below record earlier checkpoints and the contracts they added;
+their original outstanding-work lists describe those checkpoints.
+
 This records the remaining runtime contract after the AN7581 BSP/PHY build
 port, not a working PON data path. The current device is restricted to read-only
 access; no modules, files, GPIO changes, I2C probes, reboots or firmware flashes

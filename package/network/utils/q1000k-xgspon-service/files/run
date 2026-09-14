@@ -1,0 +1,154 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+. /lib/q1000k-xgspon/common.sh
+umask 077
+
+run_dir=/var/run/q1000k-xgspon
+owned_modules=
+locked=0
+stage=preflight
+result=1
+controller=
+modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
+
+report() {
+	[ "$locked" = 1 ] || return 0
+	# All strings are fixed program labels, never credentials or command text.
+	printf '{"schema_version":1,"stage":"%s","error":%d}\n' "$stage" "$result" > "$run_dir/status.new" &&
+		mv "$run_dir/status.new" "$run_dir/status.json"
+}
+
+fail() {
+	echo "Q1000K XGS-PON: $1" >&2
+	result=1
+	exit 1
+}
+
+cleanup() {
+	local module failed=0
+	trap - EXIT
+	trap '' HUP INT TERM
+	[ "$locked" = 1 ] || return
+	for module in $owned_modules; do
+		if [ "$module" = q1000k_pon_control ] && [ -n "$controller" ]; then
+			if ! printf 'off\n' > "$controller/operation"; then
+				failed=1
+				echo 'Q1000K XGS-PON: controller power-off failed.' >&2
+			fi
+		fi
+		if ! rmmod "$module" >/dev/null 2>&1; then
+			failed=1
+			echo "Q1000K XGS-PON: cannot release $module; dependent modules retained." >&2
+			break
+		fi
+	done
+	if [ "$failed" = 1 ]; then
+		stage=cleanup_failed
+		result=1
+	elif [ "$result" = 0 ]; then
+		stage=stopped
+	fi
+	report
+	rmdir "$run_dir/lock" || result=1
+	exit "$result"
+}
+
+load_module() {
+	local module="$1"
+	shift
+	stage="loading_$module"
+	report || fail 'Cannot record startup state.'
+	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
+	# Do not expose a registration ID through a module loader's error output.
+	modprobe "$module" "$@" >/dev/null 2>&1 || fail "Loading $module failed."
+	owned_modules="$module $owned_modules"
+}
+
+controller_ready() {
+	local data schema mode firmware calibrated mcu error tx
+	data=$(cat "$controller/status") && json_load "$data" || return 1
+	json_type schema_version int && json_type mode string &&
+		json_type firmware_verified boolean && json_type calibration_supplied boolean &&
+		json_type md32_enabled boolean && json_type last_error int &&
+		json_type tx_disabled boolean || return 1
+	json_get_var schema schema_version
+	json_get_var mode mode
+	json_get_var firmware firmware_verified
+	json_get_var calibrated calibration_supplied
+	json_get_var mcu md32_enabled
+	json_get_var error last_error
+	json_get_var tx tx_disabled
+	[ "$schema" = 1 ] && [ "$mode" = xgspon ] && [ "$firmware" = 1 ] &&
+		[ "$calibrated" = 1 ] && [ "$mcu" = 1 ] && [ "$error" = 0 ] || return 1
+	[ "$1" != initializing ] || [ "$tx" = 1 ]
+}
+
+json_type() {
+	local type
+	json_get_type type "$1"
+	[ "$type" = "$2" ]
+}
+
+health() {
+	local data error schema key value protocol=
+	controller_ready running || return 1
+	[ -d /sys/module/xpon_10g ] && [ -d /sys/class/net/pon ] || return 1
+	while IFS='=' read -r key value; do
+		[ "$key" != protocol_error ] || protocol=$value
+	done < /proc/xgpon/status
+	[ "$protocol" = 0 ] || return 1
+	data=$(/usr/sbin/q1000k-omci -i pon status) && json_load "$data" || return 1
+	json_type schema_version int && json_type service_error int || return 1
+	json_get_var schema schema_version
+	json_get_var error service_error
+	# Ordinary unsupported/incomplete service provisioning remains diagnosable.
+	# EUCLEAN (-117) means a failed hardware rollback and requires containment.
+	[ "$schema" = 1 ] && [ "$error" != -117 ]
+}
+
+[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] || fail 'Service is disabled.'
+[ "$(cat /tmp/sysinfo/board_name)" = quantum,q1000k-ubi ] || fail 'Unsupported board.'
+read_identity
+read_firmware
+[ "$identity_valid" = 1 ] && [ "$factory_available" = 1 ] &&
+	[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Validated identity, factory calibration and OEM firmware are required.'
+registration=$(uci -q get q1000k-xgspon.identity.registration_id)
+[ "${#registration}" = 72 ] && printf '%s\n' "$registration" | grep -Eq '^[0-9A-Fa-f]{72}$' ||
+	fail 'Registration ID must contain exactly 72 hexadecimal digits.'
+lower=$(uci -q get q1000k-xgspon.service.lower)
+[ -n "$lower" ] && [ "${#lower}" -le 15 ] && printf '%s\n' "$lower" | grep -Eq '^[A-Za-z0-9_.-]+$' ||
+	fail 'An explicit native PON lower device is required.'
+read -r flags < "/sys/class/net/$lower/flags" || fail 'PON lower device is unavailable.'
+printf '%s\n' "$flags" | grep -Eq '^0x[0-9A-Fa-f]{1,8}$' && [ "$((flags & 1))" = 1 ] ||
+	fail 'The native PON lower device must already be up.'
+for module in $modules; do
+	[ ! -d "/sys/module/$module" ] || fail "Module $module is already loaded; refusing to adopt it."
+done
+mkdir -p "$run_dir" && mkdir "$run_dir/lock" || fail 'Another service instance owns the lifecycle.'
+locked=1
+trap cleanup EXIT
+trap 'result=0; exit 0' HUP INT TERM
+
+load_module q1000k_pon_control
+controller=$(find_controller) || fail 'Matching controller DT resources are unavailable.'
+stage=initializing
+report || fail 'Cannot record controller state.'
+/usr/sbin/q1000k-xgspon initialize >/dev/null 2>&1 || fail 'Controller initialization failed.'
+controller_ready initializing || fail 'Controller verification failed.'
+for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do
+	load_module "$module"
+done
+load_module xpon_10g "wan_mac=$wan_mac" "pon_serial=$serial" "pon_reg_id=$registration" "pon_lower=$lower"
+registration=
+health || fail 'MAC/OMCI startup verification failed.'
+stage=running
+result=0
+report || fail 'Cannot record service state.'
+while sleep 5; do
+	if ! health; then
+		stage=fault
+		fail 'Controller or MAC/OMCI health check failed.'
+	fi
+done
+stage=fault
+fail 'Supervision interrupted.'

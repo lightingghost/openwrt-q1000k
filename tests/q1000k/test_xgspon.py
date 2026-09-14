@@ -108,6 +108,8 @@ class BackendTests(unittest.TestCase):
                         lambda m: str(self.root) + '/' + m[1] + '/', source)
         source = source.replace('/usr/sbin/q1000k-pon-factory', str(self.root / 'factory'))
         source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
+        source = source.replace('/etc/init.d/q1000k-xgspon', str(self.root / 'service-init'))
+        source = source.replace('/var/run/q1000k-xgspon/', str(self.root / 'run') + '/')
         self.firmware = {
             'pm': (b'fixture program', '5a8a4bbae5f70c1e615ba0aa1c2a1dce654611d3205d2fa983bf41e6cdadb4a1'),
             'dm': (b'fixture data', '21618dc3694a1e6f6b28c7da7141964dea1d6e57f2d2956bbe72a780ca6166a4'),
@@ -125,6 +127,7 @@ class BackendTests(unittest.TestCase):
         self.write('factory.json', json.dumps({'available': False}))
         cli = (PACKAGE / 'files/q1000k-xgspon').read_text()
         cli = cli.replace('/lib/q1000k-xgspon/common.sh', str(self.common))
+        cli = cli.replace('/etc/init.d/q1000k-xgspon', str(self.root / 'service-init'))
         cli = cli.replace('/usr/sbin/q1000k-pon-factory', str(self.root / 'factory'))
         cli = cli.replace('/tmp/q1000k-xgspon.', str(self.root / 'stage/q1000k-xgspon.'))
         self.cli = self.write('cli', cli)

@@ -1,0 +1,22 @@
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_runtime.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_runtime.c
+@@ -47,6 +47,9 @@
+ #include <ecnt_hook/ecnt_hook_pon_mac.h>
+ #include "gpon/gpon_recovery.h"
+ #include "gpon/gpon_runtime.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_protocol.h"
++#endif
+ 
+ /* 0: slow mode,  1: fast mode */
+ int xgpon_fast_mode_flag = 0;
+@@ -109,6 +112,9 @@
+ 		   READ_ONCE(gpGponPriv->state),
+ 		   READ_ONCE(gpPonSysData->sysLinkStatus),
+ 		   READ_ONCE(omciMicErrSwCnt));
++#ifdef Q1000K_PON_IDENTITY
++	seq_printf(seq, "protocol_error=%d\n", q1000k_protocol_status());
++#endif
+ 	return 0;
+ }
+ 
