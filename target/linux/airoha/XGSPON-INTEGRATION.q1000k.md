@@ -3,7 +3,7 @@
 ## UNI VLAN transformation checkpoint — 2026-09-14
 
 Vendor r52 and OMCI core r8 preserve class 171 filters/treatments and apply
-supported tag operations between UNI-facing `pon0` and the optical GEM.
+supported tag operations between UNI-facing `pon` and the optical GEM.
 VID zero is distinct from an untagged frame. Unsupported and empty configured
 paths cannot become a broad default service. See the [VLAN contract](XGSPON-VLAN.q1000k.md)
 for supported operations and the remaining combined-filter/advanced-mode work.

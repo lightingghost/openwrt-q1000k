@@ -4,13 +4,13 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r55 and OMCI core r9 implement the native packet path,
+ demonstrated.** Vendor r56 and OMCI core r10 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
 `q1000k-omci` userspace command and read-only LuCI status/MIB are implemented.
-Combined VLAN filter pipelines and the
-remaining advanced service paths are still incomplete.
+Combined class 84/171 filtering is implemented. Advanced service paths and
+hardware acceptance remain incomplete.
 
 **Device access is read-only; never flash firmware.** No device access or
 activation occurred during this continuation. The controller bring-up tests
@@ -42,6 +42,15 @@ encryption-state Get consults the provider. Broadcast key rings are rejected.
 
 See [key exchange contract](XGSPON-KEYS.q1000k.md).
 
+Vendor r56/core r10 add typed VLAN associations, both bridge-port class 84
+filters and an ordered UNI-side or ANI-side tag operation. First-match table
+selection precedes mapper/filter decisions, so rejection cannot select a
+broader rule. Forward-operation semantics now distinguish VID, PCP, full TCI
+and ingress/egress policy; oversized lists and reserved modes are rejected.
+Shared-GEM mapper rules retain unique cookies and ambiguous routes are blocked
+before transmission. Multiple tag-operation tables and destination-MAC-only
+forwarding remain unsupported. No device access occurred.
+
 ## Imported references
 
 | Import | Local commit | Original source |
@@ -67,7 +76,7 @@ OMCI daemon and unrelated PR changes were not imported.
 | GEM/T-CONT | Full namespace replacement, quarantined failures, PLOAM allocation reconciliation, separate ONU/OMCC publication | Multicast channel ownership and encrypted traffic hardware validation |
 | FE/QoS | Checked native frame/queue controls, SP and WRR managed entities, drained scheduler replacement | Advanced shaping/backpressure and hardware throughput tests |
 | Authentication | 36-byte registration derivation, software OMCI/PLOAM MICs, key/epoch barriers, recovery containment | Secure mutual-authentication rekey and hardware encryption acceptance |
-| OMCI services | Generic core, topology, unicast GEM/bridge/mapper provisioning, class 171 tag processing on UNI-facing pon0 | Combined class 84/171 pipeline, advanced VLAN modes, multicast and actual OLT identity/MIB compatibility |
+| OMCI services | Generic core, topology, unicast GEM/bridge/mapper provisioning, combined class 84/171 processing on UNI-facing pon | Multiple tag-operation stages, advanced VLAN modes, multicast and actual OLT identity/MIB compatibility |
 | Userspace/LuCI | q1000k-omci status/MIB/get/set; read-only LuCI; optional explicit supervisor with owned teardown | Browser QA on an installed image, final netifd/firewall integration and hardware lifecycle acceptance |
 | AT&T WAN | DHCP identified; optical VLAN must come from provisioning, with local tag handling defined by OMCI | Actual gateway/line identity, OLT provisioning, successful DHCP and IPv4/IPv6 tests |
 | Builds | Matching experimental modules/packages; normal builder remains on q1000k-dev | Experimental image boot/recovery acceptance; never flash under the present restriction |

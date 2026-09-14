@@ -221,3 +221,64 @@ int q1000k_vlan_apply(const struct q1000k_vlan_program *p, bool upstream,
 	*output = result;
 	return 0;
 }
+
+/* G.988 table 9.3.11-1. Filters sit between UNI-side and ANI-side
+ * tag operations and investigate the outermost bridge VLAN tag.
+ */
+#define QVF_UNTAGGED_DROP 1
+#define QVF_TAGGED_DROP 2
+#define QVF_NEGATIVE 4
+#define QVF_DA_REQUIRED 8
+static const struct { u16 mask; u8 flags; } qvf_operations[] = {
+	{ 0, 0 }, { 0, 2 }, { 0, 1 },
+	{ 0x0fff, 0 }, { 0x0fff, 1 }, { 0x0fff, 4 }, { 0x0fff, 5 },
+	{ 0xe000, 0 }, { 0xe000, 1 }, { 0xe000, 4 }, { 0xe000, 5 },
+	{ 0xffff, 0 }, { 0xffff, 1 }, { 0xffff, 4 }, { 0xffff, 5 },
+	{ 0x0fff, 0 }, { 0x0fff, 1 }, { 0xe000, 0 }, { 0xe000, 1 },
+	{ 0xffff, 0 }, { 0xffff, 1 }, { 0, 1 },
+	{ 0x0fff, 8 }, { 0x0fff, 9 }, { 0xe000, 8 }, { 0xe000, 9 },
+	{ 0xffff, 8 }, { 0xffff, 9 },
+	{ 0x0fff, 0 }, { 0x0fff, 1 }, { 0xe000, 0 }, { 0xe000, 1 },
+	{ 0xffff, 0 }, { 0xffff, 1 },
+};
+
+int q1000k_vlan_filter_validate(const struct omci_vlan_tagging_filter *filter)
+{
+	if (!filter) return -EINVAL;
+	if (!filter->valid) return 0;
+	if (filter->num_entries > OMCI_VLAN_FILTER_MAX_ENTRIES ||
+	    filter->forward_operation >= sizeof(qvf_operations) / sizeof(qvf_operations[0]))
+		return -EINVAL;
+	/* Action j needs a learned destination and forbids flooding. The current
+	 * single-UNI service path has no OMCI bridge FDB owner.
+	 */
+	if (qvf_operations[filter->forward_operation].flags & QVF_DA_REQUIRED)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
+int q1000k_vlan_filter_apply(const struct omci_vlan_tagging_filter *filter,
+			    bool ingress, const struct q1000k_vlan_frame *frame)
+{
+	u16 mask;
+	u8 flags;
+	unsigned int i;
+	bool matched = false;
+	int ret = q1000k_vlan_filter_validate(filter);
+
+	if (ret) return ret;
+	if (!frame || frame->count > 2) return -EINVAL;
+	if (!filter->valid) return 0;
+	mask = qvf_operations[filter->forward_operation].mask;
+	flags = qvf_operations[filter->forward_operation].flags;
+	if (!frame->count) return flags & QVF_UNTAGGED_DROP ? -ENOENT : 0;
+	if (flags & QVF_TAGGED_DROP) return -ENOENT;
+	if (!mask || (ingress && (flags & QVF_NEGATIVE))) return 0;
+	for (i = 0; i < filter->num_entries; i++)
+		if (!((frame->tag[0].tci ^ filter->entries[i].tci) & mask)) {
+			matched = true;
+			break;
+		}
+	if (flags & QVF_NEGATIVE) matched = !matched;
+	return matched ? 0 : -ENOENT;
+}

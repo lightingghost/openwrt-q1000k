@@ -250,6 +250,9 @@ struct omci_telemetry {
  * @encryption_key_ring: G.988 GEM key ring (0 none, 1 unicast both, 2 broadcast, 3 unicast downstream)
  * @direction: enum omci_gem_port_direction
  * @vlan_rule: complete class 171 rule, with explicit tag presence
+ * @vlan_filter: class 84 filters on the UNI and ANI bridge ports, in that order
+ * @vlan_entity_id: class 171 table identity, for first-match selection
+ * @vlan_ani_side: class 171 acts after upstream bridge filtering and mapping
  * @vlan_input_tpid: class 171 input TPID
  * @vlan_output_tpid: class 171 output TPID
  * @vlan_downstream_mode: class 171 downstream processing mode
@@ -263,7 +266,10 @@ struct omci_telemetry {
  * @default_service: fallback service when no VLAN/PCP rule matches
  */
 struct omci_service_config {
+	struct omci_vlan_tagging_filter vlan_filter[2];
 	struct omci_extended_vlan_rule vlan_rule;
+	u16 vlan_entity_id;
+	bool vlan_ani_side;
 	u16 vlan_input_tpid, vlan_output_tpid;
 	u8 vlan_downstream_mode;
 	u8 encryption_key_ring;

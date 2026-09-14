@@ -336,16 +336,19 @@ static void omci_vlan_filter_parse_entries(struct omci_vlan_tagging_filter *filt
 	}
 }
 
-static void omci_vlan_filter_parse_create(struct omci_mib_object *object,
+static int omci_vlan_filter_parse_create(struct omci_mib_object *object,
 					  const u8 *content)
 {
 	struct omci_vlan_tagging_filter *filter = &object->vlan_filter;
 
 	omci_vlan_filter_parse_entries(filter, content);
 	filter->forward_operation = content[24];
-	filter->num_entries = min_t(u8, content[25],
-				    OMCI_VLAN_FILTER_MAX_ENTRIES);
+	filter->num_entries = content[25];
+	if (filter->num_entries > OMCI_VLAN_FILTER_MAX_ENTRIES ||
+	    filter->forward_operation > 0x21)
+		return -EINVAL;
 	filter->valid = true;
+	return 0;
 }
 
 static int omci_vlan_filter_parse_set(struct omci_mib_object *object,
@@ -370,9 +373,11 @@ static int omci_vlan_filter_parse_set(struct omci_mib_object *object,
 	if (mask & OMCI_VLAN_FILTER_COUNT_MASK) {
 		if (!len)
 			return -EINVAL;
-		filter->num_entries = min_t(u8, *data,
-					    OMCI_VLAN_FILTER_MAX_ENTRIES);
+		filter->num_entries = *data;
 	}
+	if (filter->num_entries > OMCI_VLAN_FILTER_MAX_ENTRIES ||
+	    filter->forward_operation > 0x21)
+		return -EINVAL;
 	filter->valid = true;
 
 	return 0;
@@ -653,8 +658,7 @@ static int omci_mib_parse_create(struct omci_mib_object *object,
 	case OMCI_CLASS_GEM_PORT_CTP:
 		return object->data[15] <= 3 ? 0 : -EINVAL;
 	case OMCI_CLASS_VLAN_TAGGING_FILTER_DATA:
-		omci_vlan_filter_parse_create(object, content);
-		break;
+		return omci_vlan_filter_parse_create(object, content);
 	case OMCI_CLASS_EXTENDED_VLAN:
 		omci_ext_vlan_parse_create(object, content);
 		break;
@@ -2923,11 +2927,6 @@ static u32 omci_agent_service_cookie(u16 lan_port, u16 gem_ctp,
 	return cookie ?: 1;
 }
 
-static bool omci_agent_service_vlan_valid(u16 vid)
-{
-	return vid < VLAN_VID_MASK;
-}
-
 static int omci_agent_service_queue_locked(struct omci_device *odev,
 					 const struct omci_mib_object *gem, u8 *queue)
 {
@@ -2968,9 +2967,9 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 				     u16 lan_port_entity,
 				     u16 uni_entity, u16 gem_iwtp_entity,
 				     u8 mapper_pcp, bool mapper_pcp_valid,
-				     const struct omci_vlan_filter_entry *filter,
+				     const struct omci_vlan_tagging_filter *filters,
 				     const struct omci_extended_vlan_rule *ext_rule,
-				     const struct omci_extended_vlan *vlan,
+				     const struct omci_mib_object *vlan_object, bool vlan_ani_side,
 				     u16 selector, bool *default_installed,
 				     bool multicast, u16 ani_entity_id,
 				     bool ani_valid)
@@ -2980,6 +2979,7 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	struct omci_mib_object *gem;
 	struct omci_mib_object *tcont;
 	struct omci_service_config service = {};
+	const struct omci_extended_vlan *vlan = vlan_object ? &vlan_object->extended_vlan : NULL;
 	u16 gem_ctp_entity;
 	int ret;
 
@@ -3014,21 +3014,16 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 		service.pcp_valid = true;
 		service.queue = mapper_pcp;
 	}
-	if (filter) {
-		service.vlan_id = filter->vid;
-		service.vlan_valid =
-			omci_agent_service_vlan_valid(filter->vid);
-		service.pcp = filter->pbit;
-		service.pcp_valid = true;
-		service.queue = filter->pbit;
-	}
+	memcpy(service.vlan_filter, filters, sizeof(service.vlan_filter));
 	if (ext_rule) {
 		if (!vlan)
 			return -EINVAL;
-		/* Keep the complete class 171 operation. pon0 presents the UNI
+		/* Keep the complete class 171 operation. pon presents the UNI
 		 * side; the provider validates and applies the optical tag rewrite.
-		 * PCP from a mapper is checked after the upstream transformation.
+		 * Mapper PCP is checked on the bridge side of this transformation.
 		 */
+		service.vlan_entity_id = vlan_object->entity_id;
+		service.vlan_ani_side = vlan_ani_side;
 		service.vlan_rule = *ext_rule;
 		service.vlan_input_tpid = vlan->input_tpid;
 		service.vlan_output_tpid = vlan->output_tpid;
@@ -3037,7 +3032,8 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 		       sizeof(service.vlan_treatment));
 		service.vlan_treatment_valid = true;
 	}
-	if (!service.vlan_treatment_valid && !service.vlan_valid && !service.pcp_valid && !*default_installed) {
+	if (!service.vlan_treatment_valid && !filters[0].valid && !filters[1].valid &&
+	    !service.vlan_valid && !service.pcp_valid && !*default_installed) {
 		service.default_service = true;
 		*default_installed = true;
 	}
@@ -3063,27 +3059,52 @@ omci_agent_stage_service_rule_locked(struct omci_device *odev,
 	return omci_agent_stage_service(services, &service);
 }
 
-static bool
-omci_agent_vlan_associated(const struct omci_mib_object *object,
-			   u16 lan_port_entity, u16 uni_entity,
-			   u16 bridge_port_entity, u16 service_entity)
+/* G.988 association type identifies a class, not just an entity number.
+ * Return the attachment side (UNI 0, ANI 1), or -ENOENT for another path.
+ */
+static int omci_agent_vlan_side(const struct omci_mib_object *object,
+		const struct omci_mib_object *lan, u16 uni_entity,
+		const struct omci_mib_object *wan, u16 bridge_port_entity,
+		u16 service_entity, u16 gem_iwtp_entity)
 {
-	if (object->class_id == OMCI_CLASS_VLAN_TAGGING_FILTER_DATA)
-		return object->entity_id == lan_port_entity ||
-		       object->entity_id == uni_entity ||
-		       object->entity_id == bridge_port_entity ||
-		       object->entity_id == service_entity;
-	if (object->class_id == OMCI_CLASS_EXTENDED_VLAN)
-		return object->extended_vlan.valid &&
-		       (object->extended_vlan.associated_me == lan_port_entity ||
-			object->extended_vlan.associated_me == uni_entity ||
-			object->extended_vlan.associated_me == bridge_port_entity ||
-			object->extended_vlan.associated_me == service_entity ||
-			object->entity_id == lan_port_entity ||
-			object->entity_id == bridge_port_entity ||
-			object->entity_id == service_entity);
+	const struct omci_extended_vlan *vlan = &object->extended_vlan;
+	u16 pointer = vlan->associated_me;
 
-	return false;
+	if (object->class_id == OMCI_CLASS_VLAN_TAGGING_FILTER_DATA) {
+		if (object->entity_id == lan->entity_id) return 0;
+		if (object->entity_id == bridge_port_entity) return 1;
+		return -ENOENT;
+	}
+	if (object->class_id != OMCI_CLASS_EXTENDED_VLAN || !vlan->valid)
+		return -ENOENT;
+	switch (vlan->association_type) {
+	case 0: /* MAC bridge port */
+		if (pointer == lan->entity_id) return 0;
+		if (pointer == bridge_port_entity) return 1;
+		break;
+	case 1: /* IEEE 802.1p mapper */
+		if (wan && wan->data[3] == OMCI_BRIDGE_TP_8021P_MAPPER &&
+		    pointer == service_entity) return 1;
+		break;
+	case 2: /* PPTP Ethernet UNI */
+		if (lan->data[3] == OMCI_BRIDGE_TP_PPTP_ETH_UNI && pointer == uni_entity)
+			return 0;
+		break;
+	case 5: /* GEM IWTP, directly bridged or through a mapper */
+		if (pointer == gem_iwtp_entity && wan &&
+		    (wan->data[3] == OMCI_BRIDGE_TP_GEM_IWTP ||
+		     wan->data[3] == OMCI_BRIDGE_TP_8021P_MAPPER)) return 1;
+		break;
+	case 6: /* Multicast GEM IWTP */
+		if (pointer == gem_iwtp_entity && wan &&
+		    wan->data[3] == OMCI_BRIDGE_TP_MULTICAST_GEM_IWTP) return 1;
+		break;
+	case 10: /* VEIP */
+		if (lan->data[3] == OMCI_BRIDGE_TP_VEIP && pointer == uni_entity)
+			return 0;
+		break;
+	}
+	return -ENOENT;
 }
 
 static int
@@ -3097,71 +3118,53 @@ omci_agent_stage_path_locked(struct omci_device *odev,
 			     bool *default_installed)
 {
 	struct omci_agent *agent = &odev->agent;
-	struct omci_mib_object *object;
+	struct omci_mib_object *object, *extended = NULL, *wan;
+	struct omci_vlan_tagging_filter filters[2] = {};
 	unsigned long index;
-	u16 selector = pcp_valid ? 0x100 | pcp : 0;
-	bool installed = false, configured = false, has_filter = false, has_extended = false;
+	unsigned int i;
+	/* Reserve a full table range per mapper priority, including when
+	 * several priorities share the same GEM CTP.
+	 */
+	u16 selector = pcp_valid ? 0x1000 | (pcp << 8) : 0;
+	bool ani_side = false;
 	int ret;
 
-	/* The two MEs form a pipeline, not alternative allow rules. Reject a
-	 * combined path until the provider can represent both stages exactly.
-	 */
+	wan = omci_mib_lookup(agent, OMCI_CLASS_MAC_BRIDGE_PORT_CONFIG_DATA,
+			     bridge_port_entity);
 	xa_for_each(&agent->mib, index, object) {
-		if (!omci_mib_object_active(agent, object) ||
-		    !omci_agent_vlan_associated(object, lan_port->entity_id,
-			uni_entity, bridge_port_entity, service_entity))
-			continue;
-		has_filter |= object->class_id == OMCI_CLASS_VLAN_TAGGING_FILTER_DATA;
-		has_extended |= object->class_id == OMCI_CLASS_EXTENDED_VLAN;
-	}
-	if (has_filter && has_extended)
-		return -EOPNOTSUPP;
+		int side;
 
-	xa_for_each(&agent->mib, index, object) {
-		unsigned int i;
-
-		if (!omci_mib_object_active(agent, object) ||
-		    !omci_agent_vlan_associated(object, lan_port->entity_id,
-						 uni_entity, bridge_port_entity,
-						 service_entity))
-			continue;
-		if (object->class_id == OMCI_CLASS_VLAN_TAGGING_FILTER_DATA &&
-		    object->vlan_filter.valid) {
-			configured = true;
-			for (i = 0; i < object->vlan_filter.num_entries; i++) {
-				ret = omci_agent_stage_service_rule_locked(
-					odev, services, lan_port->entity_id,
-					uni_entity, gem_iwtp_entity, pcp, pcp_valid,
-					&object->vlan_filter.entries[i], NULL, NULL,
-					selector + i + 1, default_installed,
-					multicast, ani_entity_id, ani_valid);
-				if (ret)
-					return ret;
-				installed = true;
-			}
-		} else if (object->class_id == OMCI_CLASS_EXTENDED_VLAN &&
-			   object->extended_vlan.valid) {
-			configured = true;
-			for (i = 0; i < object->extended_vlan.rule_count; i++) {
-				ret = omci_agent_stage_service_rule_locked(
-					odev, services, lan_port->entity_id,
-					uni_entity, gem_iwtp_entity, pcp, pcp_valid,
-					NULL, &object->extended_vlan.rules[i], &object->extended_vlan,
-					selector + i + 0x20, default_installed,
-					multicast, ani_entity_id, ani_valid);
-				if (ret)
-					return ret;
-				installed = true;
-			}
+		if (!omci_mib_object_active(agent, object)) continue;
+		side = omci_agent_vlan_side(object, lan_port, uni_entity, wan,
+			bridge_port_entity, service_entity, gem_iwtp_entity);
+		if (side < 0) continue;
+		if (object->class_id == OMCI_CLASS_VLAN_TAGGING_FILTER_DATA) {
+			if (object->vlan_filter.valid) filters[side] = object->vlan_filter;
+		} else {
+			/* Two tag operations require two independently selected tables;
+			 * never merge their rows into alternative forwarding rules.
+			 */
+			if (extended) return -EOPNOTSUPP;
+			extended = object;
+			ani_side = side;
 		}
 	}
-
-	if (installed || configured)
+	if (extended) {
+		/* A configured empty table admits no service. */
+		for (i = 0; i < extended->extended_vlan.rule_count; i++) {
+			ret = omci_agent_stage_service_rule_locked(
+				odev, services, lan_port->entity_id,
+				uni_entity, gem_iwtp_entity, pcp, pcp_valid,
+				filters, &extended->extended_vlan.rules[i], extended, ani_side,
+				selector + i + 0x20, default_installed,
+				multicast, ani_entity_id, ani_valid);
+			if (ret) return ret;
+		}
 		return 0;
-
+	}
 	return omci_agent_stage_service_rule_locked(
 		odev, services, lan_port->entity_id, uni_entity, gem_iwtp_entity,
-		pcp, pcp_valid, NULL, NULL, NULL, selector, default_installed,
+		pcp, pcp_valid, filters, NULL, NULL, false, selector, default_installed,
 		multicast, ani_entity_id, ani_valid);
 }
 
@@ -5059,7 +5062,9 @@ int omci_agent_mib_set(struct omci_device *odev,
 		if (ret)
 			goto unlock;
 	} else if (local->class_id == OMCI_CLASS_VLAN_TAGGING_FILTER_DATA) {
-		omci_vlan_filter_parse_create(local, local->data);
+		ret = omci_vlan_filter_parse_create(local, local->data);
+		if (ret)
+			goto unlock;
 	} else if (local->class_id == OMCI_CLASS_EXTENDED_VLAN) {
 		omci_ext_vlan_parse_create(local, local->data);
 		if (local->attr_mask & OMCI_EXT_VLAN_TABLE_MASK)

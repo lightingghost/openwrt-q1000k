@@ -17,8 +17,54 @@ static struct omci_service_config service(void)
             .treat_inner_tpid_dei=4}};
     return s;
 }
+static void filter_test(void)
+{
+    struct omci_vlan_tagging_filter f={.valid=true,.num_entries=1,.entries={{.tci=0xb07b}}};
+    struct q1000k_vlan_frame frame={.count=1,.tag={{0x8100,0xb07b}}};
+    const u8 vid_modes[]={3,4,15,16,28,29};
+    const u8 pcp_modes[]={7,8,17,18,30,31};
+    const u8 tci_modes[]={11,12,19,20,32,33};
+    for(unsigned int m=0;m<6;m++) for(unsigned int tci=0;tci<65536;tci++) {
+        frame.tag[0].tci=tci;
+        f.forward_operation=vid_modes[m];
+        assert(q1000k_vlan_filter_apply(&f,true,&frame)==((tci&4095)==123?0:-ENOENT));
+        assert(q1000k_vlan_filter_apply(&f,false,&frame)==((tci&4095)==123?0:-ENOENT));
+        f.forward_operation=pcp_modes[m];
+        assert(q1000k_vlan_filter_apply(&f,true,&frame)==((tci>>13)==5?0:-ENOENT));
+        f.forward_operation=tci_modes[m];
+        assert(q1000k_vlan_filter_apply(&f,false,&frame)==(tci==0xb07b?0:-ENOENT));
+    }
+    f.forward_operation=5; frame.tag[0].tci=123;
+    assert(!q1000k_vlan_filter_apply(&f,true,&frame));
+    assert(q1000k_vlan_filter_apply(&f,false,&frame)==-ENOENT);
+    frame.tag[0].tci=124;
+    assert(!q1000k_vlan_filter_apply(&f,true,&frame) && !q1000k_vlan_filter_apply(&f,false,&frame));
+    f.forward_operation=0x10; f.entries[0].tci=0; frame.tag[0].tci=0xf000;
+    assert(!q1000k_vlan_filter_apply(&f,true,&frame)); /* VID zero, independent of PCP and DEI. */
+    frame.count=0; assert(q1000k_vlan_filter_apply(&f,true,&frame)==-ENOENT);
+    f.forward_operation=0xf; assert(!q1000k_vlan_filter_apply(&f,false,&frame));
+    f.forward_operation=0; assert(!q1000k_vlan_filter_apply(&f,true,&frame));
+    frame.count=1; assert(!q1000k_vlan_filter_apply(&f,true,&frame));
+    f.forward_operation=1; assert(q1000k_vlan_filter_apply(&f,true,&frame)==-ENOENT);
+    f.forward_operation=0x10; f.num_entries=0;
+    assert(q1000k_vlan_filter_apply(&f,true,&frame)==-ENOENT);
+    f.num_entries=12; f.entries[11].tci=123; frame.tag[0].tci=123;
+    assert(!q1000k_vlan_filter_apply(&f,true,&frame));
+    frame.count=2; frame.tag[1].tci=124;
+    assert(!q1000k_vlan_filter_apply(&f,true,&frame)); /* Outer bridge VLAN, not inner VID. */
+    frame.tag[0].tci=124; frame.tag[1].tci=123;
+    assert(q1000k_vlan_filter_apply(&f,true,&frame)==-ENOENT);
+    f.num_entries=13; assert(q1000k_vlan_filter_validate(&f)==-EINVAL);
+    f.num_entries=1;
+    for(unsigned int mode=0x16;mode<=0x1b;mode++) {
+        f.forward_operation=mode; assert(q1000k_vlan_filter_validate(&f)==-EOPNOTSUPP);
+    }
+    f.forward_operation=0x22; assert(q1000k_vlan_filter_validate(&f)==-EINVAL);
+    f.valid=false; assert(!q1000k_vlan_filter_apply(&f,false,&frame));
+}
 int main(void)
 {
+    filter_test();
     struct omci_service_config s=service();
     struct q1000k_vlan_program p, old;
     struct q1000k_vlan_frame in={.ethertype=0x0800}, out, back;

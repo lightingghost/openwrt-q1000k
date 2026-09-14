@@ -3,6 +3,7 @@
 #define Q1000K_VLAN_H
 #include <linux/types.h>
 struct omci_service_config;
+struct omci_vlan_tagging_filter;
 /* Host-endian tag words, ordered outermost first. */
 struct q1000k_vlan_tag { u16 tpid, tci; };
 struct q1000k_vlan_frame {
@@ -27,4 +28,7 @@ int q1000k_vlan_compile(const struct omci_service_config *service,
 int q1000k_vlan_apply(const struct q1000k_vlan_program *program, bool upstream,
 		      const struct q1000k_vlan_frame *input,
 		      struct q1000k_vlan_frame *output);
+int q1000k_vlan_filter_validate(const struct omci_vlan_tagging_filter *filter);
+int q1000k_vlan_filter_apply(const struct omci_vlan_tagging_filter *filter,
+			    bool ingress, const struct q1000k_vlan_frame *frame);
 #endif

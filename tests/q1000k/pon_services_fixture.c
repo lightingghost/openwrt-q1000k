@@ -133,7 +133,7 @@ int main(void)
     make_tag(&skb,1894,5); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==6);
     make_tag(&skb,1894,4); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==3);
     /* A provisioned UNI rewrite carries DHCP/ARP/IP frames untagged on
-     * pon0 and tagged on the optical GEM; a literal VLAN 0 is distinct.
+     * pon and tagged on the optical GEM; a literal VLAN 0 is distinct.
      */
     {
         struct omci_service_config tag=s;
@@ -161,6 +161,96 @@ int main(void)
         skb.tci=5<<13; assert(!q1000k_services_tx(&skb) && !skb.vlan && skb.len==64);
         assert(get_unaligned_be16(skb.data+14)==((5<<13)|123));
         assert(!q1000k_services_rx(&skb,500) && skb.len==64 && get_unaligned_be16(skb.data+14)==(5<<13));
+        /* Class 84 sees the bridge-side tag, in both packet directions. */
+        {
+            struct omci_service_config pipeline=tag, pair[2];
+            pipeline.vlan_entity_id=0x123;
+            pipeline.vlan_filter[0]=(struct omci_vlan_tagging_filter){.valid=true,
+                .forward_operation=0x10,.num_entries=1,.entries={{.tci=123}}};
+            pipeline.vlan_filter[1]=pipeline.vlan_filter[0];
+            assert(!q1000k_services_replace(NULL,&pipeline,1));
+            make_tag(&skb,0,5); assert(!q1000k_services_tx(&skb));
+            assert(get_unaligned_be16(skb.data+14)==((5<<13)|123));
+            assert(!q1000k_services_rx(&skb,500) && get_unaligned_be16(skb.data+14)==(5<<13));
+            pipeline.vlan_filter[1].entries[0].tci=124;
+            assert(!q1000k_services_replace(NULL,&pipeline,1));
+            make_tag(&skb,0,5); assert(q1000k_services_tx(&skb)==-ENOENT);
+            make_tag(&skb,123,5); assert(q1000k_services_rx(&skb,500)==-ENOENT);
+            pipeline.vlan_ani_side=true;
+            pipeline.vlan_filter[0].entries[0].tci=pipeline.vlan_filter[1].entries[0].tci=0;
+            assert(!q1000k_services_replace(NULL,&pipeline,1));
+            make_tag(&skb,0,5); assert(!q1000k_services_tx(&skb));
+            assert(!q1000k_services_rx(&skb,500) && get_unaligned_be16(skb.data+14)==(5<<13));
+            /* Mapper priority is at the bridge side, before an ANI rewrite. */
+            pipeline.vlan_rule.filter_inner_pbit=5; pipeline.vlan_rule.treat_inner_pbit=2;
+            pipeline.pcp_valid=true; pipeline.pcp=5;
+            assert(!q1000k_services_replace(NULL,&pipeline,1));
+            make_tag(&skb,0,5); assert(!q1000k_services_tx(&skb));
+            assert(get_unaligned_be16(skb.data+14)==((2<<13)|123));
+            assert(!q1000k_services_rx(&skb,500) && get_unaligned_be16(skb.data+14)==(5<<13));
+            pipeline.pcp_valid=false;
+            pipeline.vlan_rule.filter_inner_pbit=8; pipeline.vlan_rule.treat_inner_pbit=8;
+            /* Negative filtering accepts ingress but rejects matching egress. */
+            pipeline.vlan_filter[0].valid=false; pipeline.vlan_filter[1].forward_operation=5;
+            assert(!q1000k_services_replace(NULL,&pipeline,1));
+            make_tag(&skb,0,5); assert(q1000k_services_tx(&skb)==-ENOENT);
+            make_tag(&skb,123,5); assert(!q1000k_services_rx(&skb,500));
+            pipeline.vlan_filter[1].valid=false;
+            pipeline.vlan_filter[0].valid=true; pipeline.vlan_filter[0].forward_operation=5;
+            assert(!q1000k_services_replace(NULL,&pipeline,1));
+            make_tag(&skb,0,5); assert(!q1000k_services_tx(&skb));
+            assert(q1000k_services_rx(&skb,500)==-ENOENT);
+            /* A post-treatment filter rejection cannot select the default row. */
+            pair[0]=tag; pair[0].vlan_entity_id=0x123; pair[0].vlan_filter[0]=(struct omci_vlan_tagging_filter){
+                .valid=true,.forward_operation=0x10,.num_entries=1,.entries={{.tci=0}}};
+            pair[1]=pair[0]; pair[1].cookie=2;
+            pair[1].vlan_rule.filter_inner_pbit=14; pair[1].vlan_rule.tags_to_remove=0;
+            pair[1].vlan_rule.treat_inner_pbit=15; pair[1].vlan_rule.raw[4]=0xe0;
+            assert(!q1000k_services_replace(NULL,pair,2));
+            int sent=transmit_count;
+            make_tag(&skb,0,5); assert(q1000k_services_tx(&skb)==-ENOENT && transmit_count==sent);
+            /* Nor can a mapper mismatch fall through the selected tag row. */
+            pair[0].vlan_filter[0].valid=pair[1].vlan_filter[0].valid=false;
+            pair[0].pcp_valid=pair[1].pcp_valid=true; pair[0].pcp=pair[1].pcp=5;
+            pair[0].vlan_rule.treat_inner_pbit=2;
+            assert(!q1000k_services_replace(NULL,pair,2));
+            make_tag(&skb,0,5); assert(q1000k_services_tx(&skb)==-ENOENT && transmit_count==sent);
+            /* Inverse selection also precedes ANI-side bridge filtering. */
+            pair[0]=tag; pair[0].vlan_ani_side=true; pair[0].vlan_entity_id=0x123;
+            pair[0].vlan_filter[0]=(struct omci_vlan_tagging_filter){
+                .valid=true,.forward_operation=0x10,.num_entries=1,.entries={{.tci=1}}};
+            pair[1]=pair[0]; pair[1].cookie=2; pair[1].vlan_rule.filter_inner_vid=1;
+            pair[1].vlan_rule.raw[5]=1;
+            assert(!q1000k_services_replace(NULL,pair,2));
+            make_tag(&skb,123,5); assert(q1000k_services_rx(&skb,500)==-ENOENT);
+            pair[0].vlan_filter[0].entries[0].tci=pair[1].vlan_filter[0].entries[0].tci=0;
+            assert(!q1000k_services_replace(NULL,pair,2));
+            make_tag(&skb,123,5); assert(!q1000k_services_rx(&skb,500));
+            assert(get_unaligned_be16(skb.data+14)==(5<<13));
+            /* Standalone filters keep PCP-independent VID semantics. Two
+             * filters that admit the same packet but choose different queues
+             * are rejected at selection, never resolved by array order.
+             */
+            pair[0]=s; pair[0].vlan_valid=false;
+            pair[0].vlan_filter[0]=(struct omci_vlan_tagging_filter){
+                .valid=true,.forward_operation=0x10,.num_entries=1,.entries={{.tci=123}}};
+            pair[1]=pair[0]; pair[1].cookie=2; pair[1].queue=4;
+            pair[1].vlan_filter[0].entries[0].tci=124;
+            assert(!q1000k_services_replace(NULL,pair,2));
+            make_tag(&skb,123,5); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==3);
+            make_tag(&skb,124,5); assert(!q1000k_services_tx(&skb) && (tx_word0&7)==4);
+            pair[1].vlan_filter[0].entries[1].tci=123; pair[1].vlan_filter[0].num_entries=2;
+            assert(!q1000k_services_replace(NULL,pair,2));
+            make_tag(&skb,123,5); sent=transmit_count;
+            assert(q1000k_services_tx(&skb)==-EEXIST && sent==transmit_count);
+            int ops=physical_ops;
+            pair[0].vlan_filter[0].forward_operation=0x16;
+            assert(q1000k_services_replace(NULL,pair,2)==-EOPNOTSUPP && physical_ops==ops);
+            pair[0].vlan_filter[0].forward_operation=0x10; pair[0].vlan_filter[0].num_entries=13;
+            assert(q1000k_services_replace(NULL,pair,2)==-EINVAL && physical_ops==ops);
+            assert(!q1000k_services_replace(NULL,&tag,1));
+            make_tag(&skb,0,5);
+        }
         int saved_ops=physical_ops;
         tag.vlan_downstream_mode=2;
         assert(q1000k_services_replace(NULL,&tag,1)==-EOPNOTSUPP && physical_ops==saved_ops);

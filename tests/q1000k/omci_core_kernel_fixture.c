@@ -582,10 +582,78 @@ int q1000k_omci_core_test(void)
 		omci_agent_free_service_array(&desired);
 		filter = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_VLAN_TAGGING_FILTER_DATA, lan.entity_id, true);
 		CHECK(filter);
-		CHECK(omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
-			0xee2, 0, false, false, 0, false, &fallback) == -EOPNOTSUPP);
-		CHECK(xa_empty(&desired));
-		CHECK(omci_agent_service_vlan_valid(0) && !omci_agent_service_vlan_valid(4095));
+		filter->vlan_filter = (struct omci_vlan_tagging_filter) {
+			.valid = true, .forward_operation = 0x10, .num_entries = 1,
+			.entries = { { .tci = 123, .vid = 123 } },
+		};
+		CHECK(!omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 0, false, false, 0, false, &fallback));
+		count = 0;
+		xa_for_each(&desired, index, state) {
+			CHECK(state->config.vlan_entity_id == 0xee3 && !state->config.vlan_ani_side);
+			CHECK(!memcmp(&state->config.vlan_filter[0], &filter->vlan_filter, sizeof(filter->vlan_filter)));
+			CHECK(!state->config.vlan_filter[1].valid && !state->config.pcp_valid);
+			count++;
+		}
+		CHECK(count == 1);
+		omci_agent_free_service_array(&desired);
+		/* Two priorities sharing one GEM retain all rows and unique cookies. */
+		vlan->extended_vlan.rules[1] = vlan->extended_vlan.rules[0];
+		vlan->extended_vlan.rules[1].raw[5] = 1;
+		vlan->extended_vlan.rule_count = 2;
+		CHECK(!omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 0, true, false, 0, false, &fallback));
+		CHECK(!omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 1, true, false, 0, false, &fallback));
+		count = 0;
+		xa_for_each(&desired, index, state) count++;
+		CHECK(count == 4);
+		omci_agent_free_service_array(&desired);
+		vlan->extended_vlan.rule_count = 1;
+		/* The identical number in a different associated class is unrelated. */
+		vlan->extended_vlan.association_type = 2;
+		CHECK(omci_agent_vlan_side(vlan, &lan, 1, NULL, 0xee4, 0xee5, 0xee2) == -ENOENT);
+		lan.data[3] = OMCI_BRIDGE_TP_PPTP_ETH_UNI;
+		vlan->extended_vlan.associated_me = 1;
+		CHECK(!omci_agent_vlan_side(vlan, &lan, 1, NULL, 0xee4, 0xee5, 0xee2));
+		vlan->extended_vlan.association_type = 10;
+		CHECK(omci_agent_vlan_side(vlan, &lan, 1, NULL, 0xee4, 0xee5, 0xee2) == -ENOENT);
+		lan.data[3] = OMCI_BRIDGE_TP_VEIP;
+		CHECK(!omci_agent_vlan_side(vlan, &lan, 1, NULL, 0xee4, 0xee5, 0xee2));
+		vlan->extended_vlan.association_type = 0;
+		vlan->extended_vlan.associated_me = 0xee4;
+		CHECK(omci_agent_vlan_side(vlan, &lan, 1, NULL, 0xee4, 0xee5, 0xee2) == 1);
+		CHECK(!omci_agent_stage_path_locked(odev, &desired, &lan, 1, 0xee4, 0xee5,
+			0xee2, 5, true, false, 0, false, &fallback));
+		xa_for_each(&desired, index, state) {
+			CHECK(state->config.vlan_ani_side && state->config.pcp_valid && state->config.pcp == 5);
+		}
+		omci_agent_free_service_array(&desired);
+		{
+			struct omci_mib_object wan = {};
+			wan.data[3] = OMCI_BRIDGE_TP_8021P_MAPPER;
+			vlan->extended_vlan.association_type = 1;
+			vlan->extended_vlan.associated_me = 0xee5;
+			CHECK(omci_agent_vlan_side(vlan, &lan, 1, &wan, 0xee4, 0xee5, 0xee2) == 1);
+			wan.data[3] = OMCI_BRIDGE_TP_GEM_IWTP;
+			CHECK(omci_agent_vlan_side(vlan, &lan, 1, &wan, 0xee4, 0xee5, 0xee2) == -ENOENT);
+			vlan->extended_vlan.association_type = 5;
+			vlan->extended_vlan.associated_me = 0xee2;
+			CHECK(omci_agent_vlan_side(vlan, &lan, 1, &wan, 0xee4, 0xee5, 0xee2) == 1);
+		}
+		/* Counts and modes are validated, not silently clamped. */
+		filter->data[24] = 0x10; filter->data[25] = 12;
+		CHECK(!omci_vlan_filter_parse_create(filter, filter->data));
+		filter->data[25] = 13;
+		CHECK(omci_vlan_filter_parse_create(filter, filter->data) == -EINVAL);
+		filter->data[25] = 0; filter->data[24] = 0x22;
+		CHECK(omci_vlan_filter_parse_create(filter, filter->data) == -EINVAL);
+		filter->data[24] = 0x10;
+		CHECK(!omci_vlan_filter_parse_create(filter, filter->data));
+		{
+			u8 count_value = 255;
+			CHECK(omci_vlan_filter_parse_set(filter, OMCI_VLAN_FILTER_COUNT_MASK, &count_value, 1) == -EINVAL);
+		}
 		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_GEM_PORT_CTP, 0xee1)));
 		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_GEM_IWTP, 0xee2)));
 		kfree(xa_erase(&odev->agent.mib, omci_mib_key(OMCI_CLASS_EXTENDED_VLAN, 0xee3)));
