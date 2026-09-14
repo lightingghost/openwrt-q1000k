@@ -1,0 +1,82 @@
+--- a/xpon-en757x/xpon_phy_10g/Makefile
++++ b/xpon-en757x/xpon_phy_10g/Makefile
+@@ -33,7 +33,7 @@
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else	
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+-	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c q1000k_phy_reset.c
++	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c q1000k_phy_reset.c q1000k_phy_pma.c
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else
+ 	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7580.c a60972.c en7580_pma.c
+--- a/xpon-en757x/xpon_phy_10g/src/en7581_pma.c
++++ b/xpon-en757x/xpon_phy_10g/src/en7581_pma.c
+@@ -33,6 +33,7 @@
+ #include "en7581.h"
+ #include "en7581_reg.h"
+ #include "en7581_pma.h"
++#include <q1000k_phy_api.h>
+ //#include "en7581_ana.h"
+ 
+ 
+@@ -62,6 +63,9 @@
+ 
+ int xpon_pma_mode_init(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	return q1000k_phy_pma_init();
++#else
+ 	UINT32 read_data ;
+ 
+     #if !EN7581_EYE_SCAN
+@@ -103,6 +107,7 @@
+     #endif
+ 
+ 	return 0;
++#endif
+ }
+ //======================================================================================
+ 
+--- a/xpon-en757x/xpon_phy_10g/src/en7581.c
++++ b/xpon-en757x/xpon_phy_10g/src/en7581.c
+@@ -37,6 +37,7 @@
+ #include "en7581.h"
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ #include <q1000k_phy_api.h>
++#include <an7581_pon_phy.h>
+ #include <an7581_pon_scu.h>
+ #endif
+ #include "en7581_pma.h"
+@@ -8158,6 +8159,24 @@
+ 
+ int xpon_pma_init(void)
+ {
++#if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
++	int ret = q1000k_phy_callback_context();
++
++	if (ret) return ret;
++	ret = an7581_pon_phy_status();
++	if (ret) return ret;
++	gpPhyPriv->pma_init_done = FALSE;
++	ret = xpon_pma_param_init();
++	if (ret) return ret;
++	xpon_pma_param_disp();
++	ret = xpon_pma_mode_init();
++	if (ret) return ret;
++	xpon_pma_param_opt();
++	ret = an7581_pon_phy_status();
++	if (!ret) ret = q1000k_phy_controller_check();
++	if (ret) gpPhyPriv->pma_init_done = FALSE;
++	return ret;
++#else
+ 	PON_PHY_PRINT(PHY_MSG_TRACE,"%s\r\n",__FUNCTION__);
+ 	//param init based on wan_sel
+ 	xpon_pma_param_init();
+@@ -8166,6 +8185,7 @@
+ 	xpon_pma_param_opt();
+ 
+ 	return PHY_SUCCESS;
++#endif
+ }
+ #endif
+ 

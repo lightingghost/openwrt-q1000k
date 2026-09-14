@@ -151,6 +151,28 @@ int main(void)
     provider.fault=0;
     assert(get_pon_phy_data(0x1fa7a000)==~0U);
     assert(an7581_pon_phy_status()==-EINVAL);
+    /* The failed legacy access terminates later legacy MMIO, including
+     * both address forms, masked RMW and full-width field updates.
+     */
+    for(b=0;b<3;b++) {
+        memory[b][0]=0x5a5a5a5a;
+        unsigned int old_reads=reads, old_writes=writes;
+        assert(get_pon_phy_data(phy_address[b])==~0U);
+        assert(get_pon_phy_data(phy_address[b]|0xa0000000)==~0U);
+        set_pon_phy_data(phy_address[b],0);
+        set_pon_phy_data(phy_address[b]|0xa0000000,~0U);
+        assert(an7581_pon_phy_update(phy_address[b],7,0,0)==-EINVAL);
+        assert(an7581_pon_phy_update(phy_address[b],31,0,~0U)==-EINVAL);
+        assert(reads==old_reads && writes==old_writes && memory[b][0]==0x5a5a5a5a);
+        /* A checked containment write is still possible, but cannot make
+         * the legacy path healthy or reopen its admission.
+         */
+        assert(!an7581_pon_phy_write(phy_address[b],0x12345678));
+        assert(!an7581_pon_phy_read(phy_address[b],&v) && v==0x12345678);
+        assert(an7581_pon_phy_status()==-EINVAL);
+        old_writes=writes; set_pon_phy_data(phy_address[b],0);
+        assert(writes==old_writes && memory[b][0]==0x12345678);
+    }
     provider.fault=0;
     set_pon_phy_data(0x1fa7b000,0);
     assert(an7581_pon_phy_status()==-EINVAL);

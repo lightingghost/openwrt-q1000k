@@ -4,7 +4,10 @@
 
 #include <linux/types.h>
 
-/* Physical addresses or the exact legacy KSEG1 aliases are accepted. */
+/* Physical addresses or the exact legacy KSEG1 aliases are accepted.
+ * Explicit reads/full writes remain available for checked fault containment.
+ * Legacy reads/writes and field updates stop MMIO after a latched fault.
+ */
 int an7581_pon_phy_read(u32 reg, u32 *value);
 int an7581_pon_phy_write(u32 reg, u32 value);
 int an7581_pon_phy_update(u32 reg, u32 end, u32 start, u32 value);

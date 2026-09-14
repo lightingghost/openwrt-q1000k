@@ -44,6 +44,7 @@ void q1000k_phy_exit(void);
 int q1000k_phy_callback_context(void);
 int q1000k_phy_top_reset(void);
 int q1000k_phy_pma_reset(void);
+int q1000k_phy_pma_init(void);
 int q1000k_phy_controller_check(void);
 int q1000k_phy_board_profile(void);
 int q1000k_phy_trans_power(u32 operation);

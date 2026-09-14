@@ -215,3 +215,34 @@ real generated netlink attributes, checking success, missing callbacks,
 `-EIO` and `-ENODATA`, and absence of every unvalidated field. Host tests
 exercise the production provider and each session/query rejection. Matching
 AN7581 packages build; no Q1000K connection or firmware flashing occurred.
+
+## Legacy fault admission and analog phase errors
+
+Vendor r60 closes legacy register admission after a latched provider fault.
+The check is inside the same MMIO lock as the read or write, covering physical
+and KSEG1 addresses, full legacy writes and masked/full-width field updates.
+Explicit checked reads/full writes remain available for lifecycle containment;
+a successful containment write does not clear the original fault. The host
+provider tests verify that no further legacy MMIO occurs in all three windows.
+
+Patch 050 routes AN7581 PMA mode initialization through a process-context
+Q1000K helper. It preserves the imported `xpon_init` and `fiber_plug_reset`
+sequences, including first calibration followed by power saving when LOS is
+asserted. Provider/controller checks separate those phases. A checked LOS
+read rejects access errors and all-ones status instead of interpreting an
+error as signal present. The existing 350 ms settling delay sleeps; the
+no-signal path preserves the two one-millisecond waits. Initialized state is
+published only after the final health check.
+
+The selected `xpon_pma_init` caller now propagates parameter/mode errors and
+checks final tuning status instead of unconditionally returning success. Its
+error reaches `phy_mode_config` and the lifecycle's TX-disable/fault handling.
+Tests exercise both LOS paths, every health/phase/delay failure, ownership
+rejection and the actual prepared caller. The imported analog tuning values
+are unchanged. Their electrical correctness, calibration convergence and
+optical timing still require hardware acceptance; these local tests cannot
+prove them. No device access occurred.
+
+Validation for r60: all 79 PON/WAN host tests pass against the final prepared
+sources, including both PMA tests and the locked MMIO fixture. The PHY UML
+callback/lifetime suite and matching AN7581 core/vendor package build pass.

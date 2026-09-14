@@ -52,7 +52,7 @@ static int an7581_phy_decode(u32 reg, u32 *offset)
 	return -EINVAL;
 }
 
-int an7581_pon_phy_read(u32 reg, u32 *value)
+static int an7581_phy_read(u32 reg, u32 *value, bool legacy)
 {
 	unsigned long flags;
 	u32 offset;
@@ -63,7 +63,9 @@ int an7581_pon_phy_read(u32 reg, u32 *value)
 	read_lock_irqsave(&phy_lock, flags);
 	if (pon_phy) {
 		ret = -EBUSY;
-		if (!pon_phy->resetting) {
+		if (legacy && pon_phy->fault)
+			ret = pon_phy->fault;
+		else if (!pon_phy->resetting) {
 			*value = readl(pon_phy->base[bank] + offset);
 			ret = 0;
 		}
@@ -71,12 +73,18 @@ int an7581_pon_phy_read(u32 reg, u32 *value)
 	read_unlock_irqrestore(&phy_lock, flags);
 	return ret;
 }
+int an7581_pon_phy_read(u32 reg, u32 *value)
+{
+	return an7581_phy_read(reg, value, false);
+}
 EXPORT_SYMBOL(an7581_pon_phy_read);
 
 /* All writers share one lock, including masked updates and legacy callers.
  * Full writes must not read first: some PHY registers acknowledge W1C bits.
+ * Check legacy fault admission under that same lock. Typed full writes are
+ * retained for lifecycle containment; they never clear the fault latch.
  */
-static int an7581_phy_write(u32 reg, u32 mask, u32 value, bool masked)
+static int an7581_phy_write(u32 reg, u32 mask, u32 value, bool masked, bool legacy)
 {
 	unsigned long flags;
 	u32 offset;
@@ -85,7 +93,9 @@ static int an7581_phy_write(u32 reg, u32 mask, u32 value, bool masked)
 	if (bank < 0)
 		return bank;
 	write_lock_irqsave(&phy_lock, flags);
-	if (pon_phy && pon_phy->resetting)
+	if (pon_phy && legacy && pon_phy->fault)
+		ret = pon_phy->fault;
+	else if (pon_phy && pon_phy->resetting)
 		ret = -EBUSY;
 	else if (pon_phy) {
 		if (masked)
@@ -100,7 +110,7 @@ static int an7581_phy_write(u32 reg, u32 mask, u32 value, bool masked)
 
 int an7581_pon_phy_write(u32 reg, u32 value)
 {
-	return an7581_phy_write(reg, ~0U, value, false);
+	return an7581_phy_write(reg, ~0U, value, false, false);
 }
 EXPORT_SYMBOL(an7581_pon_phy_write);
 
@@ -118,7 +128,7 @@ int an7581_pon_phy_update(u32 reg, u32 end, u32 start, u32 value)
 		ret = -ERANGE;
 		goto out;
 	}
-	ret = an7581_phy_write(reg, mask, value << start, mask != ~0U);
+	ret = an7581_phy_write(reg, mask, value << start, mask != ~0U, true);
 out:
 	an7581_phy_fault(ret);
 	return ret;
@@ -154,14 +164,14 @@ u32 get_pon_phy_data(u32 reg)
 {
 	u32 value = ~0U;
 
-	an7581_phy_fault(an7581_pon_phy_read(reg, &value));
+	an7581_phy_fault(an7581_phy_read(reg, &value, true));
 	return value;
 }
 EXPORT_SYMBOL(get_pon_phy_data);
 
 void set_pon_phy_data(u32 reg, u32 value)
 {
-	an7581_phy_fault(an7581_pon_phy_write(reg, value));
+	an7581_phy_fault(an7581_phy_write(reg, ~0U, value, false, true));
 }
 EXPORT_SYMBOL(set_pon_phy_data);
 

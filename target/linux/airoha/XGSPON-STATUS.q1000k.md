@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r59 and OMCI core r13 implement the native packet path,
+ demonstrated.** Vendor r60 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -18,7 +18,7 @@ below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 72 passing PON host tests plus five WAN setup
+The current local evidence is 74 passing PON host tests plus five WAN setup
 tests using the real UCI parser, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,
@@ -87,6 +87,13 @@ sensor values remain invalid. Netlink status now discards partially populated
 telemetry when a provider returns an error. Host provider tests and the real
 UML netlink parser cover the availability and error behavior. No hardware was
 accessed. See the [PHY status contract](XGSPON-PHY.q1000k.md#observed-fec-telemetry).
+
+Vendor r60 blocks legacy PHY MMIO after a sticky fault while retaining the
+checked containment interface. The PMA initialization owner checks controller
+and provider health between analog phases, rejects failed/all-ones LOS reads
+and publishes initialized state only after final checks. Its vendor caller now
+propagates initialization errors. Electrical calibration and optical timing
+remain unverified on hardware. See the [analog phase contract](XGSPON-PHY.q1000k.md#legacy-fault-admission-and-analog-phase-errors).
 
 ## Imported references
 
