@@ -954,6 +954,8 @@ int q1000k_omci_backend_init(struct net_device *dev)
 	memcpy(identity.equipment_id, "Q1000K", 6);
 	memcpy(identity.serial_number, b->serial, 8);
 	memcpy(identity.vendor_id, b->serial, 4);
+	ret = q1000k_pon_get_omci_overrides(&identity);
+	if (ret) goto omci;
 	omci_device_set_identity_info(b->omci, &identity);
 	ret = omci_device_start(b->omci);
 	if (ret)

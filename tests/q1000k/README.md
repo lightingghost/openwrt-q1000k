@@ -23,6 +23,12 @@ program and all hardware paths to temporary files. It exercises preflight,
 identity arguments, all module-load failures, controller verification,
 reverse shutdown, failed unload retention, duplicate starts, health failures,
 no respawn and typed last-state diagnostics. No host or device module is loaded.
+Optional OMCI equipment/version cases cover exact byte limits, control and
+non-ASCII rejection, preserved trailing spaces and safe module-argument
+encoding of shell punctuation. The identity C fixture checks both parameter
+decoders and immutable cache behavior. The complete core UML fixture checks
+that the initial ONU-G, ONU2-G and software-image MIB fields contain the
+driver-supplied overrides before any OLT request is processed.
 
 The LuCI fixtures exercise unavailable/LOS states, failed refreshes, schema
 validation and identity validation. They do not establish optical service or

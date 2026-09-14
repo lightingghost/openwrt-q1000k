@@ -51,6 +51,15 @@ traffic and successful DHCP still need hardware acceptance. See the
 [VLAN contract](XGSPON-VLAN.q1000k.md).
 The device remains restricted to read-only access, with no firmware flashing.
 
+The supervisor accepts optional `identity.equipment_id` (20 printable ASCII
+bytes maximum) and `identity.omci_version` (14 bytes maximum) before PON
+startup. The latter feeds ONU-G and both software-image version fields in the
+generic core. Both default to empty; no values are inferred from BGW320-500 or
+the optical module. Use values established for the subscriber's own service
+if overrides are needed. These settings do not replace the serial or the
+36-byte registration ID. See the
+[supervisor configuration](../../../package/network/utils/q1000k-xgspon-service/README.md).
+
 ## Local inactive WAN configuration
 
 The optional `q1000k-xgspon-wan` package now provides inactive netifd DHCP and

@@ -18,6 +18,11 @@ The existing `/etc/config/q1000k-xgspon` contains:
   identity. Overrides have the same validation as the diagnostics backend.
 - `identity.registration_id`: an explicit 36-byte registration ID encoded as
   exactly 72 hexadecimal digits. The supervisor never invents this credential.
+- `identity.equipment_id`: optional printable ASCII text, at most 20 bytes.
+- `identity.omci_version`: optional printable ASCII text, at most 14 bytes.
+  The core applies this to ONU-G version and both software-image versions.
+  Empty equipment/version values retain the native Q1000K/OpenWrt defaults;
+  the gateway model alone does not establish appropriate override values.
 - `service.enabled`: defaults to `0`; must explicitly be `1` for startup.
 - `service.lower`: the native PON lower interface, already administratively
   up. The native driver additionally validates its hardware role at attach.
@@ -40,6 +45,12 @@ Startup loads the standalone controller, initializes and verifies MD32 with
 TX disabled, then loads the BSP, PHY, generic PON/OMCI core and MAC in dependency
 order. Only the final MAC module receives immutable identity and lower-device
 parameters. Registration IDs are never written to status or routine logs.
+Equipment and version are validated before any module load, hex-encoded for
+module-argument transport and independently checked by the MAC. Spaces and
+printable punctuation are preserved; controls, non-ASCII and oversized values
+are rejected. The MAC caches supplied values and applies them to the OMCI core
+before startup, so the initial MIB contains the configured identity. These
+fields do not change the PON serial or registration credential.
 
 The process polls checked controller status, the MAC's cached protocol error
 and the read-only OMCI command. Malformed samples, missing providers, protocol

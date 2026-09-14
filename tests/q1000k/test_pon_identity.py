@@ -27,6 +27,8 @@ def extract(source, name):
 class PonIdentityTests(unittest.TestCase):
     def test_validation_cached_identity_and_callers(self):
         source = re.sub(r'^#include[^\n]*\n', '', SRC.read_text(), flags=re.M)
+        header = (REPO / 'package/kernel/q1000k-omci/src/include/net/xpon/omci.h').read_text()
+        source = re.search(r'struct omci_identity \{.*?\n\};', header, re.S).group(0) + '\n' + source
         mac = BSP.parent / 'xpon-en757x/xpon_10g/src'
         for filename, name in [('pwan/xpon_netif.c', 'get_interface_mac_addr'),
                                ('epon/epon_dev.c', 'get_onu_mac_address'),
@@ -46,6 +48,14 @@ class PonIdentityTests(unittest.TestCase):
 #define module_param(...)
 #define MODULE_PARM_DESC(...)
 #define XMCS_IF_WAN_DETECT_MODE_XGSPON 7
+#define OMCI_OLT_VENDOR_ID_LEN 4
+#define OMCI_OLT_VERSION_LEN 14
+#define OMCI_OLT_EQUIPMENT_ID_LEN 20
+#define OMCI_IDENTITY_F_VERSION 8
+#define OMCI_IDENTITY_F_EQUIPMENT_ID 16
+#define OMCI_CONFIG_SOURCE_DRIVER 1
+typedef uint32_t u32;
+typedef uint8_t u8;
 typedef unsigned char unchar;
 typedef unsigned char __u8;
 static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
@@ -83,6 +93,9 @@ static bool is_valid_ether_addr(const unsigned char *mac) {
 }
 ''' + source + r'''
 static void unavailable(void) {
+    struct omci_identity id, saved;
+    memset(&id,0x5a,sizeof(id)); saved=id;
+    assert(q1000k_pon_get_omci_overrides(&id)==-ENODATA && !memcmp(&id,&saved,sizeof(id)));
     unsigned char out[10],before[10];
     memset(out,0xaa,sizeof(out)); memcpy(before,out,sizeof(out));
     assert(get_ethaddr(out+1,6)==-ENODATA);
@@ -138,6 +151,40 @@ int main(void) {
     assert(!q1000k_pon_get_registration(registration,36) && registration[35]==15);
     memcpy(saved_reg,registration,36); reg_id[71]='e';
     assert(!q1000k_pon_get_registration(registration,36) && !memcmp(saved_reg,registration,36));
+
+    struct omci_identity id={.valid=3,.equipment_id="Q1000K",.version="OpenWrt"}, saved=id;
+    assert(!q1000k_pon_get_omci_overrides(&id) && !memcmp(&id,&saved,sizeof(id)));
+    assert(q1000k_pon_get_omci_overrides(NULL)==-EINVAL);
+    char text[43];
+    for(int version=0;version<2;version++) {
+        unsigned int limit=version?28:40;
+        for(unsigned int n=0;n<=limit+2;n++) {
+            memset(text,'4',n); text[n]=0;
+            pon_equipment_id_hex=version?NULL:text; pon_omci_version_hex=version?text:NULL;
+            int expected=n>limit || (n&1) ? -EINVAL : 0;
+            assert(q1000k_pon_identity_init()==expected);
+            if(expected) { unavailable(); continue; }
+            id=saved; assert(!q1000k_pon_get_omci_overrides(&id));
+            if(n) {
+                const unsigned char *value=version?id.version:id.equipment_id;
+                for(unsigned int j=0;j<limit/2;j++) assert(value[j]==(j<n/2?'D':0));
+                assert(id.valid==(3|(version?OMCI_IDENTITY_F_VERSION:OMCI_IDENTITY_F_EQUIPMENT_ID)));
+                assert((version?id.version_source:id.equipment_source)==OMCI_CONFIG_SOURCE_DRIVER);
+                text[0]='5';
+                struct omci_identity cached=saved;
+                assert(!q1000k_pon_get_omci_overrides(&cached) && !memcmp(&cached,&id,sizeof(id)));
+            } else assert(!memcmp(&id,&saved,sizeof(id)));
+        }
+        for(unsigned int byte=0;byte<256;byte++) {
+            snprintf(text,sizeof(text),"%02x",byte);
+            int ret=q1000k_pon_identity_init();
+            assert(ret==((byte>=0x20 && byte<=0x7e)?0:-EINVAL));
+            if(ret) unavailable();
+        }
+        strcpy(text,"g0"); assert(q1000k_pon_identity_init()==-EINVAL); unavailable();
+    }
+    pon_equipment_id_hex=pon_omci_version_hex=NULL;
+    assert(!q1000k_pon_identity_init());
 
     assert(get_ethaddr(NULL,6)==-EINVAL);
     assert(get_ethaddr(out,-1)==-EINVAL && q1000k_pon_get_serial(out,-1)==-EINVAL);

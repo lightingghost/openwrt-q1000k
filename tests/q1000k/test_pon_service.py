@@ -24,7 +24,7 @@ class ServiceTests(unittest.TestCase):
         self.addCleanup(self.backend.tearDown)
         self.root, self.env, self.write = self.backend.root, self.backend.env, self.backend.write
         self.env.update(TEST_ROOT=str(self.root), TEST_ENABLED='1', TEST_LOWER='eth2',
-                        TEST_REG='a1' * 36)
+                        TEST_REG='a1' * 36, TEST_EQUIPMENT='', TEST_VERSION='')
         self.write('factory.json', json.dumps({'available': True, 'serial': 'TEST01234567',
                                              'wan_mac': '00:11:22:33:44:55'}))
         for suffix, (data, _) in self.backend.firmware.items():
@@ -45,6 +45,8 @@ case "$*" in
 *service.enabled) printf '%s' "$TEST_ENABLED" ;;
 *service.lower) printf '%s' "$TEST_LOWER" ;;
 *identity.registration_id) printf '%s' "$TEST_REG" ;;
+*identity.equipment_id) printf '%s\n' "$TEST_EQUIPMENT" ;;
+*identity.omci_version) printf '%s\n' "$TEST_VERSION" ;;
 esac
 ''').chmod(0o755)
         # These absolute fixture programs replace every loader/CLI invocation;
@@ -134,6 +136,10 @@ else:
         for key, bad in [('TEST_ENABLED', '0'), ('TEST_LOWER', ''), ('TEST_LOWER', '../eth2'),
                          ('TEST_LOWER', 'eth2\neth3'), ('TEST_LOWER', 'doesnotexist'),
                          ('TEST_REG', ''), ('TEST_REG', '0' * 71), ('TEST_REG', '0' * 73),
+                         ('TEST_EQUIPMENT', 'X' * 21), ('TEST_VERSION', 'X' * 15),
+                         ('TEST_EQUIPMENT', 'X\nY'), ('TEST_EQUIPMENT', 'X\n'),
+                         ('TEST_VERSION', 'X\r'), ('TEST_VERSION', 'X\x7f'),
+                         ('TEST_EQUIPMENT', 'é'),
                          ('TEST_REG', '0' * 35 + '\n' + '0' * 36), ('TEST_REG', 'g' + '0' * 71)]:
             with self.subTest(key=key, bad=bad):
                 old = self.env[key]
@@ -174,6 +180,20 @@ else:
         self.assertEqual(self.last(), dict(schema_version=1, stage='stopped', error=0))
         self.assertFalse((self.root / 'var/run/q1000k-xgspon/lock').exists())
         self.assertEqual((self.root / 'var/run/q1000k-xgspon/status.json').stat().st_mode & 0o777, 0o600)
+
+    def test_omci_overrides_are_encoded_before_module_loading(self):
+        equipment = "Q \"'`$()\\;=".ljust(20, '.')
+        version = 'TEST-version'.ljust(14, ' ')
+        self.env.update(TEST_EQUIPMENT=equipment, TEST_VERSION=version)
+        p = self.running()
+        p.terminate()
+        out, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0, err)
+        args = [c for c in self.calls() if c[:2] == ['modprobe', 'xpon_10g']][0]
+        self.assertEqual(args[-2:], ['pon_equipment_id_hex=' + equipment.encode().hex(),
+                                    'pon_omci_version_hex=' + version.encode().hex()])
+        self.assertNotIn(equipment, out + err)
+        self.assertNotIn(version, out + err)
 
     def test_every_load_and_initialize_failure_releases_only_owned_modules(self):
         for i, name in enumerate(MODULES):

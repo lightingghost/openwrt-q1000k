@@ -201,6 +201,14 @@ int q1000k_omci_core_test(void)
 	struct xpon_device xpon = {};
 	struct omci_device_ops incomplete;
 	struct omci_mib_object object = {};
+	struct omci_mib_object *identity_object;
+	struct omci_identity identity = {
+		.valid = OMCI_IDENTITY_F_VERSION | OMCI_IDENTITY_F_EQUIPMENT_ID,
+		.version = "TEST-version14",
+		.equipment_id = "TEST-equipment-20byt",
+		.version_source = OMCI_CONFIG_SOURCE_DRIVER,
+		.equipment_source = OMCI_CONFIG_SOURCE_DRIVER,
+	};
 	struct omci_service_config service = {};
 	struct sk_buff *skb, *clone;
 	struct task_struct *task;
@@ -232,6 +240,7 @@ int q1000k_omci_core_test(void)
 	}
 	CHECK(omci_device_start(odev) == -ENODATA);
 	omci_device_set_identity(odev, serial, NULL);
+	omci_device_set_identity_info(odev, &identity);
 	incomplete = fixture_ops;
 	incomplete.replace_services = NULL;
 	odev->ops = &incomplete;
@@ -243,6 +252,16 @@ int q1000k_omci_core_test(void)
 	fixture_start_error = 0;
 	CHECK(!omci_device_start(odev));
 	CHECK(!fixture_tx);
+	/* Driver overrides must be in the first MIB, before OLT traffic. */
+	identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU_G, 0);
+	CHECK(identity_object && !memcmp(identity_object->data + 4, identity.version, 14));
+	CHECK(!memcmp(identity_object->data + 18, serial, sizeof(serial)));
+	identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU2_G, 0);
+	CHECK(identity_object && !memcmp(identity_object->data, identity.equipment_id, 20));
+	for (i = 0; i < 2; i++) {
+		identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_SOFTWARE_IMAGE, i);
+		CHECK(identity_object && !memcmp(identity_object->data, identity.version, 14));
+	}
 	/* Extended content length must not wrap a u16 in TX validation. */
 	skb = alloc_skb(13, GFP_KERNEL);
 	CHECK(skb);

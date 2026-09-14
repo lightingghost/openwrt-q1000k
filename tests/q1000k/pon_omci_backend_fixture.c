@@ -19,6 +19,7 @@ typedef int32_t s32;
 #define OMCI_IDENTITY_F_SERIAL_NUMBER 1
 #define OMCI_IDENTITY_F_VENDOR_ID 2
 #define OMCI_IDENTITY_F_EQUIPMENT_ID 16
+#define OMCI_IDENTITY_F_VERSION 8
 #define OMCI_F_MIC_VALID 2
 #define OMCI_CAP_PROVIDER_MIC 8
 #define XPON_MODE_XGSPON 4
@@ -142,6 +143,13 @@ static int q1000k_services_uni(struct omci_device *o,u16 e,bool enable) { return
 static int q1000k_services_replace(struct omci_device *o,const struct omci_service_config *s,size_t n) { return 0; }
 static int q1000k_pon_get_serial(u8 *s,int n) { assert(n==8); memset(s,1,n); return 0; }
 static int q1000k_pon_get_registration(u8 *s,int n) { assert(n==36); memset(s,2,n); return 0; }
+static struct omci_identity identity_override, identity_seen;
+static bool identity_was_set;
+static int q1000k_pon_get_omci_overrides(struct omci_identity *id) {
+    if(identity_override.valid&OMCI_IDENTITY_F_VERSION) memcpy(id->version,identity_override.version,sizeof(id->version));
+    if(identity_override.valid&OMCI_IDENTITY_F_EQUIPMENT_ID) memcpy(id->equipment_id,identity_override.equipment_id,sizeof(id->equipment_id));
+    id->valid|=identity_override.valid; return 0;
+}
 static struct crypto_lskcipher *crypto_alloc_lskcipher(const char *alg,int a,int b) { return calloc(1,sizeof(struct crypto_lskcipher)); }
 static void crypto_free_lskcipher(struct crypto_lskcipher *c) { free(c); }
 static struct device *get_xpon_dev(void) { static struct device dev; return &dev; }
@@ -150,13 +158,19 @@ static void xpon_device_unregister(struct xpon_device *x) { free(x); }
 static void xpon_device_report_registration(struct xpon_device *x,int state) { assert(!owned); }
 static void xpon_device_report_carrier(struct xpon_device *x,bool up) { assert(!owned); }
 static struct omci_device *omci_device_register(struct xpon_device *x,u32 caps,const struct omci_device_ops *ops,void *priv) {
-    struct omci_device *o=calloc(1,sizeof(*o)); o->ops=ops; o->priv=priv; return o;
+    struct omci_device *o=calloc(1,sizeof(*o)); o->ops=ops; o->priv=priv; identity_was_set=false; return o;
 }
 static void *omci_device_priv(struct omci_device *o) { return o->priv; }
 static void omci_device_set_identity_info(struct omci_device *o,const struct omci_identity *id) {
     assert(id->serial_source==OMCI_CONFIG_SOURCE_DRIVER && id->vendor_source==OMCI_CONFIG_SOURCE_DRIVER);
+    identity_seen=*id; identity_was_set=true;
 }
-static int omci_device_start(struct omci_device *o) { return o->ops->start(o); }
+static int omci_device_start(struct omci_device *o) {
+    assert(identity_was_set);
+    if(identity_override.valid&OMCI_IDENTITY_F_VERSION) assert(!memcmp(identity_seen.version,identity_override.version,sizeof(identity_seen.version)));
+    if(identity_override.valid&OMCI_IDENTITY_F_EQUIPMENT_ID) assert(!memcmp(identity_seen.equipment_id,identity_override.equipment_id,sizeof(identity_seen.equipment_id)));
+    return o->ops->start(o);
+}
 static void omci_device_unregister(struct omci_device *o) { o->ops->stop(o); free(o); }
 static int omci_device_set_auth_epoch(struct omci_device *o,u64 epoch) {
     assert(!owned && !auth_held);
@@ -548,5 +562,11 @@ int main(void)
         else assert(fault==-ETIMEDOUT && !qomci_current->active && !services_enabled && !native_epoch && !qomci_current->omci->epoch);
         q1000k_omci_backend_cleanup();
     }
+    identity_override=(struct omci_identity){.valid=OMCI_IDENTITY_F_VERSION|OMCI_IDENTITY_F_EQUIPMENT_ID,
+        .version="TEST-version14",.equipment_id="TEST-equipment-20byt"};
+    begin();
+    assert(!memcmp(identity_seen.version,identity_override.version,sizeof(identity_seen.version)));
+    assert(!memcmp(identity_seen.equipment_id,identity_override.equipment_id,sizeof(identity_seen.equipment_id)));
+    q1000k_omci_backend_cleanup();
     assert(!live_skb); return 0;
 }

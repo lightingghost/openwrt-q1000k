@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 . /lib/q1000k-xgspon/common.sh
+export LC_ALL=C
 umask 077
 
 run_dir=/var/run/q1000k-xgspon
@@ -64,6 +65,28 @@ load_module() {
 	owned_modules="$module $owned_modules"
 }
 
+identity_text_hex() {
+	local text hex
+	# Keep trailing value newlines for validation. Remove only UCI's one
+	# output newline; command substitution must not trim the value itself.
+	text=$(uci -q get "q1000k-xgspon.identity.$1"; printf '.')
+	text=${text%.}
+	case "$text" in
+		*'
+') text=${text%?} ;;
+		'') return 0 ;;
+		*) return 1 ;;
+	esac
+	[ -n "$text" ] || return 0
+	[ "${#text}" -le "$2" ] && printf '%s\n' "$text" | grep -Eq '^[ -~]+$' || return 1
+	# Reject embedded newlines even if each line separately matches grep.
+	case "$text" in *'
+'*) return 1 ;; esac
+	hex=$(printf '%s' "$text" | hexdump -v -e '1/1 "%02x"') || return 1
+	[ "${#hex}" = "$(( ${#text} * 2 ))" ] || return 1
+	printf '%s' "$hex"
+}
+
 controller_ready() {
 	local data schema mode firmware calibrated mcu error tx
 	data=$(cat "$controller/status") && json_load "$data" || return 1
@@ -115,6 +138,8 @@ read_firmware
 registration=$(uci -q get q1000k-xgspon.identity.registration_id)
 [ "${#registration}" = 72 ] && printf '%s\n' "$registration" | grep -Eq '^[0-9A-Fa-f]{72}$' ||
 	fail 'Registration ID must contain exactly 72 hexadecimal digits.'
+equipment_hex=$(identity_text_hex equipment_id 20) || fail 'OMCI equipment ID must be at most 20 printable ASCII bytes.'
+version_hex=$(identity_text_hex omci_version 14) || fail 'OMCI version must be at most 14 printable ASCII bytes.'
 lower=$(uci -q get q1000k-xgspon.service.lower)
 [ -n "$lower" ] && [ "${#lower}" -le 15 ] && printf '%s\n' "$lower" | grep -Eq '^[A-Za-z0-9_.-]+$' ||
 	fail 'An explicit native PON lower device is required.'
@@ -138,7 +163,10 @@ controller_ready initializing || fail 'Controller verification failed.'
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do
 	load_module "$module"
 done
-load_module xpon_10g "wan_mac=$wan_mac" "pon_serial=$serial" "pon_reg_id=$registration" "pon_lower=$lower"
+set -- "wan_mac=$wan_mac" "pon_serial=$serial" "pon_reg_id=$registration" "pon_lower=$lower"
+[ -z "$equipment_hex" ] || set -- "$@" "pon_equipment_id_hex=$equipment_hex"
+[ -z "$version_hex" ] || set -- "$@" "pon_omci_version_hex=$version_hex"
+load_module xpon_10g "$@"
 registration=
 health || fail 'MAC/OMCI startup verification failed.'
 stage=running

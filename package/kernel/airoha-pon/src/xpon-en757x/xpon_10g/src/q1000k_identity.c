@@ -6,12 +6,19 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/string.h>
+#include <net/xpon/omci.h>
 #include <xpon_public_const.h>
 #include "common/q1000k_identity.h"
 
 static char *wan_mac;
 static char *pon_serial;
 static char *pon_reg_id;
+static char *pon_equipment_id_hex;
+static char *pon_omci_version_hex;
+module_param(pon_equipment_id_hex, charp, 0);
+MODULE_PARM_DESC(pon_equipment_id_hex, "Optional OMCI equipment ID: up to 20 printable ASCII bytes encoded as hex");
+module_param(pon_omci_version_hex, charp, 0);
+MODULE_PARM_DESC(pon_omci_version_hex, "Optional OMCI version: up to 14 printable ASCII bytes encoded as hex");
 module_param(pon_reg_id, charp, 0);
 MODULE_PARM_DESC(pon_reg_id, "XGS-PON registration ID: exactly 36 bytes as 72 hex digits (required)");
 module_param(wan_mac, charp, 0);
@@ -22,17 +29,33 @@ MODULE_PARM_DESC(pon_serial, "Validated FSAN: four vendor characters and eight h
 static unsigned char identity_mac[ETH_ALEN];
 static unsigned char identity_serial[8];
 static unsigned char identity_registration[36];
+static struct omci_identity identity_overrides;
 static bool identity_ready;
+
+static int q1000k_identity_text(const char *hex, unsigned char *value, size_t capacity)
+{
+	size_t len, i;
+
+	if (!hex || !*hex) return 0;
+	len = strnlen(hex, capacity * 2 + 1);
+	if (len > capacity * 2 || (len & 1) || hex2bin(value, hex, len / 2))
+		return -EINVAL;
+	for (i = 0; i < len / 2; i++)
+		if (value[i] < 0x20 || value[i] > 0x7e) return -EINVAL;
+	return 1;
+}
 
 int q1000k_pon_identity_init(void)
 {
 	unsigned char mac[ETH_ALEN], serial[8], registration[36] = {};
-	int i;
+	struct omci_identity overrides = {};
+	int i, ret;
 
 	identity_ready = false;
 	memset(identity_mac, 0, sizeof(identity_mac));
 	memset(identity_serial, 0, sizeof(identity_serial));
 	memset(identity_registration, 0, sizeof(identity_registration));
+	memset(&identity_overrides, 0, sizeof(identity_overrides));
 	if (!of_machine_is_compatible("quantum,q1000k-ubi"))
 		return -ENODEV;
 	if (!wan_mac || !pon_serial || !pon_reg_id)
@@ -51,6 +74,14 @@ int q1000k_pon_identity_init(void)
 	}
 	if (hex2bin(serial + 4, pon_serial + 4, 4))
 		return -EINVAL;
+	ret = q1000k_identity_text(pon_equipment_id_hex, overrides.equipment_id,
+				   sizeof(overrides.equipment_id));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_EQUIPMENT_ID;
+	ret = q1000k_identity_text(pon_omci_version_hex, overrides.version,
+				   sizeof(overrides.version));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_VERSION;
 	if (strlen(pon_reg_id) != sizeof(registration) * 2 ||
 	    hex2bin(registration, pon_reg_id, sizeof(registration))) {
 		memzero_explicit(registration, sizeof(registration));
@@ -59,6 +90,7 @@ int q1000k_pon_identity_init(void)
 	memcpy(identity_mac, mac, sizeof(mac));
 	memcpy(identity_serial, serial, sizeof(serial));
 	memcpy(identity_registration, registration, sizeof(registration));
+	identity_overrides = overrides;
 	memzero_explicit(registration, sizeof(registration));
 	identity_ready = true;
 	return 0;
@@ -91,6 +123,23 @@ int q1000k_pon_get_registration(unsigned char *registration, int len)
 	if (!identity_ready)
 		return -ENODATA;
 	memcpy(registration, identity_registration, sizeof(identity_registration));
+	return 0;
+}
+
+int q1000k_pon_get_omci_overrides(struct omci_identity *identity)
+{
+	if (!identity) return -EINVAL;
+	if (!identity_ready) return -ENODATA;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_EQUIPMENT_ID) {
+		memcpy(identity->equipment_id, identity_overrides.equipment_id,
+		       sizeof(identity->equipment_id));
+		identity->equipment_source = OMCI_CONFIG_SOURCE_DRIVER;
+	}
+	if (identity_overrides.valid & OMCI_IDENTITY_F_VERSION) {
+		memcpy(identity->version, identity_overrides.version, sizeof(identity->version));
+		identity->version_source = OMCI_CONFIG_SOURCE_DRIVER;
+	}
+	identity->valid |= identity_overrides.valid;
 	return 0;
 }
 

@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r60 and OMCI core r13 implement the native packet path,
+ demonstrated.** Vendor r61 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -18,7 +18,7 @@ below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 74 passing PON host tests plus five WAN setup
+The current local evidence is 75 passing PON host tests plus five WAN setup
 tests using the real UCI parser, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,
@@ -94,6 +94,16 @@ and provider health between analog phases, rejects failed/all-ones LOS reads
 and publishes initialized state only after final checks. Its vendor caller now
 propagates initialization errors. Electrical calibration and optical timing
 remain unverified on hardware. See the [analog phase contract](XGSPON-PHY.q1000k.md#legacy-fault-admission-and-analog-phase-errors).
+
+Vendor r61, diagnostics r5 and supervisor r2 accept optional equipment/version
+overrides before registration starts. Both values default to empty. The
+supervisor validates printable byte lengths and transports them as hex; the
+MAC independently validates and caches them, then supplies them to the core
+before startup. Tests cover malformed values, argument punctuation, immutable
+copies and initial ONU-G/ONU2-G/software-image MIB contents in real Linux UML.
+All 80 PON/WAN host tests, the complete core UML suite and matching AN7581
+vendor/diagnostics/supervisor package builds pass. See the
+[supervisor contract](../../../package/network/utils/q1000k-xgspon-service/README.md).
 
 ## Imported references
 
