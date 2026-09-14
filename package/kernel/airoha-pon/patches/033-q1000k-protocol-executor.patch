@@ -1,0 +1,307 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] serialize MAC timers, tasks, PHY events and owned IRQ
+
+Use a bounded process executor for AN7581, retaining events across service
+pauses. Keep the platform interrupt disabled until its deferred callback
+acknowledges the MAC. Drain the executor before releasing callback state.
+
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_protocol.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/inc/common/xpon_global.h
++++ b/xpon-en757x/xpon_10g/inc/common/xpon_global.h
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/inc/epon/epon.h
++++ b/xpon-en757x/xpon_10g/inc/epon/epon.h
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/inc/epon/epon_timer.h
++++ b/xpon-en757x/xpon_10g/inc/epon/epon_timer.h
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/inc/gpon/gpon.h
++++ b/xpon-en757x/xpon_10g/inc/gpon/gpon.h
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/src/epon/epon_debug.c
++++ b/xpon-en757x/xpon_10g/src/epon/epon_debug.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ #include <linux/spinlock.h>
+ #include <linux/init.h>
+ #include <linux/timer.h>
+--- a/xpon-en757x/xpon_10g/src/epon/epon_init.c
++++ b/xpon-en757x/xpon_10g/src/epon/epon_init.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /*
+ * File Name: gpon_init.c
+ * Description: Initialization for GPON
+--- a/xpon-en757x/xpon_10g/src/epon/epon_ioctl.c
++++ b/xpon-en757x/xpon_10g/src/epon/epon_ioctl.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /*
+  ***************************************************************************
+  * MediaTeK Inc.
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -949,6 +949,9 @@
+ 
+ int gpon_create_timer(struct timer_list *timer, gponTimerCallback callback, unsigned long param)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_protocol_timer_init(timer, callback, param);
++#else
+ 	if((timer == NULL) ||( callback == NULL) ){
+ 		return -1;
+ 	}
+@@ -962,6 +965,7 @@
+ 	timer->expires= param;
+ 
+ 	return 0;
++#endif
+ }
+ 
+ int is_ngpon2_mode(void)
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+@@ -514,7 +515,16 @@
+ 	char same_state = 0;
+ 	REG_CUR_KIDX gponCurKeyIdx;
+ 
++#ifdef Q1000K_PON_IDENTITY
++	int token = q1000k_protocol_enter();
++
++	if (token < 0) {
++		q1000k_protocol_fail(token);
++		return;
++	}
++#else
+ 	spin_lock_irqsave(&gpGponPriv->act_lock, flags) ;
++#endif
+ 
+ 	if (new_state == GPON_CURR_STATE){
+ 	   PON_MSG(MSG_ACT, "PLOAM: State non-change: original = O%d  new = O%d\n",GPON_CURR_STATE, new_state) ;
+@@ -608,7 +618,11 @@
+ 
+ 	gpon_act_increase_LODS_event(lastState,new_state);
+ 	
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_protocol_leave(token);
++#else
+ 	spin_unlock_irqrestore(&gpGponPriv->act_lock, flags) ;
++#endif
+ 
+ 	PON_MSG(MSG_ACT, "Change the current state: O%d. Last State:O%d\n", GPON_CURR_STATE, lastState) ; 
+ }
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_security.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_security.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+ 
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1,6 +1,8 @@
++#include "common/q1000k_protocol_compat.h"
+ #ifdef Q1000K_PON_IDENTITY
+ #include <an7581_xpon.h>
+ #include "common/q1000k_pipeline.h"
++#include <q1000k_phy_api.h>
+ #endif
+ /***************************************************************
+ Copyright Statement:
+@@ -148,7 +150,7 @@
+ 
+ static bool xpon_ready;
+ static struct {
+-	bool globals, monitor, wan, mci, epon, gpon, qdma, gasp, proc, hook, api;
++	bool globals, monitor, wan, mci, epon, gpon, qdma, gasp, proc, hook, api, protocol;
+ } xpon_owned;
+ 
+ bool xpon_is_ready(void)
+@@ -157,7 +159,7 @@
+ 	if (!smp_load_acquire(&xpon_ready))
+ 		return false;
+ #ifdef Q1000K_PON_IDENTITY
+-	return q1000k_transport_running();
++	return !q1000k_protocol_status() && q1000k_transport_running();
+ #else
+ 	return true;
+ #endif
+@@ -1140,6 +1142,43 @@
+ **	revision:
+ **		v1.0
+ **____________________________________________________________________________*/
++#ifdef Q1000K_PON_IDENTITY
++static void xpon_protocol_phy(unsigned int source, unsigned int event)
++{
++	PON_PHY_Event_data_t data = { .src = source, .id = event };
++
++	if (xpon_is_ready())
++		xpon_phy_event_dispatch(&data);
++}
++
++static void xpon_protocol_irq(void)
++{
++	if (xpon_is_ready())
++		gpon_isr();
++}
++
++static void xpon_protocol_fault(int error)
++{
++	int ret;
++
++	pr_err("Q1000K protocol executor fault: %d\n", error);
++	gpon_quiesce();
++	ret = q1000k_transport_pause(1000);
++	if (ret)
++		pr_err("Q1000K protocol CPU containment failed: %d\n", ret);
++	ret = q1000k_phy_quiesce();
++	if (ret)
++		pr_err("Q1000K protocol PHY containment failed: %d\n", ret);
++	an7581_xpon_invalidate();
++}
++
++static const struct q1000k_protocol_ops xpon_protocol_ops = {
++	.irq = xpon_protocol_irq,
++	.phy = xpon_protocol_phy,
++	.fault = xpon_protocol_fault,
++};
++#endif
++
+ static int xpon_mac_hook_dispatch(struct ecnt_data  * in_data)
+ {
+     int ret = 0;
+@@ -1150,16 +1189,27 @@
+     switch (data->src_module)
+     {
+         case XPON_PHY_MODULE:
++#ifdef Q1000K_PON_IDENTITY
++            if (!data->pEvent)
++                return -EINVAL;
++            ret = q1000k_protocol_phy(data->pEvent->src, data->pEvent->id);
++#else
+             xpon_phy_event_dispatch(data->pEvent);
++#endif
+             break;
+         case XPON_PUB_MODULE:
+             ret = xpon_mac_pub_module_hook_dispatch(data);
+             break;
+         case XPON_INT_MODULE:
++#ifdef Q1000K_PON_IDENTITY
++            /* The platform IRQ is owned directly, never dispatched in RCU. */
++            return -EOPNOTSUPP;
++#else
+             if(gpPhyData->working_mode == PHY_EPON_CONFIG)
+                 epon_isr();
+             else
+                 gpon_isr();
++#endif
+             break;
+         default:
+             printk("XPON 10g MAC Driver not ready to receive event from module with id:%d,", data->src_module);
+@@ -1243,6 +1293,12 @@
+ 	}
+ 	if (xpon_owned.wan)
+ 		pwan_quiesce();
++#ifdef Q1000K_PON_IDENTITY
++	if (xpon_owned.protocol) {
++		q1000k_protocol_stop();
++		xpon_owned.protocol = false;
++	}
++#endif
+ 	/* Keep native DMA alive until protocol producers and the physical
+ 	 * pipeline are drained. Closed ready gates reject new callbacks. */
+ 	/* In-flight RX/event wrappers may have observed ready before closure. */
+@@ -1361,6 +1417,12 @@
+ 	if (ret)
+ 		goto fail;
+ #endif
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_protocol_init(get_xpon_irq(0), &xpon_protocol_ops);
++	if (ret)
++		goto fail;
++	xpon_owned.protocol = true;
++#endif
+ 	ret = xpondrv_init_global_data();
+ 	if (ret)
+ 		goto fail;
+@@ -1414,10 +1476,20 @@
+ 		gpPonSysData->xpon_daemon.task = NULL;
+ 		goto fail;
+ 	}
+-	/* No fallible startup step follows publication. */
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_protocol_status();
++	if (ret)
++		goto fail;
++#endif
++	/* All callback state is initialized before ready/IRQ publication. */
+ 	gpPonSysData->sysMACStartup = PON_MAC_START;
+ 	smp_store_release(&xpon_ready, true);
+ 	gpon_start_interrupts();
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_protocol_start();
++	if (ret)
++		goto fail;
++#endif
+ 	change_alarm_led_status(LED_FLICKER);
+ 	XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer, 1000);
+ 	pr_info("%s\n", MODULE_VERSION_10GXPONMAC);

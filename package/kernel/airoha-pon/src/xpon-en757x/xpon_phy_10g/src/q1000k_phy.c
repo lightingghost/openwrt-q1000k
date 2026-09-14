@@ -53,14 +53,6 @@ static void qphy_callback_lock(void)
 	WRITE_ONCE(qphy_owner, current);
 }
 
-static bool qphy_callback_trylock(void)
-{
-	if (!mutex_trylock(&qphy_callback))
-		return false;
-	WRITE_ONCE(qphy_owner, current);
-	return true;
-}
-
 static void qphy_callback_unlock(void)
 {
 	WRITE_ONCE(qphy_owner, NULL);
@@ -254,12 +246,13 @@ int q1000k_phy_configure(u32 mode)
 		return ret;
 	if (mode != PHY_XGSPON_CONFIG)
 		return -EOPNOTSUPP;
-	if (!mutex_trylock(&qphy_control))
-		return -EBUSY;
-	if (!qphy_callback_trylock()) {
-		ret = -EBUSY;
-		goto control_out;
-	}
+	/* Deferred MAC events may arrive before the PHY callback returns.
+	 * Wait for that callback; reject recursion before taking control.
+	 */
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
 	ret = qphy_ready();
 	if (ret)
 		goto out;
@@ -301,7 +294,6 @@ int q1000k_phy_configure(u32 mode)
 	}
 out:
 	qphy_callback_unlock();
-control_out:
 	mutex_unlock(&qphy_control);
 	return ret;
 }
@@ -314,12 +306,13 @@ int q1000k_phy_start(void)
 
 	if (ret)
 		return ret;
-	if (!mutex_trylock(&qphy_control))
-		return -EBUSY;
-	if (!qphy_callback_trylock()) {
-		ret = -EBUSY;
-		goto control_out;
-	}
+	/* Deferred MAC events may arrive before the PHY callback returns.
+	 * Wait for that callback; reject recursion before taking control.
+	 */
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
 	ret = qphy_ready();
 	if (ret)
 		goto out;
@@ -390,14 +383,13 @@ fail:
 	qphy_failed(ret);
 out:
 	qphy_callback_unlock();
-control_out:
 	mutex_unlock(&qphy_control);
 	return ret;
 }
 EXPORT_SYMBOL(q1000k_phy_start);
 
 /* Called with control held. Callback code never waits for control: callbacks
- * trying to reenter a lifecycle API receive -EBUSY. Do not hold callback over
+ * trying to reenter a lifecycle API receive -EDEADLK. Do not hold callback over
  * free_irq/cancel_work_sync, which wait for that same code to finish.
  */
 static int qphy_stop(void)
@@ -450,14 +442,9 @@ int q1000k_phy_stop(void)
 
 	if (ret)
 		return ret;
-	if (!mutex_trylock(&qphy_control))
-		return -EBUSY;
-	/* A nested stop from this PHY's own callback must not wait on itself. */
-	if (!qphy_callback_trylock()) {
-		mutex_unlock(&qphy_control);
-		return -EBUSY;
-	}
-	qphy_callback_unlock();
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
 	ret = qphy_stop();
 	mutex_unlock(&qphy_control);
 	return ret;
@@ -465,8 +452,7 @@ int q1000k_phy_stop(void)
 EXPORT_SYMBOL(q1000k_phy_stop);
 
 /* The MAC lifecycle worker has drained event/control producers before entry.
- * Unlike the nonblocking control API, this waits for an existing PHY callback
- * to finish. A callback cannot wait on its own IRQ/work completion.
+ * A callback cannot wait on its own IRQ/work completion.
  */
 int q1000k_phy_quiesce(void)
 {
@@ -489,12 +475,10 @@ int q1000k_phy_set_tx(bool enable)
 
 	if (ret)
 		return ret;
-	if (!mutex_trylock(&qphy_control))
-		return -EBUSY;
-	if (!qphy_callback_trylock()) {
-		mutex_unlock(&qphy_control);
-		return -EBUSY;
-	}
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
 	ret = qphy_ready();
 	if (!ret && (!qphy_controller || !gpPhyPriv->phy_init_done))
 		ret = -EAGAIN;
@@ -538,12 +522,10 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 		    data->cmd_id == PON_SET_PHY_FW_READY)
 			return data->ret = -EOPNOTSUPP;
 	}
-	if (!mutex_trylock(&qphy_control))
-		return data->ret = -EBUSY;
-	if (!qphy_callback_trylock()) {
-		mutex_unlock(&qphy_control);
-		return data->ret = -EBUSY;
-	}
+	if (READ_ONCE(qphy_owner) == current)
+		return data->ret = -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
 	ret = qphy_ready();
 	if (!ret && data->api_type == XPON_PHY_API_TYPE_GET &&
 	    data->cmd_id == PON_GET_PHY_INIT_STATUS) {

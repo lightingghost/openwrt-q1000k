@@ -6,7 +6,10 @@
 
 struct xpon_phy_api_data_s;
 
-/* Process context only. Symbols pin phy_10g for the MAC's lifetime. */
+/* Process context only. Wait for active PHY callbacks; recursion from this
+ * PHY's callback returns EDEADLK before taking any control lock. Symbols pin
+ * phy_10g for the MAC's lifetime. Never call while holding an OMCI core lock.
+ */
 int q1000k_phy_configure(u32 mode);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);

@@ -325,3 +325,42 @@ used by startup or runtime service replacement. Imported `gwan_init` now checks
 native frame-limit errors and unwinds its interface/timer/tasklet allocations.
 Legacy global FE counter polling and its Q1000K control knob are disabled because
 native software packet accounting is authoritative with hardware forwarding off.
+
+## Resumable MAC executor (vendor r35)
+
+The imported MAC now owns platform IRQ 0 directly. The IRQ starts disabled,
+then remains disabled between the hard handler and the serialized process
+handler's MAC acknowledgement. The old external IRQ hook is rejected on
+Q1000K. PHY event hooks copy their two scalar fields into a bounded 64-event
+queue and return without invoking MAC protocol code under ECNT RCU or the
+PHY callback mutex.
+
+The same executor runs imported GPON timers and tasklet work. Its pause API
+waits for an active handler, retains the execution mutex for one owning task,
+and preserves pending events until that task resumes. Timer cancellation
+removes pending deferred execution and synchronous cancellation waits for
+active execution, including self-rearm. Permanent module teardown closes
+admission, waits for process controls and callbacks, shuts down registered
+timers, and balances/releases the IRQ before state is freed. Event overflow
+latches a fault and requests MAC/CPU/PHY containment in process context; a
+partial history is never dispatched as a complete one.
+
+GPON activation transitions use the executor's process guard instead of
+holding the legacy activation spinlock across PHY control. Typed PHY APIs
+wait for an unrelated active PHY callback, eliminating the race where a
+queued MAC event ran before the originating callback returned. Same-task
+PHY callback recursion returns EDEADLK before acquiring the control mutex.
+
+Validation: real-kernel UML tests cover retained events, task coalescing,
+IRQ mask/ack order, pause versus an active IRQ, synchronous cancellation
+versus a self-rearming timer, teardown versus an active callback, and sticky
+queue overflow. The PHY UML tests cover callback recursion and a MAC-style
+TX request waiting for the originating callback. AArch64 modules and host
+lifecycle failure fixtures are also checked locally. No router access occurs.
+
+This closes the event-execution prerequisite. Service replacement still needs
+an actual record owner to hold the executor pause across the physical
+transaction. Registration/key publication and OMCI session notifications
+must preserve their separate lock order: no OMCI core session barrier while
+holding the executor. The old FE/QDMA startup gate remains until its remaining
+callers and service/backend startup are integrated.

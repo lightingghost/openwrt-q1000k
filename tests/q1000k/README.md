@@ -421,3 +421,11 @@ with and without the exclusive cold-start MAC reset, and injects failure at ever
 stage. Table fixtures verify guarded quarantine release, explicit channel install,
 complete GEM clearing and preservation of the ONU/OMCC exception. `test_pon_fe_bridge.py`
 checks the actual imported frame/weight callers and native error propagation.
+
+`run_pon_protocol_uml.sh` executes the production MAC executor in a local UML
+kernel, with synthetic IRQ registration/masking and no hardware attachment.
+It verifies retained PHY/timer/task events, recursive pause rejection,
+interrupt masking until acknowledgement, waiting for active IRQ handlers,
+synchronous timer cancellation and self-rearm, callback teardown, and sticky
+bounded-queue overflow. The separate PHY UML test also verifies a typed TX
+request waits for an unrelated active callback and rejects self-recursion.

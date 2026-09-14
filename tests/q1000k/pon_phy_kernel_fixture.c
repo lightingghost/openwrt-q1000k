@@ -105,10 +105,10 @@ static int handle_event(char *p)
     struct xpon_phy_api_data_s query={.api_type=XPON_PHY_API_TYPE_GET};
     check(lockdep_is_held(&qphy_callback));
     check(!in_atomic() && !irqs_disabled() && !rcu_read_lock_held());
-    check(q1000k_phy_start()==-EBUSY);
-    check(q1000k_phy_stop()==-EBUSY);
+    check(q1000k_phy_start()==-EDEADLK);
+    check(q1000k_phy_stop()==-EDEADLK);
     check(q1000k_phy_quiesce()==-EDEADLK);
-    check(q1000k_phy_call(&query)==-EBUSY);
+    check(q1000k_phy_call(&query)==-EDEADLK);
     complete(&event_entered);
     if(READ_ONCE(hold_event)) wait_for_completion(&event_release);
     return 0;
@@ -168,6 +168,26 @@ static void stop_during_callback(bool irq, bool quiesce)
     }
     check(!gpPhyPriv && !fake_irq_owned && !fake_irq_task && !work_busy(&qphy_poll_job));
 }
+static int tx_after_event(void *unused)
+{
+    check(!q1000k_phy_set_tx(true));
+    complete(&exit_done);
+    while (!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
+    __set_current_state(TASK_RUNNING); return 0;
+}
+static void control_during_callback(void)
+{
+    struct task_struct *task;
+    start_session();
+    reinit_completion(&event_entered); reinit_completion(&event_release); reinit_completion(&exit_done);
+    WRITE_ONCE(hold_event,true); q1000k_phy_poll();
+    check(wait_for_completion_timeout(&event_entered,5*HZ));
+    task=kthread_run(tx_after_event,NULL,"qphy-tx-test"); check(!IS_ERR(task));
+    msleep(20); check(!completion_done(&exit_done) && !controller.tx);
+    WRITE_ONCE(hold_event,false); complete(&event_release);
+    check(wait_for_completion_timeout(&exit_done,5*HZ) && controller.tx);
+    kthread_stop(task); q1000k_phy_exit();
+}
 static int __init phy_test_init(void)
 {
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET};
@@ -195,7 +215,8 @@ static int __init phy_test_init(void)
     stop_during_callback(true,false);
     stop_during_callback(false,true);
     stop_during_callback(true,true);
-    check(polls==52 && irqs==2);
+    control_during_callback();
+    check(polls==53 && irqs==2);
     pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 cycles, RCU guards, concurrent poll and IRQ teardown\n");
     return 0;
 }

@@ -317,7 +317,7 @@ int main(void) {
 #define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-4095)
 #define PTR_ERR(p) ((intptr_t)(p))
 static bool xpon_ready;
-static struct { bool globals,monitor,wan,mci,epon,gpon,qdma,gasp,proc,hook,api; } xpon_owned;
+static struct { bool globals,monitor,wan,mci,epon,gpon,qdma,gasp,proc,hook,api,protocol; } xpon_owned;
 struct phy { int trans_status_refresh_timer,traffic_status_refresh_timer; } phy;
 struct system {
     int sysMACStartup;
@@ -327,9 +327,9 @@ struct system {
 static struct phy *gpPhyData;
 static void *gpWanPriv,*gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
-enum { ID=1, UNION, ALLOC, ATTACH, GLOBALS, WAN, MCI, GPON, GASP, PROC, HOOK, API, WORKER, STEPS };
+enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, GASP, PROC, HOOK, API, WORKER, PROTOSTART, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
-static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error;
+static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error,xpon_protocol_ops;
 static bool xpon_is_ready(void); /* production definition is non-static */
 static int acquire(int id) {
     assert(!xpon_ready && id==++step && !live[id]);
@@ -338,6 +338,21 @@ static int acquire(int id) {
 }
 static void release(int id) { assert(live[id]); live[id]=0; }
 static int q1000k_pon_identity_init(void) { return acquire(ID); }
+static int q1000k_protocol_init(int irq,void *ops) {
+    assert(irq==100 && ops==&xpon_protocol_ops); return acquire(PROTOCOL);
+}
+static int q1000k_protocol_status(void) { return live[PROTOCOL] ? 0 : -ENODEV; }
+static int q1000k_protocol_start(void) {
+    assert(xpon_ready && live[WORKER] && live[PROTOCOL] && ++step==PROTOSTART);
+    if(fail_at==PROTOSTART) return -EIO;
+    live[PROTOSTART]=1; return 0;
+}
+static void q1000k_protocol_stop(void) {
+    assert(!xpon_ready && live[ALLOC]);
+    if(live[PROTOSTART]) release(PROTOSTART);
+    release(PROTOCOL);
+}
+
 static void *get_xpon_dev(void) { return irq_resources ? &system_data : NULL; }
 static int get_xpon_irq(int n) { return irq_resources ? 100+n : -ENODEV; }
 static int ecnt_hook_is_registered(int a,int b) { return providers; }
@@ -401,7 +416,7 @@ static void xpon_daemon_quit(void) {
 static void stop_omci_oam_monitor(void) { assert(!live[WORKER]); }
 static int q1000k_pipeline_shutdown(void) {
     assert(rcu_drained && live[ATTACH] && live[GPON] && live[WAN]);
-    assert(!live[WORKER] && !live[API] && !live[HOOK] && !live[MCI]);
+    assert(!live[WORKER] && !live[API] && !live[HOOK] && !live[MCI] && !live[PROTOCOL]);
     return pipeline_error;
 }
 static void gpon_deinit(void) { assert(!live[WAN] && !live[ATTACH]); release(GPON); }
@@ -424,7 +439,7 @@ int main(void) {
     for(int fault=1;fault<STEPS;fault++) {
         reset(fault);
         int expected=fault==ALLOC ? -ENOMEM : fault==HOOK ? -EBUSY : -EIO;
-        assert(xpondrv_init()==expected && step==fault && !ready_published);
+        assert(xpondrv_init()==expected && step==fault && ready_published==(fault==PROTOSTART));
         clean();
         reset(0); assert(!xpondrv_init() && xpon_is_ready() && ready_published==1);
         xpondrv_cleanup(); clean(); /* complete startup and teardown after every failure */

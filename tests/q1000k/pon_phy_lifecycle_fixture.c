@@ -172,11 +172,11 @@ static int event(char *p)
     current=&other_task; assert(q1000k_phy_callback_context()==-EPERM); current=&main_task;
     if(reenter) {
         struct xpon_phy_api_data_s call={.api_type=XPON_PHY_API_TYPE_GET};
-        assert(q1000k_phy_start()==-EBUSY);
-        assert(q1000k_phy_stop()==-EBUSY);
+        assert(q1000k_phy_start()==-EDEADLK);
+        assert(q1000k_phy_stop()==-EDEADLK);
         assert(q1000k_phy_quiesce()==-EDEADLK);
-        assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EBUSY);
-        assert(q1000k_phy_call(&call)==-EBUSY);
+        assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EDEADLK);
+        assert(q1000k_phy_call(&call)==-EDEADLK);
     }
     return 0;
 }
