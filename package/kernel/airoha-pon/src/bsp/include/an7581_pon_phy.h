@@ -14,5 +14,7 @@ int an7581_pon_phy_status(void);
  * Holds exclusive reset ownership, verifies assert/deassert and latches errors.
  */
 int an7581_pon_phy_reset(void);
+/* Explicit process-context pin selection; probe leaves the pins untouched. */
+int an7581_pon_phy_prepare_pins(void);
 
 #endif

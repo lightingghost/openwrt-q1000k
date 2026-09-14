@@ -108,6 +108,11 @@
 &en7581_pinctrl {
 	gpio-ranges = <&en7581_pinctrl 0 13 50>;
 
+	pon_phy_pins: pon-phy-pins {
+		function = "pon";
+		groups = "pon";
+	};
+
 	pon_control_pins: pon-control-pins {
 		/* Establish inactive enables before switching the pins to GPIO. */
 		power {
@@ -252,6 +257,9 @@
 &{/soc} {
 	pon_phy: phy@1faf0000 {
 		compatible = "quantum,q1000k-pon-phy";
+		/* Selected explicitly after controller ownership, never at probe. */
+		pinctrl-names = "pon";
+		pinctrl-0 = <&pon_phy_pins>;
 		reg = <0 0x1faf0000 0 0x1fff>,
 		      <0 0x1fa8a000 0 0x1000>,
 		      <0 0x1fa8b000 0 0x1000>;

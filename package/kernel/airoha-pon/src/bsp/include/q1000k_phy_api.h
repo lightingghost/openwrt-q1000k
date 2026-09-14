@@ -10,6 +10,8 @@ struct xpon_phy_api_data_s;
 int q1000k_phy_configure(u32 mode);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);
+/* Final coordinated optical TX enable/disable, after successful PHY start. */
+int q1000k_phy_set_tx(bool enable);
 int q1000k_phy_call(struct xpon_phy_api_data_s *data);
 /* Timer callback only queues work; PHY polling runs in process context. */
 void q1000k_phy_poll(void);
@@ -20,5 +22,8 @@ void q1000k_phy_exit(void);
 int q1000k_phy_callback_context(void);
 int q1000k_phy_top_reset(void);
 int q1000k_phy_pma_reset(void);
+int q1000k_phy_controller_check(void);
+int q1000k_phy_board_profile(void);
+int q1000k_phy_trans_power(u32 operation);
 
 #endif

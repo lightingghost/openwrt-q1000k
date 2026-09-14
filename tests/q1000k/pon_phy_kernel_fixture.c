@@ -76,6 +76,29 @@ static void pon_phy_api_dispatch(struct ecnt_data *in)
     data->ret=0;
 }
 static void phy_event_poll(struct timer_list *timer) { q1000k_phy_poll(); }
+
+struct q1000k_pon { bool held, tx; };
+static struct q1000k_pon controller;
+static int controller_error, pins_error, pbus_error;
+static struct q1000k_pon *q1000k_pon_get(void)
+{
+    if (controller_error) return ERR_PTR(controller_error);
+    controller.held=true; return &controller;
+}
+static int q1000k_pon_check(struct q1000k_pon *p)
+{
+    return p==&controller && p->held ? controller_error : -ENODEV;
+}
+static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
+{
+    int ret=q1000k_pon_check(p); if (!ret) p->tx=enable; return ret;
+}
+static int q1000k_pon_put(struct q1000k_pon *p)
+{
+    int ret=q1000k_pon_set_tx(p,false); p->held=false; return ret;
+}
+static int an7581_pon_phy_prepare_pins(void) { return pins_error; }
+static int an7581_pon_pbus_enable(void) { return pbus_error; }
 /* PRODUCTION */
 static int handle_event(char *p)
 {

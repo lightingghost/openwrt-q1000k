@@ -8,6 +8,8 @@
 #include <linux/sched.h>
 #include <linux/workqueue.h>
 #include <an7581_pon_phy.h>
+#include <an7581_pon_scu.h>
+#include <q1000k_pon.h>
 #include <ecnt_pon_phy_api.h>
 #include <ecnt_scu_api.h>
 #include <q1000k_phy_api.h>
@@ -22,6 +24,7 @@
 static DEFINE_MUTEX(qphy_control);
 static DEFINE_MUTEX(qphy_callback);
 static struct task_struct *qphy_owner;
+static struct q1000k_pon *qphy_controller;
 static bool qphy_active, qphy_dead;
 static int qphy_fault;
 static struct device *qphy_irq_dev;
@@ -85,6 +88,60 @@ static int qphy_reg_write(u32 reg, u32 value)
 	return ret ? ret : actual != value ? -EIO : 0;
 }
 
+int q1000k_phy_controller_check(void)
+{
+	int ret = q1000k_phy_callback_context();
+
+	return ret ? ret : qphy_controller ? q1000k_pon_check(qphy_controller) : -ENODEV;
+}
+
+int q1000k_phy_board_profile(void)
+{
+	int ret = q1000k_phy_controller_check();
+
+	if (ret)
+		return ret;
+	if (gpPhyPriv->wan_sel != SCU_WAN_CONF_REG_WAN_SEL_XGSPON)
+		return -EINVAL;
+	/* OEM Q1000K boot selects table index 82 (ECONET / EN7572) for
+	 * its EN7573 pair. These exact values agree with the imported table.
+	 * No generic SFP probe may access the controller's owned I2C address.
+	 */
+	ret = qphy_reg_write(EN7581_XGPON_PHY_SFP_VLD_LEVEL, 0x9);
+	if (!ret)
+		ret = qphy_reg_write(EN7581_XPON_PMA_XPON_SETTING_0, 0x10001);
+	if (!ret)
+		ret = qphy_reg_write(EN7581_XPON_PMA_XPON_SETTING_1, 0x1010100);
+	if (!ret)
+		gpPhyPriv->trans_index = 82;
+	return ret;
+}
+
+int q1000k_phy_trans_power(u32 operation)
+{
+	bool preserve = operation == PHY_TX_DIS_ON_HW_ONLY;
+	int ret = q1000k_phy_callback_context();
+
+	if (ret)
+		return ret;
+	if (!qphy_controller)
+		return -ENODEV;
+	if (operation == PHY_TX_DIS_RESTORE_BY_SW)
+		operation = gpPhyPriv->trans_tx_status;
+	else if (preserve)
+		operation = PHY_DISABLE;
+	if (operation != PHY_ENABLE && operation != PHY_DISABLE)
+		return -EINVAL;
+	/* Only coordinated startup may authorize a later internal restore. */
+	if (operation == PHY_ENABLE &&
+	    (!READ_ONCE(qphy_active) || !gpPhyPriv->phyCfg.flags.txPowerEnFlag))
+		return -EACCES;
+	ret = q1000k_pon_set_tx(qphy_controller, operation == PHY_ENABLE);
+	if (!ret && !preserve)
+		gpPhyPriv->trans_tx_status = operation;
+	return ret;
+}
+
 /* These masks are owned by the optical PHY, never the copper SerDes. */
 static int qphy_mask(void)
 {
@@ -115,6 +172,8 @@ static void qphy_failed(int error)
 	WRITE_ONCE(gpPhyPriv->is_phy_start, FALSE);
 	if (!qphy_fault)
 		qphy_fault = error;
+	if (qphy_controller)
+		q1000k_pon_set_tx(qphy_controller, false);
 	qphy_mask();
 }
 
@@ -125,7 +184,9 @@ static void qphy_poll_work(struct work_struct *work)
 	qphy_callback_lock();
 	if (!READ_ONCE(qphy_active))
 		goto out;
-	ret = ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
+	ret = q1000k_phy_controller_check();
+	if (!ret)
+		ret = ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
 	if (!ret)
 		ret = an7581_pon_phy_status();
 	if (ret)
@@ -172,7 +233,9 @@ static irqreturn_t qphy_irq_thread(int irq, void *data)
 	/* Skip the legacy interrupt-count heuristic and its 50 ms busy wait.
 	 * Dispatch only after checking this PHY's enabled pending sources.
 	 */
-	ret = ponPhyFunc[PHY_ISR_FUNC]((char *)gpPhyPriv);
+	ret = q1000k_phy_controller_check();
+	if (!ret)
+		ret = ponPhyFunc[PHY_ISR_FUNC]((char *)gpPhyPriv);
 	if (!ret)
 		ret = an7581_pon_phy_status();
 fail:
@@ -209,12 +272,29 @@ int q1000k_phy_configure(u32 mode)
 		ret = -EINVAL;
 		goto out;
 	}
+	if (!qphy_controller) {
+		struct q1000k_pon *controller = q1000k_pon_get();
+
+		if (IS_ERR(controller)) {
+			ret = PTR_ERR(controller);
+			goto out;
+		}
+		qphy_controller = controller;
+	}
+	ret = q1000k_phy_controller_check();
+	if (!ret)
+		ret = an7581_pon_phy_prepare_pins();
+	if (!ret)
+		ret = an7581_pon_pbus_enable();
+	if (ret)
+		goto configure_failed;
 	/* Optical TX stays disabled; its enable belongs to controller/MAC startup. */
 	ret = phy_mode_config(PHY_XGSPON_CONFIG, PHY_DISABLE);
 	if (!ret)
 		ret = qphy_mask();
 	if (!ret)
 		ret = an7581_pon_phy_status();
+	configure_failed:
 	if (ret) {
 		gpPhyPriv->phy_init_done = FALSE;
 		qphy_failed(ret);
@@ -249,6 +329,9 @@ int q1000k_phy_start(void)
 		ret = -EAGAIN;
 		goto out;
 	}
+	ret = q1000k_phy_controller_check();
+	if (ret)
+		goto fail;
 	dev = get_pon_phy_dev();
 	irq = get_pon_phy_irq();
 	if (!dev || irq < 0) {
@@ -339,6 +422,13 @@ static int qphy_stop(void)
 	/* A poll already running when stop began may have rearmed this timer. */
 	timer_delete_sync(&gpPhyPriv->event_poll_timer);
 	qphy_callback_lock();
+	if (qphy_controller) {
+		err = q1000k_pon_set_tx(qphy_controller, false);
+		if (!ret)
+			ret = err;
+		gpPhyPriv->phyCfg.flags.txPowerEnFlag = false;
+		gpPhyPriv->trans_tx_status = PHY_DISABLE;
+	}
 	if (gpPhyPriv->phy_init_done) {
 		err = qphy_mask();
 		if (!ret)
@@ -376,6 +466,38 @@ int q1000k_phy_stop(void)
 	return ret;
 }
 EXPORT_SYMBOL(q1000k_phy_stop);
+
+int q1000k_phy_set_tx(bool enable)
+{
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (!mutex_trylock(&qphy_control))
+		return -EBUSY;
+	if (!qphy_callback_trylock()) {
+		mutex_unlock(&qphy_control);
+		return -EBUSY;
+	}
+	ret = qphy_ready();
+	if (!ret && (!qphy_controller || !gpPhyPriv->phy_init_done))
+		ret = -EAGAIN;
+	if (!ret && enable && !READ_ONCE(qphy_active))
+		ret = -EAGAIN;
+	if (!ret) {
+		ret = q1000k_pon_set_tx(qphy_controller, enable);
+		if (!ret) {
+			gpPhyPriv->phyCfg.flags.txPowerEnFlag = enable;
+			gpPhyPriv->trans_tx_status = enable ? PHY_ENABLE : PHY_DISABLE;
+		} else {
+			qphy_failed(ret);
+		}
+	}
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_set_tx);
 
 int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 {
@@ -478,6 +600,10 @@ void q1000k_phy_exit(void)
 	qphy_stop();
 	qphy_callback_lock();
 	timer_shutdown_sync(&gpPhyPriv->event_poll_timer);
+	if (qphy_controller) {
+		q1000k_pon_put(qphy_controller);
+		qphy_controller = NULL;
+	}
 	kfree(gpPhyPriv);
 	gpPhyPriv = NULL;
 	ponPhyFunc = NULL;

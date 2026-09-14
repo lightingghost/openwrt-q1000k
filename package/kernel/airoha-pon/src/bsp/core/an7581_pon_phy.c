@@ -7,6 +7,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/rcupdate.h>
 #include <linux/reset.h>
 #include <linux/spinlock.h>
@@ -18,6 +19,8 @@ struct an7581_pon_phy {
 	struct device *dev;
 	void __iomem *base[3];
 	struct reset_control *reset;
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pins;
 	int irq;
 	int fault;
 	bool resetting;
@@ -237,6 +240,26 @@ out:
 }
 EXPORT_SYMBOL(an7581_pon_phy_reset);
 
+int an7581_pon_phy_prepare_pins(void)
+{
+	int ret = -ENODEV;
+
+	if (in_interrupt() || in_atomic() || irqs_disabled() ||
+	    rcu_preempt_depth() ||
+	    (IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()))
+		return -EWOULDBLOCK;
+	mutex_lock(&phy_lifecycle);
+	if (pon_phy) {
+		ret = an7581_pon_phy_status();
+		if (!ret)
+			ret = pinctrl_select_state(pon_phy->pinctrl, pon_phy->pins);
+	}
+	an7581_phy_fault(ret);
+	mutex_unlock(&phy_lifecycle);
+	return ret;
+}
+EXPORT_SYMBOL(an7581_pon_phy_prepare_pins);
+
 void (*ledTurnOff_hook)(u8 led_no);
 EXPORT_SYMBOL(ledTurnOff_hook);
 void (*set_pon_phy_mode_config)(Xpon_Phy_Mode_t mode, int tx_enable);
@@ -261,6 +284,14 @@ static int an7581_pon_phy_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 	priv->dev = &pdev->dev;
+	priv->pinctrl = devm_pinctrl_get(&pdev->dev);
+	if (IS_ERR(priv->pinctrl))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->pinctrl),
+				     "cannot acquire PON pins\n");
+	priv->pins = pinctrl_lookup_state(priv->pinctrl, "pon");
+	if (IS_ERR(priv->pins))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->pins),
+				     "missing PON pin state\n");
 	for (bank = 0; bank < ARRAY_SIZE(names); bank++) {
 		struct resource *res = platform_get_resource_byname(pdev,
 						IORESOURCE_MEM, names[bank]);

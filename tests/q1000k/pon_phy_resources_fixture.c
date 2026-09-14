@@ -26,6 +26,13 @@ static int in_interrupt(void) { return 0; }
 static int irqs_disabled(void) { return 0; }
 static int rcu_preempt_depth(void) { return 0; }
 static int rcu_read_lock_held(void) { return 1; }
+struct pinctrl;
+struct pinctrl_state;
+static int pins_error, pins_calls;
+static int pinctrl_select_state(struct pinctrl *p, struct pinctrl_state *s)
+{
+    (void)p; (void)s; assert(!held && lifecycle_locked); pins_calls++; return pins_error;
+}
 struct reset_control { int asserted; };
 static int reset_control_assert(struct reset_control *r);
 static int reset_control_deassert(struct reset_control *r);
@@ -152,6 +159,10 @@ int main(void)
     for(b=0;b<4;b++) assert(!pthread_create(&threads[b],NULL,worker,(void *)(uintptr_t)b));
     for(b=0;b<4;b++) assert(!pthread_join(threads[b],NULL));
     assert(memory[2][1]==0x4000000f && !an7581_pon_phy_status());
+    assert(!an7581_pon_phy_prepare_pins() && pins_calls==1);
+    pins_error=-EIO;
+    assert(an7581_pon_phy_prepare_pins()==-EIO && provider.fault==-EIO);
+    provider.fault=0; pins_error=0;
     atomic_context=1;
     assert(an7581_pon_phy_reset()==-EWOULDBLOCK && !reset_step);
     atomic_context=0;

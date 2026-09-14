@@ -370,3 +370,8 @@ of concurrent MMIO. `Q1000K_PON_BSP` can select a prepared vendor BSP tree.
 checks exclusive references, device removal, process context, controller
 faults and power-off containment. `test_en7573.c` also checks TX changes and
 all-ones control reads, in addition to firmware download fault injection.
+
+The PHY lifecycle fixture additionally checks controller acquisition retry,
+pinctrl/PBUS setup failure, the verified Q1000K transceiver profile, explicit
+TX authorization, temporary reset suppression and optical disable on stop.
+The resource fixture checks explicit pin selection without IRQ locks.

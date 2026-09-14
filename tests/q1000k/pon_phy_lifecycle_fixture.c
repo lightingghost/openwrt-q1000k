@@ -9,6 +9,9 @@
 typedef uint32_t u32;
 #include <q1000k_phy_api.h>
 #define EXPORT_SYMBOL(x)
+#define ERR_PTR(n) ((void *)(intptr_t)(n))
+#define PTR_ERR(p) ((intptr_t)(p))
+#define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-4095)
 #define DEFINE_MUTEX(x) struct mutex x
 #define IS_ENABLED(x) 0
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
@@ -18,6 +21,8 @@ typedef uint32_t u32;
 #define FALSE 0
 #define PHY_DISABLE 0
 #define PHY_ENABLE 1
+#define PHY_TX_DIS_ON_HW_ONLY 2
+#define PHY_TX_DIS_RESTORE_BY_SW 3
 #define PHY_DEFAULT 2
 #define PHY_XGSPON_CONFIG 4
 #define PHY_UNKNOWN_CONFIG 0
@@ -77,7 +82,7 @@ struct phy_private {
     int phy_status,trans_tx_enable,trans_tx_status,first_plugin_flag,trans_msg_print_cnt;
     int debugLevel,pon_stop_flag,event_poll_timer_value,event_handle_lock,pma_reset_lock;
     int is_phy_start,is_irq_requested,phy_init_done;
-    struct { struct { int mode; } flags; } phyCfg;
+    struct { struct { int mode,txPowerEnFlag; } flags; } phyCfg;
     struct timer_list event_poll_timer;
 };
 static struct phy_private *gpPhyPriv;
@@ -122,6 +127,29 @@ static int phy_mode_config(int mode,int tx) {
 static int phy_fw_ready(int enable) { assert(enable==PHY_DISABLE); fw_calls++; return fw_error; }
 static void pon_phy_api_dispatch(struct ecnt_data *d) { struct xpon_phy_api_data_s *data=(void *)d; api_calls++; data->ret=api_error; }
 static void phy_event_poll(struct timer_list *t) { q1000k_phy_poll(); }
+
+struct q1000k_pon { bool held, tx; };
+static struct q1000k_pon controller;
+static int controller_error, pins_error, pbus_error;
+static struct q1000k_pon *q1000k_pon_get(void)
+{
+    if (controller_error) return ERR_PTR(controller_error);
+    controller.held=true; return &controller;
+}
+static int q1000k_pon_check(struct q1000k_pon *p)
+{
+    return p==&controller && p->held ? controller_error : -ENODEV;
+}
+static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
+{
+    int ret=q1000k_pon_check(p); if (!ret) p->tx=enable; return ret;
+}
+static int q1000k_pon_put(struct q1000k_pon *p)
+{
+    int ret=q1000k_pon_set_tx(p,false); p->held=false; return ret;
+}
+static int an7581_pon_phy_prepare_pins(void) { return pins_error; }
+static int an7581_pon_pbus_enable(void) { return pbus_error; }
 /* PRODUCTION */
 static void cancel_work_sync(struct work_struct *w)
 {
@@ -157,6 +185,7 @@ static void reset(void)
     if(gpPhyPriv) q1000k_phy_exit();
     assert(!allocated_irq && !allocs && !qphy_control.held && !qphy_callback.held);
     qphy_dead=false; qphy_fault=0; qphy_active=false;
+    assert(!controller.held); controller_error=pins_error=pbus_error=0;
     provider=1; provider_error=no_memory=irq_error=clear_error=mode_error=0;
     atomic_context=irq_context=preempt_rcu=0; hwid=14; wan=10;
     fail_read=fail_write=reads=writes=0; clears=polls=isrs=fw_calls=api_calls=mode_calls=0;
@@ -193,6 +222,37 @@ int main(void)
         assert(q1000k_phy_call(&data)==-EWOULDBLOCK);
     }
     atomic_context=irq_context=preempt_rcu=0;
+    reset(); assert(!q1000k_phy_init()); controller_error=-ENODEV;
+    assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-ENODEV && !qphy_fault && !controller.held);
+    controller_error=0; assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && controller.held);
+    assert(q1000k_phy_set_tx(true)==-EAGAIN && !controller.tx);
+    assert(q1000k_phy_board_profile()==-EPERM);
+    qphy_callback_lock();
+    assert(!q1000k_phy_board_profile() && gpPhyPriv->trans_index==82);
+    assert(regs[(EN7581_XGPON_PHY_SFP_VLD_LEVEL&0x1ffff)/4]==9);
+    assert(regs[(EN7581_XPON_PMA_XPON_SETTING_0&0x1ffff)/4]==0x10001);
+    assert(regs[(EN7581_XPON_PMA_XPON_SETTING_1&0x1ffff)/4]==0x1010100);
+    assert(q1000k_phy_trans_power(PHY_ENABLE)==-EACCES);
+    qphy_callback_unlock();
+    assert(!q1000k_phy_start() && !controller.tx);
+    assert(!q1000k_phy_set_tx(true) && controller.tx && gpPhyPriv->trans_tx_status==PHY_ENABLE);
+    qphy_callback_lock();
+    assert(!q1000k_phy_trans_power(PHY_TX_DIS_ON_HW_ONLY) && !controller.tx);
+    assert(gpPhyPriv->trans_tx_status==PHY_ENABLE);
+    assert(!q1000k_phy_trans_power(PHY_TX_DIS_RESTORE_BY_SW) && controller.tx);
+    qphy_callback_unlock();
+    assert(!q1000k_phy_stop() && !controller.tx && !gpPhyPriv->phyCfg.flags.txPowerEnFlag);
+    for(n=0;n<2;n++) {
+        reset(); assert(!q1000k_phy_init());
+        pins_error=n==0 ? -ETIMEDOUT : 0; pbus_error=n==1 ? -ETIMEDOUT : 0;
+        assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-ETIMEDOUT && qphy_fault && !controller.tx);
+    }
+    for(n=1;n<=3;n++) {
+        initialized(); writes=0; fail_write=n; qphy_callback_lock();
+        assert(q1000k_phy_board_profile()==-EIO && writes==n); qphy_callback_unlock();
+        initialized(); reads=0; fail_read=n; qphy_callback_lock();
+        assert(q1000k_phy_board_profile()==-EIO && reads==n); qphy_callback_unlock();
+    }
     initialized(); mode_error=-EIO; gpPhyPriv->phy_init_done=0;
     assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EIO && qphy_fault);
     for(n=1;n<=7;n++) {

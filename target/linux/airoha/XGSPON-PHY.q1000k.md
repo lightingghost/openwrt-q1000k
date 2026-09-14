@@ -160,3 +160,37 @@ failure, ignored clock writes, SCU field preservation and callback ownership.
 The UML PHY test passes its 50-cycle and concurrent teardown cases. Vendor
 r24 builds against Linux 6.18.44 and packages successfully (350,748 bytes).
 No reset or other write was executed on the Q1000K.
+
+## EN7573 and board wiring
+
+Patch 027 connects the PHY to the controller's exclusive kernel-consumer API.
+Configuration acquires the controller only after verified firmware/calibration
+initialization, checks it, selects the native pinctrl `pon` group explicitly,
+and enables only the PON PBUS access bit. Probe acquires the named pin state
+without selecting it. This replaces the selected backend's full IOMUX/PBUS
+writes and reference-board LED/GPIO changes. The disabled board node names
+only the explicit `pon` state, so the driver core cannot select a default
+state before controller ownership.
+
+The OEM boot log selects profile 82, vendor ECONET / EN7572, for its EN7573
+controllers. The imported table agrees with the three observed values:
+SFP valid level `0x9`, PMA setting 0 `0x10001`, PMA setting 1 `0x1010100`.
+The Q1000K path writes and verifies these values after checking the owned
+controller. It does not probe the controller address through the generic SFP
+I2C path or substitute a different transceiver profile.
+
+TX switching now reaches the EN7573 control register through its owner.
+Configuration and IRQ startup leave TX disabled. A separate typed operation
+requires an active, configured PHY before enabling it; temporary PMA-reset
+suppression preserves the desired state and restores it only while authorized.
+Stop revokes that authorization and disables TX. Poll/IRQ callbacks check
+controller state; faults close callback admission and attempt TX disable.
+Module exit drops the controller reference only after callbacks drain.
+
+All 37 PON host tests pass. Added cases cover missing-controller retry,
+pinctrl/PBUS failures, profile write/read errors, startup authorization,
+PMA TX suppression/restore and stop. The UML callback test passes with the
+connected lifecycle. The board DT compiles. Vendor r25 builds and its prepared
+sources match the tested files. No hardware access was performed. MAC startup,
+physical drain and OMCI coordination still must use these typed interfaces
+before the disabled board gates can be removed.
