@@ -18,9 +18,34 @@ authenticated OMCI/PLOAM, baseline unicast/QoS, userspace supervisor and class 1
 VLAN transformations, data-key exchange and unicast GEM encryption policy are
 implemented locally. Combined class 84/171 filtering is also implemented.
 An optional inactive DHCP/DHCPv6 netifd/firewall package is implemented.
+Optional equipment/version overrides reach the initial OMCI MIB before
+registration. A separate builder branch now supplies an explicit source
+revision and experimental package profile; normal builds still use `q1000k-dev`.
 Multiple tag-operation stages, advanced services and hardware acceptance
 remain pending. The numbered steps
 below remain the full acceptance plan; they are not all complete.
+
+## Current acceptance status — 2026-09-14
+
+| Plan step | Local implementation/evidence | Remaining acceptance |
+| --- | --- | --- |
+| 1. Hardware and dependencies | OEM inventory, controller mapping, firmware/calibration format and native resource ownership are documented. | Electrical calibration, cold-start timing and current production DT behavior require hardware evidence. |
+| 2. Imports and build | Vendor and LuCI imports retain provenance; native adaptations and the generic OMCI core build without unresolved symbols. | Full experimental image/release validation remains separate from package compilation. |
+| 3. Factory data and controller | Read-only extraction, exact controller selection and checked firmware/calibration loading are implemented; historical controller-only bench tests are recorded. | Current stack cold boot and rollback are untested on hardware. |
+| 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Physical FIFO/DMA retirement, optical burst/ranging timing and copper regression checks need hardware. Advanced rate shaping/policing remains unsupported. |
+| 5. OMCI and subscriber | Generic core, authenticated PLOAM/OMCI, unicast data keys, supported VLAN/bridge/GEM provisioning and identity parameters are implemented. | The subscriber's actual identity and OLT service MIB are unknown; registration, encryption and DHCP are unproven. Advanced/multicast service modes remain unsupported. |
+| 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested. | Browser QA, full image testing and actual netifd/firewall traffic require separate validation. |
+| 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
+
+Current local evidence: 80 PON/WAN host tests, the complete OMCI core UML
+suite and matching AN7581 package builds. The builder's seven tests and real
+Kconfig resolution retain every experimental package. See
+[build preparation](XGSPON-BUILD.q1000k.md) and the
+[current checkpoint](XGSPON-STATUS.q1000k.md) for validation limits.
+
+The numbered plan and older checkpoint paragraphs below retain the original
+acceptance requirements. Their historical lists of unfinished software work
+are superseded by this table and the current checkpoint.
 
 The current continuation is restricted to **read-only device access and no
 firmware flashing**. Historical RAM tests do not authorize further hardware
@@ -277,10 +302,13 @@ implemented and historically bench-tested. The BSP/PHY/MAC package now
 builds without suppressed or unresolved symbols. The MAC uses validated
 identity parameters and rejects absent runtime providers; unrelated OEM
 debug and EPON interfaces are omitted or explicitly unsupported.
-The remaining dependencies are data-key/encrypted-service support, combined
-VLAN pipelines and advanced provisioning, the remaining analog/PHY audit and
-hardware acceptance of production DT, cold boot, registration and traffic.
-Keep `pon_pcs` and `gdm2` disabled until their runtime dependencies are resolved.
+Unicast data-key exchange, GEM encryption policy, combined class 84/171 VLAN
+filtering and checked analog phase boundaries are now implemented. Remaining
+software limitations include advanced rate policy, nonconstant DSCP maps,
+multiple tag-operation tables, advanced downstream/multicast modes and
+broadcast key distribution. Hardware acceptance of production DT, calibration,
+cold boot, registration and traffic remains mandatory. Keep `pon_pcs` and
+`gdm2` disabled while those hardware gates are pending.
 The [AT&T notes](XGSPON-ATT.q1000k.md) record DHCP and the requirement to derive
 optical VLAN handling from the actual OLT provisioning.
 

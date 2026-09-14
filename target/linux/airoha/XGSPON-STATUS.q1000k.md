@@ -28,6 +28,9 @@ disabled and the experimental packages remain optional/BROKEN.
 
 See [integration details](XGSPON-INTEGRATION.q1000k.md),
 [VLAN contract](XGSPON-VLAN.q1000k.md) and [AT&T research](XGSPON-ATT.q1000k.md).
+The separate [experimental builder](XGSPON-BUILD.q1000k.md) now provides an
+explicit branch/revision selection and package profile; normal builds still
+use `q1000k-dev`. Its seven guard tests and real Kconfig selection check pass.
 
 Vendor r54 connected authenticated Key_Control to the registration owner.
 Generate/Confirm use explicit key contexts, separate ECB/CMAC transforms,
@@ -554,7 +557,12 @@ these tests do not establish optical traffic or hardware drain.
 No SSH or device changes were needed. PON remains disabled pending native
 control/FE, PHY, physical drain and OMCI service integration and hardware tests.
 
-## Validation and remaining acceptance gates
+## Historical controller-only validation
+
+This section records the earlier controller/application checkpoint. Its test
+counts and missing-integration statements describe that stage, not vendor r61.
+Current evidence and remaining gates are at the top of this document and in
+the [plan status table](XGSPON.q1000k.md#current-acceptance-status--2026-09-14).
 
 - Eleven Python tests pass for the production C reader, shell backend, CLI and
   extraction logic. They cover invalid/truncated/duplicate records, unchanged
@@ -583,8 +591,9 @@ control/FE, PHY, physical drain and OMCI service integration and hardware tests.
   traffic, reconnect/reboot reliability or accelerated PON traffic test has
   been claimed or completed.
 
-Continue the [implementation plan](XGSPON.q1000k.md) with production DT
-boot validation and remaining PHY/analog initialization, then resource/QDMA
-integration and OMCI. Keep `pon_pcs` and `gdm2` disabled until their owner and
-initialization order are implemented. Keep optical packages optional until
-the bench, registration, service and recovery gates pass.
+The native resource/QDMA, checked startup and baseline OMCI paths have since
+been implemented. Production DT cold boot, electrical/optical calibration,
+OLT registration, actual service traffic and recovery remain unverified.
+Keep `pon_pcs` and `gdm2` disabled and optical packages optional until these
+acceptance gates pass. The current read-only/no-flash restriction does not
+permit executing the hardware portions of the plan.
