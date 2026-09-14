@@ -1,0 +1,25 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] net: airoha: model vendor PON transport as an internal link
+
+The Q1000K vendor PHY owns the optical PCS registers. GDM2 is only the
+CPU DMA endpoint, so its phylink must not wait for the competing native
+PON PCS. The existing board/SoC/port checks restrict pon_port to Q1000K
+GDM2. Its fixed link indicates transport availability, not optical state.
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -4023,10 +4023,11 @@ static int airoha_setup_phylink(struct net_device *netdev)
+ 	config->type = PHYLINK_NETDEV;
+ 
+ 	/*
+-	 * GDM1 only supports internal for Embedded Switch
+-	 * and doesn't require a PCS.
++	 * GDM1 connects the embedded switch. The vendor PON endpoint
++	 * connects CPU DMA to a separately managed optical PHY/MAC.
++	 * Neither internal transport requires a native PCS.
+ 	 */
+-	if (port->id == AIROHA_GDM1_IDX) {
++	if (port->id == AIROHA_GDM1_IDX || dev->pon_port) {
+ 		config->mac_capabilities = MAC_ASYM_PAUSE | MAC_SYM_PAUSE |
+ 					   MAC_10000FD;
+ 

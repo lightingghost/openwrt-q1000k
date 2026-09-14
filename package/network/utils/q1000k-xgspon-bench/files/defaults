@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+[ -f /sys/firmware/devicetree/base/quantum,xgspon-bench ] || exit 0
+
+# Applied before networking starts. Both copper ports remain LAN, as on Q1000K.
+# The dedicated profile also sets preinit/failsafe to this address.
+uci -q batch <<'EOF'
+set network.lan.ipaddr='192.168.0.1'
+set network.lan.netmask='255.255.255.0'
+delete network.lan.gateway
+delete network.lan.dns
+delete network.lan.ip6assign
+delete network.wan
+delete network.wan6
+set dhcp.lan.ignore='1'
+set dhcp.lan.ra='disabled'
+set dhcp.lan.dhcpv6='disabled'
+set dhcp.lan.ndp='disabled'
+set system.@system[0].hostname='q1000k-pon-bench'
+set q1000k-xgspon.service.enabled='0'
+commit network
+commit dhcp
+commit system
+commit q1000k-xgspon
+EOF
+exit 0

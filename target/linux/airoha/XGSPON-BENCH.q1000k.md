@@ -1,0 +1,77 @@
+# Q1000K RAM bench
+
+This is a separate `quantum_q1000k-xgspon-bench` image target on
+`q1000k-xgspon`. It produces an initramfs FIT, no sysupgrade or bootloader
+artifact. The normal Q1000K UBI target remains unchanged. No hardware
+acceptance has been claimed for the bench image.
+
+The bench DT disables the NAND controller and NAND chip, removes partition
+definitions and the persistent rootdisk reference, and uses console-only
+boot arguments. It enables native GDM2 (`ponraw`) and the manually loaded
+vendor PHY/MAC resources; the competing native PON PCS stays disabled.
+Native GDM2 uses a 10G internal fixed link for CPU DMA availability, not
+optical carrier. The controller caches `quantum,tx-inhibit` at probe and
+rejects all consumer TX-enable requests with power-off containment.
+
+The explicit builder `--profile bench` selects this target and
+`192.168.0.1/24`, including preinit/failsafe. LAN DHCP, DHCPv6 and RA servers
+are disabled, both copper ports remain LAN, and the normal PON service is
+disabled. Connect a dedicated host at e.g. `192.168.0.2/24`, with no gateway
+on that link. **192.168.1.1 belongs to the user's working router and must
+not be used for Q1000K SSH.** No default WAN or OLT identity is inferred.
+
+## Staged device tests (not yet authorized or performed)
+
+The user's device restriction remains read-only with no firmware flashing.
+The user offered to boot the bench in RAM; agree the exact runtime steps
+before loading modules. Keep the fiber physically disconnected. Do not use
+HTTP recovery upload, sysupgrade, MTD writes, UBI formatting or `saveenv`.
+The RAM transfer/boot commands depend on the bootloader actually running;
+inspect that bootloader and its memory map before providing commands.
+
+1. On the existing Q1000K kernel at an explicitly confirmed address, collect
+   a read-only baseline: identity, kernel/boot arguments, mounts, MTD map,
+   network names, module list and relevant logs. Export this unit's 513-byte
+   XGS calibration to the host using an audited read-only reader. Do not
+   read the working router at 192.168.1.1. Do not replace calibration with
+   synthetic data or a record from another unit.
+2. User RAM-boots the checked bench FIT. Collect serial boot output. Verify
+   the running image revision, RAM root, absent MTD/UBI, address 192.168.0.1,
+   disabled DHCP and unloaded PON modules. `q1000k-pon-bench status` performs
+   only reads and rejects a persistent root, visible NAND or wrong subnet.
+3. After explicit runtime approval, stage the unit's calibration under
+   `/tmp` and the locally extracted, hash-verified OEM PM/DM pair under
+   `/lib/firmware/airoha/q1000k/`. All are in the RAM filesystem. The generic
+   image contains neither subscriber secrets nor calibration/OEM blobs.
+4. Run `q1000k-pon-bench controller /tmp/CALIBRATION --fiber-disconnected`.
+   It loads only the controller, confirms TX inhibit, detects both paths,
+   stages calibration, performs checked firmware load/readback, observes
+   MCU/TX/LOS five times, then powers off and unloads its module.
+5. Only after reviewing controller results, run
+   `q1000k-pon-bench stack /tmp/CALIBRATION --fiber-disconnected`. It repeats
+   controller initialization, opens `ponraw`, loads the vendor BSP/PHY/MAC
+   and OMCI modules, and checks status five times. It uses an explicit
+   synthetic bench identity under the TX inhibit; this is not AT&T
+   provisioning. Cleanup unloads in reverse order, exercising physical
+   drain, and closes the native transport. Failed unloads retain dependent
+   modules for diagnosis. A PHY TX request is an error with containment,
+   never a fake successful enable.
+6. Inspect errors, remaining modules, network health and controller-off
+   evidence. Repeat only after explaining any failures. Later optical
+   registration, OLT OMCI and traffic/QoS tests need a separately reviewed
+   image and explicit approval; this bench cannot validate them.
+
+The helper is a bounded smoke test, not a background daemon. No boot hook
+calls it. Status sampling can miss faults between samples; it does not
+replace disconnected fiber or prove optical safety/registration.
+
+## Local validation
+
+The production controller fixture tests immutable TX rejection, zero
+enable writes, context and lease rejection, and power-off containment.
+The bench lifecycle fixture substitutes private files and inert loaders;
+it checks RAM/storage/address guards, explicit fiber acknowledgement,
+typed inhibit/LOS status, partial startup, reverse cleanup and preservation
+of dependencies when an unload fails. Network defaults are exercised with
+the real UCI parser in private directories. The dedicated builder tests
+reject accidental selection of the UBI profile and changes to the bench IP.

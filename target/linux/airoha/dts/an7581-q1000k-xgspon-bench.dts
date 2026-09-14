@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+#include "an7581-q1000k.dts"
+
+/ {
+	model = "Quantum Fiber Q1000K (XGS-PON RAM bench, TX inhibited)";
+	quantum,xgspon-bench;
+
+	chosen {
+		/delete-property/ rootdisk;
+		bootargs = "console=ttyS0,115200 earlycon";
+	};
+};
+
+/* The RAM bench kernel must not discover or attach the installed NAND. */
+&snfi {
+	status = "disabled";
+};
+
+&spi_nand {
+	status = "disabled";
+	/delete-node/ partitions;
+};
+
+&pon_control {
+	quantum,tx-inhibit;
+};
+
+/* The vendor PHY owns the analog registers; the native PCS stays disabled. */
+&pon_phy {
+	status = "okay";
+};
+
+&pon_mac {
+	status = "okay";
+};
+
+&gdm2 {
+	/delete-property/ pcs-handle;
+	phy-mode = "internal";
+	openwrt,netdev-name = "ponraw";
+	status = "okay";
+
+	/* CPU DMA transport availability, not an indication of optical carrier. */
+	fixed-link {
+		speed = <10000>;
+		full-duplex;
+	};
+};

@@ -31,6 +31,15 @@ latches before enabling output. Global sysfs GPIO numbers are not used.
 The additional I2C-master selection bit at SCU `0x214[13]` is unnecessary
 for this board and is not changed.
 
+The optional boolean `quantum,tx-inhibit` is reserved for the RAM bench DT.
+Probe caches it for the lifetime of the controller; there is no writable
+module parameter or sysfs switch to override it. Status reports the cached
+policy as `tx_inhibited`. A kernel consumer requesting TX enable receives
+`-EPERM`, no TX-enable register write is issued, and the normal fault path
+powers both controllers off. Disabling TX remains available. This is a
+software restriction on this driver, not an independent optical interlock;
+bench tests still require physically disconnected fiber.
+
 ## Sysfs interface (development ABI, version 1)
 
 Discover the single `*-0051` child under

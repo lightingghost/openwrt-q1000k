@@ -22,7 +22,7 @@ struct q1000k_pon {
 	struct en7573_io io;
 	struct mutex lock;
 	struct kref ref;
-	bool dead, leased, tx_enabled;
+	bool dead, leased, tx_enabled, tx_inhibited;
 	int fault;
 	u8 calibration[513];
 	bool calibration_valid, initialized;
@@ -294,6 +294,9 @@ int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 		return -EINVAL;
 	mutex_lock(&pon->lock);
 	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	/* Boot-time bench policy: no runtime control can grant TX permission. */
+	if (!ret && enable && pon->tx_inhibited)
+		ret = -EPERM;
 	if (!ret)
 		ret = en7573_set_tx(&pon->io, enable);
 	if (!ret)
@@ -450,12 +453,13 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 	size = sysfs_emit(buffer,
 		"{\"schema_version\":1,\"mode\":\"%s\",\"gpon_detected\":%s,"
 		"\"xgspon_detected\":%s,\"gpon_id\":%u,\"xgspon_id\":%u,"
-		"\"checked_uptime\":%llu,\"md32_enabled\":%s,\"tx_disabled\":%s,"
+		"\"checked_uptime\":%llu,\"md32_enabled\":%s,\"tx_disabled\":%s,\"tx_inhibited\":%s,"
 		"\"calibration_supplied\":%s,\"firmware_verified\":%s,\"los\":%s,\"last_error\":%d,\"stage\":\"%s\"}\n",
 		pon->mode == -2 ? "unknown" : pon->mode == -1 ? "off" : pon->mode ? "xgspon" : "gpon",
 		detected_json(pon->detected[0]), detected_json(pon->detected[1]),
 		pon->id[0], pon->id[1], pon->checked_at,
 		detected_json(state.md32_enabled), detected_json(state.tx_disabled),
+		pon->tx_inhibited ? "true" : "false",
 		pon->calibration_valid ? "true" : "false",
 		pon->initialized ? "true" : "false", los, ret ? ret : pon->last_error, pon->stage);
 	mutex_unlock(&pon->lock);
@@ -523,6 +527,7 @@ static int pon_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 	pon->client = client;
+	pon->tx_inhibited = of_property_read_bool(dev->of_node, "quantum,tx-inhibit");
 	pon->mode = -1;
 	pon->stage = "off";
 	pon->detected[0] = pon->detected[1] = -1;

@@ -219,3 +219,19 @@ define Device/quantum_q1000k-ubi
   SOC := an7581
 endef
 TARGET_DEVICES += quantum_q1000k-ubi
+
+# Explicit RAM-only hardware test target: no sysupgrade or bootloader artifact.
+define Device/quantum_q1000k-xgspon-bench
+  DEVICE_VENDOR := Quantum Fiber
+  DEVICE_MODEL := Q1000K
+  DEVICE_VARIANT := XGS-PON RAM bench (TX inhibited)
+  DEVICE_DTS := an7581-q1000k-xgspon-bench
+  DEVICE_PACKAGES := rtl826x-firmware q1000k-xgspon-bench
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 128k
+  KERNEL_INITRAMFS_SUFFIX := -bench.itb
+  IMAGES :=
+  ARTIFACTS :=
+  SOC := an7581
+endef
+TARGET_DEVICES += quantum_q1000k-xgspon-bench

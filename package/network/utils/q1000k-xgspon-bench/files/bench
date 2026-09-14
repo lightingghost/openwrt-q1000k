@@ -1,0 +1,158 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# All mutations are explicit, temporary bench operations. No persistent media
+# may be visible. No service or boot hook calls this program.
+. /lib/q1000k-xgspon/common.sh
+export LC_ALL=C
+umask 077
+
+fail() { echo "Q1000K bench: $*" >&2; exit 1; }
+preflight() {
+	[ "$(cat /tmp/sysinfo/board_name)" = quantum,q1000k-ubi ] || fail 'Wrong board.'
+	[ -f /sys/firmware/devicetree/base/quantum,xgspon-bench ] || fail 'Not the bench DT.'
+	[ "$(tr -d '\000' < /sys/firmware/devicetree/base/soc/spi@1fa10000/status)" = disabled ] || fail 'NAND controller is not disabled.'
+	[ ! -e /sys/firmware/devicetree/base/chosen/rootdisk ] || fail 'Persistent rootdisk is configured.'
+	# INITRAMFS mounts rootfs/tmpfs directly; reject overlay or a block root.
+	awk '$2 == "/" && ($3 == "rootfs" || $3 == "tmpfs") { ok=1 } END { exit !ok }' /proc/mounts || fail 'Root is not RAM.'
+	for entry in /sys/class/mtd/mtd* /sys/class/ubi/ubi*; do
+		[ ! -e "$entry" ] || fail 'Persistent NAND/UBI is visible.'
+	done
+	[ "$(uci -q get network.lan.ipaddr)" = 192.168.0.1 ] || fail 'Unexpected management address.'
+	[ "$(uci -q get dhcp.lan.ignore)" = 1 ] || fail 'LAN DHCP server must be disabled.'
+	[ "$(uci -q get q1000k-xgspon.service.enabled)" = 0 ] || fail 'Normal PON service must stay disabled.'
+}
+
+controller_status() {
+	local data
+	data=$(cat "$controller/status") && json_load "$data" || return 1
+	# jsonfilter-like type validation using the existing jshn library.
+	local field type value
+	json_get_type type schema_version
+	json_get_var value schema_version
+	[ "$type" = int ] && [ "$value" = 1 ] || return 1
+	json_get_type type mode
+	json_get_var value mode
+	[ "$type" = string ] || return 1
+	if [ "$1" = initialized ]; then
+		[ "$value" = xgspon ] || return 1
+	else
+		[ "$value" = off ] || return 1
+	fi
+	for field in tx_inhibited tx_disabled; do
+		json_get_type type "$field"
+		json_get_var value "$field"
+		[ "$type" = boolean ] && [ "$value" = 1 ] || return 1
+	done
+	json_get_type type last_error
+	json_get_var value last_error
+	[ "$type" = int ] && [ "$value" = 0 ] || return 1
+	if [ "$1" = initialized ]; then
+		for field in md32_enabled firmware_verified calibration_supplied los; do
+			json_get_type type "$field"
+			json_get_var value "$field"
+			[ "$type" = boolean ] && [ "$value" = 1 ] || return 1
+		done
+	fi
+	printf '%s\n' "$data"
+}
+
+owned_modules=
+controller=
+lower_owned=0
+locked=0
+cleanup() {
+	local result=$? module failed=0
+	trap - EXIT
+	trap '' HUP INT TERM
+	[ "$locked" = 1 ] || exit "$result"
+	for module in $owned_modules; do
+		if [ "$module" = q1000k_pon_control ] && [ -n "$controller" ]; then
+			printf 'off\n' > "$controller/operation" || failed=1
+		fi
+		if ! rmmod "$module"; then
+			echo "Q1000K bench: unload failed for $module; dependencies retained." >&2
+			failed=1
+			break
+		fi
+	done
+	if [ "$failed" = 0 ] && [ "$lower_owned" = 1 ]; then
+		ip link set dev ponraw down || failed=1
+	fi
+	rmdir /var/run/q1000k-pon-bench.lock || failed=1
+	[ "$failed" = 0 ] || result=1
+	exit "$result"
+}
+
+load_module() {
+	local module="$1"
+	shift
+	modprobe "$module" "$@" || fail "Cannot load $module."
+	owned_modules="$module $owned_modules"
+}
+
+case "$1" in
+	status)
+		[ "$#" = 1 ] || fail 'Usage: q1000k-pon-bench status'
+		preflight
+		echo 'RAM bench preflight passed; no hardware changes made.'
+		exit 0 ;;
+	controller|stack)
+		[ "$#" = 3 ] && [ "$3" = --fiber-disconnected ] ||
+			fail 'Usage: q1000k-pon-bench controller|stack /tmp/CALIBRATION --fiber-disconnected'
+		mode=$1; calibration=$2 ;;
+	*) fail 'Commands: status, controller, stack' ;;
+esac
+
+preflight
+case "$calibration" in /tmp/*) ;; *) fail 'Stage this unit’s calibration in /tmp.' ;; esac
+[ -f "$calibration" ] && [ ! -L "$calibration" ] &&
+	[ "$(wc -c < "$calibration")" -eq 513 ] || fail 'Calibration must be a regular 513-byte file.'
+read_firmware
+[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Stage the verified OEM firmware pair in RAM first.'
+modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
+for module in $modules; do
+	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
+done
+if [ "$mode" = stack ]; then
+	read -r flags < /sys/class/net/ponraw/flags || fail 'Native PON endpoint is missing.'
+	printf '%s\n' "$flags" | grep -Eq '^0x[0-9a-fA-F]{1,8}$' || fail 'Invalid native endpoint flags.'
+	[ "$((flags & 1))" = 0 ] || fail 'Native PON endpoint is already up.'
+	[ ! -e /sys/class/net/ponraw/master ] || fail 'Native PON endpoint is enslaved.'
+fi
+mkdir /var/run/q1000k-pon-bench.lock || fail 'Another bench run holds the lock.'
+locked=1
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+load_module q1000k_pon_control
+controller=$(find_controller) || fail 'Controller did not bind.'
+controller_status off || fail 'Controller TX inhibit was not confirmed.'
+printf 'detect\n' > "$controller/operation" || fail 'Controller selection/detection failed.'
+controller_status off || fail 'Detection did not return to TX-off state.'
+cat "$calibration" > "$controller/calibration" || fail 'Calibration staging failed.'
+printf 'initialize\n' > "$controller/operation" || fail 'Controller initialization failed.'
+controller_status initialized || fail 'Controller is not healthy with LOS asserted and TX inhibited.'
+if [ "$mode" = stack ]; then
+	ip link set dev ponraw up || fail 'Cannot open the native DMA endpoint.'
+	lower_owned=1
+	for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do
+		load_module "$module"
+	done
+	# Synthetic bench identity only: the immutable controller guard rejects TX.
+	# These values are never installed in subscriber UCI configuration.
+	load_module xpon_10g wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
+		pon_reg_id=000000000000000000000000000000000000000000000000000000000000000000000000 \
+		pon_lower=ponraw
+fi
+count=0
+while [ "$count" -lt 5 ]; do
+	controller_status initialized || fail 'TX, LOS or controller health check failed.'
+	if [ "$mode" = stack ]; then
+		cat /proc/xgpon/status || fail 'MAC status unavailable.'
+		grep -qx 'protocol_error=0' /proc/xgpon/status || fail 'MAC reported a protocol fault.'
+		/usr/sbin/q1000k-omci -i pon status || fail 'OMCI status unavailable.'
+	fi
+	count=$((count + 1))
+	sleep 1 || fail 'Observation interrupted.'
+done
+echo 'Bench observation passed; shutting down owned modules and the controller.'
+exit 0

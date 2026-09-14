@@ -227,7 +227,7 @@
 	 * Both EN7573AN devices share the selected I2C bus and address pair.
 	 * The optional control module owns 0x51 and reserves memory port 0x50.
 	 */
-	pon-control@51 {
+	pon_control: pon-control@51 {
 		compatible = "quantum,q1000k-pon-control";
 		reg = <0x51>;
 		pinctrl-names = "default";

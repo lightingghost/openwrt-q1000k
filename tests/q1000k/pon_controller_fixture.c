@@ -34,7 +34,7 @@ struct en7573_state { int md32_enabled,tx_disabled; };
 struct q1000k_pon {
     struct mutex lock;
     struct kref ref;
-    bool dead,leased,tx_enabled,initialized;
+    bool dead,leased,tx_enabled,initialized,tx_inhibited;
     int fault,mode,last_error;
     const char *stage;
     unsigned char calibration[513];
@@ -113,6 +113,18 @@ int main(void)
     p=create(); assert(q1000k_pon_get()==p); off_error=-EIO; tx_error=-ETIMEDOUT;
     assert(q1000k_pon_set_tx(p,false)==-ETIMEDOUT && p->fault==-ETIMEDOUT && p->mode==-2);
     assert(q1000k_pon_put(p)==-ETIMEDOUT); pon_unpublish(p); pon_drop_device_ref(p);
-    assert(freed==5);
+    p=create(); p->tx_inhibited=true;
+    assert(q1000k_pon_set_tx(p,true)==-EPERM && !writes && !off);
+    assert(q1000k_pon_get()==p);
+    assert(!q1000k_pon_set_tx(p,false) && writes==1 && hw_disabled);
+    atomic_context=1;
+    assert(q1000k_pon_set_tx(p,true)==-EWOULDBLOCK && writes==1 && !off);
+    atomic_context=0;
+    assert(q1000k_pon_set_tx(p,true)==-EPERM && writes==1 && off==1);
+    assert(p->fault==-EPERM && !p->initialized && !p->tx_enabled);
+    assert(q1000k_pon_set_tx(p,true)==-EPERM && writes==1);
+    assert(q1000k_pon_put(p)==-EPERM);
+    pon_unpublish(p); pon_drop_device_ref(p);
+    assert(freed==6);
     return 0;
 }
