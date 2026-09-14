@@ -21,7 +21,9 @@ be used as evidence that PON service is ready.
   from process or softirq context with `OMCI_F_MIC_VALID` only after verifying
   that exact packet with the current session key. A descriptor's `no_mic` bit,
   MIC presence, or a global MAC error counter is not an authentication result.
-  CRC errors, wrong OMCC, stopped transport and missing authentication are
+  Pass the captured nonzero authentication epoch as the final argument; do
+  not relabel a queued packet after rekeying. CRC errors, wrong OMCC, stopped
+  transport, stale epochs and missing authentication are
   rejected. Nonlinear input is linearized before parsing.
 - All control/session APIs may sleep. Callbacks must not re-enter them. RX is
   serialized with session transitions through one session mutex; TX and channel
@@ -30,6 +32,17 @@ be used as evidence that PON service is ready.
   stop all RX producers before unregistering and ensure hardware resources are
   quiescent before destroying itself. These software barriers do not drain FE
   or optical hardware.
+- Establish the OMCC, then call `omci_device_set_auth_epoch()` with a strictly
+  increasing nonzero token after keys are verified. Before replacing keys,
+  call it with zero outside provider locks: it waits for current RX processing
+  and provider TX, closes authenticated admission, and purges queued work.
+  Rekeying preserves the MIB. ONU/channel changes and reset invalidate the
+  epoch; prior tokens cannot be reused. Generations are 64-bit and saturation
+  permanently closes admission instead of wrapping.
+- `xmit` receives the authorization epoch captured before PDU preparation and
+  must use that exact key generation. `OMCI_CAP_PROVIDER_MIC` requests a PDU
+  without its trailer MIC so a software provider can append it. It does not
+  advertise hardware cryptography.
 - Successful `xmit` consumes its skb. On any error it must leave ownership with
   the caller. RX from a synchronous provider `start` callback is discarded;
   the provider may deliver packets after startup returns successfully.

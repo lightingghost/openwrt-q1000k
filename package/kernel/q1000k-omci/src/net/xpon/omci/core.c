@@ -301,7 +301,7 @@ int omci_validate_tx(struct omci_device *odev, struct sk_buff *skb)
 			return -EMSGSIZE;
 		if (get_unaligned_be32(data + 40) != 40)
 			return -EPROTO;
-		if ((odev->capabilities & OMCI_CAP_HW_MIC) &&
+		if ((odev->capabilities & (OMCI_CAP_HW_MIC | OMCI_CAP_PROVIDER_MIC)) &&
 		    skb->len == OMCI_BASELINE_LEN)
 			skb_trim(skb, OMCI_BASELINE_LEN_NO_MIC);
 		break;
@@ -315,7 +315,7 @@ int omci_validate_tx(struct omci_device *odev, struct sk_buff *skb)
 		if (skb->len > pdu_len) {
 			if (skb->len - pdu_len != OMCI_MIC_LEN)
 				return -EMSGSIZE;
-			if (odev->capabilities & OMCI_CAP_HW_MIC)
+			if (odev->capabilities & (OMCI_CAP_HW_MIC | OMCI_CAP_PROVIDER_MIC))
 				skb_trim(skb, pdu_len);
 		}
 		break;
@@ -326,9 +326,22 @@ int omci_validate_tx(struct omci_device *odev, struct sk_buff *skb)
 	return 0;
 }
 
+/* state_lock held. A generation can never alias queued historical work. */
+static bool omci_advance_generation(struct omci_device *odev)
+{
+	if (odev->generation == U64_MAX) {
+		odev->session_exhausted = true;
+		odev->auth_epoch = 0;
+		odev->channel_up = false;
+		return false;
+	}
+	odev->generation++;
+	return true;
+}
+
 /* All callers retain the skb on error; the provider consumes only on success. */
 static int omci_transmit(struct omci_device *odev, struct sk_buff *skb,
-			 u16 gem_port_id)
+			 u16 gem_port_id, u64 auth_epoch)
 {
 	int ret = 0;
 
@@ -338,9 +351,12 @@ static int omci_transmit(struct omci_device *odev, struct sk_buff *skb,
 		ret = -ENETDOWN;
 	else if (!odev->channel_up || odev->gem_port_id != gem_port_id)
 		ret = -ENOLINK;
+	else if (!auth_epoch || auth_epoch != odev->auth_epoch ||
+		 odev->session_exhausted)
+		ret = -EKEYREJECTED;
 	spin_unlock_bh(&odev->state_lock);
 	if (!ret)
-		ret = odev->ops->xmit(odev, skb, gem_port_id);
+		ret = odev->ops->xmit(odev, skb, gem_port_id, auth_epoch);
 	mutex_unlock(&odev->tx_lock);
 	return ret;
 }
@@ -349,6 +365,7 @@ int omci_device_xmit(struct omci_device *odev, const void *data, size_t len)
 {
 	struct sk_buff *tx_skb;
 	u16 gem_port_id;
+	u64 auth_epoch;
 	bool channel_up;
 	u32 tx_len;
 	int ret;
@@ -358,6 +375,7 @@ int omci_device_xmit(struct omci_device *odev, const void *data, size_t len)
 
 	spin_lock_bh(&odev->state_lock);
 	gem_port_id = odev->gem_port_id;
+	auth_epoch = odev->auth_epoch;
 	channel_up = odev->channel_up;
 	spin_unlock_bh(&odev->state_lock);
 	if (!channel_up)
@@ -372,7 +390,7 @@ int omci_device_xmit(struct omci_device *odev, const void *data, size_t len)
 		goto free_skb;
 
 	tx_len = tx_skb->len;
-	ret = omci_transmit(odev, tx_skb, gem_port_id);
+	ret = omci_transmit(odev, tx_skb, gem_port_id, auth_epoch);
 	if (ret)
 		goto free_skb;
 
@@ -392,6 +410,7 @@ static int omci_cmd_tx(struct sk_buff *skb, struct genl_info *info)
 	struct omci_device *odev;
 	struct sk_buff *tx_skb;
 	u16 gem_port_id;
+	u64 auth_epoch;
 	bool channel_up;
 	u32 tx_len;
 	int ret;
@@ -421,6 +440,7 @@ static int omci_cmd_tx(struct sk_buff *skb, struct genl_info *info)
 
 	spin_lock_bh(&odev->state_lock);
 	gem_port_id = odev->gem_port_id;
+	auth_epoch = odev->auth_epoch;
 	channel_up = odev->channel_up;
 	spin_unlock_bh(&odev->state_lock);
 	if (!channel_up) {
@@ -440,7 +460,7 @@ static int omci_cmd_tx(struct sk_buff *skb, struct genl_info *info)
 		goto free_tx_skb;
 
 	tx_len = tx_skb->len;
-	ret = omci_transmit(odev, tx_skb, gem_port_id);
+	ret = omci_transmit(odev, tx_skb, gem_port_id, auth_epoch);
 	if (ret)
 		goto free_tx_skb;
 
@@ -1201,7 +1221,8 @@ static void omci_rx_work(struct work_struct *work)
 		spin_lock_bh(&odev->state_lock);
 		onu_id = odev->onu_id;
 		if (!odev->started || !odev->channel_up ||
-		    cb->generation != odev->generation) {
+		    cb->generation != odev->generation || !odev->auth_epoch ||
+		    odev->session_exhausted) {
 			spin_unlock_bh(&odev->state_lock);
 			mutex_unlock(&odev->session_lock);
 			atomic64_inc(&odev->rx_dropped);
@@ -1395,6 +1416,10 @@ int omci_device_start(struct omci_device *odev)
 		return -EINVAL;
 
 	mutex_lock(&odev->lifecycle_lock);
+	if (READ_ONCE(odev->session_exhausted)) {
+		ret = -EOVERFLOW;
+		goto out;
+	}
 	if (odev->started)
 		goto out;
 
@@ -1442,7 +1467,8 @@ void omci_device_stop(struct omci_device *odev)
 	/* Close admission before cancellation; RX schedules under state_lock. */
 	spin_lock_bh(&odev->state_lock);
 	WRITE_ONCE(odev->started, false);
-	odev->generation++;
+	omci_advance_generation(odev);
+	odev->auth_epoch = 0;
 	spin_unlock_bh(&odev->state_lock);
 	cancel_work_sync(&odev->rx_work);
 	skb_queue_purge(&odev->rx_queue);
@@ -1582,9 +1608,29 @@ EXPORT_SYMBOL_GPL(omci_device_send_dying_gasp);
 
 void omci_device_set_onu_id(struct omci_device *odev, u16 onu_id)
 {
+	bool changed;
+
+	if (!odev)
+		return;
+	mutex_lock(&odev->session_lock);
+	mutex_lock(&odev->tx_lock);
 	spin_lock_bh(&odev->state_lock);
-	odev->onu_id = onu_id;
+	changed = odev->onu_id != onu_id;
+	if (changed) {
+		omci_advance_generation(odev);
+		odev->auth_epoch = 0;
+		odev->channel_up = false;
+		odev->gem_port_id = 0xffff;
+		odev->onu_id = onu_id;
+	}
 	spin_unlock_bh(&odev->state_lock);
+	mutex_unlock(&odev->tx_lock);
+	if (changed) {
+		skb_queue_purge(&odev->rx_queue);
+		omci_agent_channel_changed(odev, false);
+		omci_device_notify(odev, OMCI_EVENT_CHANNEL_DOWN);
+	}
+	mutex_unlock(&odev->session_lock);
 }
 EXPORT_SYMBOL_GPL(omci_device_set_onu_id);
 
@@ -1599,8 +1645,14 @@ void omci_device_set_channel(struct omci_device *odev, u16 gem_port_id,
 	spin_lock_bh(&odev->state_lock);
 	changed = odev->channel_up != valid ||
 		  (valid && odev->gem_port_id != gem_port_id);
-	if (changed)
-		odev->generation++;
+	if (changed) {
+		if (!omci_advance_generation(odev))
+			valid = false;
+		odev->auth_epoch = 0;
+	}
+	if (odev->session_exhausted)
+		valid = false;
+	event = valid ? OMCI_EVENT_CHANNEL_UP : OMCI_EVENT_CHANNEL_DOWN;
 	odev->channel_up = valid;
 	odev->gem_port_id = valid ? gem_port_id : 0xffff;
 	spin_unlock_bh(&odev->state_lock);
@@ -1638,7 +1690,8 @@ void omci_device_reset_session(struct omci_device *odev)
 	mutex_lock(&odev->session_lock);
 	mutex_lock(&odev->tx_lock);
 	spin_lock_bh(&odev->state_lock);
-	odev->generation++;
+	omci_advance_generation(odev);
+	odev->auth_epoch = 0;
 	odev->onu_id = 0xffff;
 	odev->gem_port_id = 0xffff;
 	odev->channel_up = false;
@@ -1651,8 +1704,46 @@ void omci_device_reset_session(struct omci_device *odev)
 }
 EXPORT_SYMBOL_GPL(omci_device_reset_session);
 
+int omci_device_set_auth_epoch(struct omci_device *odev, u64 auth_epoch)
+{
+	int ret = 0;
+	bool changed = false;
+
+	if (!odev)
+		return -EINVAL;
+	mutex_lock(&odev->session_lock);
+	mutex_lock(&odev->tx_lock);
+	spin_lock_bh(&odev->state_lock);
+	if (odev->session_exhausted)
+		ret = -EOVERFLOW;
+	else if (auth_epoch && !odev->channel_up)
+		ret = -ENOLINK;
+	else if (auth_epoch == odev->auth_epoch)
+		goto unlock;
+	else if (auth_epoch && auth_epoch <= odev->last_auth_epoch)
+		ret = -ESTALE;
+	if (ret)
+		goto unlock;
+	if (!omci_advance_generation(odev)) {
+		ret = -EOVERFLOW;
+		goto unlock;
+	}
+	odev->auth_epoch = auth_epoch;
+	if (auth_epoch)
+		odev->last_auth_epoch = auth_epoch;
+	changed = true;
+unlock:
+	spin_unlock_bh(&odev->state_lock);
+	mutex_unlock(&odev->tx_lock);
+	if (changed)
+		skb_queue_purge(&odev->rx_queue);
+	mutex_unlock(&odev->session_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(omci_device_set_auth_epoch);
+
 void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
-			 u16 gem_port_id, u32 flags)
+			 u16 gem_port_id, u32 flags, u64 auth_epoch)
 {
 	struct omci_skb_cb *cb;
 
@@ -1671,7 +1762,8 @@ void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
 
 	spin_lock_bh(&odev->state_lock);
 	if (!odev->started || !odev->channel_up ||
-	    gem_port_id != odev->gem_port_id) {
+	    gem_port_id != odev->gem_port_id || !auth_epoch ||
+	    auth_epoch != odev->auth_epoch || odev->session_exhausted) {
 		spin_unlock_bh(&odev->state_lock);
 		goto drop;
 	}

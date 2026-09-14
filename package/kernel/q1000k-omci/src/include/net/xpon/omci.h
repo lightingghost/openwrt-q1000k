@@ -313,7 +313,7 @@ struct omci_device_ops {
 	int (*start)(struct omci_device *odev);
 	void (*stop)(struct omci_device *odev);
 	int (*xmit)(struct omci_device *odev, struct sk_buff *skb,
-		    u16 gem_port_id);
+		    u16 gem_port_id, u64 auth_epoch);
 	int (*get_ani_topology)(struct omci_device *odev,
 				struct omci_ani_topology *topology);
 	int (*set_tcont)(struct omci_device *odev, u16 entity_id,
@@ -369,8 +369,17 @@ void omci_device_reset_session(struct omci_device *odev);
 int omci_device_set_dying_gasp_enabled(struct omci_device *odev,
 				       bool enabled, u8 source);
 int omci_device_send_dying_gasp(struct omci_device *odev);
+/* Call with 0 to close authentication admission and wait for current RX/TX
+ * callbacks before replacing key material. Publish a strictly increasing,
+ * nonzero epoch only after the new keys and channel are verified. Rekeying
+ * preserves the MIB. Channel changes and reset invalidate authentication.
+ * Never hold a provider lock that RX/TX/provisioning callbacks acquire.
+ * RX and xmit carry the epoch that authenticated/authorized the packet;
+ * queued/retried packets must never be relabelled for a newer epoch.
+ */
+int omci_device_set_auth_epoch(struct omci_device *odev, u64 auth_epoch);
 void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
-			 u16 gem_port_id, u32 flags);
+			 u16 gem_port_id, u32 flags, u64 auth_epoch);
 int omci_device_reconcile_services(struct omci_device *odev);
 
 #endif /* _NET_OMCI_H */

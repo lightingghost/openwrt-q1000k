@@ -27,7 +27,7 @@
 struct omci_skb_cb {
 	u64 sequence;
 	u32 flags;
-	u32 generation;
+	u64 generation;
 	u16 gem_port_id;
 };
 
@@ -139,7 +139,9 @@ struct omci_device {
 	spinlock_t state_lock;
 	u16 onu_id;
 	u16 gem_port_id;
-	u32 generation;
+	u64 generation;
+	u64 auth_epoch, last_auth_epoch;
+	bool session_exhausted;
 	u8 state;
 	bool channel_up;
 

@@ -388,5 +388,7 @@ enum omci_mib_origin {
 #define OMCI_CAP_HW_MIC		(1U << 0)
 #define OMCI_CAP_BASELINE_AGENT	(1U << 1)
 #define OMCI_CAP_TELEMETRY		(1U << 2)
+/* Provider appends a MIC in software using the supplied authentication epoch. */
+#define OMCI_CAP_PROVIDER_MIC		(1U << 3)
 
 #endif /* _UAPI_LINUX_OMCI_H */

@@ -12,6 +12,19 @@
 static unsigned int fixture_tx, fixture_stops, fixture_batch_calls;
 static int fixture_batch_error, fixture_start_error;
 static size_t fixture_service_count;
+static u64 fixture_auth_epoch;
+static int fixture_rekey_result;
+static DECLARE_COMPLETION(fixture_rekeyed);
+static bool fixture_hold_tx;
+static DECLARE_COMPLETION(fixture_tx_entered);
+static DECLARE_COMPLETION(fixture_tx_release);
+static DECLARE_COMPLETION(fixture_tx_done);
+static int fixture_tx_result;
+static int fixture_rekey_thread(void *arg)
+{
+	fixture_rekey_result = omci_device_set_auth_epoch(arg, 0);
+	kthread_complete_and_exit(&fixture_rekeyed, 0);
+}
 static DECLARE_COMPLETION(fixture_stopped);
 
 static struct sk_buff *fixture_packet(unsigned int id, bool fragmented)
@@ -47,8 +60,10 @@ static struct sk_buff *fixture_packet(unsigned int id, bool fragmented)
 static int fixture_start(struct omci_device *odev)
 {
 	omci_device_set_channel(odev, 7, true);
+	if (omci_device_set_auth_epoch(odev, ++fixture_auth_epoch))
+		return -EIO;
 	/* Startup RX must not touch the MIB even if startup subsequently fails. */
-	omci_device_receive(odev, fixture_packet(1, false), 7, OMCI_F_MIC_VALID);
+	omci_device_receive(odev, fixture_packet(1, false), 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
 	return fixture_start_error;
 }
 
@@ -57,13 +72,27 @@ static void fixture_stop(struct omci_device *odev)
 	fixture_stops++;
 }
 
-static int fixture_xmit(struct omci_device *odev, struct sk_buff *skb, u16 gem)
+static int fixture_xmit(struct omci_device *odev, struct sk_buff *skb, u16 gem, u64 auth_epoch)
 {
-	if (gem != 7 || skb->len != 44 || skb_is_nonlinear(skb))
+	if (gem != 7 || skb->len != 44 || skb_is_nonlinear(skb) ||
+	    !auth_epoch || auth_epoch != fixture_auth_epoch)
 		return -EINVAL;
+	if (fixture_hold_tx) {
+		complete(&fixture_tx_entered);
+		wait_for_completion(&fixture_tx_release);
+	}
 	fixture_tx++;
 	kfree_skb(skb);
 	return 0;
+}
+
+static int fixture_tx_thread(void *arg)
+{
+	struct sk_buff *skb = fixture_packet(6000, false);
+
+	fixture_tx_result = skb ? omci_device_xmit(arg, skb->data, skb->len) : -ENOMEM;
+	kfree_skb(skb);
+	kthread_complete_and_exit(&fixture_tx_done, 0);
 }
 
 static int fixture_topology(struct omci_device *odev,
@@ -152,7 +181,7 @@ int q1000k_omci_core_test(void)
 	xpon.class_dev = parent;
 	xpon.netdev = netdev;
 	dev_set_drvdata(parent, &xpon);
-	odev = omci_device_register(&xpon, OMCI_CAP_HW_MIC, &fixture_ops, NULL);
+	odev = omci_device_register(&xpon, OMCI_CAP_PROVIDER_MIC, &fixture_ops, NULL);
 	if (IS_ERR(odev)) {
 		ret = PTR_ERR(odev);
 		odev = NULL;
@@ -186,11 +215,11 @@ int q1000k_omci_core_test(void)
 				    &enabled, 1) == -EOPNOTSUPP);
 
 	dropped = atomic64_read(&odev->rx_dropped);
-	omci_device_receive(odev, fixture_packet(2, false), 7, 0);
-	omci_device_receive(odev, fixture_packet(2, false), 7, OMCI_F_MIC_PRESENT);
+	omci_device_receive(odev, fixture_packet(2, false), 7, 0, fixture_auth_epoch);
+	omci_device_receive(odev, fixture_packet(2, false), 7, OMCI_F_MIC_PRESENT, fixture_auth_epoch);
 	omci_device_receive(odev, fixture_packet(2, false), 7,
-			    OMCI_F_MIC_VALID | OMCI_F_CRC_ERROR);
-	omci_device_receive(odev, fixture_packet(2, false), 8, OMCI_F_MIC_VALID);
+			    OMCI_F_MIC_VALID | OMCI_F_CRC_ERROR, fixture_auth_epoch);
+	omci_device_receive(odev, fixture_packet(2, false), 8, OMCI_F_MIC_VALID, fixture_auth_epoch);
 	CHECK(atomic64_read(&odev->rx_dropped) == dropped + 4);
 	CHECK(!fixture_tx);
 	/* Nonlinear cloned input must leave the original skb intact. */
@@ -198,7 +227,7 @@ int q1000k_omci_core_test(void)
 	CHECK(skb);
 	clone = skb_clone(skb, GFP_KERNEL);
 	if (!clone) { kfree_skb(skb); ret = -ENOMEM; goto out; }
-	omci_device_receive(odev, clone, 7, OMCI_F_MIC_VALID);
+	omci_device_receive(odev, clone, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
 	flush_work(&odev->rx_work);
 	before = fixture_tx;
 	i = skb->len;
@@ -208,7 +237,7 @@ int q1000k_omci_core_test(void)
 	skb = fixture_packet(4, false);
 	CHECK(skb);
 	skb->data[43] = 41;
-	omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID);
+	omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
 	flush_work(&odev->rx_work);
 	CHECK(fixture_tx == before);
 
@@ -218,14 +247,14 @@ int q1000k_omci_core_test(void)
 		mutex_lock(&odev->session_lock);
 		session_locked = true;
 		omci_device_receive(odev, fixture_packet(10 + i, false), 7,
-				    OMCI_F_MIC_VALID);
+				    OMCI_F_MIC_VALID, fixture_auth_epoch);
 		for (n = 0; n < 100 && skb_queue_len(&odev->rx_queue); n++)
 			msleep(1);
 		CHECK(!skb_queue_len(&odev->rx_queue));
 		dropped = atomic64_read(&odev->rx_dropped);
 		for (n = 0; n < 512; n++)
 			omci_device_receive(odev, fixture_packet(n + 100, false),
-					    7, OMCI_F_MIC_VALID);
+					    7, OMCI_F_MIC_VALID, fixture_auth_epoch);
 		CHECK(skb_queue_len(&odev->rx_queue) == OMCI_RX_QUEUE_LEN);
 		CHECK(atomic64_read(&odev->rx_dropped) == dropped + 256);
 		reinit_completion(&fixture_stopped);
@@ -242,6 +271,92 @@ int q1000k_omci_core_test(void)
 		CHECK(!omci_device_start(odev));
 	}
 	CHECK(fixture_stops == 20);
+
+	/* Rekey waits for the current transaction and invalidates queued work.
+	 * It leaves the established MIB and channel intact, but rejects packets
+	 * carrying the previous authentication epoch even if their MIC was valid.
+	 */
+	for (i = 0; i < 20; i++) {
+		u64 old_epoch = fixture_auth_epoch;
+		unsigned int mib_count = omci_mib_count_locked(&odev->agent);
+		unsigned int n;
+
+		mutex_lock(&odev->session_lock);
+		session_locked = true;
+		for (n = 0; n < 10; n++)
+			omci_device_receive(odev, fixture_packet(2000 + n, false),
+				7, OMCI_F_MIC_VALID, old_epoch);
+		reinit_completion(&fixture_rekeyed);
+		task = kthread_run(fixture_rekey_thread, odev, "omci-rekey-test");
+		CHECK(!IS_ERR(task));
+		msleep(5);
+		n = completion_done(&fixture_rekeyed);
+		mutex_unlock(&odev->session_lock);
+		session_locked = false;
+		wait_for_completion(&fixture_rekeyed);
+		CHECK(!n && !fixture_rekey_result);
+		flush_work(&odev->rx_work);
+		CHECK(!odev->auth_epoch && odev->channel_up &&
+		      !skb_queue_len(&odev->rx_queue));
+		CHECK(omci_device_set_auth_epoch(odev, old_epoch) == -ESTALE);
+		dropped = atomic64_read(&odev->rx_dropped);
+		omci_device_receive(odev, fixture_packet(3000, false),
+			7, OMCI_F_MIC_VALID, old_epoch);
+		CHECK(atomic64_read(&odev->rx_dropped) == dropped + 1);
+		CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
+		CHECK(!omci_device_set_auth_epoch(odev, fixture_auth_epoch));
+		omci_device_receive(odev, fixture_packet(3001, false),
+			7, OMCI_F_MIC_VALID, old_epoch);
+		CHECK(atomic64_read(&odev->rx_dropped) == dropped + 2);
+		before = fixture_tx;
+		omci_device_receive(odev, fixture_packet(4000 + i, false),
+			7, OMCI_F_MIC_VALID, fixture_auth_epoch);
+		flush_work(&odev->rx_work);
+		CHECK(fixture_tx == before + 1);
+		CHECK(omci_mib_count_locked(&odev->agent) == mib_count);
+	}
+	/* Closing authentication also waits for a provider TX already in flight. */
+	fixture_hold_tx = true;
+	reinit_completion(&fixture_tx_entered);
+	reinit_completion(&fixture_tx_release);
+	reinit_completion(&fixture_tx_done);
+	task = kthread_run(fixture_tx_thread, odev, "omci-tx-test");
+	CHECK(!IS_ERR(task));
+	i = wait_for_completion_timeout(&fixture_tx_entered, HZ);
+	if (!i) {
+		complete(&fixture_tx_release);
+		wait_for_completion(&fixture_tx_done);
+		CHECK(i);
+	}
+	reinit_completion(&fixture_rekeyed);
+	task = kthread_run(fixture_rekey_thread, odev, "omci-tx-rekey-test");
+	if (IS_ERR(task)) {
+		complete(&fixture_tx_release);
+		wait_for_completion(&fixture_tx_done);
+		CHECK(!IS_ERR(task));
+	}
+	msleep(5);
+	i = completion_done(&fixture_rekeyed);
+	complete(&fixture_tx_release);
+	wait_for_completion(&fixture_tx_done);
+	wait_for_completion(&fixture_rekeyed);
+	fixture_hold_tx = false;
+	CHECK(!i && !fixture_tx_result && !fixture_rekey_result && !odev->auth_epoch);
+	CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
+
+	/* A channel change invalidates authentication and cannot reuse an epoch. */
+	omci_device_set_channel(odev, 8, true);
+	CHECK(!odev->auth_epoch);
+	CHECK(omci_device_set_auth_epoch(odev, fixture_auth_epoch) == -ESTALE);
+	omci_device_set_channel(odev, 7, true);
+	CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
+
+	/* ONU reassignment cannot retain authenticated admission on the old OMCC. */
+	omci_device_set_onu_id(odev, 123);
+	CHECK(!odev->channel_up && !odev->auth_epoch && odev->onu_id == 123);
+	CHECK(omci_device_set_auth_epoch(odev, ++fixture_auth_epoch) == -ENOLINK);
+	omci_device_set_channel(odev, 7, true);
+	CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
 
 	/* Missing provisioning callbacks cannot produce success. */
 	incomplete = fixture_ops;
@@ -297,7 +412,17 @@ int q1000k_omci_core_test(void)
 	before = fixture_batch_calls;
 	CHECK(omci_agent_apply_services_locked(odev, &desired) == -EUCLEAN);
 	CHECK(fixture_batch_calls == before);
-	pr_info("Q1000K_OMCI_CORE_PASS: authenticated RX, nonlinear skb, bounded queue, 20 stop races, atomic service failures\n");
+	/* The final representable generation is usable once; it never wraps. */
+	spin_lock_bh(&odev->state_lock);
+	odev->generation = U64_MAX - 1;
+	spin_unlock_bh(&odev->state_lock);
+	CHECK(!omci_device_set_auth_epoch(odev, 0));
+	CHECK(odev->generation == U64_MAX);
+	CHECK(omci_device_set_auth_epoch(odev, ++fixture_auth_epoch) == -EOVERFLOW);
+	CHECK(odev->generation == U64_MAX && odev->session_exhausted && !odev->channel_up);
+	omci_device_set_channel(odev, 7, true);
+	CHECK(!odev->channel_up && !odev->auth_epoch);
+	pr_info("Q1000K_OMCI_CORE_PASS: authenticated RX, nonlinear skb, bounded queue, 20 stop races, 20 rekey races, generation saturation, atomic service failures\n");
 out:
 	if (session_locked)
 		mutex_unlock(&odev->session_lock);

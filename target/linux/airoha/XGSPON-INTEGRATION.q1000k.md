@@ -935,3 +935,21 @@ skbs. All 43 PON host tests pass and r31 builds for AArch64/Linux 6.18.44.
 These helpers establish cryptographic byte processing. The backend must still
 bind keys, packet admission and OMCI state to a verified registration session
 and invalidate stale packets on session changes. No device was accessed.
+
+## OMCI authentication epochs
+
+OMCI core r2 binds RX admission and provider TX to explicit authentication
+epochs. The provider closes the epoch and waits for current transactions and
+TX callbacks before changing key material. A new verified key set needs a
+strictly increasing token. Stale RX and TX are rejected, and channel/ONU
+replacement invalidates authentication. Rekey preserves the MIB. The 64-bit
+packet generation saturates and permanently closes admission; it never wraps.
+The software-MIC capability gives the provider a PDU without claiming hardware
+MIC support. The provider's asynchronous TX queue must retain the token.
+
+The full-core UML suite passes 20 rekey/queued-RX races, an in-flight provider
+TX barrier, old-token rejection, ONU/channel reassignment, generation exhaustion,
+and the existing stop/service fault tests. The package now declares its actual
+kernel module subdirectory for OpenWrt symbol collection and stages provider
+symbols for the MAC backend. These are local checks, with mock provisioning;
+MAC key publication and the actual backend remain to be connected.

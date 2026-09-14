@@ -4,7 +4,8 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=q1000k-omci
-PKG_RELEASE:=1
+PKG_RELEASE:=2
+PKG_EXTMOD_SUBDIRS:=net/xpon
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 
@@ -40,7 +41,7 @@ define Build/InstallDev
 	$(CP) $(PKG_BUILD_DIR)/include/net/xpon/omci.h $(1)/usr/include/net/xpon/
 	$(CP) $(PKG_BUILD_DIR)/include/uapi/linux/{xpon,omci}.h $(1)/usr/include/uapi/linux/
 	$(INSTALL_DIR) $(1)/usr/share/q1000k-omci
-	$(CP) $(PKG_BUILD_DIR)/net/xpon/Module.symvers $(1)/usr/share/q1000k-omci/
+	$(CP) $(LINUX_DIR)/../symvers/q1000k-omci.symvers $(1)/usr/share/q1000k-omci/Module.symvers
 endef
 
 $(eval $(call KernelPackage,q1000k-omci))
