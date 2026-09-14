@@ -89,6 +89,10 @@ static int q1000k_pon_check(struct q1000k_pon *p)
 {
     return p==&controller && p->held ? controller_error : -ENODEV;
 }
+static int q1000k_pon_get_tx(struct q1000k_pon *p,bool *enabled)
+{
+    int ret=q1000k_pon_check(p); if (!ret) *enabled=p->tx; return ret;
+}
 static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
 {
     int ret=q1000k_pon_check(p); if (!ret) p->tx=enable; return ret;

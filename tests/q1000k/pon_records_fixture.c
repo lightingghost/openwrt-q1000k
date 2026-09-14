@@ -96,6 +96,14 @@ int main(void)
     assert(!q1000k_gwan_snapshot(&desired_table));
     assert(q1000k_gwan_table_equal(&before_table,&desired_table));
     assert(queue_model[4]==0xf0 && queue_model[6]==0);
+    for(int enabled=0;enabled<2;enabled++) {
+        reset_model(); wan.gpon.allocId[0]=0xffff; optical_tx=enabled;
+        assert(!q1000k_gwan_refresh(refresh_install,&refresh_error));
+        assert(optical_tx==enabled && receive_only==!enabled && tx_queries==1);
+    }
+    two_services(); tx_query_error=-EIO;
+    assert(q1000k_gwan_refresh(refresh_install,&refresh_error)==-EUCLEAN);
+    assert(protocol_error==-EIO && !physical_started && !physical_ops);
     two_services(); refresh_error=-EIO;
     assert(q1000k_gwan_refresh(refresh_install,&refresh_error)==-EUCLEAN);
     assert(protocol_error==-EIO && q1000k_gwan_error==-EIO);

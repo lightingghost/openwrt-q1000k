@@ -12,7 +12,7 @@ typedef uint8_t u8;
 #define Q1000K_TABLE_INSTALL 2
 static u32 regs[0x6000/4], written[0x6000/4];
 static int phase, writes, fail_write, provider_error, delays;
-static bool owned, select_stuck;
+static bool owned, select_stuck, self_clear;
 static int q1000k_pipeline_table_context(int wanted) { return phase==wanted ? 0 : -EPERM; }
 static bool q1000k_protocol_owned(void) { return owned; }
 static int an7581_xpon_status(void) { return provider_error; }
@@ -24,6 +24,7 @@ static void set_xpon_data(u32 reg,u32 value) {
     u32 flip=reg==0x5868 ? 1 : reg==0x5800 ? BIT(3) : reg==0x582c ? BIT(12) : reg==0x5500 ? BIT(8) : 1;
     written[reg/4]=value; regs[reg/4]=value^(writes==fail_write ? flip : 0);
     if(reg==0x53e8 && !select_stuck) regs[0x5318/4]=0x10001;
+    if(reg==0x53e8 && self_clear) regs[reg/4]&=~0x01010000;
     if(reg==0x5284) regs[reg/4]|=BIT(8); /* Independent RO dying-gasp status. */
     if(reg==0x5868) regs[reg/4]|=BIT(2); /* Independent OC FEC indication. */
     if(reg==0x582c) regs[reg/4]|=BIT(31); /* Independent TX-sync status. */
@@ -31,7 +32,7 @@ static void set_xpon_data(u32 reg,u32 value) {
 /* PRODUCTION */
 static void reset(void) {
     memset(regs,0,sizeof(regs)); memset(written,0,sizeof(written));
-    writes=delays=fail_write=provider_error=0; phase=0; owned=select_stuck=false;
+    writes=delays=fail_write=provider_error=0; phase=0; owned=select_stuck=self_clear=false;
 }
 int main(void) {
     u8 sn[8]={1,2,3,4,5,6,7,8},reg[36];
@@ -66,6 +67,8 @@ int main(void) {
     provider_error=0;
     assert(!q1000k_mac_cold_install(sn,reg,true) && regs[0x5104/4]==7);
     assert(!q1000k_mac_cold_select_keys() && regs[0x53e8/4]==0x1010101 && !delays);
+    self_clear=true;
+    assert(!q1000k_mac_cold_select_keys() && regs[0x53e8/4]==0x101);
     select_stuck=true; regs[0x5318/4]=0;
     assert(q1000k_mac_cold_select_keys()==-ETIMEDOUT && delays==3000);
     regs[0x5318/4]=~0U;
@@ -77,5 +80,9 @@ int main(void) {
             assert(!q1000k_mac_activation_set(n) && (regs[0x5104/4]&15)==(u32)n);
         else assert(q1000k_mac_activation_set(n)==-EOPNOTSUPP);
     }
+    reset(); assert(q1000k_mac_cold_interrupts(0x1234)==-EPERM && !writes);
+    phase=2; assert(!q1000k_mac_cold_interrupts(0x1234) && regs[0x5040/4]==0x1234);
+    writes=0; fail_write=2;
+    assert(q1000k_mac_cold_interrupts(0x1234)==-EIO);
     return 0;
 }

@@ -499,6 +499,32 @@ int q1000k_phy_set_tx(bool enable)
 }
 EXPORT_SYMBOL(q1000k_phy_set_tx);
 
+int q1000k_phy_get_tx(bool *enabled)
+{
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (!enabled)
+		return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (!ret && (!qphy_controller || !gpPhyPriv->phy_init_done))
+		ret = -EAGAIN;
+	if (!ret) {
+		ret = q1000k_pon_get_tx(qphy_controller, enabled);
+		if (ret)
+			qphy_failed(ret);
+	}
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_get_tx);
+
 int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 {
 	int ret = qphy_context();

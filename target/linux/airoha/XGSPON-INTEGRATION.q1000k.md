@@ -1163,3 +1163,34 @@ verify cancellation, reuse and balanced IRQ disable depth. All 54 host tests
 and the AArch64 vendor build pass. Legacy startup/reset/PHY callers are the
 next integration stage; their startup gate remains in place. No device access
 occurred.
+
+## Cold lifecycle connected to registration
+
+Vendor r43 connects module bootstrap, deactivation, ranging timeout, LOS and
+emergency stop to the ordered OMCI registration owner. It closes authentication
+and service admission before waiting for core work, drains the physical pipeline,
+installs the cold discovery state, and publishes O1/O7 only after success. Cold
+PHY configuration runs inside the drained install phase. Old ranging/key timers,
+duplicate PLOAM state, AES validity and software registration state cannot survive
+this boundary. Repeated LOS while already in O1/O7 only checks that TX is off.
+
+PHY-ready changes to O2/3 only after the MAC state write and optical TX enable
+succeed. Legacy direct reset/enable and MSK replacement entry points reject
+bypasses. The Q1000K PHY-event dispatcher uses the fixed XGS mode and routes rogue
+or TX-fault events to emergency reset. Unsupported fast recovery and mode changes
+remain rejected.
+
+Controller r4 adds a verified TX-state snapshot under its lease lock. PHY callers
+wait for active callbacks before sampling it. Ordinary profile, registration and
+QoS rebuilds preserve that optical state, including discovery TX before ONU
+assignment; cold reset and ONU removal always resume receive only. A failed
+snapshot contains the port. Key-selection verification accepts self-clearing
+command-enable bits while checking both requested and actual hardware indices.
+
+All 55 host tests pass, including actual legacy caller extraction, bootstrap
+failure injection, emergency/LOS routing, TX-mode preservation and invalid
+full-width activation/reset arguments. Real Linux UML PHY callback/lifetime
+tests pass with lockdep enabled. Matching controller and vendor AArch64 packages
+build successfully. This checkpoint does not remove the remaining
+legacy FE/QDMA startup gate; key-transition and remaining default-call audits
+continue before enabling that path. No device access occurred.

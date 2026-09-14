@@ -23,7 +23,7 @@ static int qcold_write(u32 reg, u32 value, u32 readback_mask)
 	return ret ? ret : ((actual ^ value) & readback_mask) ? -EIO : 0;
 }
 
-static int qcold_update(u32 reg, u32 mask, u32 value, u32 omit)
+static int qcold_modify(u32 reg, u32 mask, u32 value, u32 omit, u32 verify)
 {
 	u32 old;
 	int ret = an7581_xpon_status();
@@ -34,7 +34,12 @@ static int qcold_update(u32 reg, u32 mask, u32 value, u32 omit)
 	ret = an7581_xpon_status();
 	if (ret || old == ~0U)
 		return ret ?: -EIO;
-	return qcold_write(reg, (old & ~(mask | omit)) | value, mask);
+	return qcold_write(reg, (old & ~(mask | omit)) | value, verify);
+}
+
+static int qcold_update(u32 reg, u32 mask, u32 value, u32 omit)
+{
+	return qcold_modify(reg, mask, value, omit, mask);
 }
 
 int q1000k_mac_cold_release(void)
@@ -100,7 +105,10 @@ int q1000k_mac_cold_select_keys(void)
 
 	if (ret)
 		return ret;
-	ret = qcold_update(0x53e8, 0x01010101, 0x01010101, 0);
+	/* Command-enable bits may clear after selection. Verify the requested
+	 * indices here and the resulting hardware indices below.
+	 */
+	ret = qcold_modify(0x53e8, 0x01010101, 0x01010101, 0, 0x101);
 	if (ret)
 		return ret;
 	/* Select only after bank-one PLOAM=0x55 and both integrity banks exist. */
@@ -123,4 +131,19 @@ int q1000k_mac_activation_set(u8 state)
 	if (state != 1 && state != 2 && state != 4 && state != 5 && state != 7)
 		return -EOPNOTSUPP;
 	return qcold_update(0x5104, 0xf, state, 0);
+}
+
+int q1000k_mac_cold_interrupts(u32 enables)
+{
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	if (ret)
+		return ret;
+	ret = an7581_xpon_status();
+	if (ret)
+		return ret;
+	/* W1C status is not an ordinary readback register. Source enable is. */
+	set_xpon_data(0x5044, ~0U);
+	ret = an7581_xpon_status();
+	return ret ?: qcold_write(0x5040, enables, ~0U);
 }

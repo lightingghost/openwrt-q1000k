@@ -265,6 +265,25 @@ int q1000k_pon_check(struct q1000k_pon *pon)
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_check);
 
+int q1000k_pon_get_tx(struct q1000k_pon *pon, bool *enabled)
+{
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon) || !enabled)
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret)
+		*enabled = pon->tx_enabled;
+	else if (!pon->dead && pon->leased && ret != -EAGAIN)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_get_tx);
+
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 {
 	int ret = pon_context();

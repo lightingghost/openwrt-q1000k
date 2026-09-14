@@ -329,7 +329,7 @@ static struct phy *gpPhyData;
 static struct { void *pPonNetDev[4]; } wan_data, *gpWanPriv;
 static void *gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
-enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, GASP, PROC, HOOK, API, WORKER, PROTOSTART, STEPS };
+enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, GASP, PROC, HOOK, API, WORKER, COLD, PROTOSTART, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
 static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error,xpon_protocol_ops;
 static bool xpon_is_ready(void); /* production definition is non-static */
@@ -380,8 +380,16 @@ static int pwan_init(void) { return acquire(WAN); }
 static int xpon_mci_init(void) { return acquire(MCI); }
 static int gpon_init(void) { return acquire(GPON); }
 static int q1000k_omci_backend_init(void *dev) { assert(dev==&system_data); return acquire(OMCI); }
+static int q1000k_omci_cold_start(void) {
+    assert(xpon_ready && live[WORKER] && live[OMCI] && !live[PROTOSTART] && ++step==COLD);
+    ready_published++;
+    if(fail_at==COLD) return -EIO;
+    live[COLD]=1; return 0;
+}
 static void q1000k_omci_backend_cleanup(void) {
-    assert(!xpon_ready && !live[PROTOCOL]); if(live[OMCI]) release(OMCI);
+    assert(!xpon_ready && !live[PROTOCOL]);
+    if(live[COLD]) release(COLD);
+    if(live[OMCI]) release(OMCI);
 }
 static void gpon_quiesce(void) { assert(live[GPON] && !xpon_ready); }
 static void gpon_stop_work(void) { assert(live[GPON] && live[WAN] && rcu_drained); }
@@ -445,7 +453,7 @@ int main(void) {
     for(int fault=1;fault<STEPS;fault++) {
         reset(fault);
         int expected=fault==ALLOC ? -ENOMEM : fault==HOOK ? -EBUSY : -EIO;
-        assert(xpondrv_init()==expected && step==fault && ready_published==(fault==PROTOSTART));
+        assert(xpondrv_init()==expected && step==fault && ready_published==(fault>=COLD));
         clean();
         reset(0); assert(!xpondrv_init() && xpon_is_ready() && ready_published==1);
         xpondrv_cleanup(); clean(); /* complete startup and teardown after every failure */

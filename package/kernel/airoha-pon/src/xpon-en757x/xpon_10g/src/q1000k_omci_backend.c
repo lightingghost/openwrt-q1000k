@@ -2,6 +2,7 @@
 /* Software-authenticated OMCI transport and ordered XGS registration owner. */
 #include <crypto/skcipher.h>
 #include <an7581_xpon.h>
+#include <q1000k_phy_api.h>
 #include <linux/err.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
@@ -9,6 +10,8 @@
 #include <net/xpon.h>
 #include <net/xpon/omci.h>
 #include "common/xpon_global.h"
+#include "common/phy_if_wrapper.h"
+#include "common/q1000k_mac_cold.h"
 #include "common/q1000k_identity.h"
 #include "common/q1000k_mac_keys.h"
 #include "common/q1000k_gwan.h"
@@ -20,12 +23,13 @@
 #include "gpon/gpon_ploam.h"
 
 #define QOMCI_ACKS 64
+extern int snSendInO23Cnt;
 struct qomci_request {
 	u64 generation;
 	u16 onu;
 	u8 tag[8], state, index;
 	u8 ack[QOMCI_ACKS], acks;
-	bool profile, assign, reset;
+	bool profile, assign, reset, reset_phy, emergency;
 };
 struct qomci_backend {
 	struct xpon_device *xpon;
@@ -37,7 +41,7 @@ struct qomci_backend {
 	u8 serial[8], registration[36], index;
 	u16 onu;
 	u64 epoch, published;
-	bool keys_valid, active, started;
+	bool keys_valid, active, started, cold_started;
 	int service_error;
 };
 static struct qomci_backend __rcu *qomci_current;
@@ -167,6 +171,30 @@ static int qomci_request(struct qomci_backend *b)
 	return ret;
 }
 
+int q1000k_omci_reset(bool emergency, bool reset_phy)
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+	int ret;
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	if (!b || !b->cold_started)
+		return -ENODEV;
+	qomci_close(b);
+	ret = q1000k_phy_set_tx(false);
+	if (ret) {
+		q1000k_protocol_fail(ret);
+		return ret;
+	}
+	b->request.reset = true;
+	b->request.reset_phy |= reset_phy;
+	b->request.emergency = emergency;
+	b->request.onu = 0xffff;
+	b->request.assign = b->request.profile = false;
+	b->request.acks = 0;
+	return qomci_request(b);
+}
+
 int q1000k_omci_profile(const u8 tag[8], u8 sequence, bool acknowledge)
 {
 	struct qomci_backend *b = rcu_access_pointer(qomci_current);
@@ -175,6 +203,8 @@ int q1000k_omci_profile(const u8 tag[8], u8 sequence, bool acknowledge)
 		return -EPERM;
 	if (!b || !tag)
 		return -ENODEV;
+	if (b->request.reset)
+		return -EAGAIN;
 	/* Do not acknowledge a superseded tag with a different key. The OLT
 	 * can retry a new profile after this ordered control boundary.
 	 */
@@ -205,14 +235,15 @@ int q1000k_omci_assign(u16 onu)
 		return -ENODEV;
 	if (onu >= 1023)
 		return -EINVAL;
+	if (b->request.reset)
+		return -EAGAIN;
 	if (GPON_CURR_STATE == GPON_10G_STATE_O2_3) {
 		b->request.onu = onu;
 		b->request.assign = true;
 	} else if (GPON_CURR_STATE == GPON_10G_STATE_O4 || GPON_CURR_STATE == GPON_10G_STATE_O5) {
 		if (onu == gpGponPriv->gponCfg.onu_id)
 			return 0;
-		b->request.reset = true;
-		b->request.onu = 0xffff;
+		return q1000k_omci_reset(false, false);
 	} else {
 		return -EINVAL;
 	}
@@ -228,9 +259,8 @@ void q1000k_omci_state(void)
 	if (WARN_ON_ONCE(!q1000k_protocol_owned()))
 		return;
 	if (GPON_CURR_STATE == GPON_10G_STATE_O1 || GPON_CURR_STATE == GPON_10G_STATE_O7) {
-		b->request.reset = true;
-		b->request.onu = 0xffff;
-		b->request.assign = false;
+		q1000k_omci_reset(GPON_CURR_STATE == GPON_10G_STATE_O7, false);
+		return;
 	}
 	qomci_request(b);
 }
@@ -247,17 +277,36 @@ int q1000k_omci_alloc_changed(void)
 struct qomci_install {
 	struct q1000k_mac_keys keys;
 	u16 onu;
-	bool valid, registration;
+	bool valid, registration, cold, reset_phy, emergency;
+	const u8 *serial, *registration_id;
 };
 static int qomci_install(void *arg)
 {
 	struct qomci_install *install = arg;
 	int ret = 0;
 
-	if (install->valid)
+	if (install->cold) {
+		if (install->reset_phy)
+			ret = q1000k_phy_configure(PHY_XGSPON_CONFIG);
+		if (!ret)
+			ret = XPON_PHY_SET_RX_ENABLE();
+		if (!ret)
+			ret = XPON_PHY_SET_RX_FEC(DS_FEC_SETTING_FORCE_ON);
+		if (!ret)
+			ret = q1000k_mac_cold_install(install->serial, install->registration_id,
+				install->emergency);
+	}
+	if (!ret && (install->valid || install->cold))
 		ret = q1000k_mac_keys_install(&install->keys);
 	if (!ret && install->registration)
 		ret = q1000k_mac_onu_install(install->onu);
+	if (!ret && install->cold) {
+		ret = q1000k_mac_cold_select_keys();
+		if (!ret) {
+			gpon_INT_init();
+			ret = q1000k_protocol_status();
+		}
+	}
 	return ret;
 }
 
@@ -273,6 +322,36 @@ static void qomci_legacy_keys(const struct q1000k_mac_keys *keys)
 		memcpy(gpGponPriv->gponSecurity.omciIk[i], keys->bank[i].omci, 16);
 		memcpy(gpGponPriv->gponSecurity.kek[i], keys->bank[i].kek, 16);
 	}
+}
+
+static void qomci_reset_legacy(bool emergency)
+{
+	GPON_Security_t *security = &gpGponPriv->gponSecurity;
+	u8 state = emergency ? GPON_10G_STATE_O7 : GPON_10G_STATE_O1;
+
+	/* The cold transaction already installed this hardware state and
+	 * canceled old timer/task jobs. Preserve crypto/timer allocations.
+	 */
+	snSendInO23Cnt = 0;
+	memset(&gpGponPriv->prePloamMsg, 0, sizeof(gpGponPriv->prePloamMsg));
+	gpGponPriv->gponCfg.eqd = 0;
+	gpGponPriv->gponCfg.usOmciMicCtrl = XGPON_SW;
+	gpGponPriv->gponCfg.dsOmciMicCtrl = XGPON_SW;
+	gpGponPriv->typeBOnGoing = false;
+	gpGponPriv->gpon_traffic_status = TRAFFIC_DOWN;
+	gpGponPriv->gemUpAESMode = UPAES_MODE_NONE;
+	memzero_explicit(security->aesUcKey, sizeof(security->aesUcKey));
+	memzero_explicit(security->aesBcKey, sizeof(security->aesBcKey));
+	security->aesUcKeyIdx = 0;
+	security->ploamIkIdx = security->omciIkIdx = security->kekIdx = 1;
+	security->smaValid = GPON_SMA_INVALID;
+	security->registerIDState = GPON_REG_ID_NOT_REPORT;
+	security->state = KEY_STATE_KN0;
+	/* txKeyValid is the vendor policy flag, not hardware key validity. */
+	security->txKeyValid = 1;
+	GPON_CURR_STATE = state;
+	xmcs_report_event(XMCS_EVENT_TYPE_GPON, XMCS_EVENT_GPON_STATE_CHANGE, state);
+	XPON_START_TIMER(gpPhyData->traffic_status_refresh_timer, 1000);
 }
 
 void q1000k_omci_control(void)
@@ -296,6 +375,13 @@ again:
 	install->keys = b->keys;
 	install->valid = b->keys_valid;
 	install->registration = request.assign || request.reset;
+	install->cold = request.reset;
+	install->reset_phy = request.reset_phy;
+	install->emergency = request.emergency;
+	install->serial = b->serial;
+	install->registration_id = b->registration;
+	if (install->cold)
+		install->valid = false;
 	install->onu = request.reset ? 0xffff : request.assign ? request.onu : b->onu;
 	qomci_close(b);
 	q1000k_protocol_leave(token);
@@ -313,12 +399,14 @@ again:
 		if (ret)
 			goto failed;
 	}
-	if (request.profile) {
+	if (request.profile || request.reset) {
+		const u8 empty_tag[8] = {};
+
 		ret = q1000k_mac_keys_derive(b->cipher, b->registration, b->serial,
-			request.tag, &install->keys);
+			request.reset ? empty_tag : request.tag, &install->keys);
 		if (ret)
 			goto failed;
-		install->valid = true;
+		install->valid = !request.reset;
 	}
 	if (request.assign && !install->valid) { ret = -ENOKEY; goto failed; }
 	if (request.index > 1) { ret = -EINVAL; goto failed; }
@@ -328,7 +416,9 @@ again:
 		q1000k_protocol_leave(token); goto again;
 	}
 	up = request.state == GPON_10G_STATE_O5 && install->onu != 0xffff && install->valid;
-	if (install->registration)
+	if (install->cold)
+		ret = q1000k_gwan_cold_reset(qomci_install, install);
+	else if (install->registration)
 		ret = q1000k_gwan_register(install->onu, qomci_install, install);
 	else if (request.profile || up)
 		ret = q1000k_gwan_refresh(qomci_install, install);
@@ -342,7 +432,16 @@ again:
 		gpGponPriv->gponCfg.omcc = gpGponPriv->gponCfg.onu_id;
 		b->request.assign = b->request.reset = false;
 	}
-	if (install->valid)
+	if (install->cold) {
+		qomci_reset_legacy(request.emergency);
+		request.state = GPON_CURR_STATE;
+		request.index = 1;
+		b->request.state = request.state;
+		b->request.index = 1;
+		b->request.reset_phy = false;
+		b->service_error = 0;
+	}
+	if (install->valid || install->cold)
 		qomci_legacy_keys(&install->keys);
 	spin_lock_bh(&b->auth_lock);
 	b->keys = install->keys;
@@ -358,10 +457,6 @@ again:
 		if (gpGponPriv->gponCfg.ploamCtrl == XGPON_SW)
 			q1000k_protocol_task_schedule(&gpGponPriv->swreplyploam_task);
 	}
-	else if (request.reset && GPON_CURR_STATE != GPON_10G_STATE_O1 && GPON_CURR_STATE != GPON_10G_STATE_O7)
-		gpon_act_change_state(GPON_10G_STATE_O1);
-	if (request.reset)
-		b->request.reset = false; /* The O1 notification follows the completed clear. */
 	if (b->epoch == U64_MAX) { ret = -EOVERFLOW; q1000k_protocol_leave(token); goto failed; }
 	epoch = ++b->epoch;
 	q1000k_protocol_leave(token);
@@ -416,6 +511,32 @@ failed:
 	q1000k_transport_set_auth_epoch(0);
 	q1000k_protocol_fail(ret);
 	kfree_sensitive(install);
+}
+
+int q1000k_omci_cold_start(void)
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+	int token, ret;
+
+	if (!b)
+		return -ENODEV;
+	token = q1000k_protocol_enter();
+	if (token < 0)
+		return token;
+	if (b->cold_started) {
+		q1000k_protocol_leave(token);
+		return -EALREADY;
+	}
+	b->cold_started = true;
+	b->request.reset = b->request.reset_phy = true;
+	b->request.state = GPON_10G_STATE_O1;
+	b->request.index = 1;
+	b->request.generation = 1;
+	q1000k_protocol_leave(token);
+	/* Module initialization has not started the protocol worker yet. */
+	q1000k_omci_control();
+	ret = q1000k_protocol_status();
+	return ret;
 }
 
 int q1000k_omci_backend_init(struct net_device *dev)

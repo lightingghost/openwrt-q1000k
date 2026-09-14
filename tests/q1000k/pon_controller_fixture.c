@@ -66,17 +66,25 @@ int main(void)
 {
     struct q1000k_pon *p;
     int before;
+    bool tx=true;
     assert(PTR_ERR(q1000k_pon_get())==-ENODEV);
     p=create(); atomic_context=1;
     assert(PTR_ERR(q1000k_pon_get())==-EWOULDBLOCK && !samples);
-    atomic_context=0; p->initialized=false;
+    assert(q1000k_pon_get_tx(p,&tx)==-EWOULDBLOCK && tx && !samples);
+    atomic_context=0;
+    assert(q1000k_pon_get_tx(NULL,&tx)==-EINVAL && tx);
+    assert(q1000k_pon_get_tx(p,NULL)==-EINVAL);
+    assert(q1000k_pon_get_tx(p,&tx)==-EPERM && tx);
+    p->initialized=false;
     assert(PTR_ERR(q1000k_pon_get())==-EAGAIN && p->ref.refs==1);
     p->initialized=true;
     assert(q1000k_pon_get()==p && p->leased && p->ref.refs==2 && !writes);
     assert(PTR_ERR(q1000k_pon_get())==-EBUSY && p->ref.refs==2);
+    assert(!q1000k_pon_get_tx(p,&tx) && !tx);
     assert(!q1000k_pon_check(p));
     assert(!q1000k_pon_set_tx(p,true) && p->tx_enabled && !hw_disabled);
     assert(!q1000k_pon_check(p));
+    assert(!q1000k_pon_get_tx(p,&tx) && tx);
     los_value=1; assert(q1000k_pon_get_los(p)==1);
     los_value=0; assert(q1000k_pon_get_los(p)==0);
     assert(!q1000k_pon_put(p) && !p->leased && !p->tx_enabled && hw_disabled && p->ref.refs==1);
@@ -86,6 +94,7 @@ int main(void)
     assert(!pon_registered && p->dead && p->ref.refs==1 && freed==before);
     samples=writes=los_calls=0;
     assert(q1000k_pon_check(p)==-ENODEV);
+    assert(q1000k_pon_get_tx(p,&tx)==-ENODEV && tx);
     assert(q1000k_pon_set_tx(p,true)==-ENODEV);
     assert(q1000k_pon_get_los(p)==-ENODEV);
     assert(q1000k_pon_put(p)==-ENODEV && freed==before+1);
@@ -96,7 +105,7 @@ int main(void)
     assert(q1000k_pon_put(p)==-EREMOTEIO);
     pon_unpublish(p); pon_drop_device_ref(p);
     p=create(); assert(q1000k_pon_get()==p); hw_disabled=0;
-    assert(q1000k_pon_check(p)==-EIO && off==1 && !p->initialized);
+    tx=true; assert(q1000k_pon_get_tx(p,&tx)==-EIO && tx && off==1 && !p->initialized);
     assert(q1000k_pon_put(p)==-EIO); pon_unpublish(p); pon_drop_device_ref(p);
     p=create(); assert(q1000k_pon_get()==p); los_value=-ETIMEDOUT;
     assert(q1000k_pon_get_los(p)==-ETIMEDOUT && off==1);

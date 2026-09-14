@@ -70,6 +70,12 @@ static u8 queue_model[32];
 static int physical_ops,physical_fail,physical_phase,protocol_error,async_protocol_fault_step;
 static bool physical_started, producers_drained, cold_expected, reset_done, receive_only;
 static u32 rx_channels;
+static bool optical_tx;
+static int tx_query_error, tx_queries;
+static int q1000k_phy_get_tx(bool *enabled) {
+    tx_queries++; if(tx_query_error) return tx_query_error;
+    *enabled=optical_tx; return 0;
+}
 static pthread_mutex_t protocol_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local int protocol_owned;
 static int q1000k_protocol_enter(void) {
@@ -120,6 +126,7 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,void *arg,
 {
     assert(producers_drained && q1000k_gwan_changing && ops->reset_mac==cold_expected && atomic_load(&q1000k_tcont_config_busy)==1);
     physical_started=true; int ret=physical_step(); if(ret) return ret;
+    optical_tx=false; receive_only=false;
     memset(queue_model,255,sizeof(queue_model)); physical_phase=1;
     if(ops->reset_mac) { ret=physical_step(); if(ret) return ret; reset_done=true; }
     ret=ops->clear(arg); if(ret) return ret;
@@ -131,7 +138,7 @@ int q1000k_pipeline_activate(void)
 {
     assert(q1000k_gwan_changing && physical_phase==2);
     for(unsigned int i=1;i<32;i++) assert(wan.gpon.allocId[i]==tcont_model[i]);
-    int ret=physical_step(); if(!ret) physical_phase=3; return ret;
+    int ret=physical_step(); if(!ret) { physical_phase=3; optical_tx=!receive_only; } return ret;
 }
 
 int q1000k_pipeline_activate_receive_only(void) { receive_only=true; return q1000k_pipeline_activate(); }
@@ -185,6 +192,7 @@ static void reset_model(void)
     faulted=reenter=yield_io=false; writes=quiesces=0; write_error=quiesce_error=0;
     q1000k_gwan_error=0; q1000k_gwan_changing=false;
     physical_ops=physical_fail=physical_phase=protocol_error=async_protocol_fault_step=0; physical_started=producers_drained=cold_expected=reset_done=receive_only=false; rx_channels=0;
+    optical_tx=true; tx_query_error=tx_queries=0;
     memset(queue_model,0,sizeof(queue_model)); memset(qos_model,0,sizeof(qos_model));
     for(unsigned int i=0;i<32;i++) { tcont_model[i]=wan.gpon.allocId[i]; qos_model[i].mode=i%8; qos_model[i].weights[0]=i+1; }
 }
@@ -345,7 +353,7 @@ int main(void)
     physical_ops=0;
     assert(!q1000k_gwan_cold_reset(cold_install,&wan));
     int cold_steps=physical_ops;
-    assert(reset_done && receive_only && !wan.gpon.gemNumbers && rx_channels==1);
+    assert(reset_done && receive_only && !optical_tx && !tx_queries && !wan.gpon.gemNumbers && rx_channels==1);
     for(int i=0;i<32;i++) assert(wan.gpon.allocId[i]==0xffff && queue_model[i]==255);
     for(int n=1;n<=cold_steps;n++) {
         reset_model(); cold_expected=true; create_ready(500,4,200,7);

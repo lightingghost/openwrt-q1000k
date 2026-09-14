@@ -17,6 +17,8 @@ int q1000k_phy_stop(void);
 int q1000k_phy_quiesce(void);
 /* Final coordinated optical TX enable/disable, after successful PHY start. */
 int q1000k_phy_set_tx(bool enable);
+/* Wait for callbacks and verify the controller before snapshotting TX. */
+int q1000k_phy_get_tx(bool *enabled);
 int q1000k_phy_call(struct xpon_phy_api_data_s *data);
 /* Timer callback only queues work; PHY polling runs in process context. */
 void q1000k_phy_poll(void);

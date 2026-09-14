@@ -1,0 +1,482 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: route startup, reset and PHY recovery through the cold owner
+
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
+@@ -226,9 +226,11 @@
+ 	
+ 	xgpon_priv_p->gponAlmKeepTime = JIFFIES_TIMEOUT_HZ_CNT;
+ 
++#ifndef Q1000K_PON_IDENTITY
+     dbg_cap_setting.Raw = IO_GREG(DBG_CAP_SETTING);
+ 	dbg_cap_setting.Bits.o52_idle_only_en = 1;
+ 	IO_SREG(DBG_CAP_SETTING, dbg_cap_setting.Raw) ;
++#endif
+ 	return 0;
+ }
+ /*______________________________________________________________________________
+@@ -295,6 +297,7 @@
+ 	ret = gpon_security_init();
+ 	if (ret)
+ 		goto unmap;
++#ifndef Q1000K_PON_IDENTITY
+ 	gponDevSetRspTime(gpGponPriv->gponCfg.onuResponseTime);
+ #if defined(TCSUPPORT_CPU_EN7581) && !defined(TCSUPPORT_CPU_AN7583)
+ 	ret = XPON_PHY_SET_MODE(PHY_XGSPON_CONFIG);
+@@ -312,15 +315,20 @@
+ 		gpon_security_exit();
+ 		goto unmap;
+ 	}
++#endif
+ 	ploam_init() ;
+ 	gpon_act_init() ;
++#ifndef Q1000K_PON_IDENTITY
+ 	gpon_dev_init() ;
++#endif
+ 	/* xpondrv publishes all callback state before enabling interrupts. */
+ 	
+ 
+ 	gpon_work_stopped = false;
+ 	gpon_initialized = true;
++#ifndef Q1000K_PON_IDENTITY
+     gponDevResetCtrl(XPON_RESET_HOLD_ON);
++#endif
+ 	return 0;
+ unmap:
+ 	if (g_xgpon_mac_reg_BASE) {
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_security.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_security.c
+@@ -602,8 +602,10 @@
+ 			  gpon_security_tk5_timer_expires, GPON_SECURITY_TK5_TIMER);
+ 	gpGponPriv->gponSecurity.ploamIkIdx = GPON_PLOAM_IK_IDX1;
+ 	gpGponPriv->gponSecurity.omciIkIdx = GPON_OMCI_IK_IDX1;
++#ifndef Q1000K_PON_IDENTITY
+ 	gponDevSetPloamIkIdx(GPON_PLOAM_IK_IDX1);
+ 	gponDevSetOmciIkIdx(GPON_OMCI_IK_IDX1);
++#endif
+ 	gpon_security_ready = true;
+ 	return 0;
+ }
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -46,6 +46,10 @@
+ #include <linux/kernel.h>
+ #include <linux/delay.h>
+ #include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_mac_cold.h"
++#include "common/q1000k_protocol.h"
++#endif
+ #ifdef Q1000K_PON_IDENTITY
+ #include "common/q1000k_tcont.h"
+ #include "common/q1000k_gem.h"
+@@ -1792,6 +1796,9 @@
+ Ret Value:     0:success;-1:fail
+ ******************************************************************************/
+ int gponDevKeySetOmciBasedMSK(GPON_Security_t *gponSecurity){
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 
+ 	/*new key group  based on new msk*/
+ 
+@@ -1851,6 +1858,8 @@
+ 	}
+ 	return 0;
+ 
++
++#endif
+ }
+ 
+ /*****************************************************************************
+@@ -2495,6 +2504,10 @@
+ Ret Value:     none
+ ******************************************************************************/
+ void gponDevMacReset(XPON_RESET_MODE_t mode){
++#ifdef Q1000K_PON_IDENTITY
++	/* Legacy reset entry points cannot bypass the registration owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 
+ 	REG_SW_RST  gponRest;
+     if((mode != XPON_RESET_HOLD_ON) && (mode != XPON_RESET_RELEASE)) {
+@@ -2504,6 +2517,8 @@
+ 	gponRest.Raw = IO_GREG(SW_RST);
+ 	gponRest.Bits.xgpon_mac_sw_rst_n = (mode == XPON_RESET_HOLD_ON) ? 0 : 1;	
+ 	IO_SREG(SW_RST, gponRest.Raw);
++
++#endif
+ }
+ 	
+ /*****************************************************************************
+@@ -2512,6 +2527,10 @@
+ Ret Value:     none
+ ******************************************************************************/
+ void gponDevResetCtrl(XPON_RESET_MODE_t mode){
++#ifdef Q1000K_PON_IDENTITY
++	/* Legacy reset entry points cannot bypass the registration owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	
+     ulong flags = 0;
+ 
+@@ -2533,6 +2552,8 @@
+         gponDevMpiStop(XPON_RESET_RELEASE) ;
+     }
+     spin_unlock_irqrestore(&gpGponPriv->mac_reset_lock, flags) ;	
++
++#endif
+ }
+ 
+ /*****************************************************************************
+@@ -4120,8 +4141,17 @@
+ 	gponIntEnable.Bits.ploamd_recv_int_en            = 1;	
+    
+ 	/* Clear the INT status and enable the INT */
++#ifdef Q1000K_PON_IDENTITY
++	{
++		int ret = q1000k_mac_cold_interrupts(gponIntEnable.Raw);
++
++		if (ret)
++			q1000k_protocol_fail(ret);
++	}
++#else
+ 	IO_SREG(INT_STATUS, 0xFFFFFFFF) ;
+ 	IO_SREG(INT_ENABLE, gponIntEnable.Raw) ;
++#endif
+ 	/* enable fifo/tx/rx err int */
+ #if defined(TCSUPPORT_CPU_AN7583)
+ 	IO_SREG(FIFO_ERR_ENABLE, FIFO_ERR_ENABLE_SETTING);
+@@ -4133,6 +4163,10 @@
+ ******************************************************************************/
+ void gpon_dev_init(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Legacy reset entry points cannot bypass the registration owner. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	XPON_PHY_SET_RX_ENABLE();
+ 	gponDevSetDsFecMode(gpGponPriv->gponCfg.dsFecMode);
+ 	gponDevSetSerialNumber(gpGponPriv->gponCfg.sn);
+@@ -4150,4 +4184,6 @@
+ 	gponDevSetBwmLenLimit(gpGponPriv->gponCfg.bwmLenLimit);	
+ 	gponDevSetBwmChkCtrl(gpGponPriv->gponCfg.bwmChkCtrl);
+ #endif
+-}
++
++#endif
++}
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -46,6 +46,10 @@
+ #include <linux/timer.h>
+ #include <linux/jiffies.h>
+ #include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_mac_cold.h"
++#include <q1000k_phy_api.h>
++#endif
+ #include "common/xpon_api.h"
+ #include <common/xpon_led.h>
+ #include "common/phy_if_wrapper.h"
+@@ -510,6 +514,47 @@
+ **____________________________________________________________________________*/
+ void gpon_act_change_state(const uint new_state)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int token = q1000k_protocol_enter(), ret;
++
++	if (token < 0) {
++		q1000k_protocol_fail(token);
++		return;
++	}
++	if (new_state == GPON_10G_STATE_O1 || new_state == GPON_10G_STATE_O7) {
++		ret = q1000k_omci_reset(new_state == GPON_10G_STATE_O7, false);
++		goto out;
++	}
++	/* XGS-only state changes are checked before software publication.
++	 * O6 fast recovery reuses keys/FIFOs without a complete drain and is
++	 * replaced by cold registration on PHY loss.
++	 */
++	if (new_state != GPON_10G_STATE_O2_3 && new_state != GPON_10G_STATE_O4 &&
++	    new_state != GPON_10G_STATE_O5) {
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
++	ret = q1000k_mac_activation_set(new_state);
++	if (!ret && new_state == GPON_10G_STATE_O2_3)
++		ret = q1000k_phy_set_tx(true);
++	if (ret)
++		goto out;
++	GPON_CURR_STATE = new_state;
++	if (new_state == GPON_10G_STATE_O4) {
++		GPON_START_TIMER(gpGponPriv->to1_timer, gpGponPriv->gponCfg.to1Timer);
++	} else if (new_state == GPON_10G_STATE_O5) {
++		GPON_START_TIMER(gpGponPriv->hardware_timer, gpGponPriv->gponCfg.hardware_timer);
++		gpon_clear_alarmBit(DACT_INDEX);
++		gpGponPriv->activationCnt++;
++	}
++	xmcs_report_event(XMCS_EVENT_TYPE_GPON, XMCS_EVENT_GPON_STATE_CHANGE, new_state);
++	tasklet_schedule(&taskLedConfig);
++	q1000k_omci_state();
++out:
++	if (ret)
++		q1000k_protocol_fail(ret);
++	q1000k_protocol_leave(token);
++#else
+ 	REG_ACTIVATION_ST xgponActState;	
+ 	uint lastState = 0;
+ 	ulong flags = 0;
+@@ -627,6 +672,8 @@
+ #endif
+ 
+ 	PON_MSG(MSG_ACT, "Change the current state: O%d. Last State:O%d\n", GPON_CURR_STATE, lastState) ; 
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **  function name
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -40,7 +40,12 @@
+ *************************************************************************
+ */
+ #include <linux/timer.h>
+-#include "common/xpon_global.h" 
++#include "common/xpon_global.h"
++#ifdef Q1000K_PON_IDENTITY
++#include "common/q1000k_omci_backend.h"
++#include "common/q1000k_protocol.h"
++#include <q1000k_phy_api.h>
++#endif 
+ #include <ecnt_hook/ecnt_hook_pon_phy.h>
+ #include "common/phy_if_wrapper.h"
+ #include "common/xpon_api.h"
+@@ -119,6 +124,29 @@
+ 
+ void gpon_phy_ready_handler(PHY_Event_Source_t src)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int ret = q1000k_protocol_status();
++
++	if (!q1000k_protocol_owned() || ret) {
++		q1000k_protocol_fail(ret ?: -EPERM);
++		return;
++	}
++	if (GPON_CURR_STATE != GPON_10G_STATE_O1 && GPON_CURR_STATE != GPON_10G_STATE_O2_3 &&
++	    GPON_CURR_STATE != GPON_10G_STATE_O4 && GPON_CURR_STATE != GPON_10G_STATE_O5 &&
++	    GPON_CURR_STATE != GPON_10G_STATE_O7) {
++		q1000k_protocol_fail(-EOPNOTSUPP);
++		return;
++	}
++	if (GPON_CURR_STATE == GPON_10G_STATE_O1)
++		gpon_act_change_state(GPON_10G_STATE_O2_3);
++	ret = q1000k_protocol_status();
++	if (ret)
++		return;
++	gpPonSysData->sysLinkStatus = PON_LINK_STATUS_GPON;
++	gpPonSysData->ponPhyStaus = PON_PHY_RDY;
++	gpPhyData->phy_link_status = PHY_LINK_STATUS_READY;
++	xmcs_report_event(XMCS_EVENT_TYPE_GPON, XMCS_EVENT_GPON_PHY_READY, 0);
++#else
+ 	REG_SW_SET_KIDX gponKeyIdx;
+ 	PON_MSG((MSG_INT|MSG_ACT), "PHY IRQ: xgpon detect phy ready.\n") ;
+ 	
+@@ -198,6 +226,8 @@
+ 	}
+ 	gpPonSysData->sysLinkStatus = PON_LINK_STATUS_GPON ;
+     xmcs_report_event(XMCS_EVENT_TYPE_GPON, XMCS_EVENT_GPON_PHY_READY, 0) ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **  function name
+@@ -220,6 +250,25 @@
+ 
+ void gpon_phy_loss_handler(PHY_Event_Source_t src)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int ret;
++
++	if (!q1000k_protocol_owned()) {
++		q1000k_protocol_fail(-EPERM);
++		return;
++	}
++	gpPonSysData->sysLinkStatus = PON_LINK_STATUS_OFF;
++	gpPonSysData->ponPhyStaus = PON_PHY_LOS;
++	gpPhyData->phy_link_status = PHY_LINK_STATUS_LOS;
++	/* A repeated LOS in discovery needs no second namespace reset. */
++	if (GPON_CURR_STATE == GPON_10G_STATE_O1 || GPON_CURR_STATE == GPON_10G_STATE_O7)
++		ret = q1000k_phy_set_tx(false);
++	else
++		ret = q1000k_omci_reset(gpGponPriv->emergencyState, false);
++	if (ret)
++		q1000k_protocol_fail(ret);
++	xmcs_report_event(XMCS_EVENT_TYPE_GPON, XMCS_EVENT_GPON_LOS, 0);
++#else
+ 	REG_US_PROF_VLD usProfileVld;
+ 	PHY_FecCount_T phyFecCount;
+ 	
+@@ -255,6 +304,8 @@
+ 	gphyFecCount.correct_codewords += phyFecCount.correct_codewords;
+ 	gphyFecCount.uncorrect_codewords += phyFecCount.uncorrect_codewords;
+ 	gphyFecCount.correct_bytes += phyFecCount.correct_bytes;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **  function name
+@@ -275,6 +326,10 @@
+ **____________________________________________________________________________*/
+ void gpon_enable(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	/* Discovery is activated only by a checked PHY-ready event. */
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	PON_MSG(MSG_INT, "gpon enable.\n") ;
+ 	if((GPON_CURR_STATE!=GPON_10G_STATE_O1)
+ 		&&(GPON_CURR_STATE!=GPON_10G_STATE_O2_3)
+@@ -285,6 +340,8 @@
+ 	gpon_dev_init() ;
+ 
+ 	gponDevSetPhyDsFecMde(gpGponPriv->gponCfg.dsFecMode);
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **  function name
+@@ -310,6 +367,20 @@
+ **____________________________________________________________________________*/
+ void gpon_disable(GPON_RESET_TYPE_t type)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	int token = q1000k_protocol_enter(), ret;
++
++	if (token < 0) {
++		q1000k_protocol_fail(token);
++		return;
++	}
++	ret = (type != GPON_MAC_PLAIN_RESET && type != GPON_MAC_WITH_PHY_RESET) ?
++		-EINVAL : q1000k_omci_reset(gpGponPriv->emergencyState,
++			type == GPON_MAC_WITH_PHY_RESET);
++	if (ret)
++		q1000k_protocol_fail(ret);
++	q1000k_protocol_leave(token);
++#else
+ 	PON_PHY_Event_data_t phy_event;
+ #ifdef Q1000K_PON_IDENTITY
+ 	int ret = gwan_remove_all_tcont();
+@@ -366,6 +437,8 @@
+ 			}
+ 		}
+ 	}
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -599,6 +672,15 @@
+ }
+ static void gpon_sw_resync(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (snSendInO23Cnt++ >= max_cnt) {
++		int ret = q1000k_omci_reset(gpGponPriv->emergencyState, true);
++
++		snSendInO23Cnt = 0;
++		if (ret)
++			q1000k_protocol_fail(ret);
++	}
++#else
+ 	if(snSendInO23Cnt>=max_cnt){
+ 		snSendInO23Cnt=0;
+ 		if(isEN7581 || isAN7583){
+@@ -615,6 +697,8 @@
+ 	}else{
+ 		snSendInO23Cnt++;
+ 	}
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -857,7 +857,52 @@
+ **		v1.0
+ **____________________________________________________________________________*/
+ static void xpon_phy_event_dispatch(PON_PHY_Event_data_t * pEvent)
+-{  
++{
++#ifdef Q1000K_PON_IDENTITY
++	int ret = 0;
++
++	if (!pEvent || !q1000k_protocol_owned()) {
++		q1000k_protocol_fail(-EPERM);
++		return;
++	}
++	switch (pEvent->id) {
++	case PHY_EVENT_TRANS_LOS_INT:
++	case PHY_EVENT_PHY_ILLG_INT:
++	case PHY_EVENT_TRANS_LOS_ILLG_INT:
++	case PHY_EVENT_PHY_LOF_INT:
++		gpon_set_alarmBit(pEvent->id == PHY_EVENT_PHY_LOF_INT ? LOF_INDEX : LOS_INDEX);
++		gpon_phy_loss_handler(pEvent->src);
++		break;
++	case PHY_EVENT_PHYRDY_INT:
++		gpon_phy_ready_handler(pEvent->src);
++		if (!q1000k_protocol_status()) {
++			gpon_clear_alarmBit(LOS_INDEX);
++			gpon_clear_alarmBit(LOF_INDEX);
++		}
++		break;
++	case PHY_EVENT_START_ROGUE_MODE:
++	case PHY_EVENT_TF_INT:
++	case PHY_EVENT_TX_POWER_OFF:
++		gpGponPriv->emergencyState = true;
++		gpon_set_alarmBit(ROGUE_INDEX);
++		ret = q1000k_omci_reset(true, false);
++		break;
++	case PHY_EVENT_STOP_ROGUE_MODE:
++		gpGponPriv->emergencyState = false;
++		ret = q1000k_omci_reset(false, false);
++		break;
++	case PHY_EVENT_NO_LOS_NO_READY:
++	case PHY_EVENT_TRANS_INT:
++	case PHY_EVENT_TRANS_SD_FAIL_INT:
++	case PHY_EVENT_I2CM_INT:
++		break;
++	default:
++		ret = -EOPNOTSUPP;
++		break;
++	}
++	if (ret)
++		q1000k_protocol_fail(ret);
++#else  
+ 
+ 	if(PON_WAN_START != gpPonSysData->sysStartup){
+         if((TRUE == gpPhyData->calibrating)  && (PHY_EVENT_CALIBRATION_STOP == pEvent->id)){
+@@ -927,6 +972,8 @@
+             printk("Event %d handler not implemented! %s:%d\n", pEvent->id, __FUNCTION__, __LINE__);
+             break;
+     }
++
++#endif
+ }
+ static int get_tcont_from_gemportid(uint gemport_id)
+ {
+@@ -1519,7 +1566,13 @@
+ 	/* All callback state is initialized before ready/IRQ publication. */
+ 	gpPonSysData->sysMACStartup = PON_MAC_START;
+ 	smp_store_release(&xpon_ready, true);
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_omci_cold_start();
++	if (ret)
++		goto fail;
++#else
+ 	gpon_start_interrupts();
++#endif
+ #ifdef Q1000K_PON_IDENTITY
+ 	ret = q1000k_protocol_start();
+ 	if (ret)

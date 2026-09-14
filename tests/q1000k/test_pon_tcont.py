@@ -129,45 +129,31 @@ int main(void) {
 }
 ''')
 
-    def test_reset_stops_when_retirement_is_incomplete(self):
-        source = function('gpon/gpon.c', 'gpon_disable')
-        # Keep the actual production prefix, including the gate. The remaining
-        # reset/PHY body is a trap: it must not run after any retirement error.
-        end = source.index('PON_MSG(')
-        prefix = source[:end] + 'reset_calls++; }\n'
-        source = function('gpon/gpon_ploam.c', 'ploam_recv_assign_onu_id')
-        start = source.index('#ifdef Q1000K_PON_IDENTITY',
-                             source.index('GPON_10G_STATE_O4) ||'))
-        end = source.index('#endif', start) + len('#endif')
-        prefix += 'static int reassign(void) {\n' + source[start:end] + \
-            '\nreset_calls++; return 0; }\n'
+    def test_reset_requests_the_owner_and_propagates_failure(self):
         run_c(r'''
 #include <assert.h>
 #include <errno.h>
+#include <stdbool.h>
 #define Q1000K_PON_IDENTITY
-#define pr_err(...) ((void)0)
-typedef int PON_PHY_Event_data_t;
+#define GPON_MAC_PLAIN_RESET 0
+#define GPON_MAC_WITH_PHY_RESET 1
 typedef int GPON_RESET_TYPE_t;
-static int retirement_result, gem_retirement_result, gem_calls, reset_calls;
-static int gwan_remove_all_tcont(void) { return retirement_result; }
-static int gwan_remove_all_gemport_for_disable(void) { gem_calls++; return gem_retirement_result; }
-''' + prefix + r'''
+static int owned, error, enter_error, requests, fault;
+static bool phy_reset, emergency;
+static struct { bool emergencyState; } priv,*gpGponPriv=&priv;
+static int q1000k_protocol_enter(void) { if(enter_error) return enter_error; owned++; return 0; }
+static void q1000k_protocol_leave(int token) { assert(!token && owned==1); owned--; }
+static void q1000k_protocol_fail(int ret) { assert(ret<0); fault=ret; }
+static int q1000k_omci_reset(bool e,bool p) { assert(owned==1); requests++; emergency=e; phy_reset=p; return error; }
+''' + function('gpon/gpon.c', 'gpon_disable') + r'''
 int main(void) {
-    int errors[]={-EOPNOTSUPP,-EIO,-EBUSY,-ENODEV};
-    for(unsigned int i=0;i<sizeof(errors)/sizeof(errors[0]);i++) {
-        retirement_result=errors[i]; gem_calls=0;
-        gpon_disable(0); assert(!reset_calls && gem_calls==1);
-        assert(reassign()==errors[i] && !reset_calls && gem_calls==2);
-    }
-    retirement_result=0;
-    for(unsigned int i=0;i<sizeof(errors)/sizeof(errors[0]);i++) {
-        gem_retirement_result=errors[i];
-        gpon_disable(0); assert(!reset_calls);
-        assert(reassign()==errors[i] && !reset_calls);
-    }
-    gem_retirement_result=0;
-    gpon_disable(0); assert(!reset_calls);
-    assert(reassign()==-EOPNOTSUPP && !reset_calls);
+    gpon_disable(0); assert(requests==1 && !phy_reset && !emergency && !fault && !owned);
+    priv.emergencyState=true; gpon_disable(1);
+    assert(requests==2 && phy_reset && emergency && !fault && !owned);
+    error=-ETIMEDOUT; gpon_disable(0); assert(fault==error && requests==3 && !owned);
+    gpon_disable(3); assert(fault==-EINVAL && requests==3 && !owned);
+    enter_error=-EWOULDBLOCK; gpon_disable(0);
+    assert(fault==enter_error && requests==3 && !owned);
     return 0;
 }
 ''')

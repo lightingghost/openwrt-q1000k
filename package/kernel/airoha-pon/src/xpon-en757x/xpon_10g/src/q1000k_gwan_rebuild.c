@@ -4,6 +4,7 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <q1000k_phy_api.h>
 #include "common/q1000k_gwan.h"
 #include "common/q1000k_mac_cold.h"
 #include "common/q1000k_gem.h"
@@ -17,7 +18,7 @@ struct q1000k_gwan_transaction {
 	struct airoha_pon_qos qos[Q1000K_GWAN_CHANNELS];
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
-	bool registration, cold;
+	bool registration, cold, tx_enabled;
 	int (*install)(void *arg);
 	void *install_arg;
 };
@@ -297,6 +298,15 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	ret = q1000k_gwan_validate(tx);
 	if (ret || (!install && !tx->registration && q1000k_gwan_table_equal(&tx->old, &tx->next)))
 		goto free;
+	/* Preserve discovery as well as operational TX across profile/QoS
+	 * refreshes. ONU assignment alone cannot describe the O2/3 TX state.
+	 * Bootstrap and ONU removal always resume with the transmitter off.
+	 */
+	if (!tx->cold && !(tx->registration && id == Q1000K_GWAN_UNASSIGNED)) {
+		ret = q1000k_phy_get_tx(&tx->tx_enabled);
+		if (ret)
+			goto failed;
+	}
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
 		ret = q1000k_transport_get_queue_close(i, &tx->closed[i]);
 		if (ret)
@@ -317,8 +327,8 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	if (ret)
 		goto failed;
 	q1000k_gwan_table_publish(&tx->next);
-	ret = tx->registration && tx->next.alloc_id[0] == Q1000K_GWAN_UNASSIGNED ?
-		q1000k_pipeline_activate_receive_only() : q1000k_pipeline_activate();
+	ret = tx->tx_enabled ? q1000k_pipeline_activate() :
+		q1000k_pipeline_activate_receive_only();
 	if (ret)
 		goto failed;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {

@@ -25,14 +25,24 @@ typedef uint64_t u64;
 #define XPON_REGISTRATION_REGISTERING 2
 #define XPON_REGISTRATION_OPERATIONAL 3
 #define GPON_10G_STATE_O1 1
-#define GPON_10G_STATE_O2_3 3
+#define GPON_10G_STATE_O2_3 2
 #define GPON_10G_STATE_O4 4
 #define GPON_10G_STATE_O5 5
 #define GPON_10G_STATE_O7 7
 #define GPON_UNASSIGN_ONU_ID 1023
 #define XGPON_PLOAM_ACK_OK 0
-#define XGPON_SW 1
+#define XGPON_SW 0
 #define CHECKSUM_NONE 0
+#define PHY_XGSPON_CONFIG 7
+#define DS_FEC_SETTING_FORCE_ON 3
+#define TRAFFIC_DOWN 0
+#define UPAES_MODE_NONE 0
+#define GPON_SMA_INVALID 0
+#define GPON_REG_ID_NOT_REPORT 0
+#define KEY_STATE_KN0 0
+#define XMCS_EVENT_TYPE_GPON 1
+#define XMCS_EVENT_GPON_STATE_CHANGE 2
+#define XPON_START_TIMER(timer,ms) do { assert(owned && (ms)==1000); (timer)=ms; } while(0)
 #define GFP_KERNEL 0
 #define GFP_ATOMIC 0
 #define __rcu
@@ -59,17 +69,24 @@ struct crypto_lskcipher { int unused; };
 struct xpon_device { int unused; };
 struct xpon_device_desc { struct net_device *netdev; unsigned int mode,modes; };
 /* TYPES */
-struct omci_device { const struct omci_device_ops *ops; void *priv; u16 onu,gem; u64 epoch,last; bool channel; };
-static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl; } gponCfg;
-    struct { u8 msk[16],sk[16],ploamIk[2][16],omciIk[2][16],kek[2][16],omciIkIdx; } gponSecurity;
-    u8 state; int swreplyploam_task;
+struct omci_device { const struct omci_device_ops *ops; void *priv; u16 onu,gem; u64 epoch,last; bool channel; u8 state; };
+typedef struct { u8 msk[16],sk[16],ploamIk[2][16],omciIk[2][16],kek[2][16];
+    u8 omciIkIdx,ploamIkIdx,kekIdx,aesUcKey[2][16],aesBcKey[2][16],aesUcKeyIdx;
+    u8 smaValid,registerIDState,txKeyValid,state;
+} GPON_Security_t;
+static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl,usOmciMicCtrl,dsOmciMicCtrl; u32 eqd; } gponCfg;
+    GPON_Security_t gponSecurity;
+    u8 state, prePloamMsg[52]; int swreplyploam_task, gpon_traffic_status,gemUpAESMode; bool typeBOnGoing;
 } vendor,*gpGponPriv=&vendor;
+static struct { int traffic_status_refresh_timer; } phy,*gpPhyData=&phy;
 #define GPON_CURR_STATE (vendor.state)
 static int owned, auth_held, fault, calls, fail_at, native_count, core_count, rejected_count;
 static int reconciles, reconcile_error;
 static int ack_count, resets, service_resets, live_skb, native_error, derivations;
 static int request_during_barrier, assign_count, refresh_count;
-static bool services_enabled, install_phase;
+static bool services_enabled, install_phase, optical_tx;
+static int cold_count;
+int snSendInO23Cnt;
 static u16 hardware_onu;
 static u64 native_epoch,native_last;
 static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
@@ -140,7 +157,7 @@ static int omci_device_reset_registration(struct omci_device *o) {
 static void omci_device_set_onu_id(struct omci_device *o,u16 onu) { assert(!owned); o->onu=onu; }
 static void omci_device_set_channel(struct omci_device *o,u16 gem,bool up) { assert(!owned); o->gem=gem; o->channel=up; }
 static int omci_device_reconcile_services(struct omci_device *o) { assert(!owned); reconciles++; return reconcile_error; }
-static void omci_device_set_state(struct omci_device *o,u8 state) { assert(!owned); }
+static void omci_device_set_state(struct omci_device *o,u8 state) { assert(!owned); o->state=state; }
 static struct sk_buff *packet(unsigned int n) { struct sk_buff *p=calloc(1,sizeof(*p)); assert(p); p->len=n; live_skb++; return p; }
 static void dev_kfree_skb_any(struct sk_buff *skb) { assert(live_skb>0); live_skb--; free(skb); }
 static struct sk_buff *skb_copy_expand(struct sk_buff *skb,int h,int tail,int flags) { struct sk_buff *p=packet(skb->len); *p=*skb; return p; }
@@ -164,6 +181,20 @@ static int q1000k_gwan_refresh(int (*install)(void *),void *arg) {
     assert(owned); refresh_count++; int ret=step(); if(ret) return ret;
     install_phase=true; ret=install(arg); install_phase=false; return ret;
 }
+static void xmcs_report_event(int type,int event,u8 state) { assert(owned && type==1 && event==2 && (state==1||state==7)); }
+static int q1000k_phy_set_tx(bool enable) { assert(owned); int ret=step(); if(!ret) optical_tx=enable; return ret; }
+static int q1000k_phy_configure(u32 mode) { assert(owned && install_phase && mode==PHY_XGSPON_CONFIG); return step(); }
+static int XPON_PHY_SET_RX_ENABLE(void) { assert(owned && install_phase); return step(); }
+static int XPON_PHY_SET_RX_FEC(int mode) { assert(owned && install_phase && mode==3); return step(); }
+static int q1000k_mac_cold_install(const u8 sn[8],const u8 reg[36],bool emergency) {
+    assert(owned && install_phase && !native_epoch && sn[7]==1 && reg[35]==2); return step();
+}
+static int q1000k_mac_cold_select_keys(void) { assert(owned && install_phase); return step(); }
+static void gpon_INT_init(void) { assert(owned && install_phase); int ret=step(); if(ret) q1000k_protocol_fail(ret); }
+static int q1000k_gwan_cold_reset(int (*install)(void *),void *arg) {
+    assert(owned && !native_epoch); cold_count++; int ret=step(); if(ret) return ret;
+    install_phase=true; ret=install(arg); install_phase=false; optical_tx=false; return ret;
+}
 /* PRODUCTION */
 int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u8 sn[8],const u8 tag[8],struct q1000k_mac_keys *keys) {
     assert(!owned && !auth_held && reg[35]==2 && sn[7]==1); derivations++; int ret=step(); if(ret) return ret;
@@ -177,12 +208,21 @@ int q1000k_auth_omci_mic(struct crypto_lskcipher *tfm,const u8 key[16],const str
 int q1000k_auth_omci_verify(struct crypto_lskcipher *tfm,const u8 key[16],const struct sk_buff *skb) {
     assert(auth_held); return skb->len==48 && skb->data[47]==key[0] ? 0 : -EBADMSG;
 }
-static void startup(void)
+static void begin(void)
 {
     static struct net_device dev;
-    memset(&vendor,0,sizeof(vendor)); vendor.state=3; vendor.gponSecurity.omciIkIdx=1;
+    memset(&vendor,0,sizeof(vendor)); vendor.state=2; vendor.gponSecurity.omciIkIdx=1;
     owned=auth_held=fault=calls=fail_at=0; native_epoch=native_last=0;
     assert(!q1000k_omci_backend_init(&dev));
+}
+static void startup(void)
+{
+    begin();
+    assert(!q1000k_omci_cold_start());
+    assert(!qomci_current->keys_valid && !qomci_current->active && !native_epoch);
+    assert(vendor.state==1 && qomci_current->omci->state==1 && !optical_tx);
+    assert(q1000k_omci_cold_start()==-EALREADY);
+    vendor.state=2; calls=0;
 }
 static void profile_and_assign(void)
 {
@@ -223,6 +263,14 @@ int main(void)
     p=packet(48); p->data[47]=0x30; q1000k_omci_receive(p,17,false); assert(core_count==2);
     token=q1000k_protocol_enter(); assert(!q1000k_omci_assign(18)); q1000k_protocol_leave(token); q1000k_omci_control();
     assert(!fault && hardware_onu==0xffff && b->onu==0xffff && vendor.state==1 && !b->active && !native_epoch);
+    assert(b->omci->state==1 && !b->keys_valid && b->index==1 && !optical_tx);
+    int cold_before=cold_count;
+    token=q1000k_protocol_enter(); assert(!q1000k_omci_reset(true,true));
+    u8 rejected_tag[8]={9};
+    assert(q1000k_omci_profile(rejected_tag,9,true)==-EAGAIN);
+    assert(q1000k_omci_assign(20)==-EAGAIN);
+    q1000k_protocol_leave(token); q1000k_omci_control();
+    assert(!fault && cold_count==cold_before+1 && vendor.state==7 && b->omci->state==7 && !b->keys_valid);
     q1000k_omci_backend_cleanup(); assert(!qomci_current && !live_skb);
     /* A request arriving while core barriers run cannot publish stale ONU 17. */
     startup(); request_during_barrier=1; profile_and_assign();
@@ -233,6 +281,13 @@ int main(void)
         startup(); fail_at=n; profile_and_assign(); if(!fault) operational();
         assert(fault==-ETIMEDOUT && !qomci_current->active && !services_enabled && !native_epoch && !qomci_current->omci->epoch);
         assert(!owned && !auth_held); q1000k_omci_backend_cleanup();
+    }
+    begin(); assert(!q1000k_omci_cold_start()); total=calls; q1000k_omci_backend_cleanup();
+    for(int n=1;n<=total;n++) {
+        begin(); fail_at=n;
+        assert(q1000k_omci_cold_start()==-ETIMEDOUT);
+        assert(fault && !qomci_current->active && !qomci_current->keys_valid && !native_epoch);
+        q1000k_omci_backend_cleanup();
     }
     assert(!live_skb); return 0;
 }

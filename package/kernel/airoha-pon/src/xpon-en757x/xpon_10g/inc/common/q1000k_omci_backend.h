@@ -5,6 +5,10 @@
 struct net_device;
 struct sk_buff;
 int q1000k_omci_backend_init(struct net_device *dev);
+/* Module owner only: after hooks/ready publication, before protocol start. */
+int q1000k_omci_cold_start(void);
+/* Deferred cold reset: only protocol owner, no core barrier in this caller. */
+int q1000k_omci_reset(bool emergency, bool reset_phy);
 /* Protocol stopped and RX admission closed before cleanup. */
 void q1000k_omci_backend_cleanup(void);
 /* These request functions require protocol ownership and copy their inputs. */

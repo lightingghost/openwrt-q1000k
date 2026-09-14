@@ -141,6 +141,10 @@ static int q1000k_pon_check(struct q1000k_pon *p)
 {
     return p==&controller && p->held ? controller_error : -ENODEV;
 }
+static int q1000k_pon_get_tx(struct q1000k_pon *p,bool *enabled)
+{
+    int ret=q1000k_pon_check(p); if (!ret) *enabled=p->tx; return ret;
+}
 static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
 {
     int ret=q1000k_pon_check(p); if (!ret) p->tx=enable; return ret;
@@ -171,6 +175,8 @@ static int event(char *p)
     assert(!q1000k_phy_callback_context());
     current=&other_task; assert(q1000k_phy_callback_context()==-EPERM); current=&main_task;
     if(reenter) {
+        bool tx;
+        assert(q1000k_phy_get_tx(&tx)==-EDEADLK);
         struct xpon_phy_api_data_s call={.api_type=XPON_PHY_API_TYPE_GET};
         assert(q1000k_phy_start()==-EDEADLK);
         assert(q1000k_phy_stop()==-EDEADLK);
@@ -237,14 +243,21 @@ int main(void)
     assert(regs[(EN7581_XPON_PMA_XPON_SETTING_1&0x1ffff)/4]==0x1010100);
     assert(q1000k_phy_trans_power(PHY_ENABLE)==-EACCES);
     qphy_callback_unlock();
+    bool tx=true;
+    assert(q1000k_phy_get_tx(NULL)==-EINVAL);
+    assert(!q1000k_phy_get_tx(&tx) && !tx);
     assert(!q1000k_phy_start() && !controller.tx);
     assert(!q1000k_phy_set_tx(true) && controller.tx && gpPhyPriv->trans_tx_status==PHY_ENABLE);
+    assert(!q1000k_phy_get_tx(&tx) && tx);
     qphy_callback_lock();
     assert(!q1000k_phy_trans_power(PHY_TX_DIS_ON_HW_ONLY) && !controller.tx);
     assert(gpPhyPriv->trans_tx_status==PHY_ENABLE);
     assert(!q1000k_phy_trans_power(PHY_TX_DIS_RESTORE_BY_SW) && controller.tx);
     qphy_callback_unlock();
     assert(!q1000k_phy_stop() && !controller.tx && !gpPhyPriv->phyCfg.flags.txPowerEnFlag);
+    assert(!q1000k_phy_get_tx(&tx) && !tx);
+    controller_error=-EIO; tx=true;
+    assert(q1000k_phy_get_tx(&tx)==-EIO && tx && qphy_fault && !qphy_active);
     for(n=0;n<2;n++) {
         reset(); assert(!q1000k_phy_init());
         pins_error=n==0 ? -ETIMEDOUT : 0; pbus_error=n==1 ? -ETIMEDOUT : 0;

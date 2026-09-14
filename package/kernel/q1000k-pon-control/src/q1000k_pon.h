@@ -12,6 +12,8 @@ struct q1000k_pon;
 struct q1000k_pon *q1000k_pon_get(void);
 int q1000k_pon_put(struct q1000k_pon *pon);
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable);
+/* Verify controller state before returning its current optical TX state. */
+int q1000k_pon_get_tx(struct q1000k_pon *pon, bool *enabled);
 int q1000k_pon_get_los(struct q1000k_pon *pon);
 int q1000k_pon_check(struct q1000k_pon *pon);
 #endif
