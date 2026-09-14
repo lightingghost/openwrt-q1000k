@@ -28,11 +28,21 @@ before loading modules. Keep the fiber physically disconnected. Do not use
 HTTP recovery upload, sysupgrade, MTD writes, UBI formatting or `saveenv`.
 The RAM transfer/boot commands depend on the bootloader actually running;
 inspect that bootloader and its memory map before providing commands.
+In particular, the local chainloader has `loadaddr=0x81800000`, which overlaps
+this image's decompressed kernel range starting at `0x80200000`. Do not use
+that default to stage the FIT. Its audited installed-boot implementation
+stages images at `0x84000000`; confirm the running bootloader and available
+RAM before choosing a transfer address. HTTP recovery uploads write firmware
+and are not a RAM-boot transport.
 
 1. On the existing Q1000K kernel at an explicitly confirmed address, collect
    a read-only baseline: identity, kernel/boot arguments, mounts, MTD map,
-   network names, module list and relevant logs. Export this unit's 513-byte
-   XGS calibration to the host using an audited read-only reader. Do not
+   network names, module list and relevant logs. This unit's 513-byte XGS
+   calibration can be prepared from its documented original NAND backup:
+   validate the DSD identity fields with the production factory reader and
+   extract its `0x12000` record from DSD at backup offset `0x400000`.
+   This checks provenance and format, not an unknown internal checksum.
+   Compare with a read-only factory export when available. Do not
    read the working router at 192.168.1.1. Do not replace calibration with
    synthetic data or a record from another unit.
 2. User RAM-boots the checked bench FIT. Collect serial boot output. Verify
@@ -75,3 +85,26 @@ typed inhibit/LOS status, partial startup, reverse cleanup and preservation
 of dependencies when an unload fails. Network defaults are exercised with
 the real UCI parser in private directories. The dedicated builder tests
 reject accidental selection of the UBI profile and changes to the bench IP.
+
+## Built bench image — 2026-09-14
+
+Source `109361469940476fc06bf68303b47514718bcb5e` builds successfully using
+the separate builder's bench profile (Kconfig gate fix `aaa8656`). The source
+development configuration was restored after the cached build; no device
+was accessed. Controller r5 adds the TX inhibit; vendor r61/core r13 are
+unchanged. All 87 PON/WAN/bench host tests and eight builder tests pass.
+
+`openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb` is
+7,602,176 bytes; SHA-256:
+`98717f5c3ca6721ce1381709a4e860bf974081866f95feb04f68db1575915d4d`.
+The local artifact directory is
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-1093614699`.
+
+Offline inspection verifies both FIT payload hashes, the enabled bench
+resources, disabled NAND/PCS, absent partitions/rootdisk, immutable controller
+property, exact source revision and all 1,154 embedded initramfs entries.
+It checks the 192.168.0.1 preinit/normal-LAN configuration, exact bench defaults,
+required modules/userspace files, absent OEM blobs and absent PON module
+autoload, including boot-module symlinks. A corrupt kernel is rejected; a DT
+with valid recomputed hashes but the TX-inhibit property removed is rejected
+too. This is build/content validation, not hardware acceptance.

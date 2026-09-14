@@ -37,14 +37,22 @@ below remain the full acceptance plan; they are not all complete.
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
 
-Current local evidence: 80 PON/WAN host tests, the complete OMCI core UML
-suite and matching AN7581 package builds. The builder's seven tests and real
+Current local evidence: 87 PON/WAN/bench host tests, the complete OMCI core UML
+suite and matching AN7581 package builds. The builder's eight tests and real
 Kconfig resolution retain every experimental package. A full cached build at
 `cb0853acbc5b5ef178f7419b9926a6722f58df9f` produces both Q1000K UBI images;
 offline inspection verifies FIT payload hashes, disabled PON nodes and the
 packaged modules/userspace defaults. It has not been booted or flashed. See
 [build preparation](XGSPON-BUILD.q1000k.md) and the
 [current checkpoint](XGSPON-STATUS.q1000k.md) for validation limits.
+
+A separate [RAM bench](XGSPON-BENCH.q1000k.md) now builds at source
+`109361469940476fc06bf68303b47514718bcb5e`. It disables NAND, inhibits
+controller TX, enables the vendor PHY/MAC resources and fixes the native
+GDM2 internal transport dependency. Normal LAN and failsafe use 192.168.0.1;
+LAN DHCP/RA and automatic PON startup are disabled. Its FIT/initramfs content
+inspection passes; RAM boot and controller/stack smoke tests await the user.
+192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original
 acceptance requirements. Their historical lists of unfinished software work

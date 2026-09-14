@@ -1,5 +1,19 @@
 # Q1000K app checks
 
+For the separate TX-inhibited RAM bench image:
+
+```sh
+python3 tests/q1000k/test_pon_bench.py
+python3 tests/q1000k/check_pon_bench_image.py BENCH_FIT FULL_SOURCE_REVISION
+```
+
+The lifecycle tests replace all module/network operations with inert fixtures
+and exercise RAM/NAND/IP guards, typed TX-inhibit/LOS checks, partial startup
+and cleanup. Network defaults run through an isolated real UCI parser. The
+FIT checker reads and hashes the embedded kernel and DT, parses the embedded
+newc initramfs in memory, and verifies the bench network/module policy without
+booting or executing any image content.
+
 ## Experimental image inspection
 
 After a complete local experimental image build, run:
