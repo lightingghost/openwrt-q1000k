@@ -47,5 +47,7 @@ int en7573_sample_state(struct en7573_io *io, struct en7573_state *state);
 int en7573_load(struct en7573_io *io, const u8 *pm, size_t pm_size,
 		const u8 *dm, size_t dm_size, const u8 *cal);
 int en7573_start_tx_disabled(struct en7573_io *io);
+/* Caller serializes controller access and verifies firmware is running. */
+int en7573_set_tx(struct en7573_io *io, bool enable);
 
 #endif

@@ -5,11 +5,15 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/ktime.h>
+#include <linux/interrupt.h>
+#include <linux/kref.h>
+#include <linux/rcupdate.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include "en7573.h"
+#include "q1000k_pon.h"
 
 struct q1000k_pon {
 	struct i2c_client *client;
@@ -17,6 +21,9 @@ struct q1000k_pon {
 	struct gpio_descs *select;
 	struct en7573_io io;
 	struct mutex lock;
+	struct kref ref;
+	bool dead, leased, tx_enabled;
+	int fault;
 	u8 calibration[513];
 	bool calibration_valid, initialized;
 	int mode; /* -1 off, 0 GPON, 1 XGS-PON */
@@ -63,6 +70,7 @@ static int pon_off(struct q1000k_pon *pon)
 	first = gpiod_set_value_cansleep(pon->power[0], 0);
 	second = gpiod_set_value_cansleep(pon->power[1], 0);
 	pon->initialized = false;
+	pon->tx_enabled = false;
 	pon->mode = first || second ? -2 : -1;
 	return first ? first : second;
 }
@@ -152,12 +160,205 @@ out:
 	return ret;
 }
 
+/* Kernel consumer lifecycle: all hardware operations hold pon->lock. */
+static DEFINE_MUTEX(pon_registry_lock);
+static struct q1000k_pon *pon_registered;
+
+static int pon_context(void)
+{
+	return in_interrupt() || in_atomic() || irqs_disabled() ||
+		rcu_preempt_depth() ||
+		(IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC) && rcu_read_lock_held()) ?
+		-EWOULDBLOCK : 0;
+}
+
+static void pon_free(struct kref *ref)
+{
+	struct q1000k_pon *pon = container_of(ref, struct q1000k_pon, ref);
+
+	memzero_explicit(pon->calibration, sizeof(pon->calibration));
+	kfree(pon);
+}
+
+static void pon_drop_device_ref(void *data)
+{
+	struct q1000k_pon *pon = data;
+
+	kref_put(&pon->ref, pon_free);
+}
+
+static int pon_check_locked(struct q1000k_pon *pon)
+{
+	struct en7573_state state;
+	int ret;
+
+	if (pon->dead)
+		return -ENODEV;
+	if (pon->fault)
+		return pon->fault;
+	if (!pon->initialized || pon->mode != 1)
+		return -EAGAIN;
+	ret = en7573_sample_state(&pon->io, &state);
+	if (!ret && (!state.md32_enabled || state.tx_disabled == pon->tx_enabled))
+		ret = -EIO;
+	return ret;
+}
+
+static int pon_contain(struct q1000k_pon *pon, int error)
+{
+	int ret;
+
+	if (!error)
+		return 0;
+	if (!pon->fault)
+		pon->fault = error;
+	ret = pon_off(pon);
+	if (ret)
+		dev_err(&pon->client->dev, "controller containment failed: %d\n", ret);
+	pon->last_error = error;
+	pon->stage = "fault";
+	return error;
+}
+
+struct q1000k_pon *q1000k_pon_get(void)
+{
+	struct q1000k_pon *pon;
+	int ret = pon_context();
+
+	if (ret)
+		return ERR_PTR(ret);
+	mutex_lock(&pon_registry_lock);
+	pon = pon_registered;
+	if (!pon) {
+		ret = -ENODEV;
+		goto out;
+	}
+	mutex_lock(&pon->lock);
+	ret = pon->leased ? -EBUSY : pon_check_locked(pon);
+	if (!ret && pon->tx_enabled)
+		ret = -EBUSY;
+	if (!ret) {
+		kref_get(&pon->ref);
+		pon->leased = true;
+	}
+	mutex_unlock(&pon->lock);
+out:
+	mutex_unlock(&pon_registry_lock);
+	return ret ? ERR_PTR(ret) : pon;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_get);
+
+int q1000k_pon_check(struct q1000k_pon *pon)
+{
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon))
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (ret && !pon->dead && pon->leased && ret != -EAGAIN)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_check);
+
+int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
+{
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon))
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret)
+		ret = en7573_set_tx(&pon->io, enable);
+	if (!ret)
+		pon->tx_enabled = enable;
+	else if (!pon->dead && pon->leased)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_set_tx);
+
+int q1000k_pon_get_los(struct q1000k_pon *pon)
+{
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon))
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret)
+		ret = gpiod_get_value_cansleep(pon->los[1]);
+	if (ret < 0 && !pon->dead && pon->leased)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_get_los);
+
+int q1000k_pon_put(struct q1000k_pon *pon)
+{
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon))
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	if (!pon->leased) {
+		mutex_unlock(&pon->lock);
+		return -EPERM;
+	}
+	ret = pon->dead ? -ENODEV : pon->fault;
+	if (!pon->dead && pon->initialized) {
+		int disable = en7573_set_tx(&pon->io, false);
+
+		if (!disable)
+			pon->tx_enabled = false;
+		else
+			pon_contain(pon, disable);
+		if (!ret)
+			ret = disable;
+	}
+	pon->leased = false;
+	mutex_unlock(&pon->lock);
+	kref_put(&pon->ref, pon_free);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_put);
+
+static void pon_unpublish(struct q1000k_pon *pon)
+{
+	mutex_lock(&pon_registry_lock);
+	if (pon_registered == pon)
+		pon_registered = NULL;
+	mutex_lock(&pon->lock);
+	pon->dead = true;
+	pon_off(pon);
+	mutex_unlock(&pon->lock);
+	mutex_unlock(&pon_registry_lock);
+}
+/* End kernel consumer lifecycle. */
+
 static ssize_t operation_store(struct device *dev, struct device_attribute *attr,
 			       const char *buffer, size_t count)
 {
 	struct q1000k_pon *pon = dev_get_drvdata(dev);
 	int ret = 0, other;
 	mutex_lock(&pon->lock);
+	if (pon->dead || pon->leased) {
+		ret = pon->dead ? -ENODEV : -EBUSY;
+		goto done;
+	}
 	if (sysfs_streq(buffer, "off")) {
 		ret = pon_off(pon);
 		pon->stage = "off";
@@ -180,6 +381,8 @@ static ssize_t operation_store(struct device *dev, struct device_attribute *attr
 			goto done;
 		}
 		ret = pon_initialize(pon);
+		if (!ret)
+			pon->fault = 0;
 	} else {
 		ret = -EINVAL;
 		goto done;
@@ -215,7 +418,7 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 	}
 	if (pon->initialized) {
 		ret = en7573_sample_state(&pon->io, &state);
-		if (!ret && (!state.md32_enabled || !state.tx_disabled))
+		if (!ret && (!state.md32_enabled || state.tx_disabled == pon->tx_enabled))
 			ret = -EIO;
 		if (!ret) {
 			ret = gpiod_get_value_cansleep(pon->los[1]);
@@ -253,7 +456,7 @@ static ssize_t calibration_write(struct file *file, struct kobject *kobj,
 	    !memchr_inv(buffer, 0xff, EN7573_CAL_SIZE))
 		return -EINVAL;
 	mutex_lock(&pon->lock);
-	if (pon->mode != -1) {
+	if (pon->dead || pon->leased || pon->mode != -1) {
 		ret = -EBUSY;
 	} else {
 		memcpy(pon->calibration, buffer, count);
@@ -293,9 +496,13 @@ static int pon_probe(struct i2c_client *client)
 		return -ENODEV;
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -EOPNOTSUPP;
-	pon = devm_kzalloc(dev, sizeof(*pon), GFP_KERNEL);
+	pon = kzalloc(sizeof(*pon), GFP_KERNEL);
 	if (!pon)
 		return -ENOMEM;
+	kref_init(&pon->ref);
+	ret = devm_add_action_or_reset(dev, pon_drop_device_ref, pon);
+	if (ret)
+		return ret;
 	pon->client = client;
 	pon->mode = -1;
 	pon->stage = "off";
@@ -327,7 +534,16 @@ static int pon_probe(struct i2c_client *client)
 	if (IS_ERR(memory))
 		return dev_err_probe(dev, PTR_ERR(memory), "controller memory address\n");
 	i2c_set_clientdata(client, pon);
-	return devm_device_add_group(dev, &pon_group);
+	ret = devm_device_add_group(dev, &pon_group);
+	if (ret)
+		return ret;
+	mutex_lock(&pon_registry_lock);
+	if (pon_registered)
+		ret = -EBUSY;
+	else
+		pon_registered = pon;
+	mutex_unlock(&pon_registry_lock);
+	return ret;
 }
 
 static const struct of_device_id pon_of_match[] = {
@@ -337,19 +553,22 @@ MODULE_DEVICE_TABLE(of, pon_of_match);
 static const struct i2c_device_id pon_ids[] = { { "q1000k-pon" }, { } };
 MODULE_DEVICE_TABLE(i2c, pon_ids);
 
+static void pon_remove(struct i2c_client *client)
+{
+	pon_unpublish(i2c_get_clientdata(client));
+}
+
 static void pon_shutdown(struct i2c_client *client)
 {
 	struct q1000k_pon *pon = i2c_get_clientdata(client);
 
-	mutex_lock(&pon->lock);
-	pon_shutdown_action(pon);
-	mutex_unlock(&pon->lock);
+	pon_unpublish(pon);
 }
 
 static struct i2c_driver pon_driver = {
 	.driver = { .name = "q1000k-pon-control", .of_match_table = pon_of_match },
-	.probe = pon_probe, .shutdown = pon_shutdown, .id_table = pon_ids,
+	.probe = pon_probe, .remove = pon_remove, .shutdown = pon_shutdown, .id_table = pon_ids,
 };
 module_i2c_driver(pon_driver);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Q1000K EN7573 controller bring-up with transmission disabled");
+MODULE_DESCRIPTION("Q1000K EN7573 controller with exclusive kernel consumer ownership");

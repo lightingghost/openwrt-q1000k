@@ -39,6 +39,8 @@ int en7573_sample_state(struct en7573_io *io, struct en7573_state *state)
 	ret = en7573_read_control(io, EN7573_TX_CONTROL, &tx);
 	if (ret)
 		return ret;
+	if (mcu == ~0U || tx == ~0U)
+		return -EIO;
 	state->md32_enabled = !!(mcu & 1);
 	state->tx_disabled = !!(tx & EN7573_TX_DISABLE);
 	return 0;
@@ -55,6 +57,23 @@ static int update_control(struct en7573_io *io, u16 reg, u32 mask, u32 value)
 	u32 old;
 	int ret = en7573_read_control(io, reg, &old);
 	return ret ? ret : write_control(io, reg, (old & ~mask) | (value & mask));
+}
+
+int en7573_set_tx(struct en7573_io *io, bool enable)
+{
+	u32 old, actual, expected;
+	int ret = en7573_read_control(io, EN7573_TX_CONTROL, &old);
+
+	if (ret)
+		return ret;
+	if (old == ~0U)
+		return -EIO;
+	expected = enable ? old & ~EN7573_TX_DISABLE : old | EN7573_TX_DISABLE;
+	ret = write_control(io, EN7573_TX_CONTROL, expected);
+	if (!ret)
+		ret = en7573_read_control(io, EN7573_TX_CONTROL, &actual);
+	return ret ? ret : actual == ~0U ||
+		!!(actual & EN7573_TX_DISABLE) == enable ? -EIO : 0;
 }
 
 int en7573_identify(struct en7573_io *io, u16 *id)

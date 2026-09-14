@@ -365,3 +365,8 @@ compatible UML build directory to reuse the local build artifacts.
 SCU fields and failures before reset, during reset and during restoration.
 `test_pon_phy_resources.py` also checks exclusive reset status and exclusion
 of concurrent MMIO. `Q1000K_PON_BSP` can select a prepared vendor BSP tree.
+
+`test_pon_controller.py` compiles the production EN7573 consumer API and
+checks exclusive references, device removal, process context, controller
+faults and power-off containment. `test_en7573.c` also checks TX changes and
+all-ones control reads, in addition to firmware download fault injection.

@@ -110,6 +110,28 @@ static void test_read_only_state(void)
 	}
 }
 
+static void test_tx_control(void)
+{
+    struct model m = {0};
+    struct en7573_io io = { .ctx=&m, .read=rd, .write=wr };
+    struct en7573_state state;
+    unsigned int enable, fail;
+    for (enable=0; enable<2; enable++) {
+        m.regs[EN7573_TX_CONTROL/4]=0xa5a55a5a;
+        assert(!en7573_set_tx(&io,enable));
+        assert(m.regs[EN7573_TX_CONTROL/4]==
+            ((0xa5a55a5a&~EN7573_TX_DISABLE)|(enable ? 0 : EN7573_TX_DISABLE)));
+        for (fail=1;fail<=3;fail++) {
+            m.calls=0; m.fail_at=fail;
+            assert(en7573_set_tx(&io,enable)==-EREMOTEIO && m.calls==fail);
+        }
+        m.fail_at=0;
+    }
+    m.regs[EN7573_TX_CONTROL/4]=~0U;
+    assert(en7573_set_tx(&io,false)==-EIO);
+    assert(en7573_sample_state(&io,&state)==-EIO && state.tx_disabled==-1);
+}
+
 int main(void)
 {
 	struct model m = {0};
@@ -151,6 +173,7 @@ int main(void)
 	assert(en7573_load(&io, pm, sizeof(pm), dm, EN7573_CAL_ADDRESS + 1, cal) == -EINVAL);
 	assert(m.calls == 0);
 	test_read_only_state();
+	test_tx_control();
 	printf("EN7573 loader: layout, addressing, readback and %u I2C failure points passed\n", calls);
 	puts("EN7573 status: read-only samples and read failures passed");
 	return 0;

@@ -110,3 +110,29 @@ padding, readback rejection, no MCU enable before successful verification,
 invalid input rejection and immediate error propagation at every transfer.
 State sampling is tested with no write/delay callbacks, all four MCU/TX bit
 combinations and failures of either register read; stale values become unknown.
+
+## Exclusive kernel consumer
+
+The exported `q1000k_pon_get/check/set_tx/get_los/put` API requires process
+context. Acquisition requires this unit's calibration and verified controller
+firmware already initialized in XGS mode with TX disabled. One consumer holds
+an exclusive reference; sysfs operation and calibration writes return busy
+while it is held. References survive I2C-device removal, after which operations
+return `-ENODEV` without accessing released GPIO or I2C resources. Release
+disables TX and drops the reference; a context error leaves the reference held
+so the caller can retry from process context.
+
+TX changes preserve unrelated control bits and check readback. Controller
+state is checked against the expected TX state, including MCU enable.
+Transport failures and inconsistent state latch a fault and attempt power-off
+containment. A failed power-off remains an error, never a successful optical
+stop. Recovery requires a fresh verified initialization while no consumer
+holds the controller. No module autoload or board activation is added.
+
+The production consumer fixture covers exclusive acquisition, release,
+removal with an outstanding reference, context rejection, state mismatch,
+LOS/I2C failures and failed containment. The EN7573 fixture still passes all
+15,388 firmware-loader I2C failure points, plus TX field preservation and
+control read/write/readback failures. The Linux 6.18.44 AArch64 r3 package
+builds (8,711 bytes) and installs its development header and exported symbol
+file. These are local tests; the controller was not accessed on hardware.
