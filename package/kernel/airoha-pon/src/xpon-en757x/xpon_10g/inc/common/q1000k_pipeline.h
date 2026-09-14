@@ -54,7 +54,7 @@ struct q1000k_pipeline_ops {
 	int (*clear)(void *arg);
 	int (*install)(void *arg);
 };
-enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL };
+enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL, Q1000K_TABLE_ACTIVATE };
 /* Internal table primitives: permission exists only in the owning callback. */
 int q1000k_pipeline_table_context(enum q1000k_table_phase phase);
 int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
@@ -65,5 +65,9 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 int q1000k_pipeline_activate(void);
 /* Resume receive/control state while keeping the controller transmitter off. */
 int q1000k_pipeline_activate_receive_only(void);
+/* Check resumed MAC/PHY state before optical TX and CPU producers can start.
+ * The synchronous callback runs with ACTIVATE ownership and must not reenter.
+ */
+int q1000k_pipeline_activate_checked(bool transmit, int (*ready)(void *), void *arg);
 
 #endif

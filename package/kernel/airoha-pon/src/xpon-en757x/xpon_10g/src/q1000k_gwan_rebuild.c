@@ -195,7 +195,7 @@ enum q1000k_gwan_edit { Q1000K_GWAN_APPLY, Q1000K_GWAN_DELETE_GEM,
 static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			      const struct q1000k_gwan_table *desired,
 			      enum q1000k_gwan_edit edit, u16 id, bool all,
-			      int (*install)(void *), void *install_arg)
+			      int (*install)(void *), void *install_arg, int (*ready)(void *))
 {
 	struct q1000k_gwan_transaction *tx;
 	struct q1000k_pipeline_ops ops = q1000k_gwan_pipeline_ops;
@@ -327,8 +327,8 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	if (ret)
 		goto failed;
 	q1000k_gwan_table_publish(&tx->next);
-	ret = tx->tx_enabled ? q1000k_pipeline_activate() :
-		q1000k_pipeline_activate_receive_only();
+	ret = ready ? q1000k_pipeline_activate_checked(tx->tx_enabled, ready, install_arg) :
+		tx->tx_enabled ? q1000k_pipeline_activate() : q1000k_pipeline_activate_receive_only();
 	if (ret)
 		goto failed;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
@@ -363,7 +363,7 @@ int q1000k_gwan_apply(const struct q1000k_gwan_table *expected,
 {
 	if (!expected || !desired)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, NULL, NULL);
+	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, NULL, NULL, NULL);
 }
 
 int q1000k_gwan_apply_install(const struct q1000k_gwan_table *expected,
@@ -372,42 +372,42 @@ int q1000k_gwan_apply_install(const struct q1000k_gwan_table *expected,
 {
 	if (!expected || !desired || !install)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, install, arg);
+	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, install, arg, NULL);
 }
 
 int q1000k_gwan_delete_gem(u16 gem, bool all)
 {
 	if (!all && gem > Q1000K_GEM_ID_MAX)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_GEM, gem, all, NULL, NULL);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_GEM, gem, all, NULL, NULL, NULL);
 }
 
 int q1000k_gwan_delete_tcont(u16 alloc_id, bool all)
 {
 	if (!all && alloc_id > Q1000K_ALLOC_ID_MAX)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_TCONT, alloc_id, all, NULL, NULL);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_DELETE_TCONT, alloc_id, all, NULL, NULL, NULL);
 }
 
 int q1000k_gwan_add_tcont(u16 alloc_id)
 {
 	if (alloc_id > Q1000K_ALLOC_ID_MAX)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_ADD_TCONT, alloc_id, false, NULL, NULL);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_ADD_TCONT, alloc_id, false, NULL, NULL, NULL);
 }
 
 int q1000k_gwan_refresh(int (*install)(void *arg), void *arg)
 {
 	if (!install)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REFRESH, 0, true, install, arg);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REFRESH, 0, true, install, arg, NULL);
 }
 
 int q1000k_gwan_register(u16 onu_id, int (*install)(void *arg), void *arg)
 {
 	if ((onu_id >= 1023 && onu_id != Q1000K_GWAN_UNASSIGNED) || !install)
 		return -EINVAL;
-	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REGISTER, onu_id, true, install, arg);
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REGISTER, onu_id, true, install, arg, NULL);
 }
 
 int q1000k_gwan_cold_reset(int (*install)(void *arg), void *arg)
@@ -415,5 +415,12 @@ int q1000k_gwan_cold_reset(int (*install)(void *arg), void *arg)
 	if (!install)
 		return -EINVAL;
 	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_COLD,
-		Q1000K_GWAN_UNASSIGNED, true, install, arg);
+		Q1000K_GWAN_UNASSIGNED, true, install, arg, NULL);
+}
+
+int q1000k_gwan_refresh_checked(int (*install)(void *), int (*ready)(void *), void *arg)
+{
+	if (!install || !ready)
+		return -EINVAL;
+	return q1000k_gwan_rebuild(NULL, NULL, Q1000K_GWAN_REFRESH, 0, true, install, arg, ready);
 }

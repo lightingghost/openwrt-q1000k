@@ -19,6 +19,8 @@ int q1000k_omci_burst_profile(const struct q1000k_pon_profile *profile,
 int q1000k_omci_assign(u16 onu);
 /* Verify the hardware registration-key transition before publishing it. */
 int q1000k_omci_registration_keys(void);
+int q1000k_omci_ranging(u32 delay, bool absolute, bool negative, u8 sequence, bool acknowledge);
+int q1000k_omci_ranged(void);
 int q1000k_omci_alloc_changed(void);
 void q1000k_omci_state(void);
 /* Ordered protocol control callback, invoked without the executor mutex. */

@@ -142,6 +142,11 @@ int q1000k_pipeline_activate(void)
 }
 
 int q1000k_pipeline_activate_receive_only(void) { receive_only=true; return q1000k_pipeline_activate(); }
+int q1000k_pipeline_activate_checked(bool transmit,int (*ready)(void *),void *arg) {
+    assert(!optical_tx && physical_phase==2); int ret=ready(arg);
+    if(ret) return ret;
+    receive_only=!transmit; return q1000k_pipeline_activate();
+}
 
 bool q1000k_gem_faulted(void) { return faulted; }
 int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,

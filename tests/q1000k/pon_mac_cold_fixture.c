@@ -7,9 +7,10 @@
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t u8;
-#define BIT(n) (UINT32_C(1)<<(n))
+#define BIT(n) (1UL<<(n))
 #define Q1000K_TABLE_CLEAR 1
 #define Q1000K_TABLE_INSTALL 2
+#define Q1000K_TABLE_ACTIVATE 3
 static u32 regs[0x6000/4], written[0x6000/4];
 static int phase, writes, fail_write, provider_error, delays;
 static bool owned, select_stuck, self_clear;
@@ -36,6 +37,21 @@ static void reset(void) {
 }
 int main(void) {
     u8 sn[8]={1,2,3,4,5,6,7,8},reg[36];
+    assert(q1000k_mac_ranging_install(123)==-EPERM && !writes);
+    phase=2;
+    assert(q1000k_mac_ranging_install(0x40000000)==-ERANGE && !writes);
+    assert(!q1000k_mac_ranging_install(0x3fffffff) && regs[0x5114/4]==0xfffffffc);
+    assert(written[0x582c/4]==0x101);
+    assert(q1000k_mac_ranging_ready()==-EPERM);
+    phase=3; assert(!q1000k_mac_ranging_ready() && !(regs[0x582c/4]&0x101));
+    reset(); phase=2; fail_write=1; assert(q1000k_mac_ranging_install(123)==-EIO);
+    reset(); phase=2; fail_write=2; assert(q1000k_mac_ranging_install(123)==-EIO);
+    reset(); phase=3; regs[0x582c/4]=BIT(31)|0x101; fail_write=1;
+    assert(q1000k_mac_ranging_ready()==-EIO && writes==1);
+    reset(); phase=3; assert(q1000k_mac_ranging_ready()==-ETIMEDOUT && delays==3000);
+    reset(); phase=3; regs[0x582c/4]=~0U; assert(q1000k_mac_ranging_ready()==-EIO && !writes);
+    reset(); phase=3; provider_error=-ENODEV; assert(q1000k_mac_ranging_ready()==-ENODEV && !writes);
+    reset();
     for(int i=0;i<36;i++) reg[i]=i;
     assert(q1000k_mac_cold_release()==-EPERM);
     assert(q1000k_mac_cold_install(sn,reg,false)==-EPERM);

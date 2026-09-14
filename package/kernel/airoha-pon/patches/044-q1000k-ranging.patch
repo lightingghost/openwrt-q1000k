@@ -1,0 +1,169 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: defer ranging to verified physical resynchronization
+
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -642,6 +642,31 @@
+ **____________________________________________________________________________*/
+ static int ploam_recv_ranging_time(PLOAM_RAW_Ranging_Time_T *pRangingMsg)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	u16 dest;
++	u32 delay;
++	bool absolute, broadcast;
++
++	if (!pRangingMsg)
++		return -EINVAL;
++	if (!q1000k_protocol_owned())
++		return -EPERM;
++	if (GPON_CURR_STATE != GPON_10G_STATE_O4 && GPON_CURR_STATE != GPON_10G_STATE_O5)
++		return -EINVAL;
++	absolute = pRangingMsg->raw.eqd_mode == PLOAM_EQD_ABSOLUTE;
++	dest = (u16)pRangingMsg->raw.dest_id[0] << 8 | pRangingMsg->raw.dest_id[1];
++	broadcast = dest == PLOAM_BROADCAST_ADDR || dest == PLOAM_XGSPON_BROADCAST_ADDR ||
++		dest == PLOAM_XGSPON_BROADCAST_ADDR_NOKIA;
++	if ((absolute && dest != GPON_ONU_ID) ||
++	    (!absolute && dest != GPON_ONU_ID && !broadcast) ||
++	    (GPON_CURR_STATE == GPON_10G_STATE_O4 && !absolute))
++		return -EINVAL;
++	delay = (u32)pRangingMsg->raw.eqd_value[0] << 24 |
++		(u32)pRangingMsg->raw.eqd_value[1] << 16 |
++		(u32)pRangingMsg->raw.eqd_value[2] << 8 | pRangingMsg->raw.eqd_value[3];
++	return q1000k_omci_ranging(delay, absolute, pRangingMsg->raw.eqd_adjust == PLOAM_EQD_NEGATIVE,
++		pRangingMsg->raw.seq_no, !broadcast && (GPON_CURR_STATE == GPON_10G_STATE_O4 || delay));
++#else
+ 	uint msgDestId = 0 ;
+ 	uint newEqd = 0;
+ #if defined(TCSUPPORT_CPU_AN7583)
+@@ -799,6 +824,8 @@
+ 	}
+ #endif
+ 	return 0 ;
++
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -535,8 +535,22 @@
+ 		goto out;
+ 	}
+ 	if (new_state == GPON_10G_STATE_O5) {
++		ret = q1000k_omci_ranged();
++		if (ret)
++			goto out;
+ 		ret = q1000k_omci_registration_keys();
+ 		if (ret)
++			goto out;
++	}
++	if (new_state == GPON_10G_STATE_O2_3 &&
++	    GPON_CURR_STATE != GPON_10G_STATE_O1 && GPON_CURR_STATE != GPON_10G_STATE_O2_3) {
++		/* Registration timeout/restart cannot retain the old ONU namespace. */
++		ret = q1000k_omci_reset(false, false);
++		goto out;
++	}
++	if (new_state == GPON_10G_STATE_O5) {
++		ret = q1000k_protocol_timer_delete(&gpGponPriv->to1_timer, true, false);
++		if (ret < 0)
+ 			goto out;
+ 	}
+ 	ret = q1000k_mac_activation_set(new_state);
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -2612,12 +2612,17 @@
+ ******************************************************************************/
+ void gponDevSetEqd(uint eqd)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	REG_EQD gponEqd ;
+ 	
+ 	/* Setting the EqD to MAC register */
+     gponEqd.Raw = IO_GREG(EQD) ;	
+ 	gponEqd.Bits.eqd = eqd;
+ 	IO_SREG(EQD, gponEqd.Raw) ;	
++
++#endif
+ }
+ 
+ #if !defined(TCSUPPORT_CPU_AN7583)
+@@ -2627,7 +2632,10 @@
+ Ret Value:	none
+ ******************************************************************************/
+ void gponDevRefreshEqdValue(void)
+-{	
++{
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else	
+ 	REG_EQD gponEqd ;	
+ 
+ 	gponEqd.Raw = IO_GREG(EQD);	
+@@ -2638,6 +2646,8 @@
+ 	}	
+ 	gpGponPriv->gponCfg.eqd_olt_init = gpGponPriv->gponCfg.eqd_olt_absolute;	
+ 	IO_SREG(EQD, gponEqd.Raw) ;
++
++#endif
+ }
+ /*****************************************************************************
+ Descriptor:    set eqd value
+@@ -2646,6 +2656,9 @@
+ ******************************************************************************/
+ int gponDevSetEqdValue(uint newEqd_eqd_olt_absolute,uint	eqd_olt_init ,unchar wanMode)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 	uint newEqd = 0; // the new value for eqd reg
+ 	uint EqdDiff = 0;
+ 	REG_EQD gponEqd ;
+@@ -2687,6 +2700,8 @@
+ 		PON_MSG((MSG_ACT|MSG_EQD), "PLOAM: cur state %d, receive EqdDiff %d, eqd:0x%.8x, Resync Tx\n",GPON_CURR_STATE,EqdDiff,IO_GREG(EQD)) ;	
+ 		return 0;
+ 	}
++
++#endif
+ }
+ #else
+ /*****************************************************************************
+@@ -3554,6 +3569,9 @@
+  ******************************************************************************/
+ void gponDevSwResync(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_protocol_fail(-EOPNOTSUPP);
++#else
+ 	REG_DBG_RESYNC gponResync; 
+     int RETRY = 3000 ;
+ 
+@@ -3570,6 +3588,8 @@
+ 			break  ;
+ 		}
+ 	}
++
++#endif
+ }
+ int gponDevTxSyncRdy(void)
+ {
+@@ -3587,6 +3607,9 @@
+ 	return -1;
+ }
+ int gponDevSwResyncCompleteProcess(void){
++#ifdef Q1000K_PON_IDENTITY
++	return -EOPNOTSUPP;
++#else
+ 	REG_US_PROF_VLD usProfileVld;
+ 	uint32 regReadData = 0;
+ 	
+@@ -3631,6 +3654,8 @@
+ 	IO_SREG(US_PROF_VLD, regReadData) ;
+ 
+ 	return 0;
++
++#endif
+ }
+ 
+ int gponDevSetTxLateStartErrResyncEn(XPON_Mode_t mode)

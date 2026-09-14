@@ -52,6 +52,45 @@ int q1000k_mac_cold_release(void)
 	return ret ?: qcold_update(0x5000, BIT(0), BIT(0), 0);
 }
 
+int q1000k_mac_ranging_install(u32 delay)
+{
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
+
+	if (ret)
+		return ret;
+	if (delay > (~0U >> 2))
+		return -ERANGE;
+	/* AN7581 XGS EqD units are four times the OLT value. A complete
+	 * resynchronization uses the absolute value, without incremental wrap.
+	 * Profile validity and all physical producers are closed by the owner.
+	 */
+	ret = qcold_write(0x5114, delay << 2, ~0U);
+	if (!ret)
+		ret = qcold_modify(0x582c, BIT(8) | BIT(0), BIT(8) | BIT(0),
+			BIT(31), ~(u32)(BIT(31) | BIT(0)));
+	return ret;
+}
+
+int q1000k_mac_ranging_ready(void)
+{
+	u32 value;
+	unsigned int retry;
+	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_ACTIVATE);
+
+	if (ret)
+		return ret;
+	for (retry = 0; retry < 3000; retry++) {
+		value = get_xpon_data(0x582c);
+		ret = an7581_xpon_status();
+		if (ret || value == ~0U)
+			return ret ?: -EIO;
+		if (value & BIT(31))
+			return qcold_modify(0x582c, BIT(8) | BIT(0), 0, BIT(31), ~(u32)BIT(31));
+		udelay(1);
+	}
+	return -ETIMEDOUT;
+}
+
 int q1000k_mac_cold_install(const u8 serial[8], const u8 registration[36], bool emergency)
 {
 	static const struct { u32 reg, mask, value, omit; } defaults[] = {

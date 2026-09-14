@@ -233,7 +233,7 @@ out:
 	return ret;
 }
 
-static int q1000k_pipeline_activate_mode(bool transmit)
+int q1000k_pipeline_activate_checked(bool transmit, int (*ready)(void *), void *arg)
 {
 	int ret;
 
@@ -261,6 +261,14 @@ static int q1000k_pipeline_activate_mode(bool transmit)
 	if (ret)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_MAC_ACTIVE;
+	if (ready) {
+		q1000k_table_phase = Q1000K_TABLE_ACTIVATE;
+		WRITE_ONCE(q1000k_table_owner, current);
+		ret = ready(arg);
+		WRITE_ONCE(q1000k_table_owner, NULL);
+		if (ret)
+			goto fail;
+	}
 	ret = q1000k_phy_set_tx(transmit);
 	if (ret)
 		goto fail;
@@ -280,10 +288,10 @@ out:
 
 int q1000k_pipeline_activate(void)
 {
-	return q1000k_pipeline_activate_mode(true);
+	return q1000k_pipeline_activate_checked(true, NULL, NULL);
 }
 
 int q1000k_pipeline_activate_receive_only(void)
 {
-	return q1000k_pipeline_activate_mode(false);
+	return q1000k_pipeline_activate_checked(false, NULL, NULL);
 }

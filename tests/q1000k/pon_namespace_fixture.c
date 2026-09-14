@@ -51,7 +51,7 @@ static bool transmitter;
 static int q1000k_phy_set_tx(bool enable);
 /* PRODUCTION */
 static int step(void) { assert(held && !atomic_context); return ++calls==fail ? -ETIMEDOUT : 0; }
-static int containment(void) { assert(held && q1000k_pipeline.error==-ETIMEDOUT); return ++containment_calls==contain_fail ? -ENODEV : 0; }
+static int containment(void) { assert(held && q1000k_pipeline.error<0); return ++containment_calls==contain_fail ? -ENODEV : 0; }
 static int q1000k_transport_pause(unsigned int ms) { assert(ms==1000 && !calls); return step(); }
 static int q1000k_transport_retire_fe(unsigned int channel)
 {
@@ -95,6 +95,7 @@ static int q1000k_transport_drain_rx(void)
 }
 static int q1000k_phy_quiesce(void)
 {
+    transmitter=false;
     if(q1000k_pipeline.error) { assert(containment_calls==33); return containment(); }
     assert(calls==38 && q1000k_pipeline.stage==Q1000K_PIPELINE_RX_DRAINED);
     return step();
@@ -167,6 +168,13 @@ static int install_tables(void *arg)
     assert(q1000k_pipeline_table_context(Q1000K_TABLE_CLEAR)==-EPERM);
     return step();
 }
+static int readiness_error,readiness_calls;
+static int check_ready(void *arg)
+{
+    assert(arg==&task1 && !q1000k_pipeline_table_context(Q1000K_TABLE_ACTIVATE));
+    assert(q1000k_pipeline.stage==Q1000K_PIPELINE_MAC_ACTIVE && !transmitter);
+    readiness_calls++; return readiness_error;
+}
 int main(void)
 {
     struct q1000k_pipeline_ops ops={.clear=clear_tables,.install=install_tables};
@@ -204,5 +212,13 @@ int main(void)
     assert(!q1000k_pipeline_reconfigure(&ops,&task1,0x80000081));
     transmitter=true;
     assert(!q1000k_pipeline_activate_receive_only() && !transmitter);
+    for(int failure=0;failure<2;failure++) {
+        reset(); readiness_error=failure ? -EIO : 0;
+        assert(!q1000k_pipeline_reconfigure(&ops,&task1,0x80000081));
+        assert(q1000k_pipeline_activate_checked(true,check_ready,&task1)==readiness_error);
+        assert(!q1000k_table_owner && transmitter==!failure);
+        if(failure) assert(q1000k_pipeline.error==-EIO && poison && containment_calls==34);
+    }
+    assert(readiness_calls==2);
     return 0;
 }

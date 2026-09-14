@@ -35,7 +35,7 @@ typedef uint64_t u64;
 #define XGPON_SW 0
 #define CHECKSUM_NONE 0
 #define PHY_XGSPON_CONFIG 7
-#define DS_FEC_SETTING_FORCE_ON 3
+#define DS_FEC_SETTING_FORCE_ON 1
 #define TRAFFIC_DOWN 0
 #define UPAES_MODE_NONE 0
 #define GPON_SMA_INVALID 0
@@ -76,7 +76,7 @@ typedef struct { u8 msk[16],sk[16],ploamIk[2][16],omciIk[2][16],kek[2][16];
     u8 omciIkIdx,ploamIkIdx,kekIdx,aesUcKey[2][16],aesBcKey[2][16],aesUcKeyIdx;
     u8 smaValid,registerIDState,txKeyValid,state;
 } GPON_Security_t;
-static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl,usOmciMicCtrl,dsOmciMicCtrl; u32 eqd; } gponCfg;
+static struct { struct { u16 onu_id,omcc; u8 ponTag[8]; int ploamCtrl,usOmciMicCtrl,dsOmciMicCtrl; u32 eqd,eqd_olt_absolute,eqd_olt_init; } gponCfg;
     GPON_Security_t gponSecurity;
     u8 state, prePloamMsg[52]; int swreplyploam_task, gpon_traffic_status,gemUpAESMode; bool typeBOnGoing;
 } vendor,*gpGponPriv=&vendor;
@@ -110,7 +110,8 @@ static void q1000k_protocol_task_schedule(int *task) { assert(owned); }
 static int q1000k_protocol_control(void) { assert(owned); return fault; }
 void q1000k_omci_state(void);
 int q1000k_omci_assign(u16 onu);
-static void gpon_act_change_state(u8 state) { assert(owned); vendor.state=state; q1000k_omci_state(); }
+int q1000k_omci_ranged(void);
+static void gpon_act_change_state(u8 state) { assert(owned && (state!=5 || !q1000k_omci_ranged())); vendor.state=state; q1000k_omci_state(); }
 static void ploam_send_acknowledge_msg(u8 seq,int result) { assert(owned && !result); ack_count++; }
 static void q1000k_services_enable(bool enabled) { services_enabled=enabled; }
 static void q1000k_services_init(void) { services_enabled=false; }
@@ -184,11 +185,14 @@ static int q1000k_gwan_refresh(int (*install)(void *),void *arg) {
     assert(owned); refresh_count++; int ret=step(); if(ret) return ret;
     install_phase=true; ret=install(arg); install_phase=false; return ret;
 }
+static int q1000k_gwan_refresh_checked(int (*install)(void *),int (*ready)(void *),void *arg) {
+    int ret=q1000k_gwan_refresh(install,arg); return ret ? ret : ready(arg);
+}
 static void xmcs_report_event(int type,int event,u8 state) { assert(owned && type==1 && event==2 && (state==1||state==7)); }
 static int q1000k_phy_set_tx(bool enable) { assert(owned); int ret=step(); if(!ret) optical_tx=enable; return ret; }
 static int q1000k_phy_configure(u32 mode) { assert(owned && install_phase && mode==PHY_XGSPON_CONFIG); return step(); }
 static int XPON_PHY_SET_RX_ENABLE(void) { assert(owned && install_phase); return step(); }
-static int XPON_PHY_SET_RX_FEC(int mode) { assert(owned && install_phase && mode==3); return step(); }
+static int XPON_PHY_SET_RX_FEC(int mode) { assert(owned && install_phase && mode==1); return step(); }
 static int q1000k_mac_cold_install(const u8 sn[8],const u8 reg[36],bool emergency) {
     assert(owned && install_phase && !native_epoch && sn[7]==1 && reg[35]==2); return step();
 }
@@ -199,6 +203,8 @@ static int q1000k_gwan_cold_reset(int (*install)(void *),void *arg) {
     install_phase=true; ret=install(arg); install_phase=false; optical_tx=false; return ret;
 }
 /* PRODUCTION */
+int q1000k_mac_ranging_install(u32 delay) { assert(owned && install_phase && !installed_profiles && delay<=0x3fffffff); return step(); }
+int q1000k_mac_ranging_ready(void) { assert(owned && !install_phase); return step(); }
 int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u8 sn[8],const u8 tag[8],struct q1000k_mac_keys *keys) {
     assert(!owned && !auth_held && reg[35]==2 && sn[7]==1); derivations++; int ret=step(); if(ret) return ret;
     memset(keys,0,sizeof(*keys)); memcpy(keys->pon_tag,tag,8); memset(keys->bank[0].omci,0x30,16); memset(keys->bank[1].omci,0x31,16); return 0;
@@ -246,8 +252,7 @@ static void profile_and_assign(void)
 static void operational(void)
 {
     int token=q1000k_protocol_enter();
-    int ret=q1000k_omci_registration_keys();
-    if(!ret) gpon_act_change_state(5);
+    q1000k_omci_ranging(100,true,false,0,false);
     q1000k_protocol_leave(token); q1000k_omci_control();
 }
 int main(void)
@@ -265,6 +270,15 @@ int main(void)
     q1000k_protocol_leave(same_tag_owner); q1000k_omci_control();
     assert(!fault && ack_count==2);
     operational(); assert(!fault && b->active && services_enabled && b->omci->epoch==b->published && native_epoch==b->published);
+    assert(b->ranged && b->delay==100 && vendor.gponCfg.eqd==400);
+    int ranging_owner=q1000k_protocol_enter(),prior_calls=calls;
+    assert(q1000k_omci_ranging(0x40000000,true,false,0,true)==-ERANGE);
+    assert(q1000k_omci_ranging(101,false,true,0,true)==-ERANGE && calls==prior_calls && b->active);
+    assert(!q1000k_omci_ranging(23,false,false,22,true));
+    assert(!b->active && b->delay==100 && vendor.gponCfg.eqd==400);
+    assert(q1000k_omci_ranging(24,false,false,23,true)==-EBUSY);
+    q1000k_protocol_leave(ranging_owner); q1000k_omci_control();
+    assert(!fault && b->active && b->delay==123 && vendor.gponCfg.eqd==492);
     int before_reconcile=reconciles;
     int owner=q1000k_protocol_enter(); assert(!q1000k_omci_alloc_changed()); q1000k_protocol_leave(owner);
     q1000k_omci_control(); assert(reconciles==before_reconcile+1 && b->active && services_enabled);

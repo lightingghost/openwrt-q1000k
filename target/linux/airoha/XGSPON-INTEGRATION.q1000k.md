@@ -1303,3 +1303,28 @@ register all-ones reads fault the PHY and contain TX. Host fixtures cover the
 external command namespace, boolean semantics, controller/cache disagreement,
 every counter read failure and unchanged output on error. All 58 host tests,
 PHY UML and the AArch64 vendor build pass without device access.
+
+## Drained ranging and O5 publication
+
+Vendor r49 moves PLOAM ranging into the registration transaction. Absolute
+and relative EqD candidates are checked for the AN7581 XGS fourfold scaling,
+overflow and underflow before mutation. Conflicting pending ACKs cannot be
+superseded. O4 accepts directed absolute ranging; O5 also accepts relative
+updates addressed to this ONU or the supported broadcast addresses.
+
+The transaction closes software admission, drains the existing physical
+pipeline, invalidates burst profiles, installs the absolute EqD and starts
+software resynchronization with checked register writes. An ACTIVATE callback
+waits for the resumed MAC's TX-sync status before the pipeline enables optical
+TX or CPU producers. Failures contain the port and do not send a success ACK.
+After completion the owner publishes the delay, enters O5 and releases ACKs.
+O5 requires verified ranging as well as the registration key selectors.
+
+The old direct EqD/resynchronization APIs cannot bypass this owner. An O4
+timeout returning to discovery requests a cold reset of the old namespace;
+entering O5 synchronously cancels the ranging timer. Cold reset clears all
+cached EqD forms. All 59 host tests, the protocol executor/timer UML suite and
+the AArch64 vendor build pass. Tests cover caller addresses and full-width
+decoding, arithmetic limits, pending requests, MAC readback and timeout, and
+readiness before TX. OLT timing and the analog resynchronization sequence
+remain hardware acceptance work; no device access or flash occurred.

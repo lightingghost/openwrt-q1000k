@@ -58,6 +58,8 @@ int q1000k_gwan_add_tcont(u16 alloc_id);
  * drained. The callback must only install MAC state; no core session calls.
  */
 int q1000k_gwan_refresh(int (*install)(void *arg), void *arg);
+/* Ranging resynchronization also verifies MAC readiness before TX resumes. */
+int q1000k_gwan_refresh_checked(int (*install)(void *), int (*ready)(void *), void *arg);
 
 /* Registration owner, after core/session and OMCI retry barriers: discard all
  * old data/OMCC records and install ONU/keys through the drained callback.

@@ -8,10 +8,18 @@ static void two_services(void)
 }
 static int refresh_called;
 static int refresh_install(void *arg) { assert(physical_phase==2); refresh_called++; return *(int *)arg; }
+static int ready_error,ready_called;
+static int refresh_ready(void *arg) { assert(physical_phase==2 && !optical_tx); ready_called++; return ready_error; }
 int main(void)
 {
     struct q1000k_gwan_binding b;
     unsigned int steps;
+    int installed=0;
+    two_services();
+    assert(!q1000k_gwan_refresh_checked(refresh_install,refresh_ready,&installed) && ready_called==1 && optical_tx);
+    two_services(); ready_error=-ETIMEDOUT;
+    assert(q1000k_gwan_refresh_checked(refresh_install,refresh_ready,&installed)==-EUCLEAN && !optical_tx);
+    ready_error=ready_called=refresh_called=0;
     reset_model();
     assert(!gwan_create_new_tcont(200));
     assert(wan.gpon.allocId[1]==200 && wan.activeChannelNum==2 && tcont_model[0]==17);

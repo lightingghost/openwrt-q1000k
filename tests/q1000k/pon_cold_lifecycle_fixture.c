@@ -66,11 +66,14 @@ static void xmcs_report_event(int type,int event,unsigned int value) {
 }
 static int key_error;
 static int q1000k_omci_registration_keys(void) { assert(owned); return key_error; }
+static int ranging_error;
+static int q1000k_omci_ranged(void) { assert(owned); return ranging_error; }
+static int q1000k_protocol_timer_delete(int *timer,bool sync,bool shutdown) { assert(owned && sync && !shutdown); *timer=0; return 1; }
 /* PRODUCTION */
 static void reset(void) {
     memset(&priv,0,sizeof(priv)); memset(&sys,0,sizeof(sys)); memset(&phy,0,sizeof(phy));
     owned=1; priv.state=1; priv.gponCfg.to1Timer=10000; priv.gponCfg.hardware_timer=1000;
-    key_error=enter_error=fault=state_error=tx_error=reset_error=0;
+    ranging_error=key_error=enter_error=fault=state_error=tx_error=reset_error=0;
     state_calls=reset_calls=ready_events=state_events=loss_events=omci_notifications=led_schedules=0;
     tx_enabled=requested_phy_reset=requested_emergency=false;
 }
@@ -80,6 +83,7 @@ int main(void) {
     gpon_phy_ready_handler(7); assert(state_calls==1 && ready_events==2);
     gpon_act_change_state(4); assert(priv.to1_timer==10000 && priv.state==4);
     gpon_act_change_state(5); assert(priv.hardware_timer==1000 && priv.activationCnt==1);
+    assert(!priv.to1_timer);
     gpon_phy_loss_handler(7); assert(reset_calls==1 && !requested_phy_reset && !sys.sysLinkStatus && loss_events==1);
     assert(priv.state==5); /* Reset completion, not this request, publishes O1. */
     reset(); state_error=-ETIMEDOUT; gpon_phy_ready_handler(7);
@@ -88,6 +92,10 @@ int main(void) {
     assert(fault==-EIO && !ready_events && priv.state==1 && !tx_enabled);
     reset(); priv.state=4; key_error=-EKEYREJECTED; gpon_act_change_state(5);
     assert(fault==-EKEYREJECTED && priv.state==4 && !state_calls && !state_events);
+    reset(); priv.state=4; ranging_error=-EAGAIN; gpon_act_change_state(5);
+    assert(fault==-EAGAIN && priv.state==4 && !state_calls && !state_events);
+    reset(); priv.state=4; gpon_act_change_state(2);
+    assert(!fault && reset_calls==1 && priv.state==4 && !state_calls && !tx_enabled);
     reset(); priv.state=6; gpon_phy_ready_handler(7);
     assert(fault==-EOPNOTSUPP && !ready_events && !state_calls);
     reset(); gpon_act_change_state(260); assert(fault==-EOPNOTSUPP && !state_calls && priv.state==1);
