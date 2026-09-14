@@ -11,6 +11,9 @@
 
 static char *wan_mac;
 static char *pon_serial;
+static char *pon_reg_id;
+module_param(pon_reg_id, charp, 0);
+MODULE_PARM_DESC(pon_reg_id, "XGS-PON registration ID: exactly 36 bytes as 72 hex digits (required)");
 module_param(wan_mac, charp, 0);
 MODULE_PARM_DESC(wan_mac, "Validated factory or configured WAN MAC (required)");
 module_param(pon_serial, charp, 0);
@@ -18,19 +21,21 @@ MODULE_PARM_DESC(pon_serial, "Validated FSAN: four vendor characters and eight h
 
 static unsigned char identity_mac[ETH_ALEN];
 static unsigned char identity_serial[8];
+static unsigned char identity_registration[36];
 static bool identity_ready;
 
 int q1000k_pon_identity_init(void)
 {
-	unsigned char mac[ETH_ALEN], serial[8];
+	unsigned char mac[ETH_ALEN], serial[8], registration[36] = {};
 	int i;
 
 	identity_ready = false;
 	memset(identity_mac, 0, sizeof(identity_mac));
 	memset(identity_serial, 0, sizeof(identity_serial));
+	memset(identity_registration, 0, sizeof(identity_registration));
 	if (!of_machine_is_compatible("quantum,q1000k-ubi"))
 		return -ENODEV;
-	if (!wan_mac || !pon_serial)
+	if (!wan_mac || !pon_serial || !pon_reg_id)
 		return -ENODATA;
 	if (strlen(wan_mac) != 17 || !mac_pton(wan_mac, mac) ||
 	    !is_valid_ether_addr(mac) || strlen(pon_serial) != 12)
@@ -46,8 +51,15 @@ int q1000k_pon_identity_init(void)
 	}
 	if (hex2bin(serial + 4, pon_serial + 4, 4))
 		return -EINVAL;
+	if (strlen(pon_reg_id) != sizeof(registration) * 2 ||
+	    hex2bin(registration, pon_reg_id, sizeof(registration))) {
+		memzero_explicit(registration, sizeof(registration));
+		return -EINVAL;
+	}
 	memcpy(identity_mac, mac, sizeof(mac));
 	memcpy(identity_serial, serial, sizeof(serial));
+	memcpy(identity_registration, registration, sizeof(registration));
+	memzero_explicit(registration, sizeof(registration));
 	identity_ready = true;
 	return 0;
 }
@@ -69,6 +81,16 @@ int q1000k_pon_get_serial(unsigned char *serial, int len)
 	if (!identity_ready)
 		return -ENODATA;
 	memcpy(serial, identity_serial, sizeof(identity_serial));
+	return 0;
+}
+
+int q1000k_pon_get_registration(unsigned char *registration, int len)
+{
+	if (!registration || len != sizeof(identity_registration))
+		return -EINVAL;
+	if (!identity_ready)
+		return -ENODATA;
+	memcpy(registration, identity_registration, sizeof(identity_registration));
 	return 0;
 }
 

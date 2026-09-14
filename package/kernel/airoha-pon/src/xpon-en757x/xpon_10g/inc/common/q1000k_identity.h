@@ -5,6 +5,7 @@
 #define Q1000K_PON_IDENTITY
 int q1000k_pon_identity_init(void);
 int q1000k_pon_get_serial(unsigned char *serial, int len);
+int q1000k_pon_get_registration(unsigned char *registration, int len);
 int get_ethaddr(unsigned char *addr, int len);
 char get_onutype(void);
 #endif

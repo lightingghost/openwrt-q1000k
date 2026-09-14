@@ -1,0 +1,27 @@
+Add standard key/MIC helpers and the complete immutable XGS registration ID.
+
+The PHY/MAC backend must still bind these helpers to a verified session.
+
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_init.c
+@@ -128,7 +128,8 @@
+ 	sn[7] = get_sninit();
+ #endif
+ #ifdef Q1000K_PON_IDENTITY
+-	if (q1000k_pon_get_serial(sn, sizeof(sn)))
++	if (q1000k_pon_get_serial(sn, sizeof(sn)) ||
++	    q1000k_pon_get_registration(defaultRegId, sizeof(defaultRegId)))
+ 		return -ENODATA;
+ #endif
+ 	memset(xgpon_priv_p->gponCfg.sn, 0x0, GPON_SN_LENS) ;

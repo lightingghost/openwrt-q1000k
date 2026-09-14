@@ -905,3 +905,33 @@ changes on test hardware. They cannot be completed through the current
 read-only device connection. No full service image or completion claim is
 appropriate until those acceptance gates pass. The optional diagnostics
 profile is the only supported build profile at this checkpoint.
+
+## Full XGS registration identity and software authentication
+
+Vendor r31 requires a hidden `pon_reg_id` module argument containing exactly
+72 hexadecimal digits. It decodes all 36 registration bytes into immutable
+MAC-owned storage and passes those bytes to the imported registration field;
+there is no imported placeholder or ten-byte GPON-password conversion.
+Failure invalidates the complete cached identity. Parameter and cached buffers
+are separate, and temporary registration bytes are erased.
+
+The new authentication helpers implement registration MSK, session, OMCI,
+PLOAM and KEK derivation with the existing serialized synchronous AES-CMAC
+helper. They follow [G.9807.1 C.15.3](https://www.itu.int/epublications/ar/publication/itu-t-g-9807-1-2023-02-10-gigabit-capable-symmetric-passive-optical-network-xgs-pon).
+MIC calculation prefixes downstream/upstream direction 1/2, covers the full
+PDU including the baseline trailer and compares received MICs in constant
+time. Exact frame lengths and the 1980-byte protocol limit are checked before
+allocation. Fragmented skbs use `skb_copy_bits`; no hardware CMAC DMA buffer
+is allocated. Failed operations preserve outputs and erase temporary keys.
+
+Official key and downstream MIC vectors are checked in host and UML tests:
+[G.987.3 Appendix IV](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-G.987.3-202505-I%21%21PDF-E&lang=e&type=items)
+and [G.9807.1 amendment golden vectors](https://www.itu.int/epublications/es/publication/itu-t-g-9807-1-2023-amd-1-2025-05).
+The host tests alter every baseline bit, exercise every extended length,
+every packet split, crypto/allocation failures and the final registration
+byte. The UML guest uses the real kernel AES implementation and fragmented
+skbs. All 43 PON host tests pass and r31 builds for AArch64/Linux 6.18.44.
+
+These helpers establish cryptographic byte processing. The backend must still
+bind keys, packet admission and OMCI state to a verified registration session
+and invalidate stale packets on session changes. No device was accessed.

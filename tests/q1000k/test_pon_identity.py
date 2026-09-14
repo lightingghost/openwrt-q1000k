@@ -48,6 +48,7 @@ class PonIdentityTests(unittest.TestCase):
 #define XMCS_IF_WAN_DETECT_MODE_XGSPON 7
 typedef unsigned char unchar;
 typedef unsigned char __u8;
+static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
 static bool board=true;
 static bool of_machine_is_compatible(const char *name) {
     assert(!strcmp(name,"quantum,q1000k-ubi")); return board;
@@ -107,6 +108,8 @@ int main(void) {
     wan_mac=valid_mac;
     assert(q1000k_pon_identity_init()==-ENODATA);
     pon_serial=valid_sn;
+    assert(q1000k_pon_identity_init()==-ENODATA);
+    char reg_id[73]; memset(reg_id,'0',72); reg_id[72]=0; pon_reg_id=reg_id;
     board=false; assert(q1000k_pon_identity_init()==-ENODEV); unavailable(); board=true;
     for(i=0;i<sizeof(bad_mac)/sizeof(bad_mac[0]);i++) {
         wan_mac=bad_mac[i]; assert(q1000k_pon_identity_init()==-EINVAL); unavailable();
@@ -118,6 +121,24 @@ int main(void) {
     pon_serial=valid_sn;
     assert(!q1000k_pon_identity_init());
     assert(get_onutype()==0x71);
+    unsigned char registration[36],saved_reg[36];
+    assert(!q1000k_pon_get_registration(registration,36));
+    for(i=0;i<36;i++) assert(!registration[i]);
+    assert(q1000k_pon_get_registration(NULL,36)==-EINVAL);
+    assert(q1000k_pon_get_registration(registration,10)==-EINVAL);
+    assert(q1000k_pon_get_registration(registration,35)==-EINVAL);
+    assert(q1000k_pon_get_registration(registration,37)==-EINVAL);
+    for(i=0;i<72;i++) {
+        reg_id[i]='x'; assert(q1000k_pon_identity_init()==-EINVAL); reg_id[i]='0';
+    }
+    for(i=0;i<72;i++) {
+        reg_id[i]=0; assert(q1000k_pon_identity_init()==-EINVAL); reg_id[i]='0';
+    }
+    reg_id[71]='f'; assert(!q1000k_pon_identity_init());
+    assert(!q1000k_pon_get_registration(registration,36) && registration[35]==15);
+    memcpy(saved_reg,registration,36); reg_id[71]='e';
+    assert(!q1000k_pon_get_registration(registration,36) && !memcmp(saved_reg,registration,36));
+
     assert(get_ethaddr(NULL,6)==-EINVAL);
     assert(get_ethaddr(out,-1)==-EINVAL && q1000k_pon_get_serial(out,-1)==-EINVAL);
     assert(q1000k_pon_get_serial(NULL,8)==-EINVAL);

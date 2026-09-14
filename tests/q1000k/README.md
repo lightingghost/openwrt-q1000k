@@ -399,3 +399,10 @@ checks that daemon/control/event work is gone while the native attachment
 and protocol state remain alive during physical shutdown. PHY UML tests
 hold real poll/IRQ callbacks while the blocking quiescence worker waits;
 self-invocation is rejected without waiting on its own callback.
+
+`test_pon_auth.py` checks official ITU key/MIC vectors, full registration-ID
+length, baseline-bit corruption, all extended message lengths, scattered
+packets, crypto failures and output preservation. `run_pon_crypto_uml.sh` also
+runs those vectors with the actual kernel AES implementation and frag-list
+skbs. `test_pon_identity.py` checks all 72 registration hex positions, exact
+length, caller bounds, cache invalidation and parameter-buffer independence.
