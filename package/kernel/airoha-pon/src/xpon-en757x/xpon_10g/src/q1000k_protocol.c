@@ -61,7 +61,7 @@ int q1000k_protocol_enter(void)
 	if (!qprotocol_process())
 		return -EWOULDBLOCK;
 	if (q1000k_protocol_owned())
-		return 1;
+		return q1000k_protocol_status() ?: 1;
 	mutex_lock(&qprotocol_execute);
 	ret = q1000k_protocol_status();
 	if (ret) {

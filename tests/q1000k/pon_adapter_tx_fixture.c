@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
+static int rcu_depth;
 typedef unsigned int uint;
 typedef uint16_t uint16;
 typedef uint16_t u16;
@@ -85,7 +86,7 @@ static void netif_trans_update(struct net_device *d) { updates++; }
 _Static_assert(sizeof(PWAN_FETxMsg_T)==8,"AN7581 TX metadata ABI");
 static int gwan_prepare_tx_message(PWAN_FETxMsg_T *msg,int index,struct sk_buff *s,
                                   int q,struct port_info *info) {
-    assert(!s->freed && !s->nonlinear);
+    assert(rcu_depth==1 && !s->freed && !s->nonlinear);
     if(flow_fail) return -EOPNOTSUPP;
     msg->raw.gem=5; msg->raw.fport=2; msg->raw.mtr_g=127;
     msg->raw.acnt_g0=31; msg->raw.acnt_g1=31;
@@ -93,7 +94,7 @@ static int gwan_prepare_tx_message(PWAN_FETxMsg_T *msg,int index,struct sk_buff 
     s->cb.gem_port=5; return 0;
 }
 static int q1000k_transport_xmit(struct sk_buff *s,uint word0,uint word1) {
-    assert(!s->freed && !s->nonlinear);
+    assert(rcu_depth==1 && !s->freed && !s->nonlinear);
     assert(word0==(5u<<14 | (s->dev->priv.netIdx==PWAN_IF_OMCI?1u<<8:0)));
     assert(word1==(0x7f2007dfu | (s->dev->priv.netIdx==PWAN_IF_OMCI?1u<<31:0)));
     submitted_len=s->len; submits++;
@@ -106,6 +107,8 @@ static void q1000k_gwan_account(u16 gem,bool tx,unsigned int bytes) {
     wan.gpon.gemPort[3].stats.tx_packets++;
     wan.gpon.gemPort[3].stats.tx_bytes+=bytes;
 }
+static void rcu_read_lock(void) { rcu_depth++; }
+static void rcu_read_unlock(void) { assert(rcu_depth==1); rcu_depth--; }
 /* PRODUCTION */
 static void setup(struct sk_buff *s,struct net_device *d,int index) {
     memset(s,0,sizeof(*s)); memset(d,0,sizeof(*d)); memset(&wan,0,sizeof(wan));
@@ -119,7 +122,7 @@ int main(void) {
     int errors[]={0,-ENOBUFS,-ENOMEM,-ENODEV,-EOPNOTSUPP};
     for(int index=PWAN_IF_DATA;index<=PWAN_IF_OMCI;index++) for(unsigned i=0;i<sizeof(errors)/sizeof(errors[0]);i++) {
         setup(&skb,&dev,index); submit_error=errors[i];
-        assert(pwan_net_start_xmit(&skb,&dev)==NETDEV_TX_OK);
+        assert(pwan_net_start_xmit(&skb,&dev)==NETDEV_TX_OK && !rcu_depth);
         assert(frees==1 && skb.freed && submits==1 && submitted_len==60);
         assert(dev.priv.stats.tx_packets==!errors[i] && dev.priv.stats.tx_bytes==(!errors[i]?60:0));
         assert(dev.priv.stats.tx_dropped==!!errors[i]);
@@ -136,11 +139,11 @@ int main(void) {
         if(fault==6) flow_fail=true;
         if(fault==7) sys.sysLinkStatus=PON_LINK_STATUS_OFF;
         if(fault==8) { skb.len=14; pad_fail=true; }
-        assert(pwan_net_start_xmit(&skb,&dev)==NETDEV_TX_OK);
+        assert(pwan_net_start_xmit(&skb,&dev)==NETDEV_TX_OK && !rcu_depth);
         assert(frees==1 && skb.freed && !submits && dev.priv.stats.tx_dropped==1);
     }
     setup(&skb,&dev,PWAN_IF_DATA); skb.len=14;
-    assert(pwan_net_start_xmit(&skb,&dev)==NETDEV_TX_OK);
+    assert(pwan_net_start_xmit(&skb,&dev)==NETDEV_TX_OK && !rcu_depth);
     assert(frees==1 && submitted_len==60 && dev.priv.stats.tx_bytes==60);
     return 0;
 }

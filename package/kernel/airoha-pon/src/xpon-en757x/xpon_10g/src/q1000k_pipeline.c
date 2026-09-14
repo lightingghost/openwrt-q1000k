@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Complete physical port retirement; no service record is released here. */
 #include <linux/interrupt.h>
+#include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
@@ -125,6 +126,36 @@ int q1000k_pipeline_table_context(enum q1000k_table_phase phase)
 	return q1000k_table_phase == phase ? 0 : -EPERM;
 }
 
+/* TX FCS table state must not survive channel/GEM reuse. All MAC transfer
+ * paths and DMA are stopped and empty here. The XG register definition gives
+ * START bit 0 and DONE bit 8; write a fresh command with reserved bits zero.
+ * This clears packet assembly state, preserving ONU, OMCC and key registers.
+ */
+static int q1000k_pipeline_clear_fcs(void)
+{
+	unsigned int retry;
+	u32 value;
+	int ret = an7581_xpon_status();
+
+	if (ret)
+		return ret;
+	value = get_xpon_data(0x527c);
+	if (value == ~0U)
+		return -EIO;
+	if ((value & BIT(0)) && !(value & BIT(8)))
+		return -EBUSY;
+	set_xpon_data(0x527c, BIT(0));
+	for (retry = 0; retry < 3000; retry++) {
+		value = get_xpon_data(0x527c);
+		if (value == ~0U)
+			return -EIO;
+		if (value & BIT(8))
+			return an7581_xpon_status();
+		udelay(1);
+	}
+	return -ETIMEDOUT;
+}
+
 int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 			       void *arg, u32 channels)
 {
@@ -163,6 +194,10 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 	if (ret)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_TABLES_CLEARED;
+	ret = q1000k_pipeline_clear_fcs();
+	if (ret)
+		goto fail;
+	q1000k_pipeline.stage = Q1000K_PIPELINE_FCS_CLEARED;
 	ret = q1000k_transport_reset_epoch();
 	if (ret)
 		goto fail;

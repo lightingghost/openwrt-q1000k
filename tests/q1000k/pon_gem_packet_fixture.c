@@ -52,7 +52,7 @@ static int filter(struct sk_buff *s) {
     assert(!held);
     if(filter_action==1) s->cb.gem_port=501;
     if(filter_action==2) s->cb.v_if=8;
-    if(filter_action==3) assert(gwan_remove_gemport(500)==-EOPNOTSUPP);
+    if(filter_action==3) assert(gwan_config_gemport(500,ENUM_CFG_NETIDX,256)==-EOPNOTSUPP);
     return 0;
 }
 static int (*pon_check_mac_hook)(struct sk_buff *)=filter;

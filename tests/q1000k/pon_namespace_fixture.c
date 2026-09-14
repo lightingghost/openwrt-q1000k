@@ -43,6 +43,7 @@ static int q1000k_transport_get_port_config(struct airoha_pon_port_config *confi
 static int q1000k_transport_configure_port(const struct airoha_pon_port_config *old,
     const struct airoha_pon_port_config *config);
 static int q1000k_transport_reset_epoch(void);
+static int q1000k_pipeline_clear_fcs(void);
 static int q1000k_transport_activate_rx(u32 channels);
 static int q1000k_transport_resume(void);
 static int q1000k_phy_start(void);
@@ -121,9 +122,13 @@ static int q1000k_transport_configure_port(const struct airoha_pon_port_config *
     assert(config->min_len==60 && config->max_len==2000 && config->byte_mode && config->scale16);
     return step();
 }
+static int q1000k_pipeline_clear_fcs(void)
+{
+    assert(q1000k_pipeline.stage==Q1000K_PIPELINE_TABLES_CLEARED); return step();
+}
 static int q1000k_transport_reset_epoch(void)
 {
-    assert(q1000k_pipeline.stage==Q1000K_PIPELINE_TABLES_CLEARED && !q1000k_table_owner);
+    assert(q1000k_pipeline.stage==Q1000K_PIPELINE_FCS_CLEARED && !q1000k_table_owner);
     return step();
 }
 static int q1000k_transport_activate_rx(u32 channels)
@@ -174,7 +179,7 @@ int main(void)
     atomic_context=0;
     for(unsigned int cold=0;cold<2;cold++) {
         ops.reset_mac=reset_requested=cold;
-        for(int failure=0;failure<=52+(cold?2:0);failure++) {
+        for(int failure=0;failure<=53+(cold?2:0);failure++) {
             reset(); fail=failure; contain_fail=failure%35;
             int ret=q1000k_pipeline_reconfigure(&ops,&task1,0x80000081);
             if(!ret) {
@@ -189,7 +194,7 @@ int main(void)
                 assert(q1000k_pipeline.containment_error==(contain_fail?-ENODEV:0));
                 assert(q1000k_pipeline_activate()==-ETIMEDOUT && calls==failure);
             } else {
-                assert(!ret && calls==52+(cold?2:0) && !poison && !containment_calls);
+                assert(!ret && calls==53+(cold?2:0) && !poison && !containment_calls);
                 assert(q1000k_pipeline.stage==Q1000K_PIPELINE_UNDRAINED);
             }
         }

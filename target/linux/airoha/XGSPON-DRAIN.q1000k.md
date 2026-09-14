@@ -364,3 +364,56 @@ transaction. Registration/key publication and OMCI session notifications
 must preserve their separate lock order: no OMCI core session barrier while
 holding the executor. The old FE/QDMA startup gate remains until its remaining
 callers and service/backend startup are integrated.
+
+## Physical data-record replacement (vendor r36)
+
+Public T-CONT creation/removal and data GEM removal now run a complete
+namespace transaction using the existing WAN records. The process executor
+serializes protocol handlers with the transaction; the shared nonblocking
+control guard excludes legacy table writers. Binding acquisition closes
+before an RCU grace period. An explicit TX wrapper holds RCU from flow lookup
+through native submission, matching the existing RX wrapper, so a producer
+cannot copy an old binding and later submit it under the replacement epoch.
+
+The transaction snapshots queue closure, drains CPU/FE/MAC/RX/PHY, reads the
+actual native scheduler state while drained, removes tracked old data GEMs,
+invalidates data T-CONTs, clears TX FCS assembly state, resets the native epoch,
+replays scheduler/T-CONT/GEM configuration, publishes one complete software
+table, and reactivates the port. Existing unchanged channels regain their
+previous closed-queue mask. New or reassigned T-CONTs remain closed until
+provisioning opens their queues. Receive-channel activation includes newly
+created T-CONTs; merely setting FE TX enable would have omitted that step.
+
+ONU/channel zero and any unchanged OMCC record remain owned by registration.
+The OMCC's special ANI 0x1ff, lookup word, and distinct RX/TX encryption flags
+are preserved. Data removal cannot discard or rewrite it. Removing a data
+T-CONT leaves referencing GEM records unresolved until allocation returns.
+Apply compares a full expected table, rejects duplicate IDs and inconsistent
+references before hardware changes, and returns ESTALE for a stale snapshot.
+Unsupported multicast/encryption changes still fail before mutation.
+
+Any failure after physical replacement begins returns EUCLEAN and permanently
+contains the port; retained records do not imply working old hardware. A
+protocol-event overflow during the transaction also prevents successful
+reactivation/publication of service readiness. PLOAM deallocation now sends
+an error acknowledgement when the physical operation fails instead of
+acknowledging the unchecked result as success.
+
+The mandatory FCS command uses the imported XG register definition at 0x527c
+(START bit 0, DONE bit 8), a fresh command with reserved bits zero, rejection
+of all-ones reads or a pre-existing incomplete command, and a 3 ms timeout.
+It runs only after complete MAC stop and table clearing, before native epoch
+replacement. The cached OEM removal routine does not provide this completion
+check; this addition follows the imported register definition and initialization
+command pattern. This is a local implementation with mocked MMIO validation,
+not a claim of measured AN7581 completion timing.
+
+Host fixtures exercise the actual record bridge and public callers with
+injected failures at every physical operation, stale snapshots, ID reuse,
+peer preservation, unresolved/reassigned T-CONTs, OMCC preservation, scheduler
+replay, new-channel closure, asynchronous protocol failure, and PLOAM ACKs.
+Separate namespace/FCS fixtures cover every coordinator boundary and bounded
+command polling. The MAC executor continues to pass its real-kernel UML tests.
+All work is local; the board's optical nodes remain disabled and no router
+connection or flash is performed. Cold startup, registration/key publication,
+the actual OMCI backend and software service classification remain next.

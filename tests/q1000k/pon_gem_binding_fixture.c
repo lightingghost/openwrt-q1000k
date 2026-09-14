@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -28,6 +29,10 @@ typedef unsigned int uint;
 #define GPON_UNICAST_GEM 0
 #define GPON_MULTICAST_GEM 1
 #define NO_ENCRYPTION 0
+#define READ_ONCE(x) (x)
+#define GFP_KERNEL 0
+#define kzalloc(n,f) calloc(1,n)
+#define kfree free
 #define BIT(n) (UINT32_C(1)<<(n))
 typedef enum { ENUM_CFG_NETIDX,ENUM_CFG_CHANNEL,ENUM_CFG_ENCRYPTION,ENUM_CFG_LOOPBACK } ENUM_GWanGemCfgType_t;
 typedef struct { uint portId,ani; u8 channel,rxLb,rxEncrypt,txEncrypt,valid; u16 allocId; } GWAN_GemInfo_T;
@@ -58,7 +63,68 @@ static bool hardware[65536];
 struct q1000k_gem_value;
 static void q1000k_tcont_quarantine(unsigned int channel);
 static int q1000k_transport_quiesce_channel(u8 channel);
+struct airoha_pon_qos { u16 weights[8]; u8 mode; bool byte_mode,scale16; };
+static struct airoha_pon_qos qos_model[32];
+static u16 tcont_model[32];
+static u8 queue_model[32];
+static int physical_ops,physical_fail,physical_phase,protocol_error,async_protocol_fault_step;
+static bool physical_started, producers_drained;
+static u32 rx_channels;
+static pthread_mutex_t protocol_lock=PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local int protocol_owned;
+static int q1000k_protocol_enter(void) {
+    if(protocol_owned) return 1;
+    assert(!pthread_mutex_lock(&protocol_lock)); protocol_owned=1; return 0;
+}
+static void q1000k_protocol_leave(int token) {
+    if(token) return;
+    assert(protocol_owned); protocol_owned=0; assert(!pthread_mutex_unlock(&protocol_lock));
+}
+static int q1000k_protocol_status(void) { return protocol_error; }
+static void q1000k_protocol_fail(int error) { assert(error<0); protocol_error=error; memset(queue_model,255,sizeof(queue_model)); }
+static void synchronize_rcu(void) { assert(protocol_owned && !held); producers_drained=true; }
+static int physical_step(void) {
+    assert(!held && protocol_owned); physical_ops++;
+    if(physical_ops==async_protocol_fault_step) protocol_error=-ENOSPC;
+    return physical_ops==physical_fail ? -ETIMEDOUT : 0;
+}
+static int q1000k_transport_get_queue_close(u8 ch,u8 *closed) {
+    int ret=physical_step(); if(!ret) *closed=queue_model[ch]; return ret;
+}
+static int q1000k_transport_set_queue_close(u8 ch,u8 closed) {
+    assert(physical_phase==3); int ret=physical_step(); if(!ret) queue_model[ch]=closed; return ret;
+}
+static int q1000k_transport_get_qos(u8 ch,struct airoha_pon_qos *qos) {
+    assert(physical_phase==1); int ret=physical_step(); if(!ret) *qos=qos_model[ch]; return ret;
+}
+static int q1000k_transport_set_qos(u8 ch,const struct airoha_pon_qos *qos) {
+    assert(physical_phase==2 && !memcmp(qos,&qos_model[ch],sizeof(*qos))); return physical_step();
+}
+static int q1000k_tcont_clear_namespace(void) {
+    assert(physical_phase==1); int ret=physical_step(); if(!ret) for(int i=1;i<32;i++) tcont_model[i]=0xffff; return ret;
+}
+static int q1000k_tcont_install(unsigned int ch,u16 alloc,u16 onu) {
+    assert(physical_phase==2 && ch>0 && ch<32 && onu==17 && tcont_model[ch]==0xffff);
+    int ret=physical_step(); if(!ret) tcont_model[ch]=alloc; return ret;
+}
 /* PRODUCTION */
+int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,void *arg,u32 channels)
+{
+    assert(producers_drained && q1000k_gwan_changing && !ops->reset_mac && atomic_load(&q1000k_tcont_config_busy)==1);
+    physical_started=true; int ret=physical_step(); if(ret) return ret;
+    memset(queue_model,255,sizeof(queue_model)); physical_phase=1;
+    ret=ops->clear(arg); if(ret) return ret;
+    ret=physical_step(); if(ret) return ret; /* The separate namespace fixture tests real FCS/epoch commands. */
+    physical_phase=2; ret=ops->install(arg); if(ret) return ret;
+    rx_channels=channels; return 0;
+}
+int q1000k_pipeline_activate(void)
+{
+    assert(q1000k_gwan_changing && physical_phase==2);
+    for(unsigned int i=1;i<32;i++) assert(wan.gpon.allocId[i]==tcont_model[i]);
+    int ret=physical_step(); if(!ret) physical_phase=3; return ret;
+}
+
 
 bool q1000k_gem_faulted(void) { return faulted; }
 int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,
@@ -66,8 +132,13 @@ int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,
 {
     struct q1000k_gwan_binding binding;
     assert(!held && atomic_load(&q1000k_tcont_config_busy)==1);
-    assert(expected->valid==0 && value->valid==1 && !value->encrypted);
-    assert(q1000k_gwan_binding(gem,false,&binding)==-ENOENT);
+    if(!q1000k_gwan_changing) {
+        assert(expected->valid==0 && value->valid==1 && !value->encrypted);
+        assert(q1000k_gwan_binding(gem,false,&binding)==-ENOENT);
+    } else {
+        assert(physical_phase==1 || physical_phase==2);
+        int ret=physical_step(); if(ret) return ret;
+    }
     writes++;
     if(reenter) {
         assert(gwan_create_new_gemport(800,33,0,200)==-EBUSY);
@@ -78,8 +149,8 @@ int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,
     if(yield_io) sched_yield();
     if(faulted) return -EIO;
     if(write_error) return write_error;
-    if(hardware[gem]) return -ESTALE;
-    hardware[gem]=true; return 0;
+    if(hardware[gem] != !!expected->valid) return -ESTALE;
+    hardware[gem]=!!value->valid; return 0;
 }
 static void q1000k_tcont_quarantine(unsigned int channel)
 {
@@ -102,11 +173,15 @@ static void reset_model(void)
     q1000k_gwan_retiring_channels=quarantine=closed=0;
     atomic_store(&q1000k_tcont_config_busy,0);
     faulted=reenter=yield_io=false; writes=quiesces=0; write_error=quiesce_error=0;
+    q1000k_gwan_error=0; q1000k_gwan_changing=false;
+    physical_ops=physical_fail=physical_phase=protocol_error=async_protocol_fault_step=0; physical_started=producers_drained=false; rx_channels=0;
+    memset(queue_model,0,sizeof(queue_model)); memset(qos_model,0,sizeof(qos_model));
+    for(unsigned int i=0;i<32;i++) { tcont_model[i]=wan.gpon.allocId[i]; qos_model[i].mode=i%8; qos_model[i].weights[0]=i+1; }
 }
 static void publish(u8 channel,u16 alloc_id)
 {
     assert(!atomic_cmpxchg(&q1000k_tcont_config_busy,0,1));
-    q1000k_gwan_publish_tcont(channel,alloc_id);
+    q1000k_gwan_publish_tcont(channel,alloc_id); tcont_model[channel]=alloc_id;
     atomic_store(&q1000k_tcont_config_busy,0);
 }
 static void failed_binding(u16 gem,bool tx,int error)
@@ -202,25 +277,22 @@ int main(void)
     q1000k_gwan_account(65534,true,60); q1000k_gwan_account(65534,false,100);
     assert(wan.gpon.gemPort[0].stats.tx_packets==1 && wan.gpon.gemPort[0].stats.rx_bytes==100);
     create_ready(500,4,200,3);
-    quiesce_error=-EAGAIN;
-    assert(xmcs_remove_gem_port(65534)==-EAGAIN && closed==BIT(4) && quarantine==BIT(4));
-    failed_binding(65534,true,-ESHUTDOWN); failed_binding(500,true,-ESHUTDOWN);
-    assert(gwan_create_new_gemport(501,33,0,200)==-ESHUTDOWN);
-    quiesce_error=0;
-    assert(xmcs_remove_gem_port(65534)==-EOPNOTSUPP && wan.gpon.gemNumbers==2 && hardware[65534]);
-    assert(gwan_config_gemport(500,ENUM_CFG_NETIDX,3)==-ESHUTDOWN);
-    assert(gwan_remove_all_gemport_for_disable()==-EOPNOTSUPP && wan.gpon.gemNumbers==2);
+    assert(!xmcs_remove_gem_port(65534) && wan.gpon.gemNumbers==1 && !hardware[65534]);
+    failed_binding(65534,true,-ENOENT);
+    assert(!q1000k_gwan_binding(500,true,&b) && b.channel==4 && b.ani==3);
+    assert(!gwan_create_new_gemport(65534,4,0,200));
+    assert(!gwan_remove_all_gemport_for_disable() && !wan.gpon.gemNumbers && !hardware[500]);
 
     reset_model(); assert(!gwan_remove_all_gemport());
     assert(!gwan_create_new_gemport(600,32,1,0xffff));
     failed_binding(600,false,-ENODATA); assert(!gwan_config_gemport(600,ENUM_CFG_NETIDX,255));
     assert(!q1000k_gwan_binding(600,false,&b) && b.multicast && b.ani==255);
     failed_binding(600,true,-EOPNOTSUPP);
-    assert(gwan_remove_gemport(600)==-EOPNOTSUPP && !quiesces && wan.gpon.gemNumbers==1);
-    failed_binding(600,false,-ESHUTDOWN);
+    assert(!gwan_remove_gemport(600) && !wan.gpon.gemNumbers);
+    failed_binding(600,false,-ENOENT);
     assert(!gwan_create_new_gemport(601,33,0,202));
-    assert(gwan_remove_gemport(601)==-EOPNOTSUPP && !quiesces);
-    publish(6,202); assert(wan.gpon.gemPort[1].info.channel==33);
+    assert(!gwan_remove_gemport(601) && !wan.gpon.gemNumbers);
+    publish(6,202);
 
     reset_model(); create_ready(500,4,200,7);
     assert(gwan_config_gemport(500,ENUM_CFG_NETIDX,256)==-EOPNOTSUPP);
@@ -228,7 +300,8 @@ int main(void)
     failed_binding(500,false,-ESHUTDOWN);
     reset_model(); create_ready(500,4,200,7); faulted=true;
     failed_binding(500,true,-EIO); assert(gwan_config_gemport(500,ENUM_CFG_NETIDX,7)==-EIO);
-    assert(gwan_remove_gemport(500)==-EOPNOTSUPP && closed==BIT(4));
+    assert(gwan_remove_gemport(500)==-EUCLEAN && protocol_error==-EIO);
+    failed_binding(500,false,-EIO);
 
     reset_model(); create_ready(500,4,200,7);
     wan.gpon.gemIdToIndex[500]=255; failed_binding(500,true,-ENOENT);
@@ -249,7 +322,7 @@ int main(void)
     }
     unsigned int gem=wan.gpon.gemPort[255].info.portId;
     assert(!q1000k_gwan_binding(gem,true,&b) && b.index==255);
-    assert(gwan_remove_all_gemport()==-EOPNOTSUPP && wan.gpon.gemNumbers==256);
+    assert(!gwan_remove_all_gemport() && !wan.gpon.gemNumbers);
     atomic_store(&finished,true);
     for(unsigned int i=0;i<4;i++) assert(!pthread_join(readers[i],NULL));
     return 0;

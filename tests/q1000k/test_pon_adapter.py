@@ -14,7 +14,8 @@ class PonAdapterTests(unittest.TestCase):
         end = header.index('} PWAN_FETxMsg_T ;', start) + len('} PWAN_FETxMsg_T ;')
         fixture = Path(__file__).with_name('pon_adapter_tx_fixture.c').read_text()
         run_c(fixture.replace('/* TYPES */', header[start:end]).replace(
-            '/* PRODUCTION */', function('pwan/xpon_netif.c', 'pwan_net_start_xmit')))
+            '/* PRODUCTION */', function('pwan/xpon_netif.c', 'pwan_net_start_xmit_impl') +
+            function('pwan/xpon_netif.c', 'pwan_net_start_xmit')))
 
 
 if __name__ == '__main__':

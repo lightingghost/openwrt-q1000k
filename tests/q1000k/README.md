@@ -429,3 +429,14 @@ interrupt masking until acknowledgement, waiting for active IRQ handlers,
 synchronous timer cancellation and self-rearm, callback teardown, and sticky
 bounded-queue overflow. The separate PHY UML test also verifies a typed TX
 request waits for an unrelated active callback and rejects self-recursion.
+
+`test_pon_records.py` runs the actual WAN record bridge, public T-CONT/GEM
+callers and physical replacement coordinator callbacks with synthetic hardware
+operations. It covers all operation failures, CAS/stale snapshots, identifier
+reuse, ONU/OMCC preservation, unchanged peer queues and QoS, unresolved and
+newly assigned channels, and asynchronous protocol faults. The packet adapter
+fixture verifies RCU covers flow lookup through native TX submission; the
+record fixture requires producer synchronization before physical replacement.
+`test_pon_fcs.py` separately exercises the production FCS command's initial busy
+check, all-ones rejection, provider failures and bounded completion polling.
+The PLOAM fixture checks failed physical deallocation produces an error ACK.

@@ -19,8 +19,10 @@ def binding_source():
     source = (BSP.parent / 'xpon-en757x/xpon_10g/src/pwan/gpon_wan.c').read_text()
     start = source.index('static atomic_t q1000k_tcont_config_busy')
     end = source.index('static int q1000k_gwan_create_tcont', start)
-    source = header('q1000k_gem.h') + header('q1000k_gwan.h') + source[start:end]
-    for name in ['gwan_create_new_gemport', 'gwan_config_gemport',
+    source = header('q1000k_gem.h') + header('q1000k_gwan.h') + header('q1000k_pipeline.h') + source[start:end]
+    source += (MAC / 'src/q1000k_gwan_rebuild.c').read_text()
+    for name in ['gwan_create_new_tcont', 'gwan_remove_tcont', 'gwan_remove_all_tcont',
+                 'gwan_create_new_gemport', 'gwan_config_gemport',
                  'gwan_config_gemport_encrypt', 'gwan_remove_gemport',
                  'gwan_remove_all_gemport', 'gwan_remove_all_gemport_for_disable']:
         source += function('pwan/gpon_wan.c', name)

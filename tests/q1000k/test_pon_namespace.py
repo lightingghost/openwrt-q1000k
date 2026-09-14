@@ -9,6 +9,9 @@ MAC=REPO/'package/kernel/airoha-pon/src/xpon-en757x/xpon_10g'
 class NamespaceTests(unittest.TestCase):
     def test_clear_install_activate_and_every_boundary_failure(self):
         source=(MAC/'inc/common/q1000k_pipeline.h').read_text()+(MAC/'src/q1000k_pipeline.c').read_text()
+        start=source.index('static int q1000k_pipeline_clear_fcs(')
+        end=source.index('int q1000k_pipeline_reconfigure(',start)
+        source=source[:start]+source[end:]
         source=re.sub(r'^#include[^\n]*\n','',source,flags=re.M)
         fixture=Path(__file__).with_name('pon_namespace_fixture.c').read_text()
         run_c(fixture.replace('/* PRODUCTION */',source))

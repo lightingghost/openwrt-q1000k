@@ -28,7 +28,9 @@ int q1000k_protocol_resume(void);
 bool q1000k_protocol_owned(void);
 /* Serialize a process control caller with protocol events. The nonnegative
  * token must be returned unchanged to leave; nested owned calls are allowed.
- * A control caller must not hold RTNL, RCU, a spinlock or an OMCI core lock.
+ * A control caller must not hold RTNL, RCU or a spinlock. OMCI service
+ * callbacks may hold their core session lock; reverse notifications to the
+ * core must run outside this executor to preserve that lock order.
  */
 int q1000k_protocol_enter(void);
 void q1000k_protocol_leave(int token);
