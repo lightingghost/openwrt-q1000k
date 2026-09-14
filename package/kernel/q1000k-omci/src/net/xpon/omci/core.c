@@ -29,6 +29,7 @@ static struct genl_family omci_genl_family;
 
 static const struct nla_policy omci_policy[OMCI_ATTR_MAX + 1] = {
 	[OMCI_ATTR_DEV_ID] = { .type = NLA_U32 },
+	[OMCI_ATTR_IFINDEX] = { .type = NLA_U32 },
 	[OMCI_ATTR_PDU] = {
 		.type = NLA_BINARY,
 		.len = OMCI_MAX_PDU_LEN,
@@ -75,12 +76,26 @@ static struct omci_device *omci_find_locked(u32 id)
 
 static struct omci_device *omci_get_from_info(struct genl_info *info)
 {
+	struct omci_device *odev;
 	u32 id = 0;
 
 	if (info->attrs[OMCI_ATTR_DEV_ID])
 		id = nla_get_u32(info->attrs[OMCI_ATTR_DEV_ID]);
 
-	return omci_find_locked(id);
+	if (info->attrs[OMCI_ATTR_IFINDEX]) {
+		u32 ifindex = nla_get_u32(info->attrs[OMCI_ATTR_IFINDEX]);
+
+		if (!ifindex)
+			return NULL;
+		list_for_each_entry(odev, &omci_devices, list)
+			if (odev->ifindex == ifindex &&
+			    (!info->attrs[OMCI_ATTR_DEV_ID] || odev->id == id) &&
+			    net_eq(dev_net(odev->xpon->netdev), genl_info_net(info)))
+				return odev;
+		return NULL;
+	}
+	odev = omci_find_locked(id);
+	return odev && net_eq(dev_net(odev->xpon->netdev), genl_info_net(info)) ? odev : NULL;
 }
 
 static int omci_put_telemetry(struct sk_buff *msg, struct omci_device *odev)
@@ -128,6 +143,7 @@ static int omci_put_telemetry(struct sk_buff *msg, struct omci_device *odev)
 
 static int omci_put_status(struct sk_buff *msg, struct omci_device *odev)
 {
+	bool authenticated;
 	u32 owner_portid;
 	u32 flags = 0;
 	u16 onu_id;
@@ -142,6 +158,8 @@ static int omci_put_status(struct sk_buff *msg, struct omci_device *odev)
 	onu_id = odev->onu_id;
 	gem_port_id = odev->gem_port_id;
 	state = odev->state;
+	authenticated = odev->started && odev->channel_up && odev->auth_epoch &&
+			!odev->session_exhausted;
 	if (odev->channel_up)
 		flags |= OMCI_F_CHANNEL_UP;
 	spin_unlock_bh(&odev->state_lock);
@@ -151,6 +169,7 @@ static int omci_put_status(struct sk_buff *msg, struct omci_device *odev)
 	    nla_put_u16(msg, OMCI_ATTR_ONU_ID, onu_id) ||
 	    nla_put_u16(msg, OMCI_ATTR_GEM_PORT_ID, gem_port_id) ||
 	    nla_put_u8(msg, OMCI_ATTR_STATE, state) ||
+	    nla_put_u8(msg, OMCI_ATTR_AUTHENTICATED, authenticated) ||
 	    nla_put_u32(msg, OMCI_ATTR_FLAGS, flags) ||
 	    nla_put_u32(msg, OMCI_ATTR_CAPABILITIES, odev->capabilities) ||
 	    nla_put_u32(msg, OMCI_ATTR_OWNER_PORTID, owner_portid) ||

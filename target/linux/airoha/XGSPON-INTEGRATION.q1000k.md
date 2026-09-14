@@ -1101,3 +1101,24 @@ builds also pass. No device access occurred. The next work includes the
 userspace q1000k-omci command requested by the user, complete startup/reset and
 PHY-ready/loss integration. Advanced encryption and multicast remain separate
 from this unicast path.
+
+## Userspace OMCI management command
+
+The `q1000k-omci-tools` package provides the `q1000k-omci` command requested by
+the user. It keeps the imported/adapted kernel core as the protocol owner and
+uses its Generic Netlink API for status, MIB inspection and validated runtime
+configuration. It does not add a second daemon. The [command reference](../../../package/network/utils/q1000k-omci-tools/README.md)
+describes selectors, named profiles, JSON output and the exact local tests.
+
+Core r6/API version 15 adds strict interface-index selection, authentication
+admission status, configured rule count and service/reconciliation errors.
+Absent telemetry stays unavailable; configured rules are not labelled as
+working optical service. The client validates reply framing, supports bounded
+MIB traversal, preserves 64-bit counter precision and does not expose keys or
+registration-password writes. No activation or autoload is added.
+
+The current PR #24577 head was rechecked through the GitHub API and remains
+`d7569c5e26551084e7643b0e83ecda9c31f49f11`. The `econet-omcid` reuse review still
+applies. Its user-facing management concept is useful; its EN7528 procfs
+transport and successful no-op protocol replies are not imported. The user
+confirmed continuing with the existing generic core.

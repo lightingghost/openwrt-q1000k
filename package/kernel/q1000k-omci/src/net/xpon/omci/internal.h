@@ -83,6 +83,7 @@ struct omci_agent {
 	struct xarray mib;
 	struct xarray *services;
 	int service_error;
+	int reconcile_error;
 	bool resetting_registration;
 	struct omci_agent_config config;
 	u32 upload_index;

@@ -3231,8 +3231,10 @@ static int omci_agent_reconcile_services_locked(struct omci_device *odev)
 	int ret;
 
 	desired = kzalloc(sizeof(*desired), GFP_KERNEL);
-	if (!desired)
+	if (!desired) {
+		agent->reconcile_error = -ENOMEM;
 		return -ENOMEM;
+	}
 	xa_init(desired);
 	xa_for_each(&agent->mib, index, object) {
 		u8 tp_type;
@@ -3255,6 +3257,7 @@ static int omci_agent_reconcile_services_locked(struct omci_device *odev)
 		swap(agent->services, desired);
 
 out:
+	agent->reconcile_error = ret;
 	omci_agent_free_service_array(desired);
 	xa_destroy(desired);
 	kfree(desired);
@@ -4434,6 +4437,7 @@ void omci_agent_channel_changed(struct omci_device *odev, bool valid)
 
 		agent->alarm_sequence = 0;
 		ret = omci_agent_clear_services_locked(odev);
+		agent->reconcile_error = ret;
 		if (ret == -EUCLEAN)
 			agent->service_error = ret;
 	} else {
@@ -4451,6 +4455,10 @@ void omci_agent_channel_changed(struct omci_device *odev, bool valid)
 int omci_agent_put_status(struct sk_buff *msg, struct omci_device *odev)
 {
 	struct omci_agent *agent = &odev->agent;
+	struct omci_service_state *service;
+	unsigned long index;
+	u32 service_rules = 0;
+	int service_error;
 	u32 count;
 	u32 profile_quirks;
 	u16 sync;
@@ -4465,6 +4473,9 @@ int omci_agent_put_status(struct sk_buff *msg, struct omci_device *odev)
 	bool operational;
 
 	mutex_lock(&agent->lock);
+	xa_for_each(agent->services, index, service)
+		service_rules++;
+	service_error = agent->service_error ?: agent->reconcile_error;
 	count = omci_mib_count_locked(agent);
 	sync = agent->mib_sync;
 	enabled = agent->enabled;
@@ -4480,6 +4491,8 @@ int omci_agent_put_status(struct sk_buff *msg, struct omci_device *odev)
 	mutex_unlock(&agent->lock);
 
 	if (nla_put_u8(msg, OMCI_ATTR_AGENT_ENABLED, enabled) ||
+	    nla_put_u32(msg, OMCI_ATTR_SERVICE_RULES, service_rules) ||
+	    nla_put_s32(msg, OMCI_ATTR_SERVICE_ERROR, service_error) ||
 	    nla_put_u8(msg, OMCI_ATTR_AGENT_OPERATIONAL, operational) ||
 	    nla_put_u8(msg, OMCI_ATTR_AGENT_PERMISSIVE, permissive) ||
 	    nla_put_u8(msg, OMCI_ATTR_AGENT_FAKE_OMCI, fake_omci) ||
