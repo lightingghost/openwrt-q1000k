@@ -8,6 +8,10 @@ struct q1000k_protocol_ops {
 	void (*irq)(void);
 	void (*phy)(unsigned int source, unsigned int event);
 	void (*fault)(int error);
+	/* Optional ordered session work, outside the executor mutex. May enter
+	 * it for a hardware transaction, after completing OMCI core barriers.
+	 */
+	void (*control)(void);
 };
 /* Init/start/stop are serialized by the module owner. Init leaves IRQ and
  * dispatch closed; stop must precede freeing any callback/timer/task state.
@@ -35,6 +39,13 @@ bool q1000k_protocol_owned(void);
 int q1000k_protocol_enter(void);
 void q1000k_protocol_leave(int token);
 void q1000k_protocol_fail(int error);
+/* Request one coalesced control callback ahead of pending protocol events.
+ * Only an executor owner may request it. The callback runs on the same ordered
+ * worker without the execution mutex, so the current protocol event must
+ * return before it executes. No later protocol event overtakes it. Stop waits
+ * for it; it must never call stop or retain borrowed event storage.
+ */
+int q1000k_protocol_control(void);
 
 int q1000k_protocol_timer_init(struct timer_list *timer,
 			     void (*callback)(struct timer_list *), unsigned long expires);

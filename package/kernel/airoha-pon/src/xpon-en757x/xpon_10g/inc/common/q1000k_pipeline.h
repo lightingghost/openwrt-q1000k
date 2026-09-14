@@ -63,5 +63,7 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
  * CPU queues remain closed for explicit provisioning after success.
  */
 int q1000k_pipeline_activate(void);
+/* Resume receive/control state while keeping the controller transmitter off. */
+int q1000k_pipeline_activate_receive_only(void);
 
 #endif

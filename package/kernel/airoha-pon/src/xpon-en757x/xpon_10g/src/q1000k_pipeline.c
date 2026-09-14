@@ -233,7 +233,7 @@ out:
 	return ret;
 }
 
-int q1000k_pipeline_activate(void)
+static int q1000k_pipeline_activate_mode(bool transmit)
 {
 	int ret;
 
@@ -261,7 +261,7 @@ int q1000k_pipeline_activate(void)
 	if (ret)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_MAC_ACTIVE;
-	ret = q1000k_phy_set_tx(true);
+	ret = q1000k_phy_set_tx(transmit);
 	if (ret)
 		goto fail;
 	ret = q1000k_transport_resume();
@@ -276,4 +276,14 @@ fail:
 out:
 	mutex_unlock(&q1000k_pipeline_lock);
 	return ret;
+}
+
+int q1000k_pipeline_activate(void)
+{
+	return q1000k_pipeline_activate_mode(true);
+}
+
+int q1000k_pipeline_activate_receive_only(void)
+{
+	return q1000k_pipeline_activate_mode(false);
 }

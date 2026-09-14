@@ -358,6 +358,29 @@ int q1000k_omci_core_test(void)
 	omci_device_set_channel(odev, 7, true);
 	CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
 
+	/* A new ONU registration must not inherit the previous OLT's GEM MIB
+	 * or a changed ONU-created T-CONT allocation. Rekey above preserved it.
+	 */
+	{
+		struct omci_mib_object *stale;
+
+		mutex_lock(&odev->agent.lock);
+		stale = omci_get_or_create_locked(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 0x456, true);
+		CHECK(stale);
+		stale = omci_mib_lookup(&odev->agent, OMCI_CLASS_TCONT, 0x8000);
+		CHECK(stale);
+		put_unaligned_be16(123, stale->data);
+		mutex_unlock(&odev->agent.lock);
+		CHECK(!omci_device_reset_registration(odev));
+		CHECK(!odev->channel_up && !odev->auth_epoch && odev->onu_id == 0xffff);
+		CHECK(!omci_mib_lookup(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 0x456));
+		stale = omci_mib_lookup(&odev->agent, OMCI_CLASS_TCONT, 0x8000);
+		CHECK(stale && get_unaligned_be16(stale->data) == 0xffff);
+		CHECK(!odev->agent.resetting_registration);
+		omci_device_set_channel(odev, 7, true);
+		CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
+	}
+
 	/* Missing provisioning callbacks cannot produce success. */
 	incomplete = fixture_ops;
 	incomplete.set_tcont = NULL;

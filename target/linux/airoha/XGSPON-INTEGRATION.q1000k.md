@@ -1004,3 +1004,46 @@ a changed registration publishes the newly programmed record. All 50 host
 fixtures and the AArch64 package build pass, including failure injection at
 every registration replacement step. The PLOAM caller connection follows in
 the OMCI session owner; the helper alone does not establish a usable session.
+
+## Connected authenticated OMCI and unicast service provider
+
+The r39 MAC package registers the generic PON/OMCI core on the `pon` netdevice.
+Native OAM RX now verifies a complete software MIC with the selected verified
+key bank and passes the exact authentication epoch to the core. TX appends its
+MIC to a private copy and transfers the original only after bounded native
+queue admission succeeds. Raw netdevice OAM injection is closed. Data traffic
+uses the core's ANI-side VLAN/PCP rules, coherent GEM/T-CONT bindings and explicit
+per-channel queue masks; VLAN offload tags are materialized, checksums completed
+and short Ethernet frames padded before native submission. UNI disable and
+missing/ambiguous service rules reject traffic. This provider does not rewrite
+customer-side class-171 VLAN treatments: the imported core explicitly describes
+the network-facing VLAN on `pon`.
+
+PLOAM profile and ONU assignment now request ordered session work. A dedicated
+control job runs on the MAC worker without its execution mutex, ahead of later
+protocol events. Core RX/TX/session barriers can therefore finish an active
+provisioning call that needs the executor. The control callback then obtains
+execution ownership for physical retirement, verified key/ONU/OMCC replacement
+and software publication. Stale request generations cannot publish an old ONU.
+Profile acknowledgements follow verified key programming. The registration
+namespace's receive-only activation keeps controller TX disabled after removal.
+
+The core's new registration-reset API closes admission and restores the MIB's
+initial ONU-created entities, removing the old OLT's objects. This is separate
+from an ordinary key change, which preserves the MIB. Private staged core
+headers and its symbol versions are explicit MAC build dependencies. The core
+now reports Q1000K equipment identity instead of its imported EN7523 default.
+
+Validation: all 52 host PON tests pass, including actual provider/session code,
+packet ownership, stale requests, old-key rejection, every modeled physical
+failure, VLAN/PCP rules and lifecycle unwind. The protocol UML test passes with
+control work waiting outside the executor while another service enters it.
+The complete OMCI core UML test passes, including registration MIB reset and its
+existing RX/rekey/TX/teardown races. The AArch64 MAC/core package build and
+modpost are checked as part of this checkpoint. No device access occurred.
+
+Cold MAC startup and legacy reset/PHY-ready/loss callers, remaining scheduler
+managed-entity controls, encrypted/multicast data and profile-seeded services
+still need their final integration. The existing startup gate, BROKEN marking,
+disabled PON node and lack of autoload remain until that work is complete. These
+local test results do not establish optical service or hardware timing.

@@ -1376,7 +1376,7 @@ omci_agent_profile_reconcile_locked(struct omci_device *odev,
 	if (ret)
 		return ret;
 	agent->profile_effective = new_profile;
-	ret = omci_agent_reconcile_services_locked(odev);
+	ret = agent->resetting_registration ? 0 : omci_agent_reconcile_services_locked(odev);
 	agent->profile_effective = old_profile;
 	if (ret && ret != -EOPNOTSUPP)
 		return ret;
@@ -2644,7 +2644,7 @@ static int omci_agent_mib_reset_locked(struct omci_device *odev, bool all,
 	 * leaves the ONU in O5 with OMCI up and no datapath, indefinitely,
 	 * until some unrelated event happens to trigger reconcile again.
 	 */
-	if (!ret)
+	if (!ret && !agent->resetting_registration)
 		ret = omci_agent_reconcile_services_locked(odev);
 
 	return ret;
@@ -4967,6 +4967,19 @@ int omci_agent_mib_delete(struct omci_device *odev, u16 class_id,
 unlock:
 	mutex_unlock(&agent->lock);
 	kfree(object);
+	return ret;
+}
+
+int omci_agent_reset_registration(struct omci_device *odev)
+{
+	struct omci_agent *agent = &odev->agent;
+	int ret;
+
+	mutex_lock(&agent->lock);
+	agent->resetting_registration = true;
+	ret = omci_agent_mib_reset_locked(odev, true, NULL);
+	agent->resetting_registration = false;
+	mutex_unlock(&agent->lock);
 	return ret;
 }
 

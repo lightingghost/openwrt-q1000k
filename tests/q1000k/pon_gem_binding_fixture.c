@@ -125,6 +125,7 @@ int q1000k_pipeline_activate(void)
     int ret=physical_step(); if(!ret) physical_phase=3; return ret;
 }
 
+int q1000k_pipeline_activate_receive_only(void) { return q1000k_pipeline_activate(); }
 
 bool q1000k_gem_faulted(void) { return faulted; }
 int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,

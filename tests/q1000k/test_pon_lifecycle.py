@@ -325,9 +325,11 @@ struct system {
     struct { void *task; } xpon_daemon;
 } system_data, *gpPonSysData;
 static struct phy *gpPhyData;
-static void *gpWanPriv,*gpMcsPriv,*gpGponPriv,*gpEponPriv;
+#define PWAN_IF_DATA 3
+static struct { void *pPonNetDev[4]; } wan_data, *gpWanPriv;
+static void *gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
-enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, GASP, PROC, HOOK, API, WORKER, PROTOSTART, STEPS };
+enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, GASP, PROC, HOOK, API, WORKER, PROTOSTART, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
 static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error,xpon_protocol_ops;
 static bool xpon_is_ready(void); /* production definition is non-static */
@@ -370,13 +372,17 @@ static void kfree(void *p) {
     release(ALLOC);
 }
 static int xpondrv_init_global_data(void) {
-    gpPhyData=&phy; gpWanPriv=gpMcsPriv=gpGponPriv=gpEponPriv=&system_data;
+    gpPhyData=&phy; gpWanPriv=&wan_data; wan_data.pPonNetDev[3]=&system_data; gpMcsPriv=gpGponPriv=gpEponPriv=&system_data;
     return acquire(GLOBALS);
 }
 static void omci_oam_monitor_init(void *p) { assert(live[GLOBALS]); }
 static int pwan_init(void) { return acquire(WAN); }
 static int xpon_mci_init(void) { return acquire(MCI); }
 static int gpon_init(void) { return acquire(GPON); }
+static int q1000k_omci_backend_init(void *dev) { assert(dev==&system_data); return acquire(OMCI); }
+static void q1000k_omci_backend_cleanup(void) {
+    assert(!xpon_ready && !live[PROTOCOL]); if(live[OMCI]) release(OMCI);
+}
 static void gpon_quiesce(void) { assert(live[GPON] && !xpon_ready); }
 static void gpon_stop_work(void) { assert(live[GPON] && live[WAN] && rcu_drained); }
 static int xpondrv_rx_packet(void) { return 0; }

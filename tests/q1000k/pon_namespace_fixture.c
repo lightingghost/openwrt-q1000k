@@ -47,6 +47,7 @@ static int q1000k_pipeline_clear_fcs(void);
 static int q1000k_transport_activate_rx(u32 channels);
 static int q1000k_transport_resume(void);
 static int q1000k_phy_start(void);
+static bool transmitter;
 static int q1000k_phy_set_tx(bool enable);
 /* PRODUCTION */
 static int step(void) { assert(held && !atomic_context); return ++calls==fail ? -ETIMEDOUT : 0; }
@@ -142,7 +143,7 @@ static int q1000k_phy_start(void)
 }
 static int q1000k_phy_set_tx(bool enable)
 {
-    assert(enable && q1000k_pipeline.stage==Q1000K_PIPELINE_MAC_ACTIVE); return step();
+    assert(q1000k_pipeline.stage==Q1000K_PIPELINE_MAC_ACTIVE); transmitter=enable; return step();
 }
 static int q1000k_transport_resume(void)
 {
@@ -199,5 +200,9 @@ int main(void)
             }
         }
     }
+    reset(); reset_requested=ops.reset_mac=false;
+    assert(!q1000k_pipeline_reconfigure(&ops,&task1,0x80000081));
+    transmitter=true;
+    assert(!q1000k_pipeline_activate_receive_only() && !transmitter);
     return 0;
 }

@@ -14,7 +14,7 @@
 #define Q1000K_PROTOCOL_EVENTS 64
 
 enum q1000k_job_type { Q1000K_JOB_TIMER, Q1000K_JOB_TASK, Q1000K_JOB_PHY,
-	Q1000K_JOB_IRQ };
+	Q1000K_JOB_IRQ, Q1000K_JOB_CONTROL };
 struct q1000k_protocol_job {
 	struct list_head node;
 	enum q1000k_job_type type;
@@ -35,7 +35,7 @@ static LIST_HEAD(qprotocol_pending);
 static struct q1000k_protocol_job qprotocol_timers[Q1000K_PROTOCOL_TIMERS];
 static struct q1000k_protocol_job qprotocol_tasks[Q1000K_PROTOCOL_TASKS];
 static struct q1000k_protocol_job qprotocol_events[Q1000K_PROTOCOL_EVENTS];
-static struct q1000k_protocol_job qprotocol_irq_job;
+static struct q1000k_protocol_job qprotocol_irq_job, qprotocol_control_job;
 static int qprotocol_irq, qprotocol_error;
 static bool qprotocol_live, qprotocol_started, qprotocol_paused;
 static bool qprotocol_irq_masked, qprotocol_fault_pending;
@@ -99,6 +99,25 @@ static void qprotocol_enqueue(struct q1000k_protocol_job *job)
 	qprotocol_kick();
 }
 
+int q1000k_protocol_control(void)
+{
+	unsigned long flags;
+	int ret;
+
+	if (!q1000k_protocol_owned())
+		return -EPERM;
+	spin_lock_irqsave(&qprotocol_lock, flags);
+	ret = qprotocol_error ?: (!qprotocol_live ? -ENODEV :
+		!qprotocol_ops.control ? -EOPNOTSUPP : 0);
+	if (!ret && !qprotocol_control_job.queued) {
+		list_add(&qprotocol_control_job.node, &qprotocol_pending);
+		qprotocol_control_job.queued = true;
+		qprotocol_kick();
+	}
+	spin_unlock_irqrestore(&qprotocol_lock, flags);
+	return ret;
+}
+
 static void qprotocol_remove(struct q1000k_protocol_job *job)
 {
 	if (job->queued) {
@@ -158,6 +177,13 @@ static void qprotocol_work(struct work_struct *work)
 			}
 		}
 		spin_unlock_irqrestore(&qprotocol_lock, flags);
+		if (job && type == Q1000K_JOB_CONTROL) {
+			WRITE_ONCE(qprotocol_owner, NULL);
+			mutex_unlock(&qprotocol_execute);
+			qprotocol_ops.control();
+			cond_resched();
+			continue;
+		}
 		if (fault)
 			qprotocol_ops.fault(fault);
 		else if (job) {
@@ -166,6 +192,7 @@ static void qprotocol_work(struct work_struct *work)
 			case Q1000K_JOB_TASK: job->task.fn(job->task.arg); break;
 			case Q1000K_JOB_PHY: qprotocol_ops.phy(source, event); break;
 			case Q1000K_JOB_IRQ: qprotocol_ops.irq(); break;
+			case Q1000K_JOB_CONTROL: break; /* dispatched without mutex above */
 			}
 		}
 		/* A level IRQ stays masked until its deferred handler has read and
@@ -457,6 +484,8 @@ int q1000k_protocol_init(int irq, const struct q1000k_protocol_ops *ops)
 	memset(qprotocol_events, 0, sizeof(qprotocol_events));
 	memset(&qprotocol_irq_job, 0, sizeof(qprotocol_irq_job));
 	qprotocol_irq_job.type = Q1000K_JOB_IRQ;
+	memset(&qprotocol_control_job, 0, sizeof(qprotocol_control_job));
+	qprotocol_control_job.type = Q1000K_JOB_CONTROL;
 	qprotocol_error = 0;
 	qprotocol_fault_pending = false;
 	qprotocol_started = false;
@@ -501,7 +530,8 @@ void q1000k_protocol_stop(void)
 	unsigned int i;
 	bool unmask;
 
-	if (WARN_ON_ONCE(!qprotocol_process() || q1000k_protocol_owned()))
+	if (WARN_ON_ONCE(!qprotocol_process() || q1000k_protocol_owned() ||
+			 current_work() == &qprotocol_worker))
 		return;
 	spin_lock_irqsave(&qprotocol_lock, flags);
 	wq = qprotocol_wq;

@@ -1,0 +1,228 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: connect authenticated OMCI and native service provider
+
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1,3 +1,6 @@
++#include "common/q1000k_omci_backend.h"
++#include "common/q1000k_services.h"
++#include "common/q1000k_packet.h"
+ #include "common/q1000k_protocol_compat.h"
+ #ifdef Q1000K_PON_IDENTITY
+ #include <an7581_xpon.h>
+@@ -436,12 +439,35 @@
+ 	int ret;
+ 
+ 	rcu_read_lock();
++#ifdef Q1000K_PON_IDENTITY
++	if (xpon_is_ready() && !q1000k_pwan_rx_prepare(skb, msg, msg_len, len)) {
++		u32 first = ((u32 *)msg)[0];
++		u16 gem = (first >> 14) & 0xffff;
++		struct net_device *dev = gpWanPriv->pPonNetDev[PWAN_IF_DATA];
++
++		if (first & BIT(8)) {
++			q1000k_omci_receive(skb, gem, !!(first & BIT(11)));
++			ret = 0;
++		} else if (!(first & (BIT(11) | BIT(12) | BIT(13))) && dev &&
++			   !q1000k_services_rx(skb, gem)) {
++			skb->ip_summed = CHECKSUM_NONE;
++			skb->protocol = eth_type_trans(skb, dev);
++			netif_rx(skb);
++			ret = 0;
++		} else {
++			dev_kfree_skb_any(skb);
++		}
++	} else {
++		dev_kfree_skb_any(skb);
++	}
++#else
+ 	if (xpon_is_ready())
+ 		ret = pwan_cb_rx_packet(msg, msg_len, skb, len);
+ 	else {
+ 		dev_kfree_skb_any(skb);
+ 		ret = -ENODEV;
+ 	}
++#endif
+ 	rcu_read_unlock();
+ 	return ret;
+ }
+@@ -1176,6 +1202,7 @@
+ 	.irq = xpon_protocol_irq,
+ 	.phy = xpon_protocol_phy,
+ 	.fault = xpon_protocol_fault,
++	.control = q1000k_omci_control,
+ };
+ #endif
+ 
+@@ -1299,6 +1326,9 @@
+ 		xpon_owned.protocol = false;
+ 	}
+ #endif
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_omci_backend_cleanup();
++#endif
+ 	/* Keep native DMA alive until protocol producers and the physical
+ 	 * pipeline are drained. Closed ready gates reject new callbacks. */
+ 	/* In-flight RX/event wrappers may have observed ready before closure. */
+@@ -1447,6 +1475,11 @@
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.gpon = true;
++#ifdef Q1000K_PON_IDENTITY
++	ret = q1000k_omci_backend_init(gpWanPriv->pPonNetDev[PWAN_IF_DATA]);
++	if (ret)
++		goto fail;
++#endif
+ #ifndef Q1000K_PON_IDENTITY
+ 	ret = xpondrv_qdma_init();
+ 	if (ret)
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_services.h"
+ #include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+@@ -291,19 +292,26 @@
+ 
+ int pwan_net_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
+-	int ret;
+-
+ #ifdef Q1000K_PON_IDENTITY
+-	/* Cover the binding snapshot through native admission, including calls
+-	 * from the vendor public hook and receive loopback path.
+-	 */
++	PWAN_NetPriv_T *priv = netdev_priv(dev);
++	unsigned int bytes = skb->len;
++	int ret = -ENOLINK;
++
+ 	rcu_read_lock();
+-#endif
+-	ret = pwan_net_start_xmit_impl(skb, dev);
+-#ifdef Q1000K_PON_IDENTITY
++	if (xpon_is_ready() && priv->netIdx == PWAN_IF_DATA)
++		ret = q1000k_services_tx(skb);
++	if (ret) {
++		priv->stats.tx_dropped++;
++		dev_kfree_skb_any(skb);
++	} else {
++		priv->stats.tx_packets++;
++		priv->stats.tx_bytes += bytes;
++	}
+ 	rcu_read_unlock();
+-#endif
+-	return ret;
++	return NETDEV_TX_OK;
++#else
++	return pwan_net_start_xmit_impl(skb, dev);
++#endif
+ }
+ 
+ static int pwan_net_start_xmit_impl(struct sk_buff *skb, struct net_device *dev)
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_omci_backend.h"
+ #include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+@@ -450,6 +451,7 @@
+ 				+ pRecvProfMsg->raw.delimiter_lens ;
+ 		gponDevSetProfileInfo(pRecvProfMsg->raw.prof_index, profLens, pRecvProfMsg->raw.prof_version);
+ 
++#ifndef Q1000K_PON_IDENTITY
+ 		/*record by SW*/
+ 		gpGponPriv->gponCfg.profVersion = pRecvProfMsg->raw.prof_version ;
+ 		memcpy(gpGponPriv->gponCfg.ponTag, pRecvProfMsg->raw.pon_tag, GPON_TAG_LENS);
+@@ -459,8 +461,14 @@
+ 		if(GPON_CURR_STATE == GPON_10G_STATE_O2_3)
+ 			tasklet_hi_schedule(&gpGponPriv->securityKey_task);
+ 
++#endif
+ 		/*set preamble,delimiter,PSBu len information prmb rpt times,prmb len,dlmt len,fec value to  PHY */
+ 		gponDevSetPhyProfile(pRecvProfMsg);
++#ifdef Q1000K_PON_IDENTITY
++		return q1000k_omci_profile(pRecvProfMsg->raw.pon_tag, pRecvProfMsg->raw.seq_no,
++			msgDestId != PLOAM_BROADCAST_ADDR && msgDestId != PLOAM_XGSPON_BROADCAST_ADDR &&
++			msgDestId != PLOAM_XGSPON_BROADCAST_ADDR_NOKIA);
++#endif
+ 
+         if(gpPonSysData->sysPonMode == XMCS_IF_WAN_DETECT_MODE_XGPON){
+ 			if(msgDestId != PLOAM_BROADCAST_ADDR) {
+@@ -521,6 +529,9 @@
+ 		return -1 ;
+ 	}
+ 
++#ifdef Q1000K_PON_IDENTITY
++	return q1000k_omci_assign(msgAssignOnuId);
++#else
+ 	if(GPON_CURR_STATE == GPON_10G_STATE_O2_3) {
+ 		/* Store the latest ONU ID*/
+ 		gpGponPriv->gponCfg.onu_id = msgAssignOnuId ;
+@@ -573,6 +584,7 @@
+ 		return -1 ;
+ 	}
+ 	return 0 ;
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -943,6 +955,9 @@
+ 		}else{
+ 			gpon_ploamIk_index_change_by_OMCI_base_secure(&gpGponPriv->gponSecurity);
+ 		}
++#ifdef Q1000K_PON_IDENTITY
++		q1000k_omci_state();
++#endif
+ 		ploam_send_registration_msg(pReqRegistMsg->raw.seq_no,gpGponPriv->gponCfg.reg_id) ;
+ 	}
+ 	return 0 ;
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_act.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_omci_backend.h"
+ #include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+ Copyright Statement:
+@@ -619,6 +620,7 @@
+ 	gpon_act_increase_LODS_event(lastState,new_state);
+ 	
+ #ifdef Q1000K_PON_IDENTITY
++	q1000k_omci_state();
+ 	q1000k_protocol_leave(token);
+ #else
+ 	spin_unlock_irqrestore(&gpGponPriv->act_lock, flags) ;
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_dev.c
+@@ -1,3 +1,4 @@
++#include "common/q1000k_omci_backend.h"
+ #ifdef Q1000K_PON_IDENTITY
+ #include <an7581_xpon.h>
+ #endif
+@@ -1685,6 +1686,14 @@
+ Ret Value:     0:success;-1:fail
+ ******************************************************************************/
+ void gponDevIntegrityKeySet(unsigned long arg){
++#ifdef Q1000K_PON_IDENTITY
++	int ret = q1000k_omci_profile(gpGponPriv->gponCfg.ponTag, 0, false);
++
++	if (ret)
++		q1000k_protocol_fail(ret);
++	return;
++#endif
++
+ 
+ 	PON_MSG(MSG_SECUR, "PLOAM: init two key groups in O2_3\n") ;
+ 	memcpy(gpGponPriv->gponSecurity.msk, gpGponPriv->gponSecurity.defaultMsk, GPON_MSK_LENS);
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_protocol.o $(SRCDIR)/q1000k_gwan_rebuild.o $(SRCDIR)/q1000k_mac_keys.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_protocol.o $(SRCDIR)/q1000k_gwan_rebuild.o $(SRCDIR)/q1000k_mac_keys.o $(SRCDIR)/q1000k_services.o $(SRCDIR)/q1000k_omci_backend.o
+ endif
+ endif
+ 

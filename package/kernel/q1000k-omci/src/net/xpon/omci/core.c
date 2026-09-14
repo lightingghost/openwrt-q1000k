@@ -1681,13 +1681,10 @@ void omci_device_set_state(struct omci_device *odev, u8 state)
 }
 EXPORT_SYMBOL_GPL(omci_device_set_state);
 
-void omci_device_reset_session(struct omci_device *odev)
+static void omci_device_reset_locked(struct omci_device *odev)
 {
-	if (!odev)
-		return;
-
 	/* Wait only for the current transaction, then invalidate queued requests. */
-	mutex_lock(&odev->session_lock);
+	lockdep_assert_held(&odev->session_lock);
 	mutex_lock(&odev->tx_lock);
 	spin_lock_bh(&odev->state_lock);
 	omci_advance_generation(odev);
@@ -1700,9 +1697,31 @@ void omci_device_reset_session(struct omci_device *odev)
 	skb_queue_purge(&odev->rx_queue);
 	omci_agent_channel_changed(odev, false);
 	omci_device_notify(odev, OMCI_EVENT_CHANNEL_DOWN);
+}
+
+void omci_device_reset_session(struct omci_device *odev)
+{
+	if (!odev)
+		return;
+	mutex_lock(&odev->session_lock);
+	omci_device_reset_locked(odev);
 	mutex_unlock(&odev->session_lock);
 }
 EXPORT_SYMBOL_GPL(omci_device_reset_session);
+
+int omci_device_reset_registration(struct omci_device *odev)
+{
+	int ret;
+
+	if (!odev)
+		return -EINVAL;
+	mutex_lock(&odev->session_lock);
+	omci_device_reset_locked(odev);
+	ret = omci_agent_reset_registration(odev);
+	mutex_unlock(&odev->session_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(omci_device_reset_registration);
 
 int omci_device_set_auth_epoch(struct omci_device *odev, u64 auth_epoch)
 {

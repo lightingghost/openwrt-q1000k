@@ -70,7 +70,22 @@ static void test_timer(struct timer_list *timer)
 	maybe_block(3);
 	mod_timer(timer, jiffies + HZ);
 }
-static const struct q1000k_protocol_ops test_ops = { test_irq, test_phy, test_fault };
+static int control_count;
+static void test_control(void)
+{
+	int token;
+	WARN_ON(q1000k_protocol_owned());
+	control_count++;
+	if (READ_ONCE(block_kind) == 6) {
+		complete(&entered);
+		wait_for_completion(&release_callback);
+	}
+	token = q1000k_protocol_enter();
+	if (token >= 0) q1000k_protocol_leave(token);
+}
+static const struct q1000k_protocol_ops test_ops = {
+	.irq=test_irq, .phy=test_phy, .fault=test_fault, .control=test_control,
+};
 static void finish_thread(void)
 {
 	complete(&thread_done);
@@ -140,6 +155,23 @@ static int run_test(void)
 	CHECK(seen_count == 2 && seen[0] == 11 && seen[1] == 12);
 	CHECK(task_count == 2 && timer_count == 0);
 
+	/* Session work waits outside the executor. A concurrent core service
+	 * can acquire/release it, and later MAC events remain ordered behind it.
+	 */
+	CHECK(q1000k_protocol_control() == -EPERM);
+	reset_barriers(6);
+	ret=q1000k_protocol_enter(); CHECK(ret == 0);
+	CHECK(!q1000k_protocol_control() && !q1000k_protocol_control());
+	CHECK(!q1000k_protocol_phy(7,13));
+	q1000k_protocol_leave(ret);
+	CHECK(wait_for_completion_timeout(&entered,HZ));
+	CHECK(control_count == 1 && seen_count == 2);
+	ret=q1000k_protocol_enter(); CHECK(ret == 0);
+	q1000k_protocol_leave(ret);
+	complete(&release_callback); flush_workqueue(qprotocol_wq);
+	CHECK(seen_count == 3 && seen[2] == 13);
+	WRITE_ONCE(block_kind,0);
+
 	/* A service pause waits for a running IRQ; IRQ stays disabled until ack. */
 	reset_barriers(1); inject_irq(); CHECK(wait_for_completion_timeout(&entered,HZ));
 	CHECK(irq_depth == 1);
@@ -175,7 +207,7 @@ static int run_test(void)
 	for (i=0;i<Q1000K_PROTOCOL_EVENTS;i++) CHECK(!q1000k_protocol_phy(7,i));
 	CHECK(q1000k_protocol_phy(7,999) == -ENOSPC);
 	CHECK(q1000k_protocol_resume() == -ENOSPC); flush_workqueue(qprotocol_wq);
-	CHECK(fault_seen == -ENOSPC && seen_count == 3);
+	CHECK(fault_seen == -ENOSPC && seen_count == 4);
 	CHECK(q1000k_protocol_pause() == -ENOSPC);
 	CHECK(q1000k_protocol_phy(7,999) == -ENOSPC);
 	q1000k_protocol_stop(); CHECK(!irq_requested);

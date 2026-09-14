@@ -83,6 +83,7 @@ struct omci_agent {
 	struct xarray mib;
 	struct xarray *services;
 	int service_error;
+	bool resetting_registration;
 	struct omci_agent_config config;
 	u32 upload_index;
 	u16 mib_sync;
@@ -186,6 +187,7 @@ int omci_agent_mib_set(struct omci_device *odev,
 int omci_agent_mib_delete(struct omci_device *odev, u16 class_id,
 			  u16 entity_id);
 int omci_agent_mib_reset(struct omci_device *odev, bool all);
+int omci_agent_reset_registration(struct omci_device *odev);
 int omci_agent_mib_next(struct omci_device *odev, u32 index,
 			struct omci_mib_object *object, u32 *next_index,
 			const char **name);

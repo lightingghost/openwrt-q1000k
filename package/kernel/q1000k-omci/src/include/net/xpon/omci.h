@@ -366,6 +366,11 @@ void omci_device_set_channel(struct omci_device *odev, u16 gem_port_id,
 			     bool valid);
 void omci_device_set_state(struct omci_device *odev, u8 state);
 void omci_device_reset_session(struct omci_device *odev);
+/* ONU reassignment discards the previous OLT's MIB and restores defaults.
+ * Authentication and channel remain closed. A normal rekey uses auth_epoch
+ * instead and preserves the MIB. Provider must retire its old namespace next.
+ */
+int omci_device_reset_registration(struct omci_device *odev);
 int omci_device_set_dying_gasp_enabled(struct omci_device *odev,
 				       bool enabled, u8 source);
 int omci_device_send_dying_gasp(struct omci_device *odev);

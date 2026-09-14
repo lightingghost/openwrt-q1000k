@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=38
+PKG_RELEASE:=39
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -33,7 +33,7 @@ endef
 
 define KernelPackage/airoha-xpon-en757x
   $(call KernelPackage/airoha-pon/Default)
-  DEPENDS+=@BROKEN @(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-crypto-ecb +TARGET_airoha_an7581:kmod-q1000k-pon-control
+  DEPENDS+=@BROKEN @(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-crypto-ecb +TARGET_airoha_an7581:kmod-q1000k-pon-control +TARGET_airoha_an7581:kmod-q1000k-omci
   KCONFIG+=CONFIG_CRYPTO_AES=y
   TITLE:=Airoha EN757x xPON driver (v2)
   VARIANT:=v2
@@ -62,6 +62,7 @@ endef
 PON_BSP_DIR:=$(PKG_BUILD_DIR)/bsp
 PON_INCLUDE_FLAGS:= \
 	-I$(STAGING_DIR)/usr/include/q1000k-pon \
+	-I$(STAGING_DIR)/usr/include/q1000k-omci \
 	-I$(PON_BSP_DIR)/include \
 	-I$(PON_BSP_DIR)/include/global_inc \
 	-I$(PON_BSP_DIR)/include/global_inc/version \
@@ -114,7 +115,7 @@ define Build/Compile
 		modules
 	+$(KERNEL_MAKE) $(PKG_JOBS) M="$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g" \
 		KCFLAGS="$(PON_INCLUDE_FLAGS) $(PON_V2_CPU_CFLAGS) -DTCSUPPORT_WAN_GPON=1 -DTCSUPPORT_WAN_EPON=1" \
-		KBUILD_EXTRA_SYMBOLS="$(PON_BSP_DIR)/Module.symvers $(PKG_BUILD_DIR)/xpon-en757x/xpon_phy_10g/Module.symvers" \
+		KBUILD_EXTRA_SYMBOLS="$(PON_BSP_DIR)/Module.symvers $(PKG_BUILD_DIR)/xpon-en757x/xpon_phy_10g/Module.symvers $(if $(CONFIG_TARGET_airoha_an7581),$(STAGING_DIR)/usr/share/q1000k-omci/Module.symvers)" \
 		XPON_BSP_MODULES_XPON_10G_DRIVER="$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g" \
 		XPON_BSP_GLOBAL_INC_PRIVATE="$(PON_BSP_DIR)/include/global_inc" \
 		XPON_BSP_GLOBAL_INC_PUBLIC="$(PON_BSP_DIR)/include/global_inc" \

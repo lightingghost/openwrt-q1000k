@@ -305,7 +305,8 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	if (ret)
 		goto failed;
 	q1000k_gwan_table_publish(&tx->next);
-	ret = q1000k_pipeline_activate();
+	ret = tx->registration && tx->next.alloc_id[0] == Q1000K_GWAN_UNASSIGNED ?
+		q1000k_pipeline_activate_receive_only() : q1000k_pipeline_activate();
 	if (ret)
 		goto failed;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
