@@ -1,0 +1,83 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Only configuration is installed; netifd and the optical supervisor stay idle.
+set -eu
+
+fail() {
+	printf '%s\n' "q1000k-xgspon-wan: $*" >&2
+	exit 1
+}
+
+# Never commit someone else's staged UCI edits as part of package setup.
+for config in network firewall; do
+	changes=$(uci -q changes "$config") || fail "cannot read $config changes"
+	[ -z "$changes" ] || fail "$config has uncommitted changes"
+	uci -q export "$config" >/dev/null || fail "cannot read $config"
+done
+
+# A completed installation is never reapplied over user edits. Pending
+# markers let a failed cross-config commit finish without enabling interfaces.
+complete=0
+for interface in q1000k_wan q1000k_wan6; do
+	existing=$(uci -q get "network.$interface") || existing=''
+	[ -n "$existing" ] || continue
+	[ "$existing" = interface ] || fail "$interface is not an interface"
+	owner=$(uci -q get "network.$interface.q1000k_profile") || owner=''
+	case "$owner" in
+		1) complete=1 ;;
+		pending) ;;
+		*) fail "$interface already exists without ownership marker" ;;
+	esac
+done
+[ "$complete" = 0 ] || exit 0
+
+# Use the existing WAN policy, including its DHCP/IPv6 and LAN forwarding
+# rules. Missing or duplicate WAN zones require an explicit configuration.
+wan_zone=''
+sections=$(uci -q show firewall) || fail 'cannot read firewall zones'
+for section in $(printf '%s\n' "$sections" | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+	name=$(uci -q get "firewall.$section.name") || continue
+	[ "$name" = wan ] || continue
+	[ -z "$wan_zone" ] || fail 'more than one WAN zone'
+	wan_zone=$section
+done
+[ -n "$wan_zone" ] || fail 'no WAN firewall zone'
+
+# Each new section is committed with autostart off. Even an interrupted
+# cross-config commit cannot bring up DHCP or start the PON modules.
+if ! uci -q get network.q1000k_wan >/dev/null; then
+	uci -q batch <<'UCI'
+set network.q1000k_wan=interface
+set network.q1000k_wan.q1000k_profile='pending'
+set network.q1000k_wan.proto='dhcp'
+set network.q1000k_wan.device='pon'
+set network.q1000k_wan.auto='0'
+set network.q1000k_wan.ipv6='1'
+UCI
+fi
+if ! uci -q get network.q1000k_wan6 >/dev/null; then
+	uci -q batch <<'UCI'
+set network.q1000k_wan6=interface
+set network.q1000k_wan6.q1000k_profile='pending'
+set network.q1000k_wan6.proto='dhcpv6'
+set network.q1000k_wan6.device='pon'
+set network.q1000k_wan6.auto='0'
+set network.q1000k_wan6.reqaddress='try'
+set network.q1000k_wan6.reqprefix='auto'
+UCI
+fi
+uci -q commit network
+
+networks=$(uci -q get "firewall.$wan_zone.network") || networks=''
+for interface in q1000k_wan q1000k_wan6; do
+	case " $networks " in
+		*" $interface "*) ;;
+		*) uci -q add_list "firewall.$wan_zone.network=$interface" ;;
+	esac
+done
+uci -q commit firewall
+
+# Mark completion only after both configurations were committed successfully.
+uci -q set network.q1000k_wan.q1000k_profile=1
+uci -q set network.q1000k_wan6.q1000k_profile=1
+uci -q commit network

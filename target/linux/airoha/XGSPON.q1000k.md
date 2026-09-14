@@ -17,6 +17,7 @@ controller, native FE/QDMA drain, cold MAC/PHY orchestration, ranging,
 authenticated OMCI/PLOAM, baseline unicast/QoS, userspace supervisor and class 171
 VLAN transformations, data-key exchange and unicast GEM encryption policy are
 implemented locally. Combined class 84/171 filtering is also implemented.
+An optional inactive DHCP/DHCPv6 netifd/firewall package is implemented.
 Multiple tag-operation stages, advanced services and hardware acceptance
 remain pending. The numbered steps
 below remain the full acceptance plan; they are not all complete.

@@ -18,7 +18,8 @@ below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 72 passing PON host tests, the complete OMCI
+The current local evidence is 72 passing PON host tests plus five WAN setup
+tests using the real UCI parser, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,
 cryptography and PHY concurrency results. Hardware cold boot, OLT registration,
@@ -51,6 +52,16 @@ Shared-GEM mapper rules retain unique cookies and ambiguous routes are blocked
 before transmission. Multiple tag-operation tables and destination-MAC-only
 forwarding remain unsupported. No device access occurred.
 
+The optional `q1000k-xgspon-wan` package creates `q1000k_wan` and
+`q1000k_wan6` with autostart off and associates them with the existing WAN
+firewall zone. It preserves copper LAN/WAN settings, refuses uncommitted UCI
+edits and unrelated named interfaces, and does not reapply completed setup over
+user changes. No reload, DHCP client, module loader or hardware operation runs
+during setup. The package and matching dependencies build locally. The actual
+data netdevice is `pon` in this build; `pon0` belongs to a disabled vendor HAL
+variant. Earlier current-contract references have been corrected.
+See [WAN package behavior](../../../package/network/utils/q1000k-xgspon-wan/README.md).
+
 ## Imported references
 
 | Import | Local commit | Original source |
@@ -77,8 +88,8 @@ OMCI daemon and unrelated PR changes were not imported.
 | FE/QoS | Checked native frame/queue controls, SP and WRR managed entities, drained scheduler replacement | Advanced shaping/backpressure and hardware throughput tests |
 | Authentication | 36-byte registration derivation, software OMCI/PLOAM MICs, key/epoch barriers, recovery containment | Secure mutual-authentication rekey and hardware encryption acceptance |
 | OMCI services | Generic core, topology, unicast GEM/bridge/mapper provisioning, combined class 84/171 processing on UNI-facing pon | Multiple tag-operation stages, advanced VLAN modes, multicast and actual OLT identity/MIB compatibility |
-| Userspace/LuCI | q1000k-omci status/MIB/get/set; read-only LuCI; optional explicit supervisor with owned teardown | Browser QA on an installed image, final netifd/firewall integration and hardware lifecycle acceptance |
-| AT&T WAN | DHCP identified; optical VLAN must come from provisioning, with local tag handling defined by OMCI | Actual gateway/line identity, OLT provisioning, successful DHCP and IPv4/IPv6 tests |
+| Userspace/LuCI | q1000k-omci status/MIB/get/set; read-only LuCI; optional explicit supervisor with owned teardown and inactive DHCP/DHCPv6 WAN package | Browser QA on an installed image and hardware lifecycle acceptance |
+| AT&T WAN | Optional DHCP/DHCPv6 netifd configuration on pon, existing WAN firewall policy; optical VLAN comes from provisioning | Actual gateway/line identity, OLT provisioning, successful DHCP and IPv4/IPv6 tests |
 | Builds | Matching experimental modules/packages; normal builder remains on q1000k-dev | Experimental image boot/recovery acceptance; never flash under the present restriction |
 
 The following entries are historical checkpoints. Their outstanding-work lists

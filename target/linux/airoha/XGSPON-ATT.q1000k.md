@@ -37,3 +37,12 @@ This is tested locally, not against AT&T. Combined class 84/171 pipelines,
 data encryption and actual OLT interoperability still need completion before
 DHCP can establish Internet access. See the [VLAN contract](XGSPON-VLAN.q1000k.md).
 The device remains restricted to read-only access, with no firmware flashing.
+
+## Local inactive WAN configuration
+
+The optional `q1000k-xgspon-wan` package now provides inactive netifd DHCP and
+DHCPv6 interfaces on `pon`, using the existing WAN firewall zone. It sets no
+optical VLAN, custom DHCP identity or fixed delegated-prefix size. Its setup
+was tested with the real UCI parser in temporary directories; nothing was
+installed or activated on the Q1000K. See the
+[package contract](../../../package/network/utils/q1000k-xgspon-wan/README.md).
