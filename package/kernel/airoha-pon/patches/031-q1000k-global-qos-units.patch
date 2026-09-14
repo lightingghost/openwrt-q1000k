@@ -1,0 +1,71 @@
+Subject: [PATCH] q1000k: route global scheduler units through native drained port
+
+Preserve frame limits and use compare-and-replace to avoid stale writes.
+All native failures propagate without publishing output.
+
+--- a/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
++++ b/xpon-en757x/xpon_10g/src/xmcs/xmcs_if.c
+@@ -281,6 +281,25 @@
+ **____________________________________________________________________________*/
+ static int xmcs_set_qos_weight_config(struct XMCS_QoSWeightConfig_S *pWeightCfg) 
+ {
++#ifdef Q1000K_PON_IDENTITY
++	struct airoha_pon_port_config old, config;
++	int ret;
++
++	if (!pWeightCfg ||
++	    (pWeightCfg->weightType != XMCS_IF_WEIGHT_TYPE_PACKET &&
++	     pWeightCfg->weightType != XMCS_IF_WEIGHT_TYPE_BYTE) ||
++	    (pWeightCfg->weightScale != XMCS_IF_WEIGHT_SCALE_1B &&
++	     pWeightCfg->weightScale != XMCS_IF_WEIGHT_SCALE_16B))
++		return -EINVAL;
++	ret = q1000k_transport_get_port_config(&old);
++	if (ret)
++		return ret;
++	config = old;
++	config.byte_mode = pWeightCfg->weightType == XMCS_IF_WEIGHT_TYPE_BYTE;
++	/* This imported ABI calls the AN7581 64-byte setting "1B". */
++	config.scale16 = pWeightCfg->weightScale == XMCS_IF_WEIGHT_SCALE_16B;
++	return q1000k_transport_configure_port(&old, &config);
++#else
+ 	QDMA_TxQosWeightType_t qdmaWeightType = 0;
+ 	QDMA_TxQosWeightScale_t qdmaWeightScale = 0;
+ 	
+@@ -302,6 +321,7 @@
+ 		}
+ 	}
+ 	return QDMA_API_SET_TX_QOS_WEIGHT(ECNT_QDMA_WAN, qdmaWeightType, qdmaWeightScale) ;
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name
+@@ -321,6 +341,21 @@
+ **____________________________________________________________________________*/
+ static int xmcs_get_qos_weight_config(struct XMCS_QoSWeightConfig_S *pWeightCfg) 
+ {
++#ifdef Q1000K_PON_IDENTITY
++	struct airoha_pon_port_config config;
++	int ret;
++
++	if (!pWeightCfg)
++		return -EINVAL;
++	ret = q1000k_transport_get_port_config(&config);
++	if (ret)
++		return ret;
++	pWeightCfg->weightType = config.byte_mode ?
++		XMCS_IF_WEIGHT_TYPE_BYTE : XMCS_IF_WEIGHT_TYPE_PACKET;
++	pWeightCfg->weightScale = config.scale16 ?
++		XMCS_IF_WEIGHT_SCALE_16B : XMCS_IF_WEIGHT_SCALE_1B;
++	return 0;
++#else
+ 	int ret = 0 ;
+ 	QDMA_TxQosWeightType_t qdmaWeightType ;
+ 	QDMA_TxQosWeightScale_t qdmaWeightScale ;
+@@ -335,6 +370,7 @@
+     pWeightCfg->weightScale = (qdmaWeightScale==QDMA_TXQOS_WEIGHT_SCALE_64B) ? XMCS_IF_WEIGHT_SCALE_1B : XMCS_IF_WEIGHT_SCALE_16B ;
+ 		
+ 	return 0 ;
++#endif
+ }
+ /*______________________________________________________________________________
+ **	function name

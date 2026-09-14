@@ -433,9 +433,6 @@ static int qphy_stop(void)
 		err = qphy_mask();
 		if (!ret)
 			ret = err;
-		err = phy_fw_ready(PHY_DISABLE);
-		if (!ret)
-			ret = err;
 	}
 	if (!ret)
 		ret = an7581_pon_phy_status();
@@ -537,7 +534,8 @@ int q1000k_phy_call(struct xpon_phy_api_data_s *data)
 		/* Lifecycle and optical TX cannot bypass coordinated startup. */
 		if (data->cmd_id == PON_SET_PHY_MODE_CONFIG ||
 		    data->cmd_id == PON_SET_PHY_TRANS_POWER_SWITCH ||
-		    data->cmd_id == PON_SET_PHY_TX_POWER_CONFIG)
+		    data->cmd_id == PON_SET_PHY_TX_POWER_CONFIG ||
+		    data->cmd_id == PON_SET_PHY_FW_READY)
 			return data->ret = -EOPNOTSUPP;
 	}
 	if (!mutex_trylock(&qphy_control))

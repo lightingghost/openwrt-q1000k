@@ -406,3 +406,8 @@ packets, crypto failures and output preservation. `run_pon_crypto_uml.sh` also
 runs those vectors with the actual kernel AES implementation and frag-list
 skbs. `test_pon_identity.py` checks all 72 registration hex positions, exact
 length, caller bounds, cache invalidation and parameter-buffer independence.
+
+`test_pon_port.py` checks production native port configuration: physical drain
+requirements, stale snapshots, all queue words, FE masks, readback faults,
+unchanged output on error, and isolation from QDMA0. The native UML guest also
+changes frame limits and weight units between retirement and RX reactivation.

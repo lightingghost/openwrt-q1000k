@@ -237,8 +237,8 @@ No hardware reset or other device operation was performed.
 Vendor r29 joins the stages in `q1000k_pipeline_shutdown`: pause CPU admission
 and drain native mappings; stop MPI RX ingress; retire all 32 FE channels;
 stop MBI TX and wait for the transmit alignment FIFO; stop MPI TX and MBI RX;
-drain downstream FE/QDMA1; then stop PHY callbacks and disable FW-ready and
-the owned EN7573 transmitter. No service record, identity or key is cleared
+drain downstream FE/QDMA1; then stop PHY callbacks and disable the owned
+EN7573 transmitter. No service record, identity or key is cleared
 by this routine. It records the last completed stage and exact retired bitmap.
 
 The outer MAC teardown closes readiness and unregisters control/event paths,
@@ -268,3 +268,26 @@ inject it into every allocation and replacement command position. A transmit
 FIFO already empty with MPI TX stopped can establish emptiness without
 releasing that stop; a stopped FIFO containing data returns `-EBUSY` rather
 than reopening egress. All 42 host tests and the AArch64 vendor build pass.
+
+## Port frame limits and scheduler units
+
+Vendor r32 and kernel patch 9999i expose native GDM2 frame limits and QDMA1
+weight units. A change requires paused CPU admission, all FE channels retired
+(or a verified new epoch), drained RX, disabled/idle RX DMA, zero FE TX/RX and
+hardware forwarding masks, and all 256 CPU queues closed. The expected/current
+configuration comparison rejects stale updates. Register writes preserve
+unrelated fields and verify readback; uncertainty poisons subsequent controls.
+An identical configuration is a read-only success while running.
+
+The imported global scheduler ioctl now uses this owner. Its historical `1B`
+enumeration denotes the AN7581 64-byte setting; the 16-byte selector remains
+explicit. Per-channel indirect commands reject an absent all-ones completion,
+including channel 31/queue 7, without publishing output. No global ECNT FE/QDMA
+provider is introduced. Remaining startup callers still need the coordinated
+namespace reset and reactivation transaction.
+
+All 44 PON host tests pass. Native, adapter and PHY Linux UML tests pass with
+lockdep/RCU checks; the native kernel and r32 vendor packages build for AArch64.
+The PHY shutdown now relies on actual controller TX disable and callback drain:
+the imported XGS `FW_READY` command was a no-op and is explicitly unsupported.
+No hardware was accessed for these checks.

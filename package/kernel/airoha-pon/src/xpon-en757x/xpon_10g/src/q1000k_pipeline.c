@@ -83,8 +83,8 @@ int q1000k_pipeline_shutdown(void)
 	if (ret)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_RX_DRAINED;
-	/* PHY polling/IRQ callbacks drain before FW-ready and real controller
-	 * TX are disabled. No reset or ID reuse precedes this boundary.
+	/* PHY polling/IRQ callbacks drain before real controller TX is disabled.
+	 * No reset or ID reuse precedes this boundary.
 	 */
 	ret = q1000k_phy_quiesce();
 	if (ret)

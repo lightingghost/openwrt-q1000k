@@ -69,7 +69,7 @@ static int phy_mode_config(int mode,int tx)
     check(mode==PHY_XGSPON_CONFIG && tx==PHY_DISABLE);
     gpPhyPriv->phy_init_done=TRUE; return 0;
 }
-static int phy_fw_ready(int enable) { check(enable==PHY_DISABLE); return 0; }
+
 static void pon_phy_api_dispatch(struct ecnt_data *in)
 {
     struct xpon_phy_api_data_s *data=(void *)in;

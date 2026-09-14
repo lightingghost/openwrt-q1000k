@@ -1,0 +1,177 @@
+net: airoha: configure PON frame limits and global QoS units after drain
+
+Reject absent scheduler status and stale port configuration. Preserve unrelated
+register fields and keep admission closed after ambiguous writes.
+
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -454,7 +454,8 @@
+ 				qdma, REG_TXWRR_WEIGHT_CFG);
+ 	if (ret)
+ 		return ret;
+-	if ((status & (TWRR_CHAN_IDX_MASK | TWRR_QUEUE_IDX_MASK)) !=
++	if (status == U32_MAX ||
++	    (status & (TWRR_CHAN_IDX_MASK | TWRR_QUEUE_IDX_MASK)) !=
+ 	    (cmd & (TWRR_CHAN_IDX_MASK | TWRR_QUEUE_IDX_MASK)))
+ 		return -EIO;
+ 	if (!write)
+@@ -506,6 +507,10 @@
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ 	qdma = &pon->dma_dev->eth->qdma[1];
+ 	mode = airoha_qdma_rr(qdma, REG_TXWRR_MODE_CFG);
++	if (mode == U32_MAX) {
++		ret = -EIO;
++		goto fault;
++	}
+ 	actual.byte_mode = !!(mode & TWRR_WEIGHT_BASE_MASK);
+ 	actual.scale16 = !!(mode & TWRR_WEIGHT_SCALE_MASK);
+ 	/* The unit is shared by every channel. Never silently change peers. */
+@@ -582,6 +587,124 @@
+ 	return airoha_pon_qos_access(pon, channel, qos, false);
+ }
+ EXPORT_SYMBOL_GPL(airoha_pon_get_qos);
++
++/* Port-wide units and frame limits may change only across a physical drain.
++ * RTNL excludes indirect QoS access; admission_lock excludes IRQ controls.
++ */
++static bool airoha_pon_port_equal(const struct airoha_pon_port_config *a,
++				const struct airoha_pon_port_config *b)
++{
++	return a->min_len == b->min_len && a->max_len == b->max_len &&
++	       a->byte_mode == b->byte_mode && a->scale16 == b->scale16;
++}
++
++static int airoha_pon_port_access(struct airoha_pon *pon,
++		const struct airoha_pon_port_config *expected,
++		struct airoha_pon_port_config *config)
++{
++	struct airoha_pon_port_config actual = {};
++	struct airoha_eth *eth;
++	struct airoha_qdma *qdma;
++	unsigned long flags;
++	u32 len, mode, value, dma;
++	int i, ret = 0;
++
++	if (!pon || !config)
++		return -EINVAL;
++	if (expected && (!config->min_len || config->min_len > config->max_len ||
++			 config->max_len > FIELD_MAX(GDM_LONG_LEN_MASK)))
++		return -EINVAL;
++	if (in_interrupt() || irqs_disabled())
++		return -EWOULDBLOCK;
++	rtnl_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (!rcu_access_pointer(pon->netdev))
++		ret = -ENODEV;
++	else if (pon->control_fault)
++		ret = -EIO;
++	else if (pon->configuring)
++		ret = -EBUSY;
++	if (ret)
++		goto out;
++	eth = pon->dma_dev->eth;
++	qdma = &eth->qdma[1];
++	len = airoha_fe_rr(eth, REG_GDM_LEN_CFG(AIROHA_GDM2_IDX));
++	mode = airoha_qdma_rr(qdma, REG_TXWRR_MODE_CFG);
++	if (len == U32_MAX || mode == U32_MAX)
++		goto fault;
++	actual.min_len = FIELD_GET(GDM_SHORT_LEN_MASK, len);
++	actual.max_len = FIELD_GET(GDM_LONG_LEN_MASK, len);
++	actual.byte_mode = !!(mode & TWRR_WEIGHT_BASE_MASK);
++	actual.scale16 = !!(mode & TWRR_WEIGHT_SCALE_MASK);
++	if (!expected) {
++		*config = actual;
++		goto out;
++	}
++	/* Never overwrite a peer's newer configuration using a stale snapshot. */
++	if (!airoha_pon_port_equal(expected, &actual)) {
++		ret = -ESTALE;
++		goto out;
++	}
++	if (airoha_pon_port_equal(config, &actual))
++		goto out;
++	if (!pon->paused || !pon->pause_ready || !pon->rx_closed ||
++	    !pon->rx_drained || atomic_read_acquire(&pon->pending) ||
++	    (pon->fe_retired != U32_MAX && !pon->epoch_ready)) {
++		ret = -EBUSY;
++		goto out;
++	}
++	dma = airoha_qdma_rr(qdma, REG_QDMA_GLOBAL_CFG);
++	if (dma == U32_MAX ||
++	    (dma & (GLOBAL_CFG_RX_DMA_EN_MASK | GLOBAL_CFG_RX_DMA_BUSY_MASK)) ||
++	    airoha_fe_rr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX)) ||
++	    airoha_fe_rr(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX)) ||
++	    airoha_fe_rr(eth, REG_CDM_HWFWD_CHN(AIROHA_GDM2_IDX)))
++		goto fault;
++	for (i = 0; i < 32; i += 4)
++		if (airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(i)) != U32_MAX)
++			goto fault;
++	value = (len & ~(GDM_SHORT_LEN_MASK | GDM_LONG_LEN_MASK)) |
++		FIELD_PREP(GDM_SHORT_LEN_MASK, config->min_len) |
++		FIELD_PREP(GDM_LONG_LEN_MASK, config->max_len);
++	airoha_fe_wr(eth, REG_GDM_LEN_CFG(AIROHA_GDM2_IDX), value);
++	if (airoha_fe_rr(eth, REG_GDM_LEN_CFG(AIROHA_GDM2_IDX)) != value)
++		goto fault;
++	value = (mode & ~(TWRR_WEIGHT_BASE_MASK | TWRR_WEIGHT_SCALE_MASK)) |
++		(config->byte_mode ? TWRR_WEIGHT_BASE_MASK : 0) |
++		(config->scale16 ? TWRR_WEIGHT_SCALE_MASK : 0);
++	airoha_qdma_wr(qdma, REG_TXWRR_MODE_CFG, value);
++	if (airoha_qdma_rr(qdma, REG_TXWRR_MODE_CFG) != value)
++		goto fault;
++	goto out;
++fault:
++	/* Admission was already closed for a write; never reopen after ambiguity. */
++	pon->control_fault = true;
++	ret = -EIO;
++out:
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rtnl_unlock();
++	return ret;
++}
++
++int airoha_pon_get_port_config(struct airoha_pon *pon,
++			     struct airoha_pon_port_config *config)
++{
++	return airoha_pon_port_access(pon, NULL, config);
++}
++EXPORT_SYMBOL_GPL(airoha_pon_get_port_config);
++
++int airoha_pon_configure_port(struct airoha_pon *pon,
++		const struct airoha_pon_port_config *expected,
++		const struct airoha_pon_port_config *config)
++{
++	struct airoha_pon_port_config copy;
++
++	if (!expected || !config)
++		return -EINVAL;
++	copy = *config;
++	return airoha_pon_port_access(pon, expected, &copy);
++}
++EXPORT_SYMBOL_GPL(airoha_pon_configure_port);
+ 
+ int airoha_pon_pause(struct airoha_pon *pon, unsigned int timeout_ms)
+ {
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -112,6 +112,21 @@
+  * be nonzero; strict queue weights must be zero. The global byte/packet unit
+  * and scaling flags are reported and checked, never changed by these calls.
+  */
++/* GDM2 frame limits and QDMA1-wide scheduler weight units. Actual changes
++ * require a fully retired, drained port. Reads are allowed while running.
++ * configure uses an expected snapshot and returns ESTALE if it has changed.
++ * All unrelated register fields and the other QDMA instance are preserved.
++ */
++struct airoha_pon_port_config {
++	u16 min_len, max_len;
++	bool byte_mode, scale16;
++};
++int airoha_pon_get_port_config(struct airoha_pon *pon,
++			     struct airoha_pon_port_config *config);
++int airoha_pon_configure_port(struct airoha_pon *pon,
++		const struct airoha_pon_port_config *expected,
++		const struct airoha_pon_port_config *config);
++
+ struct airoha_pon_qos {
+ 	u16 weights[8];
+ 	u8 mode;

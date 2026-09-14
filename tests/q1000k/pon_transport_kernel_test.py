@@ -41,13 +41,13 @@ struct airoha_eth;
 struct airoha_qdma {
     struct airoha_eth *eth;
     DECLARE_BITMAP(qos_channel_map,AIROHA_NUM_QOS_CHANNELS);
-    u32 regs[8],qos_cmd,qos_modes[4],global;
+    u32 regs[8],qos_cmd,qos_modes[4],global,weight_mode;
     u16 qos_weights[32][8];
 };
 static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
 {
     if (offset==4) return qdma->global;
-    if (offset==0x1020) return BIT(3); /* Native byte-weight mode. */
+    if (offset==0x1020) return qdma->weight_mode;
     if (offset==0x1024) return qdma->qos_cmd;
     if (offset>=0x1280 && offset<=0x129c && !(offset&3)) return 0;
     if (offset>=0x1040 && offset<=0x104c && !(offset&3))
@@ -58,6 +58,7 @@ static u32 airoha_qdma_rr(struct airoha_qdma *qdma,u32 offset)
 static void airoha_qdma_wr(struct airoha_qdma *qdma,u32 offset,u32 value)
 {
     if (offset==4) { qdma->global=value; return; }
+    if (offset==0x1020) { qdma->weight_mode=value; return; }
     if (offset==0x1024) {
         unsigned int channel=(value>>19)&31,queue=(value>>16)&7;
         ASSERT_RTNL();
@@ -88,13 +89,14 @@ struct airoha_gdm_dev {
 struct airoha_gdm_port { struct airoha_gdm_dev *devs[1]; };
 struct airoha_eth {
     struct airoha_qdma qdma[2]; struct airoha_gdm_port *ports[4];
-    u32 fe_tx,fe_loopback,fe_rx,fe_forward,fe_release;
+    u32 fe_tx,fe_loopback,fe_rx,fe_forward,fe_release,fe_len;
 };
 static void check_fe_access(struct airoha_eth *eth);
 static u32 airoha_fe_rr(struct airoha_eth *eth,u32 reg) {
     check_fe_access(eth);
     switch(reg) {
     case 0x140c: return eth->fe_forward;
+    case 0x1514: return eth->fe_len;
     case 0x151c: return eth->fe_loopback;
     case 0x1520: return eth->fe_release | (eth->fe_release&1 ? 2 : 0);
     case 0x1524: return eth->fe_tx;
@@ -108,6 +110,7 @@ static void airoha_fe_wr(struct airoha_eth *eth,u32 reg,u32 value) {
     check_fe_access(eth);
     switch(reg) {
     case 0x140c: eth->fe_forward=value; break;
+    case 0x1514: eth->fe_len=value; break;
     case 0x1520: eth->fe_release=value; break;
     case 0x1524: eth->fe_tx=value; break;
     case 0x1528: eth->fe_rx=value; break;
@@ -177,7 +180,7 @@ print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:REG_TXWRR_|TWRR_|REG_CHAN_QOS_MODE)', line)))
 print(re.search(r'#define GDM_BASE\(_n\).*?(?=\n\n)', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
-    r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK)', line)))
+    r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:LEN_CFG|TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK|GDM_SHORT_LEN_MASK|GDM_LONG_LEN_MASK)', line)))
 print(re.search(r'#define CDM_BASE\(_n\).*?(?=\n(?:#|\n))', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:CDM[12]_BASE|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_|RETIRE_STS)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
@@ -341,6 +344,7 @@ static int __init pon_transport_test_init(void)
     atomic_set(&hold_dma,1); atomic_set(&live,1);
     pon=airoha_pon_attach(lower,&ops,NULL);
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
+    gdm->eth->qdma[1].weight_mode=BIT(3);
     CHECK(!check_qos(pon));
     /* Exercise a non-detaching pause with actual pending DMA and waitqueues,
      * then the FE release transaction while RTNL pins the native owner.
@@ -364,6 +368,16 @@ static int __init pon_transport_test_init(void)
         CHECK(pon->rx_closed && pon->rx_drained && rx_drain_calls==1);
         CHECK(airoha_pon_resume(pon)==-EBUSY);
         CHECK(!airoha_pon_reset_epoch(pon));
+        {
+            struct airoha_pon_port_config old,config;
+            CHECK(!airoha_pon_get_port_config(pon,&old));
+            config=old; config.min_len=60; config.max_len=2000;
+            config.byte_mode=true; config.scale16=true;
+            CHECK(!airoha_pon_configure_port(pon,&old,&config));
+            CHECK(airoha_pon_configure_port(pon,&old,&config)==-ESTALE);
+            CHECK(!airoha_pon_get_port_config(pon,&old));
+            CHECK(old.min_len==60 && old.max_len==2000 && old.byte_mode && old.scale16);
+        }
         CHECK(!airoha_pon_set_tx_channel(pon,31,true));
         CHECK(!airoha_pon_activate_rx(pon,BIT(31)));
         CHECK(!airoha_pon_resume(pon));

@@ -34,6 +34,9 @@ int q1000k_transport_set_tx_channel(u8 channel, bool enabled);
  * sleep; the adapter mutex pins the attachment across the entire operation.
  * Both operations require closed queues and reclaimed native mappings.
  */
+int q1000k_transport_get_port_config(struct airoha_pon_port_config *config);
+int q1000k_transport_configure_port(const struct airoha_pon_port_config *expected,
+		const struct airoha_pon_port_config *config);
 int q1000k_transport_set_qos(u8 channel, const struct airoha_pon_qos *qos);
 int q1000k_transport_get_qos(u8 channel, struct airoha_pon_qos *qos);
 

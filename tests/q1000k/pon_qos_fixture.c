@@ -7,6 +7,7 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+#define U32_MAX UINT32_MAX
 #define BIT(n) (UINT32_C(1)<<(n))
 #define GENMASK(h,l) ((UINT32_MAX>>(31-(h))) & (UINT32_MAX<<(l)))
 #define FIELD_PREP(m,v) (((u32)(v)<<__builtin_ctz(m)) & (m))
@@ -14,7 +15,7 @@ typedef uint32_t u32;
 #define EXPORT_SYMBOL_GPL(...)
 static bool rtnl, irq;
 static unsigned int writes, polls;
-static int fail_command, corrupt_command, ignore_command, ignore_mode;
+static int fail_command, corrupt_command, ignore_command, ignore_mode, absent_command;
 static bool retire_during, fault_during;
 static void rtnl_lock(void) { assert(!rtnl && !irq); rtnl=true; }
 static void rtnl_unlock(void) { assert(rtnl); rtnl=false; }
@@ -48,7 +49,7 @@ static u32 airoha_qdma_rr(struct airoha_qdma *q,u32 reg)
     if(retire_during) pon.retiring|=pon.configuring;
     if(fault_during) pon.control_fault=true;
     polls++;
-    return q->command;
+    return (int)command_count==absent_command ? ~0U : q->command;
 }
 static void airoha_qdma_wr(struct airoha_qdma *q,u32 reg,u32 value)
 {
@@ -81,7 +82,7 @@ static void reset_fixture(void)
     pon.netdev=&dev; pon.dma_dev=&dev; memset(pon.closed,255,sizeof(pon.closed));
     for(unsigned int i=0;i<4;i++) eth.qdma[1].mode[i]=0x88888888;
     memset(&eth.qdma[0],0xa5,sizeof(eth.qdma[0]));
-    fail_command=corrupt_command=ignore_command=ignore_mode=0;
+    fail_command=corrupt_command=ignore_command=ignore_mode=absent_command=0;
     command_count=writes=polls=0; retire_during=fault_during=false; irq=false;
 }
 static void check_unmodified_lan(void)
@@ -138,6 +139,13 @@ int main(void)
         assert(airoha_pon_get_qos(&pon,23,&actual)==-ETIMEDOUT);
         assert(!memcmp(&actual,&sentinel,sizeof(actual)) && pon.control_fault);
     }
+    for(k=1;k<=16;k++) {
+        reset_fixture(); absent_command=k;
+        assert(airoha_pon_set_qos(&pon,31,&cfg)==-EIO && pon.control_fault);
+    }
+    reset_fixture(); actual=sentinel; eth.qdma[1].global=~0U;
+    assert(airoha_pon_get_qos(&pon,31,&actual)==-EIO && !writes && pon.control_fault);
+    assert(!memcmp(&actual,&sentinel,sizeof(actual)));
     reset_fixture(); cfg.byte_mode=true;
     assert(airoha_pon_set_qos(&pon,0,&cfg)==-EOPNOTSUPP && !writes && !pon.control_fault);
     cfg.byte_mode=false; cfg.mode=8;

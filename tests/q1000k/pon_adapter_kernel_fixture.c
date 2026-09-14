@@ -239,6 +239,18 @@ static int fake_lifecycle(struct airoha_pon *pon)
     msleep(1);
     return tx_channel_error;
 }
+int airoha_pon_get_port_config(struct airoha_pon *pon,struct airoha_pon_port_config *config)
+{
+    int ret=fake_lifecycle(pon);
+    if(!ret) { memset(config,0,sizeof(*config)); config->min_len=60; config->max_len=2000; }
+    return ret;
+}
+int airoha_pon_configure_port(struct airoha_pon *pon,
+        const struct airoha_pon_port_config *expected,const struct airoha_pon_port_config *config)
+{
+    WARN_ON(expected->min_len!=60 || config->max_len!=2000);
+    return fake_lifecycle(pon);
+}
 int airoha_pon_pause(struct airoha_pon *pon,unsigned int timeout_ms)
 {
     WARN_ON(timeout_ms!=750);
@@ -450,6 +462,7 @@ static int run_tests(void)
     int i, ret, count, rx;
     u8 closed=0xa5;
     struct airoha_pon_qos qos={.mode=1},saved;
+    struct airoha_pon_port_config config={.min_len=60,.max_len=2000};
 
     CHECK(!metadata_test());
     CHECK(!q1000k_transport_stop());
@@ -459,6 +472,8 @@ static int run_tests(void)
     CHECK(q1000k_transport_set_tx_channel(29,true)==-ENODEV);
     CHECK(q1000k_transport_set_qos(29,&qos)==-ENODEV);
     CHECK(q1000k_transport_get_qos(29,&qos)==-ENODEV);
+    CHECK(q1000k_transport_get_port_config(&config)==-ENODEV);
+    CHECK(q1000k_transport_configure_port(&config,&config)==-ENODEV);
     CHECK(q1000k_transport_pause(750)==-ENODEV);
     CHECK(q1000k_transport_retire_fe(29)==-ENODEV);
     CHECK(q1000k_transport_resume()==-ENODEV);
@@ -498,6 +513,8 @@ static int run_tests(void)
         CHECK(q1000k_transport_activate_rx(BIT(29))==errors[i]);
         saved=qos;
         CHECK(q1000k_transport_get_qos(29,&qos)==errors[i]);
+        CHECK(q1000k_transport_get_port_config(&config)==errors[i]);
+        CHECK(q1000k_transport_configure_port(&config,&config)==errors[i]);
         CHECK(errors[i] ? !memcmp(&saved,&qos,sizeof(qos)) : qos.mode==1);
     }
     tx_channel_error=0;

@@ -40,6 +40,7 @@ typedef uint32_t u32;
 #define PON_SET_PHY_MODE_CONFIG 3
 #define PON_SET_PHY_TRANS_POWER_SWITCH 4
 #define PON_SET_PHY_TX_POWER_CONFIG 5
+#define PON_SET_PHY_FW_READY 6
 #define PON_GET_PHY_INIT_STATUS 6
 #define PHY_ISR_FUNC 0
 #define PHY_EVENT_POLL_FUNC 1
@@ -273,6 +274,9 @@ int main(void)
     assert(!q1000k_phy_start());
     assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EBUSY);
     assert(!q1000k_phy_call(&data) && api_calls==1);
+    struct xpon_phy_api_data_s fw_request={.api_type=XPON_PHY_API_TYPE_SET,.cmd_id=PON_SET_PHY_FW_READY};
+    assert(q1000k_phy_call(&fw_request)==-EOPNOTSUPP && api_calls==1);
+
     api_error=-EOPNOTSUPP; assert(q1000k_phy_call(&data)==-EOPNOTSUPP);
     assert(irq_fn(75,&device)==IRQ_NONE && !isrs);
     regs[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=EN7581_XGPON_PHY_RX_LOS_INT_EN;
@@ -281,7 +285,7 @@ int main(void)
     qphy_poll_job.fn(&qphy_poll_job); assert(polls==1 && gpPhyPriv->event_poll_timer.armed);
     cancel_run=1; assert(!q1000k_phy_stop());
     assert(!qphy_active && !allocated_irq && !qphy_poll_job.queued && !gpPhyPriv->event_poll_timer.armed);
-    assert(polls==1 && fw_calls==1 && !gpPhyPriv->is_irq_requested);
+    assert(polls==1 && !fw_calls && !gpPhyPriv->is_irq_requested);
     assert(!q1000k_phy_stop());
     for(n=0;n<20;n++) { assert(!q1000k_phy_start()); assert(!q1000k_phy_stop()); }
     initialized(); assert(!q1000k_phy_start());
@@ -292,7 +296,7 @@ int main(void)
     poll_error=-ERANGE; q1000k_phy_poll(); qphy_poll_job.fn(&qphy_poll_job);
     assert(qphy_fault==-ERANGE && !qphy_active);
     assert(q1000k_phy_stop()==-ERANGE && !allocated_irq);
-    initialized(); assert(!q1000k_phy_start()); fw_error=-EIO;
+    initialized(); assert(!q1000k_phy_start()); controller_error=-EIO;
     assert(q1000k_phy_stop()==-EIO && !allocated_irq && !qphy_active);
     initialized(); assert(!q1000k_phy_start()); q1000k_phy_exit();
     assert(!gpPhyPriv && !allocated_irq && !allocs && !qphy_poll_job.queued);

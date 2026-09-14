@@ -247,6 +247,39 @@ int q1000k_transport_set_qos(u8 channel, const struct airoha_pon_qos *qos)
 	return ret;
 }
 
+int q1000k_transport_get_port_config(struct airoha_pon_port_config *config)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	if (in_interrupt() || irqs_disabled())
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_transport_mutex);
+	transport = rcu_dereference_protected(q1000k_current,
+				lockdep_is_held(&q1000k_transport_mutex));
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_get_port_config(transport->pon, config);
+	mutex_unlock(&q1000k_transport_mutex);
+	return ret;
+}
+
+int q1000k_transport_configure_port(const struct airoha_pon_port_config *expected,
+		const struct airoha_pon_port_config *config)
+{
+	struct q1000k_transport *transport;
+	int ret = -ENODEV;
+
+	if (in_interrupt() || irqs_disabled())
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_transport_mutex);
+	transport = rcu_dereference_protected(q1000k_current,
+				lockdep_is_held(&q1000k_transport_mutex));
+	if (transport && READ_ONCE(transport->active))
+		ret = airoha_pon_configure_port(transport->pon, expected, config);
+	mutex_unlock(&q1000k_transport_mutex);
+	return ret;
+}
+
 int q1000k_transport_pause(unsigned int timeout_ms)
 {
 	struct q1000k_transport *transport;
