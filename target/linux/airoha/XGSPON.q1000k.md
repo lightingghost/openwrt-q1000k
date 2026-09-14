@@ -51,7 +51,10 @@ A separate [RAM bench](XGSPON-BENCH.q1000k.md) now builds at source
 controller TX, enables the vendor PHY/MAC resources and fixes the native
 GDM2 internal transport dependency. Normal LAN and failsafe use 192.168.0.1;
 LAN DHCP/RA and automatic PON startup are disabled. Its FIT/initramfs content
-inspection passes; RAM boot and controller/stack smoke tests await the user.
+inspection passes. The user has RAM-booted this image; read-only SSH confirms
+RAM root, absent MTD/UBI devices, native ponraw registration and disabled
+PON modules/service. The audited bench status preflight passes. Controller
+and stack smoke tests await explicit permission for temporary hardware changes.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original

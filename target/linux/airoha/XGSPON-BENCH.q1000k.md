@@ -2,8 +2,8 @@
 
 This is a separate `quantum_q1000k-xgspon-bench` image target on
 `q1000k-xgspon`. It produces an initramfs FIT, no sysupgrade or bootloader
-artifact. The normal Q1000K UBI target remains unchanged. No hardware
-acceptance has been claimed for the bench image.
+artifact. The normal Q1000K UBI target remains unchanged. RAM boot and
+read-only preflight have passed; optical hardware acceptance remains pending.
 
 The bench DT disables the NAND controller and NAND chip, removes partition
 definitions and the persistent rootdisk reference, and uses console-only
@@ -20,11 +20,12 @@ disabled. Connect a dedicated host at e.g. `192.168.0.2/24`, with no gateway
 on that link. **192.168.1.1 belongs to the user's working router and must
 not be used for Q1000K SSH.** No default WAN or OLT identity is inferred.
 
-## Staged device tests (not yet authorized or performed)
+## Staged device tests
 
 The user's device restriction remains read-only with no firmware flashing.
-The user offered to boot the bench in RAM; agree the exact runtime steps
-before loading modules. Keep the fiber physically disconnected. Do not use
+The user has RAM-booted the bench and authorized read-only SSH access at
+192.168.0.1. Agree the exact runtime steps before loading modules. Keep the
+fiber physically disconnected. Do not use
 HTTP recovery upload, sysupgrade, MTD writes, UBI formatting or `saveenv`.
 The RAM transfer/boot commands depend on the bootloader actually running;
 inspect that bootloader and its memory map before providing commands.
@@ -108,3 +109,37 @@ required modules/userspace files, absent OEM blobs and absent PON module
 autoload, including boot-module symlinks. A corrupt kernel is rejected; a DT
 with valid recomputed hashes but the TX-inhibit property removed is rejected
 too. This is build/content validation, not hardware acceptance.
+
+## First RAM boot and read-only preflight — 2026-09-14
+
+The user booted the bench and supplied SSH at 192.168.0.1. Read-only checks
+confirm the expected model, Linux 6.18.44 and embedded source revision
+`109361469940476fc06bf68303b47514718bcb5e`. The boot arguments are
+`console=ttyS0,115200 earlycon root=/dev/ram0 rdinit=/init`; `/` and `/tmp`
+are tmpfs. `/proc/mtd` contains only its header, `/sys/class/mtd` is empty,
+and `/sys/class/ubi` contains only the framework's `version` attribute.
+There are no MTD devices, attached UBI devices or flash-backed mounts.
+
+`br-lan` has 192.168.0.1/24 with no default route. The 1G `lan1` port has
+carrier at 1000 Mbps; the `lan2` RTL8261N driver binds, but that port has no
+carrier in this sample. DHCP, DHCPv6, RA and NDP service settings are disabled;
+the UDP socket tables show DNS listeners but no DHCP server ports 67/547.
+The normal PON service remains disabled. `ponraw` is registered with the
+native airoha_eth driver, administratively down with flags 0x1002 and no
+address. No PON/controller/OMCI modules are loaded, and the deferred-device
+list is empty. The boot log has no observed kernel warning splat or oops.
+
+The live DT contains the bench marker and controller TX-inhibit property.
+This establishes the intended policy, not the actual transmitter state:
+the controller has not been loaded, powered, detected or sampled in this
+session. The helper, common library and jshn shell library hashes match the
+locally built files. The audited `q1000k-pon-bench status` command returns
+`RAM bench preflight passed; no hardware changes made.`
+
+All device commands were reads. No calibration/firmware was copied to the
+device, no PON modules were loaded, no interface was changed, and no flash
+operation occurred. The controller test still needs explicit permission to
+stage RAM files and change GPIO/I2C state, plus confirmation that the fiber
+remains disconnected. The subsequent PHY/MAC/OMCI and shutdown/drain tests
+remain pending. Local raw logs and a summary are saved under the bench
+artifact directory's `read-only-boot/` directory; raw logs are kept private.
