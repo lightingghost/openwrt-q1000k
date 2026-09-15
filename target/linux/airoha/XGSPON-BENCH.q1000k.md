@@ -329,3 +329,28 @@ This replacement has not been booted. The retained old SCU cannot be replaced
 by a normal module unload, so the next action is a user RAM boot of this FIT,
 followed by read-only preflight and the already-authorized stack retry. No
 forced unload, reboot or firmware flash was performed during this work.
+
+## Default IP changed to 192.168.255.1 — 2026-09-14
+
+The user requested 192.168.255.1 as the default OpenWrt address. Source
+`de0b571776d067c027138d333b33bcaeaebf6a24` and experimental builder
+`42302b4c57a1f3aa6c68bd394b1e3fc3efc37a16` set the bench's normal LAN and
+preinit/failsafe to 192.168.255.1/24, broadcast 192.168.255.255. Bench release
+3 updates the LAN defaults and preflight guard. Existing tests and image
+inspection use the same address; the guard rejects the previous subnet.
+
+The seven bench tests, eight builder tests, full cached image build and
+offline FIT/initramfs inspection pass. The image contains the expected new
+address in preinit and normal LAN configuration and all nine unloadable PON
+modules. NAND/TX/autostart policy and the prior stack fixes are preserved.
+Normal development configuration, protected source branches, the normal
+builder and the user-owned README were preserved. No device access or
+runtime network configuration change occurred for this update.
+
+The image is 7,602,176 bytes; SHA-256:
+`a8521b0815fd43c9fda5d31916272f3d3cef10badeb9e38566b3afd551e4752b`.
+The image, manifest, test/build logs, inspection and checksums are under
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-de0b571776`.
+This image has not been booted. After user RAM boot, the new SSH target is
+192.168.255.1; use a host address such as 192.168.255.2/24 while DHCP remains
+disabled. The authorized stack retry remains the next hardware step.
