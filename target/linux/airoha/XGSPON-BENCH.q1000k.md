@@ -1271,3 +1271,41 @@ hardware behavior remains untested; this experiment is not a claimed fix.
 The running device is left idle on `e26854f308` after successful cleanup.
 These source changes have not been installed on it. A new matching RAM FIT
 must be built/inspected and booted by the user before this optional experiment.
+
+### Single-reacquisition RAM image ready — 2026-09-15
+
+Source: `90952676e40bb74905aee2b549114b8dd3335804`.
+Artifact: `/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-90952676e4/`.
+FIT: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`,
+7,602,176 bytes; SHA256
+`08b91d9ff1e65b1973a48096805cf2ef8cba9c68f0b4e79d14bd4a7d690d342b`.
+
+Full build, **120 host PON tests**, and FIT/kernel/rootfs/DT inspection passed.
+Inspection also verifies the new MAC opt-in parameter, PHY reacquisition
+routine and helper option, with the helper default disabled. The manifest
+contains vendor r74, controller r7 and helper r8. NAND remains disabled;
+management remains `192.168.255.1`; immutable optical TX inhibit, no PON
+autoload, panic zero and the identity CLI/LuCI fields remain verified.
+The saved PHY UML run and generated-source equivalence are recorded under
+`uml-phy/` and `uml-phy-source-verification.json`. No new OMCI core run is
+claimed. Normal configs, protected refs and the user's board README were
+preserved. The same unrelated cached-feed warnings remain in the build log.
+
+The connected test on `e26854f308` remains failed for downstream sync, with
+successful cleanup. No additional device mutation was performed while this
+new image was built. Ask the user to RAM-boot the new FIT via second-stage
+http-uboot and report SSH ready. Fiber may remain connected; do not flash.
+Then run the prepared, opt-in experiment against the exact new artifact:
+
+```sh
+python3 scripts/q1000k/bench-run.py receive \
+  --artifact ../build-artifacts/q1000k-xgspon/bench-90952676e4 \
+  --output ../build-artifacts/q1000k-xgspon/bench-90952676e4-receive-reacquire-01 \
+  --inputs /tmp/q1000k-controller-test-1093614699-inputs.tar \
+  --fiber-connected --reacquire-once --serial-log /tmp/serial_output.log
+```
+
+Retain before/after snapshots with `bench-receiver-report.py`. Treat the
+experiment as unproven until the hardware observations are collected. A
+reacquisition attempt alone cannot pass the downstream acceptance check,
+and the test cannot establish O5 registration, OMCI service or WAN traffic.
