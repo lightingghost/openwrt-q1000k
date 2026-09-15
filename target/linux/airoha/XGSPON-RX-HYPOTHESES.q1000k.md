@@ -75,3 +75,33 @@ In particular, the clock/control audit also checks whether TX-disable handling
 leaves a shared RX clock or frontend gate disabled; TX inhibit stays asserted
 throughout this investigation. Proving electrical polarity or modulation
 quality may require board/scope evidence beyond this RAM bench.
+
+## Results from the first consolidated bench session — 2026-09-15
+
+All five runs used image `7e9c0edc1d` on the same RAM boot, with 270 samples
+total and normal verified cleanup between runs. The connected gain matrix,
+disconnected control, and reconnected gain+PLL matrix are recorded in
+`XGSPON-BENCH.q1000k.md`. No additional image or unsupported register write was
+needed. The final connected sensor reading was 14,300 nW (-18.45 dBm).
+
+| Hypothesis | Result and remaining limit |
+|---|---|
+| 1. Optical power | Connected measurements were available throughout (approximately -18.9 to -18.3 dBm across starts), with small within-window variation. Severe disappearance/fluctuation was not observed; absolute calibration, wavelength and modulation quality remain unproven. |
+| 2. False/stale light | Both LOS sources followed the confirmed physical state. RX power fell to one count/100 nW disconnected and recovered to about 14,400 nW after reconnection. SFP status changed 0 -> 1 -> 0 with unchanged polarity. A stuck indication is strongly disfavored; live insertion timing/IRQs were not tested. |
+| 3. RX gain/equalization | The isolated OEM gain setting and gain+PLL both applied successfully and restored their saved gain fields on shutdown, but neither produced synchronization or any receive-counter activity. This rules out those candidates as sufficient fixes, not every analog setting. |
+| 4. Clock/rate/reset | Sampled rate/divider/bus/OSR fields match the imported 9/10G setup. The prior PLL-only trial and this combined trial failed. Actual recovered clock and reset/PLL ordering remain open; forced lock fields do not settle them. |
+| 5. RX path/packing/polarity | Input, SerDes, bus and frontend controls were captured and remained stable. No physical route or differential-polarity proof was obtained. Keep this open for OEM/board comparison. |
+| 6. PCS configuration | RX enabled, PCS reset released, counter-clear inactive and descrambling enabled throughout. These simple gate/reset explanations are weakened. Correct bit packing and all framing parameters are not yet proven. |
+| 7. Counter blind spot | All seven extra codeword/HEC/MAC-boundary counters also stayed zero. They did not uncover earlier reception hidden by the original frame counter; missing data/clock or incorrect counter configuration remain possible. |
+| 8. External technology | No new wavelength/rate measurement was made. The previously identified XGS-PON module keeps this lower priority, not eliminated. |
+| 9. Firmware/calibration/hardware | Verified loading and controller health checks passed; power and LOS changed with the fiber state. Analog output quality and end-to-end electrical receive operation remain unverified. |
+
+Next work should audit the controller-to-PHY receive path and the complete OEM
+clock/reset sequence. Known differences worth resolving before another build
+are PLL restoration before final PCS release versus our after-recovery trial,
+TDC settling/toggle order, and the OEM's upper five digital-reset fields whose
+meanings remain unknown. Do not replay unknown fields or remove TX inhibit.
+The public FEC_FORCE_OFF macro name is misleading: its enable handler sets
+that bit, so 0x310 must not be labeled disabled FEC based on the name alone.
+There is no evidence yet that http-uboot is responsible, and no basis to change
+ONT identity, OMCI profiles, DHCP or VLANs to fix this pre-sync PHY state.

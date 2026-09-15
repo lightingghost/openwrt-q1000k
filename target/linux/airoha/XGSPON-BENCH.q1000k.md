@@ -1784,3 +1784,59 @@ The latter includes the independently validated `comparison.json` and per-stage
 `observations.json`, `receiver-report.json`, `hypotheses.json` and raw evidence.
 Next is a user-confirmed disconnected control, followed by reconnection, to
 test the sensor/LOS response without a new image or speculative register write.
+
+### Dark/reconnected controls and combined recovery — 2026-09-15
+
+After the user confirmed disconnection, a 30-sample receive-only dark control
+passed. Both LOS sources were true in every sample. MCU RX power was 100 nW
+(-40 dBm, one sensor count) throughout. Treat this as a near-floor indication,
+not an independently calibrated dark optical measurement. SFP status changed
+from 0 connected to 1 disconnected; SFP polarity remained 9. LED class readings
+were green 0/red 1. Cleanup passed and the stack was unloaded before asking
+the user to reconnect.
+
+The user then confirmed firm reconnection. On the same image a second matrix
+captured a 30-sample baseline and one 90-sample gain-plus-PLL trial:
+
+| Observation | Reconnected baseline | Gain + PLL |
+|---|---|---|
+| MCU RX power | 13,600–14,600 nW (-18.66 to -18.36 dBm) | 14,200–14,700 nW (-18.48 to -18.33 dBm) |
+| Last RX power | 14,400 nW (-18.42 dBm) | 14,300 nW (-18.45 dBm) |
+| Both LOS sources | Clear throughout | Clear throughout |
+| Synchronization | HUNT (0) throughout | HUNT (0) throughout |
+| Original and seven additional receive counters | Zero throughout | Zero throughout |
+| Recovery attempts | 0 | 1 |
+| Setup/observation/cleanup elapsed | 53.749 s | 121.294 s |
+
+The combined attempt was first observed in sample 15, at poll 10, 15.731 s
+after the first snapshot. An additional 84.292 s still showed no reception.
+Gain changed 0x103 -> 0x101 and normal teardown confirmed restoration to 0x103.
+Readback checks for both optional routines succeeded; they were insufficient
+to restore synchronization. Neither this nor the prior isolated tests rules
+out a sequencing/timing dependency in the complete OEM initialization.
+
+Read-only live captures of the LuCI backend showed LOS=true/RX=100 nW when
+disconnected and LOS=false/RX=14,400 nW after reconnection, with telemetry bit
+64 and TX power null in both. After final unload its OMCI/LOS/registration
+fields were null and PHY/MAC-loaded flags false, so the backend did not retain
+the last power value. The browser UI was not independently operated in these
+tests. Physical fiber changes occurred between unloaded runs: these controls
+establish state response across starts, not live insertion IRQ or latency.
+
+All five receive runs (270 samples total) on this one boot passed TX/registration,
+protocol/service, postflight and private-input cleanup checks. The dark control
+passed its acceptance criteria; all four connected windows retained failed
+downstream acceptance. No kernel fault occurred. The last state is idle, all
+nine PON modules unloaded, controller powered off, ponraw down/unenslaved,
+private inputs removed, SSH healthy and fiber physically connected. No flash,
+reboot, optical transmission, bootloader change or new image build occurred.
+
+Additional captures in the parent workspace:
+`build-artifacts/q1000k-xgspon/bench-7e9c0edc1d-dark-control-01/` and
+`build-artifacts/q1000k-xgspon/bench-7e9c0edc1d-reconnected-gain-pll-matrix-01/`.
+Both have independently generated receiver/hypothesis reports; the matrix also
+has `comparison.json`. Live backend captures are `luci-status.json` in the dark
+capture and reconnected baseline, plus `idle-luci-status.json` at matrix root.
+The updated hypothesis document records what this evidence does and does not
+resolve; repeating the same recovery modes or longer unchanged observations
+is not the next step.
