@@ -15,11 +15,22 @@
 #include "en7573.h"
 #include "q1000k_pon.h"
 
+/* Immutable experiment selection; every nonzero option requires the bench
+ * DT's hard TX inhibit before the controller can bind or touch hardware.
+ */
+static bool bench_md32_a0;
+module_param(bench_md32_a0, bool, 0400);
+MODULE_PARM_DESC(bench_md32_a0, "TX-inhibited bench: OEM A0 MD32 transport");
+static unsigned int bench_rx_output;
+module_param(bench_rx_output, uint, 0400);
+MODULE_PARM_DESC(bench_rx_output, "TX-inhibited RX output: 0 unchanged, 1 400mV flat, 2 600mV flat, 3 600mV 2dB");
+
 struct q1000k_pon {
 	struct i2c_client *client;
 	struct gpio_desc *power[2], *los[2]; /* GPON, XGS-PON */
 	struct gpio_descs *select;
 	struct en7573_io io;
+	struct en7573_rx_output rx_output_original;
 	struct mutex lock;
 	struct kref ref;
 	bool dead, leased, tx_enabled, tx_inhibited;
@@ -66,13 +77,21 @@ static void pon_delay(void *ctx, unsigned int ms)
 
 static int pon_off(struct q1000k_pon *pon)
 {
-	int first, second;
+	int first, second, restore = 0;
+
+	if (pon->rx_output_original.saved)
+		restore = en7573_restore_rx_output(&pon->io, &pon->rx_output_original);
 	first = gpiod_set_value_cansleep(pon->power[0], 0);
 	second = gpiod_set_value_cansleep(pon->power[1], 0);
+	/* Power removal contains even an I2C restoration failure. Preserve the
+	 * error so the collector cannot claim verified register restoration.
+	 */
+	if (!first && !second)
+		pon->rx_output_original.saved = false;
 	pon->initialized = false;
 	pon->tx_enabled = false;
 	pon->mode = first || second ? -2 : -1;
-	return first ? first : second;
+	return restore ? restore : first ? first : second;
 }
 
 static int pon_select(struct q1000k_pon *pon, int mode)
@@ -128,6 +147,8 @@ static int pon_initialize(struct q1000k_pon *pon)
 	const struct firmware *pm = NULL, *dm = NULL;
 	int ret;
 	pon->stage = "inputs";
+	if ((pon->io.md32_a0 || bench_rx_output) && !pon->tx_inhibited)
+		return -EACCES;
 	if (!pon->calibration_valid)
 		return -ENODATA;
 	/* Verify the complete input pair before changing GPIOs or chip state. */
@@ -150,6 +171,11 @@ static int pon_initialize(struct q1000k_pon *pon)
 		goto out;
 	pon->stage = "mcu-start";
 	ret = en7573_start_tx_disabled(&pon->io);
+	if (!ret && bench_rx_output) {
+		pon->stage = "rx-output";
+		ret = en7573_apply_rx_output(&pon->io, bench_rx_output,
+					    &pon->rx_output_original);
+	}
 	if (!ret)
 		pon->initialized = true;
 	if (!ret)
@@ -497,10 +523,11 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 		}
 	}
 	size = sysfs_emit(buffer,
-		"{\"schema_version\":1,\"mode\":\"%s\",\"gpon_detected\":%s,"
+		"{\"schema_version\":1,\"bench_md32_a0\":%s,\"bench_rx_output\":%u,\"mode\":\"%s\",\"gpon_detected\":%s,"
 		"\"xgspon_detected\":%s,\"gpon_id\":%u,\"xgspon_id\":%u,"
 		"\"checked_uptime\":%llu,\"md32_enabled\":%s,\"tx_disabled\":%s,\"tx_inhibited\":%s,"
 		"\"calibration_supplied\":%s,\"firmware_verified\":%s,\"los\":%s,\"last_error\":%d,\"stage\":\"%s\"}\n",
+		pon->io.md32_a0 ? "true" : "false", bench_rx_output,
 		pon->mode == -2 ? "unknown" : pon->mode == -1 ? "off" : pon->mode ? "xgspon" : "gpon",
 		detected_json(pon->detected[0]), detected_json(pon->detected[1]),
 		pon->id[0], pon->id[1], pon->checked_at,
@@ -526,13 +553,25 @@ static ssize_t receiver_status_show(struct device *dev,
 		ret = en7573_sample_receiver(&pon->io, &sample);
 	if (!ret)
 		ret = sysfs_emit(buffer,
-			"{\"schema_version\":1,\"receiver_status\":true,"
+			"{\"schema_version\":1,\"controller_version\":2,\"receiver_status\":true,"
+			"\"bench_md32_a0\":%s,\"bench_rx_output\":%u,"
 			"\"sampled_ms\":%llu,\"mcu_a0\":%u,\"mcu_a2\":%u,"
 			"\"apd_control\":%u,\"ocp_control\":%u,\"firmware_status\":%u,"
-			"\"los_control\":%u,\"system_status\":%u}\n",
+			"\"los_control\":%u,\"system_status\":%u,"
+			"\"rx_output_control\":%u,\"rx_output_shape\":%u,\"ocp_status\":%u,"
+			"\"temperature_raw\":%u,\"supply_raw\":%u,\"apd_voltage_raw\":%u,"
+			"\"rssi_adc\":%u,\"rssi_current_raw\":%u,"
+			"\"rx_output_mask_control\":64,\"rx_output_mask_shape\":1059012360,"
+			"\"rx_output_saved\":%s,\"rx_output_original_control\":%u,"
+			"\"rx_output_original_shape\":%u}\n",
+			pon->io.md32_a0 ? "true" : "false", bench_rx_output,
 			ktime_get_boottime_ns() / 1000000, sample.mcu_a0, sample.mcu_a2,
 			sample.apd, sample.ocp, sample.firmware, sample.los_control,
-			sample.system_status);
+			sample.system_status, sample.rx_output_control, sample.rx_output_shape,
+			sample.ocp_status, sample.temperature_raw, sample.supply_raw,
+			sample.apd_voltage_raw, sample.rssi_adc, sample.rssi_current_raw,
+			pon->rx_output_original.saved ? "true" : "false",
+			pon->rx_output_original.control, pon->rx_output_original.shape);
 	mutex_unlock(&pon->lock);
 	return ret;
 }
@@ -600,11 +639,14 @@ static int pon_probe(struct i2c_client *client)
 		return ret;
 	pon->client = client;
 	pon->tx_inhibited = of_property_read_bool(dev->of_node, "quantum,tx-inhibit");
+	if (bench_rx_output > 3 || ((bench_md32_a0 || bench_rx_output) &&
+				 !pon->tx_inhibited))
+		return dev_err_probe(dev, -EACCES, "RX experiments require TX-inhibited bench and valid profile\n");
 	pon->mode = -1;
 	pon->stage = "off";
 	pon->detected[0] = pon->detected[1] = -1;
 	mutex_init(&pon->lock);
-	pon->io = (struct en7573_io){ .ctx = pon, .read = pon_read,
+	pon->io = (struct en7573_io){ .ctx = pon, .md32_a0 = bench_md32_a0, .read = pon_read,
 		.write = pon_write, .delay_ms = pon_delay };
 	pon->power[0] = devm_gpiod_get(dev, "gpon-enable", GPIOD_OUT_LOW);
 	if (IS_ERR(pon->power[0]))

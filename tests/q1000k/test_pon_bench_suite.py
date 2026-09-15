@@ -25,25 +25,54 @@ class SuiteTests(unittest.TestCase):
     def test_every_hypothesis_has_executable_and_external_coverage(self):
         names={c[0] for c in SUITE.CASES}
         self.assertEqual(len(SUITE.COVERAGE),9)
-        self.assertEqual(len(SUITE.CASES),13)
-        self.assertEqual(tuple(p for _,p,_ in SUITE.CASES if p),PROBE.PROBES)
+        self.assertEqual(len(SUITE.CASES),len(SUITE.CONNECTED_PROBES)+len(SUITE.CONTROLLER_CASES)+3)
+        self.assertEqual(tuple(p for n,p,_ in SUITE.CASES if p == n),SUITE.CONNECTED_PROBES)
         for coverage in SUITE.COVERAGE.values():
             self.assertLessEqual(set(coverage['cases']),names)
             self.assertTrue(coverage['external'])
 
     def test_all_cases_continue_for_expected_no_sync_and_stop_on_fault(self):
-        for fail in (None,0,5,12):
+        total=len(SUITE.CASES)
+        for fail in (None,0,5,total-1):
             with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
                 args=argparse.Namespace(output=Path(directory)/'suite',artifact=Path('/artifact'),samples=90)
                 results=[ValueError('unsafe') if i==fail else observation(p,r)
                          for i,(_,p,r) in enumerate(SUITE.CASES)]
-                with patch.object(SUITE,'stage',side_effect=results) as stage:
+                with patch.object(SUITE,'stage',side_effect=results) as stage, \
+                     patch.object(SUITE.RUN,'diagnostics_version',return_value=3):
                     status=SUITE.execute(args)
-                self.assertEqual(stage.call_count,13 if fail is None else fail+1)
+                self.assertEqual(stage.call_count,total if fail is None else fail+1)
                 self.assertEqual(status,0 if fail is None else 1)
                 record=json.loads((args.output/'suite.json').read_text())
-                self.assertEqual(len(record['results']),13 if fail is None else fail)
+                self.assertEqual(len(record['results']),total if fail is None else fail)
                 self.assertFalse(record['optical_tx'])
+
+    def test_explicit_case_does_not_repeat_other_experiments(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            args=argparse.Namespace(output=Path(directory)/'suite',artifact=Path('/artifact'),
+                                    samples=90,case='checker')
+            with patch.object(SUITE,'stage',return_value=observation('checker',True)) as stage, \
+                 patch.object(SUITE.RUN,'diagnostics_version',return_value=3):
+                self.assertEqual(SUITE.execute(args),0)
+            self.assertEqual(stage.call_count,1)
+            self.assertEqual(stage.call_args.args[1:],('checker','checker',True))
+            record=json.loads((args.output/'suite.json').read_text())
+            self.assertEqual(record['not_run'],[])
+            self.assertFalse(record['automatic_retries'])
+
+    def test_old_artifact_rejects_new_modes_before_capture_and_preserves_old_cases(self):
+        for version in (1,2):
+            SUITE.check_artifact_compatibility(SUITE.plan(90,'checker')['cases'],version)
+            for name in ('cdr-auto-release','oem-md32','rx-output-600-flat','oem-md32-acquire-600-flat'):
+                with self.subTest(version=version,case=name), self.assertRaisesRegex(ValueError,'schema 3 is required'):
+                    SUITE.check_artifact_compatibility(SUITE.plan(90,name)['cases'],version)
+        with tempfile.TemporaryDirectory() as directory:
+            args=argparse.Namespace(output=Path(directory)/'suite',artifact=Path('/artifact'),samples=90)
+            with patch.object(SUITE.RUN,'diagnostics_version',return_value=2), \
+                 patch.object(SUITE,'stage') as stage, self.assertRaisesRegex(ValueError,'schema 3 is required'):
+                SUITE.execute(args)
+            stage.assert_not_called()
+            self.assertFalse(args.output.exists())
 
     def test_mismatch_missing_attempt_and_lost_light_reject_case(self):
         for kind in ('attempt','light','cleanup','probe'):

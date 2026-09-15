@@ -207,7 +207,8 @@ u32 q1000k_phy_rx_probe_writes(void) { return 0; }
 int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain)
 {
     assert(!q1000k_phy_callback_context() && controller_inhibit && !controller.tx);
-    assert(qphy_rx_attempts==1 && qphy_active && !controller_los);
+    assert(qphy_rx_attempts==1 && qphy_active);
+    assert(controller_los == (qphy_rx_probe_mode==Q1000K_RX_PROBE_CHECKER_DARK));
     reacquire_calls++; reacquire_restore_pll=restore_pll; reacquire_restore_gain=restore_gain;
     if(reacquire_bad_tx) controller.tx=true;
     return reacquire_error;
@@ -573,8 +574,33 @@ static void rx_probe_tests(void)
         assert(q1000k_phy_set_rx_bench(false,false,false,false)==-EINVAL);
         assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
         assert(q1000k_phy_set_rx_probe(0)==-EBUSY);
+        if(mode==Q1000K_RX_PROBE_CHECKER_DARK) {
+            /* No initial darkness or mixed LOS may arm the checker. */
+            controller_los=true;
+            regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+            for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
+            assert(!reacquire_calls && !qphy_rx_seen_light);
+            controller_los=false;
+            regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+            for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
+            assert(!reacquire_calls && qphy_rx_seen_light);
+            controller_los=true;
+            for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
+            assert(!reacquire_calls);
+            regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+            for(int i=0;i<9;i++) qphy_poll_work(&qphy_poll_job);
+            assert(!reacquire_calls);
+            controller_los=false; qphy_poll_work(&qphy_poll_job); controller_los=true;
+            assert(!qphy_rx_no_sync && !reacquire_calls);
+        }
         for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
         assert(reacquire_calls==1 && !qphy_fault);
+        if(mode==Q1000K_RX_PROBE_CHECKER_DARK) {
+            controller_los=false;
+            regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+            for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
+            assert(reacquire_calls==1);
+        }
         regs[(EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4&0x1ffff)/4]=0xfedcba98;
         regs[(EN7581_XPON_PMA_FIFO_CK_STATUS&0x1ffff)/4]=0x12345678;
         unsigned int previous_writes=writes;

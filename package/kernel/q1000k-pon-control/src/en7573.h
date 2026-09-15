@@ -24,13 +24,16 @@ typedef uint32_t u32;
 #define EN7573_TX_CONTROL 0x3e0
 #define EN7573_TX_DISABLE (1U << 9)
 
-/* Control/address registers use 0x51, memory data ports use 0x50.
+/* Normally control/address registers use 0x51; the immutable OEM bench
+ * profile moves only MD32 words to 0x50. Memory data ports always use 0x50.
  * Register addresses are big endian, register words and memory are little
  * endian, except the published optical-power words, which are big endian.
  * Transport callbacks return zero only for a complete transaction.
  */
 struct en7573_io {
 	void *ctx;
+	/* Fixed at controller bind; ordinary control words always stay on A2. */
+	bool md32_a0;
 	int (*read)(void *ctx, u8 device, u16 reg, u8 *data, size_t len);
 	int (*write)(void *ctx, u8 device, u16 reg, const u8 *data, size_t len);
 	void (*delay_ms)(void *ctx, unsigned int ms);
@@ -45,7 +48,20 @@ struct en7573_state {
 /* Opaque read-only startup observations, not firmware-health assertions. */
 struct en7573_receiver {
 	u32 mcu_a0, mcu_a2, apd, ocp, firmware, los_control, system_status;
+	u32 rx_output_control, rx_output_shape, ocp_status;
+	u32 temperature_raw, supply_raw, apd_voltage_raw, rssi_adc, rssi_current_raw;
 };
+struct en7573_rx_output {
+	u32 control, shape;
+	bool saved;
+};
+/* Fixed source-table candidates, never a general register write API.
+ * Caller must enforce immutable bench TX inhibition and serialize accesses.
+ */
+int en7573_apply_rx_output(struct en7573_io *io, unsigned int profile,
+			  struct en7573_rx_output *original);
+int en7573_restore_rx_output(struct en7573_io *io,
+			    struct en7573_rx_output *original);
 int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample);
 /* Published RX power: 0x51:0x0068, BE16 in 0.1 uW units. Zero/saturated
  * words are unavailable (-ENODATA); errors leave the output unchanged.

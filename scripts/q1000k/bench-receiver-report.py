@@ -28,6 +28,53 @@ PATH_PHY_WORDS = ('sfp_status', 'sfp_polarity', 'digital_status', 'pcs_debug_con
 PCS_COUNTERS = ('cw_start', 'cw_end', 'sof_to_mac', 'eof_to_mac', 'psync_mismatch', 'sfc_hec_error', 'pon_id_hec_error')
 COUNTERS = ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
             'fec_uncorrected', 'irq_calls', 'poll_calls')
+CONTROLLER_V2_WORDS = ('rx_output_control', 'rx_output_shape', 'ocp_status',
+                       'temperature_raw', 'supply_raw', 'apd_voltage_raw',
+                       'rssi_adc', 'rssi_current_raw',
+                       'rx_output_original_control', 'rx_output_original_shape')
+OUTPUT_PROFILES = {'unchanged': (0, None, None),
+                   '400-flat': (1, 0x40, 0x14001400),
+                   '600-flat': (2, 0x40, 0x1e001e00),
+                   '600-boost': (3, 0, 0x36083208)}
+
+
+def controller_diagnostics(rows, record):
+    versions = {r.get('controller_version', 1) for r in rows}
+    if versions == {1}:
+        if record.get('oem_md32') or record.get('rx_output', 'unchanged') != 'unchanged':
+            raise ValueError('Controller experiment requires version 2 observations')
+        return None
+    if versions != {2} or any(type(r.get('controller_version')) is not int for r in rows):
+        raise ValueError('Inconsistent controller diagnostics version')
+    oem = record.get('oem_md32', False)
+    output = record.get('rx_output', 'unchanged')
+    if type(oem) is not bool or output not in OUTPUT_PROFILES:
+        raise ValueError('Invalid controller experiment selection')
+    mode, control, shape = OUTPUT_PROFILES[output]
+    raw = words(rows, CONTROLLER_V2_WORDS)
+    for r in rows:
+        if (r.get('bench_md32_a0') is not oem or type(r.get('bench_rx_output')) is not int or
+                r['bench_rx_output'] != mode or r.get('rx_output_saved') is not bool(mode) or
+                r.get('rx_output_mask_control') != 0x40 or
+                r.get('rx_output_mask_shape') != 0x3f1f3f08):
+            raise ValueError('Controller experiment observations do not match requested profile')
+        if mode and (r['rx_output_control'] & 0x40 != control or
+                     r['rx_output_shape'] & 0x3f1f3f08 != shape):
+            raise ValueError('Electrical output fields did not retain the selected profile')
+        if mode and ((r['rx_output_control'] ^ r['rx_output_original_control']) & ~0x40 or
+                     (r['rx_output_shape'] ^ r['rx_output_original_shape']) & ~0x3f1f3f08):
+            raise ValueError('Electrical output changed unrelated fields')
+        if any(r[k] > 0xffff for k in ('temperature_raw', 'supply_raw', 'apd_voltage_raw',
+                                     'rssi_adc', 'rssi_current_raw')):
+            raise ValueError('Invalid controller analog sample width')
+    return dict(controller_version=2, oem_md32=oem, rx_output=output, raw_words=raw,
+                apd_voltage_v=sorted({r['apd_voltage_raw']/8 for r in rows}),
+                rssi_current_ua=sorted({r['rssi_current_raw'] >> 5 for r in rows}),
+                temperature_c=sorted({(r['temperature_raw']-(65536 if r['temperature_raw'] & 0x8000 else 0))/256 for r in rows}),
+                supply_v=sorted({r['supply_raw']/10000 for r in rows}),
+                ocp_detected=sorted({bool(r['ocp_status'] & 256) for r in rows}),
+                limits=['Analog telemetry is reported by the controller and does not prove high-speed electrical data.',
+                        'Electrical profiles come from EN7572 family source; they are not verified Q1000K defaults.'])
 
 
 def analog_fields(rows):
@@ -165,6 +212,7 @@ def summarize(capture):
                           'FIFO nibbles may latch, wrap or saturate; changes are not counted as received frames.',
                           'No independent clock/data validity follows from these decoded fields.'],
         'controller_words': words(controller, CONTROLLER_WORDS),
+        'controller_diagnostics': controller_diagnostics(controller, record),
         'elapsed_seconds': round(record['finished'] - record['started'], 3),
     }
 

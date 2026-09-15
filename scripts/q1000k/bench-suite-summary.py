@@ -26,6 +26,7 @@ def summarize(directory,partial=False):
         capture=directory/name
         observed=SUITE.REPORT.summarize(capture,allow_downstream_failure=True)
         SUITE.check_case(observed,case['probe'],case['reacquire'])
+        SUITE.check_controller_selection(capture, case)
         receiver=SUITE.RECEIVER.summarize(capture)
         rx=observed['receive']; diag=observed['probe_diagnostics']
         samples=[]

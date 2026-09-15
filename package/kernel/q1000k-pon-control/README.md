@@ -162,3 +162,28 @@ LOS/I2C failures and failed containment. The EN7573 fixture still passes all
 control read/write/readback failures. The Linux 6.18.44 AArch64 r3 package
 builds (8,711 bytes) and installs its development header and exported symbol
 file. These are local tests; the controller was not accessed on hardware.
+
+
+## RX acquisition bench profiles
+
+The RAM bench may select immutable module parameters `bench_md32_a0=1`
+(OEM A0 transport for MD32 registers 0x3000 through 0x3018) and
+`bench_rx_output=1|2|3` (400 mV/0 dB, 600 mV/0 dB, 600 mV/2 dB electrical
+RX output). These parameters require the device tree's TX-inhibit property
+before the controller can bind. They cannot be changed at runtime.
+
+The electrical RX output candidates use the pinned EN7572
+[`SetRxPreEmphasis` table](https://github.com/Sirherobrine23/airoha_xpon_en757x/blob/950199a8de6b75e76906a7c1b39b7a9a3e2913f9/v2/lddla/en7572_cmd.c#L2027):
+A2 0x114 mask `0x3f1f3f08`, A2 0x110 mask `0x40`. This changes the receiver's
+electrical output toward the SoC. It does not change optical transmit drive,
+APD bias, persistent calibration, or the OEM-only unknown 0x110 bit8.
+Each field update checks MCU-running/TX-disabled state and full-word readback.
+Shutdown restores owned fields in reverse order and always removes controller
+power, including on restore failure. Failures remain visible to the collector.
+
+Receiver snapshots now carry `controller_version=2`, immutable profile values,
+original/applied output words and masks, live APD voltage, raw RSSI ADC/current,
+OCP status, temperature and supply words. They distinguish sensor and analog
+state from high-speed frame acceptance. None independently proves a usable
+electrical eye. The A0 profile remains a comparison experiment: earlier hardware
+already reported both MCU-enable address views as 1.

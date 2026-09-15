@@ -59,7 +59,9 @@ if action=='cat':
         data=dict(schema_version=1, mode='xgspon' if initialized else 'off',
                   tx_inhibited=True, tx_disabled=True, last_error=0,
                   md32_enabled=initialized, firmware_verified=initialized,
-                  calibration_supplied=initialized, los=True)
+                  calibration_supplied=initialized, los=True,
+                  bench_md32_a0=bool(int(os.environ.get('BENCH_OEM_MD32','0'))),
+                  bench_rx_output=int(os.environ.get('BENCH_RX_OUTPUT','0')))
         data.update(json.loads(os.environ.get('BENCH_STATUS','{}')))
         print(json.dumps(data))
     elif args==[str(root/'sys/module/xpon_10g/parameters/rx_bench_status')]:
@@ -80,7 +82,7 @@ if action=='cat':
         params=json.loads((root/'module-params').read_text())
         mode=int(params.get('rx_probe',0))
         attempts=int(params.get('rx_reacquire')=='1' and n>=15)
-        data=dict(diagnostics_version=2,probe=mode,attempts=attempts,writes=attempts if mode else 0,
+        data=dict(diagnostics_version=3,probe=mode,attempts=attempts,writes=attempts if mode else 0,
                   sampled_ms=n*1000,checker_control=5,data_route_control=0,bist_lane_control=0,
                   tdc_ncpo=0,fifo_clock_status=0)
         data.update(json.loads(os.environ.get('BENCH_DIAGNOSTICS','{}')))
@@ -129,7 +131,7 @@ else: raise AssertionError(action)
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
 
-    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None, restore_pll=False, restore_gain=False, probe=None):
+    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None, restore_pll=False, restore_gain=False, probe=None, oem_md32=False, rx_output=None):
         args = [mode]
         if mode != 'status':
             args += [str(self.calibration)]
@@ -137,6 +139,10 @@ else: raise AssertionError(action)
                 args += ['--fiber-' + fiber]
             if probe:
                 args += ['--probe',probe]
+            if oem_md32:
+                args += ['--oem-md32']
+            if rx_output:
+                args += ['--rx-output', rx_output]
             if restore_gain:
                 args += ['--restore-gain']
             if restore_pll:
@@ -174,14 +180,14 @@ else: raise AssertionError(action)
 
     def test_controller_cycle_and_cleanup(self):
         self.run_bench('controller')
-        self.assertEqual(self.calls(), [['modprobe', MODULES[0]], ['rmmod', MODULES[0]]])
+        self.assertEqual(self.calls(), [['insmod', MODULES[0], 'bench_md32_a0=0', 'bench_rx_output=0'], ['rmmod', MODULES[0]]])
         self.assertEqual((self.controller / 'calibration').read_bytes(), self.calibration.read_bytes())
         self.assertFalse((self.root / 'var/run/q1000k-pon-bench.lock').exists())
 
     def test_receiver_read_failure_stops_before_phy_and_cleans_controller(self):
         (self.controller / 'receiver_status').unlink()
         self.run_bench(success=False)
-        self.assertEqual(self.calls(), [['modprobe', MODULES[0]], ['rmmod', MODULES[0]]])
+        self.assertEqual(self.calls(), [['insmod', MODULES[0], 'bench_md32_a0=0', 'bench_rx_output=0'], ['rmmod', MODULES[0]]])
         self.assertEqual((self.controller / 'operation').read_text(), 'off\n')
 
     def test_panic_reboot_blocks_mutations_but_allows_status(self):
@@ -246,6 +252,17 @@ else: raise AssertionError(action)
         self.run_bench('receive', reacquire=True, success=False)
         self.run_bench('stack', fiber='connected', reacquire=True, success=False)
         self.assertEqual(self.calls(), [])
+
+    def test_new_controller_and_phy_selection_reaches_modules(self):
+        self.env.update(BENCH_FIBER='connected', BENCH_OEM_MD32='1', BENCH_RX_OUTPUT='3')
+        self.env['BENCH_STATUS'] = json.dumps({'los': False})
+        self.run_bench('receive', fiber='connected', reacquire=True,
+                       probe='combined-auto', oem_md32=True, rx_output='600-boost')
+        loads = [c for c in self.calls() if c[0] == 'insmod']
+        self.assertEqual(loads[0], ['insmod', 'q1000k_pon_control',
+                                   'bench_md32_a0=1', 'bench_rx_output=3'])
+        self.assertIn('rx_probe=21', loads[-1])
+        self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
 
     def test_reacquire_passes_explicit_parameter_and_collects_attempt(self):
         self.env['BENCH_FIBER']='connected'

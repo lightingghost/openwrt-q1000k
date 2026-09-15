@@ -15,7 +15,10 @@ import tarfile
 import time
 
 PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-low',
-          'tdc-delay', 'pll-order', 'oem-order', 'checker')
+          'tdc-delay', 'pll-order', 'oem-order', 'checker',
+          'cdr-auto-release', 'cdr-internal-auto', 'prcal-finalize', 'fll-auto',
+          'rx-sequence-auto', 'post-eye-ready', 'oem-clock-cycle', 'oem-rx-acquire',
+          'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun')
 HOST = '192.168.255.1'
 SSH = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
@@ -133,7 +136,7 @@ def diagnostics_version(artifact):
     versions = re.findall(r'^RX_DIAGNOSTICS_VERSION=(\d+)$', helper, re.M)
     if not versions:
         return 1
-    if len(versions) != 1 or versions[0] not in ('1', '2'):
+    if len(versions) != 1 or versions[0] not in ('1', '2', '3'):
         raise ValueError('Unsupported artifact receiver diagnostics schema')
     return int(versions[0])
 
@@ -181,6 +184,18 @@ dmesg
 '''
 
 
+def requires_acquisition_firmware(args):
+    probe = getattr(args, 'probe', None)
+    return (getattr(args, 'oem_md32', False) or
+            getattr(args, 'rx_output', 'unchanged') != 'unchanged' or
+            (probe in PROBES and PROBES.index(probe) >= 10))
+
+
+def validate_experiment_artifact(args):
+    if requires_acquisition_firmware(args) and diagnostics_version(args.artifact) < 3:
+        raise ValueError('Acquisition/controller experiments require diagnostics v3 firmware; RAM boot the new bench')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['status', 'resources', 'controller', 'stack', 'receive'])
@@ -198,11 +213,17 @@ def main(argv=None):
     parser.add_argument('--restore-gain', action='store_true',
                         help='Apply the OEM RX frontend gain after the single recovery')
     parser.add_argument('--probe', choices=PROBES, help='One bounded, checked RX experiment')
+    parser.add_argument('--oem-md32', action='store_true',
+                        help='TX-inhibited bench: initialize MD32 using the OEM A0 transport')
+    parser.add_argument('--rx-output', choices=('unchanged', '400-flat', '600-flat', '600-boost'),
+                        default='unchanged', help='Fixed controller electrical RX output candidate')
     parser.add_argument('--samples', type=int, choices=(30, 90, 180),
                         help='Receive observations at one-second intervals (default: 30)')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args(argv)
+    if (args.oem_md32 or args.rx_output != 'unchanged') and args.action != 'receive':
+        parser.error('Controller experiments are only for receive')
     if args.probe and (not args.reacquire_once or args.restore_gain or args.restore_pll):
         parser.error('--probe requires exclusive --reacquire-once')
     if args.restore_gain and not args.reacquire_once:
@@ -221,11 +242,16 @@ def main(argv=None):
         parser.error('Tests require --inputs; status is read-only')
     if args.registers and args.action != 'status':
         parser.error('--registers is only for a read-only status capture')
+    try:
+        validate_experiment_artifact(args)
+    except ValueError as error:
+        parser.error(str(error))
     with device_lock():
         return execute(args)
 
 
 def execute(args):
+    validate_experiment_artifact(args)
     artifact = args.artifact.resolve()
     revision = json.loads((artifact / 'selection.json').read_text())['revision']
     if not re.fullmatch('[0-9a-f]{40}', revision):
@@ -253,6 +279,10 @@ def execute(args):
         recovery_flag += ' --restore-gain'
     if getattr(args, 'probe', None):
         recovery_flag += ' --probe ' + shlex.quote(args.probe)
+    if getattr(args, 'oem_md32', False):
+        recovery_flag += ' --oem-md32'
+    if getattr(args, 'rx_output', 'unchanged') != 'unchanged':
+        recovery_flag += ' --rx-output ' + shlex.quote(args.rx_output)
     sample_flag = f' --samples {args.samples}' if args.samples is not None else ''
     run = dict(schema_version=1, action=args.action, host=HOST, revision=revision,
                fiber='connected' if args.fiber_connected else 'disconnected' if args.fiber_disconnected else 'unspecified',
@@ -261,6 +291,8 @@ def execute(args):
     run['reacquire_once'] = args.reacquire_once
     run['restore_pll'] = args.restore_pll
     run['restore_gain'] = args.restore_gain
+    run['oem_md32'] = getattr(args, 'oem_md32', False)
+    run['rx_output'] = getattr(args, 'rx_output', 'unchanged')
     if args.action == 'receive':
         run['diagnostics_version'] = diagnostics_version(artifact)
         run['probe'] = getattr(args, 'probe', None)

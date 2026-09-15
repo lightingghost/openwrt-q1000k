@@ -7,23 +7,32 @@ from pathlib import Path
 import re
 
 PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-low',
-          'tdc-delay', 'pll-order', 'oem-order', 'checker')
+          'tdc-delay', 'pll-order', 'oem-order', 'checker',
+          'cdr-auto-release', 'cdr-internal-auto', 'prcal-finalize', 'fll-auto',
+          'rx-sequence-auto', 'post-eye-ready', 'oem-clock-cycle', 'oem-rx-acquire',
+          'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun')
 HEADER = Path(__file__).resolve().parents[2] / 'package/kernel/airoha-pon/src/bsp/include/q1000k_rx_diag.h'
 FIELDS = tuple(re.findall(r'X\((\w+),', HEADER.read_text()))
 V2_FIELDS = ('tdc_ncpo', 'fifo_clock_status')
-FIELDS_BY_VERSION = {1: tuple(k for k in FIELDS if k not in V2_FIELDS), 2: FIELDS}
+V3_FIELDS = ('cdr_injection', 'cdr_lpf_override', 'fll_idac', 'fll_load',
+             'eye_reset_force', 'eye_reset_mode', 'eye_pi_ready', 'eye_pi_mode',
+             'eye_count_ready', 'eye_count_mode', 'rx_peaking_control')
+FIELDS_BY_VERSION = {1: tuple(k for k in FIELDS if k not in V2_FIELDS + V3_FIELDS),
+                     2: tuple(k for k in FIELDS if k not in V3_FIELDS), 3: FIELDS}
 
 
 def summarize(capture):
     record = json.loads((capture/'checkpoint.json').read_text())
     version = record.get('diagnostics_version')
     if type(version) is not int or version not in FIELDS_BY_VERSION:
-        raise ValueError('Capture requires diagnostics schema 1 or 2')
+        raise ValueError('Capture requires diagnostics schema 1, 2 or 3')
     fields = FIELDS_BY_VERSION[version]
     probe = record.get('probe')
     if probe is not None and probe not in PROBES:
         raise ValueError('Unknown probe in checkpoint')
     mode = PROBES.index(probe)+1 if probe else 0
+    if mode > 10 and version < 3:
+        raise ValueError('Acquisition probe requires diagnostic schema 3')
     if mode and (not record.get('reacquire_once') or record.get('restore_gain') or record.get('restore_pll')):
         raise ValueError('Probe request is not exclusive recovery')
     rows, rx = [], []
@@ -61,6 +70,12 @@ def summarize(capture):
             raise ValueError('Upstream test generator or loopback is active')
         previous_ms, attempts, writes = row['sampled_ms'],row['attempts'],row['writes']
     serial = (capture/'serial.log').read_text()
+    if probe == 'checker-dark' and attempts:
+        first = next(i for i, row in enumerate(rows) if row['attempts'])
+        if (not rx[first].get('controller_los') or not rx[first].get('phy_los') or
+                not any(sample.get('controller_los') is False and sample.get('phy_los') is False
+                        for sample in rx[:first])):
+            raise ValueError('Fresh dark checker lacks observed light followed by a dark first attempt')
     if mode and attempts and serial.count('q1000k: RX probe fields restored')!=1:
         raise ValueError('Probe field restoration was not confirmed exactly once')
     def words(items):
@@ -86,7 +101,7 @@ def summarize(capture):
                 counter_delta_crosses_intervention=False,
                 passive_clock_words={k: dict(first=rows[0][k], last=rows[-1][k],
                     minimum=min(r[k] for r in rows), maximum=max(r[k] for r in rows),
-                    distinct_values=len({r[k] for r in rows})) for k in V2_FIELDS} if version == 2 else None,
+                    distinct_values=len({r[k] for r in rows})) for k in V2_FIELDS} if version >= 2 else None,
                 limits=['Frequency words are not a calibrated baud-rate measurement or CDR-lock proof.',
                         'NCPO is a raw tracking word, not a lock flag or a calibrated frequency.',
                         'FIFO clock status is passive and may be stale without a latch; no latch/clear was written.',

@@ -159,22 +159,45 @@ def interrupts(stop):
             signal.signal(number, handler)
 
 
-def plan(baseline_only):
-    cases = [dict(name='connected-baseline', samples=30, fiber='connected')]
+def plan(baseline_only=False, suite=None, skip_live_control=False, selected_case=None, samples=90):
+    """Pin every immutable experiment in the plan before any device access."""
+    if suite is None:
+        suite = module(Path(__file__).resolve().parents[2], 'bench-suite')
+    cases = [dict(name='connected-baseline', samples=30, fiber='connected',
+                  probe=None, reacquire=False)]
     if not baseline_only:
-        cases.append(dict(name='live-reconnect', samples=180, fiber='connected-dark-reconnected',
-                          minimum_samples_per_phase=MIN_PHASE_SAMPLES))
-    return dict(schema_version=1, host=HOST,
-                mode='baseline-only' if baseline_only else 'live-control', cases=cases,
-                optical_tx=False, flash=False, register_probe=None,
+        cases.extend(dict(case, fiber='connected') for case in suite.plan(samples)['cases']
+                     if case['name'] != 'baseline')
+        if not skip_live_control:
+            if 'checker-dark' in suite.RUN.PROBES:
+                cases.append(dict(name='checker-dark', samples=180, fiber='connected-dark-reconnected',
+                                  probe='checker-dark', reacquire=True,
+                                  minimum_samples_per_phase=MIN_PHASE_SAMPLES))
+            cases.append(dict(name='live-reconnect', samples=180, fiber='connected-dark-reconnected',
+                              probe=None, reacquire=False, minimum_samples_per_phase=MIN_PHASE_SAMPLES))
+    if selected_case is not None:
+        cases = [case for case in cases if case['name'] == selected_case]
+        if not cases:
+            raise ValueError('Unknown or excluded case: ' + selected_case)
+    coverage = {name: dict(value, cases=['connected-baseline' if case == 'baseline' else case
+                                       for case in value['cases']])
+                for name, value in suite.COVERAGE.items()}
+    if any(case['name'] == 'checker-dark' for case in cases):
+        coverage['measurement-boundary']['cases'].append('checker-dark')
+    return dict(schema_version=2, host=HOST,
+                mode='baseline-only' if baseline_only else 'experiments', cases=cases,
+                optical_tx=False, flash=False,
+                register_probe='immutable per-case selection' if any(case.get('probe') for case in cases) else None,
+                coverage=coverage, automatic_retries=False,
+                minimum_sampling_seconds=sum(case['samples'] for case in cases),
                 optical_service_verified=False, signal_quality_verified=False,
                 live_reconnection_tested=False, collection_completion_is_not_optical_service_validation=True,
                 remaining_hypotheses={
-                    'clock-reset': dict(software='Compare passive NCPO, frequency and FIFO status across live optical transitions',
+                    'clock-reset': dict(software='Run isolated clock/recovery sequences and compare NCPO, frequency and FIFO status',
                                         pending='Actual recovered-clock/data measurement and documented reset interpretation'),
-                    'route-polarity': dict(software='Retain input-route and PCS counter evidence',
+                    'route-polarity': dict(software='Exercise fixed RX electrical-output settings, retain input-route and PCS counter evidence',
                                            pending='Electrical continuity/polarity measurement or board-specific OEM comparison'),
-                    'analog-calibration': dict(software='Compare passive RX2ANA fields, power, LOS and controller health',
+                    'analog-calibration': dict(software='Run fixed receiver acquisition sequences and compare RX2ANA, power, LOS and controller health',
                                               pending='Analog signal quality and calibration accuracy require external evidence'),
                     'pcs-packing': dict(software='Correlate seven PCS counters; previous isolated bit-order/FEC/descrambler trials failed',
                                        pending='Earlier receive-path failure or undocumented combined configuration remains possible'),
@@ -182,11 +205,13 @@ def plan(baseline_only):
                                           pending='This collection tests sampled response; exact physical latency is not measured'),
                     'external-line-wavelength': dict(software='Record average received power and LOS',
                                                     pending='Same-line gateway comparison and wavelength-selective measurement'),
-                    'undocumented-oem-resets': dict(software='No undocumented reset experiment',
+                    'undocumented-oem-resets': dict(software='Only explicitly implemented, source-mapped receive experiments run',
                                                    pending='Identify meanings and board applicability from OEM source/documentation'),
                 },
                 limits=['Power and LOS do not prove wavelength, modulation quality or recovered-clock lock.',
                         'Operator confirmation time is not the precise time of the physical transition.',
+                        'A negative experiment excludes only its exact recipe, not the entire hypothesis.',
+                        'Every connected experiment unloads the stack and removes private RAM inputs before the next case.',
                         'The 180-sample live window is bounded; missing confirmation or phase stops collection without retry.',
                         'External optical/electrical measurements and documented OEM configuration evidence remain required.'])
 
@@ -235,10 +260,11 @@ def rx_rows(path):
     return rows
 
 
-def consecutive_phase(rows, start, los, count=MIN_PHASE_SAMPLES):
+def consecutive_phase(rows, start, los, count=MIN_PHASE_SAMPLES, attempts=None):
     streak = []
     for number, row in enumerate(rows[start:], start + 1):
-        if row.get('controller_los') is los and row.get('phy_los') is los:
+        if (row.get('controller_los') is los and row.get('phy_los') is los and
+                (attempts is None or row.get('reacquire_attempts') == attempts)):
             streak.append((number, row))
             if len(streak) == count:
                 first_number, first = streak[0]
@@ -270,6 +296,9 @@ class LiveControl:
                     limits=['Confirmation timestamps are operator reports, not precise physical transition times.',
                             'Sampled detection and IRQ/poll counts are evidence; they are not calibrated interrupt latency.'])
 
+    def phase(self, rows):
+        return consecutive_phase(rows, self.start, self.state == 'dark')
+
     def advance(self, rows, allow_prompts=True):
         if self.stop.reason or self.state == 'complete':
             return
@@ -292,7 +321,7 @@ class LiveControl:
             self.state = 'dark' if word == 'DISCONNECTED' else 'reconnected'
             self.save()
             return
-        phase = consecutive_phase(rows, self.start, self.state == 'dark')
+        phase = self.phase(rows)
         if phase is None:
             return
         if not allow_prompts and self.state != 'reconnected':
@@ -320,6 +349,20 @@ class LiveControl:
         self.save()
 
 
+class FreshCheckerControl(LiveControl):
+    """Arm the immutable checker once in darkness after illuminated startup."""
+    def phase(self, rows):
+        return consecutive_phase(rows, self.start, self.state == 'dark',
+                                 attempts=0 if self.state == 'lit' else 1)
+
+    def result(self):
+        return dict(super().result(), probe='checker-dark',
+                    limits=super().result()['limits'] + [
+                        'The checker must arm once in darkness before reconnection is requested.',
+                        'Normal traffic is not PRBS; checker activity is not a BER measurement.',
+                        'Compare against the separate illuminated checker case; constant status may be latched.'])
+
+
 def capture_case(args, root, artifact, case, stop):
     if args.serial_capture is not None:
         args.serial_capture.check()
@@ -327,7 +370,16 @@ def capture_case(args, root, artifact, case, stop):
     command = [sys.executable, str(root/'scripts/q1000k/bench-run.py'), 'receive',
                '--artifact', str(artifact), '--output', str(capture), '--inputs', str(args.inputs),
                '--fiber-connected', '--samples', str(case['samples']), '--serial-log', str(args.serial_log)]
-    live = LiveControl(capture, stop) if case['name'] == 'live-reconnect' else None
+    if case.get('reacquire'):
+        command.append('--reacquire-once')
+    if case.get('probe'):
+        command.extend(['--probe', case['probe']])
+    if case.get('oem_md32'):
+        command.append('--oem-md32')
+    if case.get('rx_output', 'unchanged') != 'unchanged':
+        command.extend(['--rx-output', case['rx_output']])
+    live = (FreshCheckerControl(capture, stop) if case['name'] == 'checker-dark' else
+            LiveControl(capture, stop) if case['name'] == 'live-reconnect' else None)
     print(f"Starting {case['name']} ({case['samples']} samples); optical TX remains inhibited.", flush=True)
     with (args.output/(case['name']+'-runner.log')).open('wb') as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -359,34 +411,53 @@ def capture_case(args, root, artifact, case, stop):
     return live.result() if live else None
 
 
-def summarize_case(root, capture, live=None):
+def summarize_case(root, capture, live=None, case=None):
     if not (capture/'serial.log').read_bytes():
         raise ValueError('Serial evidence is empty; an active serial logger/device is required')
     control = module(root, 'bench-control-report')
     report, observations, receiver = control.summarize(capture)
-    if observations['probe_diagnostics']['probe'] is not None or observations['receive']['reacquire_requested']:
-        raise ValueError('Collector case unexpectedly performed a register/recovery experiment')
+    control.SUITE.check_controller_selection(capture, case or {})
     for name, data in (('observations.json', observations), ('receiver-report.json', receiver),
                        ('probe-report.json', observations['probe_diagnostics']),
                        ('hypotheses.json', control.SUITE.HYPOTHESES.evaluate(receiver)),
                        ('control-report.json', report)):
         write_json(capture/name, data)
     if live is None:
-        if observations['receive']['controller_los'] != [False] or observations['receive']['phy_los'] != [False]:
-            raise ValueError('Baseline did not maintain both light indications')
+        status = control.SUITE.check_case(observations, (case or {}).get('probe'),
+                                         (case or {}).get('reacquire', False))
     else:
+        dark_checker = (case or {}).get('probe') == 'checker-dark'
+        expected_probe = 'checker-dark' if dark_checker else None
+        if (observations['probe_diagnostics']['probe'] != expected_probe or
+                observations['receive']['reacquire_requested'] != dark_checker):
+            raise ValueError('Live control experiment selection did not match the capture')
+        if dark_checker and observations['probe_diagnostics']['attempts'] != 1:
+            raise ValueError('Fresh dark checker did not execute its single attempt')
         if live['status'] != 'complete' or [p['name'] for p in live['observed_phases']] != ['lit', 'dark', 'reconnected']:
             raise ValueError('Live window lacks confirmed and observed connected/dark/reconnected phases')
         # Independently verify the ordered phase evidence against the complete,
         # safety-checked capture, not just the interactive monitoring state.
         rows = rx_rows(capture/'attempt.log')
+        if dark_checker:
+            first_attempt = next((index for index,row in enumerate(rows)
+                                  if row.get('reacquire_attempts') == 1), None)
+            if (first_attempt is None or
+                    rows[first_attempt].get('controller_los') is not True or
+                    rows[first_attempt].get('phy_los') is not True or
+                    not any(row.get('controller_los') is False and row.get('phy_los') is False
+                            for row in rows[:first_attempt])):
+                raise ValueError('Fresh checker arm was not observed in darkness after illuminated startup')
         after = 0
-        for los in (False, True, False):
-            phase = consecutive_phase(rows, after, los)
+        for index, los in enumerate((False, True, False)):
+            phase = consecutive_phase(rows, after, los,
+                                      attempts=(0 if index == 0 else 1) if dark_checker else None)
             if phase is None:
                 raise ValueError('Complete capture does not contain all three ordered LOS phases')
             after = phase['last_sample']
-    return dict(status='observed', cleanup='passed', downstream_stable=observations['receive']['downstream_stable'],
+        status = 'observed'
+    return dict(status=status, cleanup='passed', downstream_stable=observations['receive']['downstream_stable'],
+                probe=observations['probe_diagnostics']['probe'],
+                attempts=observations['probe_diagnostics']['attempts'],
                 optical_service_verified=False, signal_quality_verified=False)
 
 
@@ -407,7 +478,7 @@ def package_capture(output, record):
                 path = output/name
                 if not path.exists():
                     continue
-                if path.is_symlink() or not path.is_file():
+                if path.is_symlink() or not path.is_file() or (path.parent != output and path.parent.is_symlink()):
                     raise ValueError('Evidence is not a regular file: ' + name)
                 data = path.read_bytes()
                 member = tarfile.TarInfo(output.name+'/'+name)
@@ -418,6 +489,11 @@ def package_capture(output, record):
 
 def execute(args, root, artifact, metadata):
     run = module(root, 'bench-run')
+    suite = module(root, 'bench-suite')
+    record = plan(args.baseline_only, suite,
+                  getattr(args, 'skip_live_control', False), getattr(args, 'case', None),
+                  getattr(args, 'samples', 90))
+    suite.check_artifact_compatibility(record['cases'], metadata['diagnostics_version'])
     run.validate_inputs(args.inputs)
     # Serial evidence is necessary for the existing kernel-warning/restore checks.
     if args.serial_device is None:
@@ -431,7 +507,6 @@ def execute(args, root, artifact, metadata):
     for original, name in (('selection.json', 'selection.json'), ('runtime-sha256sums', 'runtime-sha256sums'),
                            ('checkpoint.json', 'build-checkpoint.json')):
         (args.output/name).write_bytes((artifact/original).read_bytes())
-    record = plan(args.baseline_only)
     if args.serial_device is not None:
         args.serial_log = args.output/'serial-source.log'
     record.update(artifact=metadata, started=time.time(), status='running', results=[], confirmations=[],
@@ -450,14 +525,16 @@ def execute(args, root, artifact, metadata):
             if args.serial_device is not None:
                 serial = module(root, 'bench-serial')
                 args.serial_capture = resources.enter_context(serial.SerialCapture(args.serial_device, args.serial_log))
+            connected_confirmed = False
             for case in record['cases']:
                 if stop.reason:
                     break
-                if args.baseline_only:
+                if args.fiber_connected:
                     record['confirmations'].append(dict(action='CONNECTED', kind='command-line', confirmed_at=time.time()))
-                elif not confirm('Connect the fiber and leave it connected for '+case['name']+'.',
+                elif not connected_confirmed and not confirm('Connect the fiber and leave it connected throughout the acquisition experiments.',
                                  'CONNECTED', stop, record['confirmations'], args.serial_capture):
                     break
+                connected_confirmed = True
                 result = dict(name=case['name'], status='running', started=time.time())
                 record['results'].append(result)
                 save()
@@ -465,7 +542,7 @@ def execute(args, root, artifact, metadata):
                     live = capture_case(args, root, artifact, case, stop)
                     if live:
                         result['physical_control'] = live
-                    result.update(summarize_case(root, args.output/case['name'], live))
+                    result.update(summarize_case(root, args.output/case['name'], live, case))
                     if live:
                         record['live_reconnection_tested'] = True
                     if stop.reason:
@@ -502,12 +579,13 @@ def summarize_existing(root, output):
             results.append(dict(name=case['name'], status='not-run'))
             continue
         try:
-            live = json.loads((capture/'operator-events.json').read_text()) if case['name'] == 'live-reconnect' else None
-            results.append(dict(name=case['name'], **summarize_case(root, capture, live)))
+            live = (json.loads((capture/'operator-events.json').read_text())
+                    if case['name'] in ('live-reconnect', 'checker-dark') else None)
+            results.append(dict(name=case['name'], **summarize_case(root, capture, live, case)))
         except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
             results.append(dict(name=case['name'], status='incomplete-or-invalid', error=str(error)))
     print(json.dumps(dict(optical_service_verified=False, results=results), indent=2))
-    return 0 if all(result['status'] == 'observed' for result in results) else 1
+    return 0 if all(result['status'] in ('observed', 'not-triggered-already-synchronized') for result in results) else 1
 
 
 def main(argv=None):
@@ -520,7 +598,11 @@ def main(argv=None):
     serial.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'), help='Actively written serial capture (default: /tmp/serial_output.log)')
     serial.add_argument('--serial-device', type=Path, help='Capture a serial device at 115200 baud during the tests')
     parser.add_argument('--baseline-only', action='store_true', help='Only the 30-sample connected baseline; no interactive physical control')
-    parser.add_argument('--fiber-connected', action='store_true', help='Explicit physical confirmation required with --baseline-only')
+    parser.add_argument('--experiments', action='store_true', help='Run every immutable acquisition experiment (the default)')
+    parser.add_argument('--skip-live-control', action='store_true', help='Run connected experiments without prompted dark-checker/reconnect controls')
+    parser.add_argument('--case', help='Run just this named case from --dry-run, without retrying any case')
+    parser.add_argument('--samples', type=int, choices=(30, 90, 180), default=90, help='Samples per acquisition experiment (default: 90)')
+    parser.add_argument('--fiber-connected', action='store_true', help='Confirm the fiber is connected before the first case')
     parser.add_argument('--dry-run', action='store_true', help='Show pinned image and plan without contacting the device')
     parser.add_argument('--summarize', type=Path, metavar='CAPTURE', help='Recheck existing evidence without device access')
     args = parser.parse_args(argv)
@@ -534,10 +616,15 @@ def main(argv=None):
         return build_single_file(args.build_single_file, args.artifact)
     if args.baseline_only and not args.fiber_connected and not args.dry_run and not args.summarize:
         parser.error('--baseline-only requires --fiber-connected as explicit physical confirmation')
+    if args.baseline_only and (args.experiments or args.skip_live_control or args.case):
+        parser.error('--baseline-only cannot be combined with experiment selection')
     with workspace(args.artifact) as (root, artifact):
         metadata = artifact_metadata(artifact, module(root, 'bench-run'))
         if args.dry_run:
-            print(json.dumps(dict(**plan(args.baseline_only), artifact=metadata), indent=2))
+            suite = module(root, 'bench-suite')
+            record = plan(args.baseline_only, suite, args.skip_live_control, args.case, args.samples)
+            suite.check_artifact_compatibility(record['cases'], metadata['diagnostics_version'])
+            print(json.dumps(dict(**record, artifact=metadata), indent=2))
             return 0
         if args.summarize:
             return summarize_existing(root, args.summarize)

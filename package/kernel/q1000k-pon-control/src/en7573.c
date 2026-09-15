@@ -35,10 +35,19 @@ static u32 get_le32(const u8 *p)
 	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
 
+static u8 control_device(struct en7573_io *io, u16 reg)
+{
+	/* OEM QKX001-06.00.44.00 uses A0 for these MD32 words. The
+	 * published loader uses A2; expose the difference as a bench trial.
+	 */
+	return io->md32_a0 && reg >= 0x3000 && reg <= 0x3018 ?
+		EN7573_MEMORY : EN7573_CONTROL;
+}
+
 int en7573_read_control(struct en7573_io *io, u16 reg, u32 *value)
 {
 	u8 data[4];
-	int ret = io->read(io->ctx, EN7573_CONTROL, reg, data, sizeof(data));
+	int ret = io->read(io->ctx, control_device(io, reg), reg, data, sizeof(data));
 	if (!ret)
 		*value = get_le32(data);
 	return ret;
@@ -72,25 +81,33 @@ int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample)
 	 * routines. No PM/DM data port, address selector, alarm clear, or FIFO.
 	 */
 	static const u16 registers[] = { 0x3018, 0x3018, 0x15c, 0x160,
-					0x80, 0x43c, 0x488 };
-	u32 values[7];
+		0x80, 0x43c, 0x488, 0x110, 0x114, 0x3e4,
+		0x60, 0x62, 0xae, 0xf2, 0xf6 };
+	u32 values[15];
 	u8 data[4];
 	unsigned int i;
 	int ret;
 
-	for (i = 0; i < 7; i++) {
+	for (i = 0; i < 15; i++) {
+		size_t length = i < 10 ? 4 : 2;
+
 		ret = io->read(io->ctx, i ? EN7573_CONTROL : EN7573_MEMORY,
-			       registers[i], data, sizeof(data));
+			       registers[i], data, length);
 		if (ret)
 			return ret;
-		values[i] = get_le32(data);
-		if (values[i] == ~0U)
+		values[i] = i < 10 ? get_le32(data) : i < 12 ?
+			(u32)data[0] << 8 | data[1] : (u32)data[1] << 8 | data[0];
+		if (i < 10 && values[i] == ~0U)
 			return -EIO;
 	}
 	*sample = (struct en7573_receiver) {
 		.mcu_a0 = values[0], .mcu_a2 = values[1], .apd = values[2],
 		.ocp = values[3], .firmware = values[4], .los_control = values[5],
 		.system_status = values[6],
+		.rx_output_control = values[7], .rx_output_shape = values[8],
+		.ocp_status = values[9], .temperature_raw = values[10],
+		.supply_raw = values[11], .apd_voltage_raw = values[12],
+		.rssi_adc = values[13], .rssi_current_raw = values[14],
 	};
 	return 0;
 }
@@ -98,7 +115,7 @@ int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample)
 static int write_control(struct en7573_io *io, u16 reg, u32 value)
 {
 	u8 data[] = { value, value >> 8, value >> 16, value >> 24 };
-	return io->write(io->ctx, EN7573_CONTROL, reg, data, sizeof(data));
+	return io->write(io->ctx, control_device(io, reg), reg, data, sizeof(data));
 }
 
 static int update_control(struct en7573_io *io, u16 reg, u32 mask, u32 value)
@@ -106,6 +123,85 @@ static int update_control(struct en7573_io *io, u16 reg, u32 mask, u32 value)
 	u32 old;
 	int ret = en7573_read_control(io, reg, &old);
 	return ret ? ret : write_control(io, reg, (old & ~mask) | (value & mask));
+}
+
+static int rx_output_guard(struct en7573_io *io)
+{
+	struct en7573_state state;
+	int ret = en7573_sample_state(io, &state);
+
+	return ret ? ret : !state.md32_enabled || !state.tx_disabled ? -EACCES : 0;
+}
+
+static int rx_output_update(struct en7573_io *io, u16 reg, u32 mask, u32 value)
+{
+	u32 old, actual;
+	int ret = rx_output_guard(io);
+
+	if (!ret)
+		ret = en7573_read_control(io, reg, &old);
+	if (ret || old == ~0U)
+		return ret ? ret : -EIO;
+	ret = write_control(io, reg, (old & ~mask) | (value & mask));
+	if (!ret)
+		ret = en7573_read_control(io, reg, &actual);
+	if (ret || actual == ~0U || actual != ((old & ~mask) | (value & mask)))
+		return ret ? ret : -EIO;
+	return rx_output_guard(io);
+}
+
+int en7573_apply_rx_output(struct en7573_io *io, unsigned int profile,
+			  struct en7573_rx_output *original)
+{
+	/* Pinned EN7572 SetRxPreEmphasis/RX_PE_LUT 950199a: electrical
+	 * RX output to the SoC, not optical transmit drive. Source field order.
+	 */
+	static const u32 shapes[] = { 0, 0x14001400, 0x1e001e00, 0x36083208 };
+	static const u32 masks[] = { 0x00003f00, 0x001f0000, 0x3f000000, 0x8 };
+	struct en7573_rx_output saved = { 0 };
+	unsigned int i;
+	int ret;
+
+	if (!io || !io->read || !io->write || !original || profile > 3)
+		return -EINVAL;
+	if (original->saved)
+		return -EBUSY;
+	if (!profile)
+		return 0;
+	ret = rx_output_guard(io);
+	if (!ret)
+		ret = en7573_read_control(io, 0x110, &saved.control);
+	if (!ret)
+		ret = en7573_read_control(io, 0x114, &saved.shape);
+	if (ret || saved.control == ~0U || saved.shape == ~0U)
+		return ret ? ret : -EIO;
+	saved.saved = true;
+	*original = saved; /* Save before the first possibly partial write. */
+	for (i = 0; i < sizeof(masks) / sizeof(masks[0]); i++) {
+		ret = rx_output_update(io, 0x114, masks[i], shapes[profile]);
+		if (ret)
+			return ret;
+	}
+	return rx_output_update(io, 0x110, 0x40, profile == 3 ? 0 : 0x40);
+}
+
+int en7573_restore_rx_output(struct en7573_io *io,
+			    struct en7573_rx_output *original)
+{
+	static const u32 masks[] = { 0x8, 0x3f000000, 0x001f0000, 0x00003f00 };
+	unsigned int i;
+	int ret;
+
+	if (!io || !io->read || !io->write || !original)
+		return -EINVAL;
+	if (!original->saved)
+		return 0;
+	ret = rx_output_update(io, 0x110, 0x40, original->control);
+	for (i = 0; !ret && i < sizeof(masks) / sizeof(masks[0]); i++)
+		ret = rx_output_update(io, 0x114, masks[i], original->shape);
+	if (!ret)
+		original->saved = false;
+	return ret;
 }
 
 int en7573_set_tx(struct en7573_io *io, bool enable)

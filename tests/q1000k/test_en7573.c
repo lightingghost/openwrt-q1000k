@@ -10,7 +10,7 @@ struct model {
 	u32 regs[0x4000 / 4];
 	u8 pm[EN7573_PM_SIZE], dm[EN7573_DM_SIZE];
 	unsigned int calls, fail_at, readbacks;
-	bool corrupt, wrong_id, start_seen;
+	bool corrupt, wrong_id, start_seen, md32_a0, output_mismatch, output_unrelated_mismatch, drop_tx_guard;
 };
 
 static u32 unpack(const u8 *p)
@@ -36,8 +36,8 @@ static int rd(void *ctx, u8 dev, u16 reg, u8 *buf, size_t len)
 		return 0;
 	}
 	assert(len == 4);
-	if (dev == 0x50) {
-		assert(reg == 0x3008 || reg == 0x3014);
+	if (reg == 0x3008 || reg == 0x3014) {
+		assert(dev == 0x50);
 		bool pm = reg == 0x3008;
 		u32 addr = m->regs[(pm ? 0x3004 : 0x3010) / 4];
 		assert(addr <= (pm ? sizeof(m->pm) : sizeof(m->dm)) - 4);
@@ -46,7 +46,7 @@ static int rd(void *ctx, u8 dev, u16 reg, u8 *buf, size_t len)
 		m->readbacks++;
 		return 0;
 	}
-	assert(dev == 0x51 && !(reg & 3) && reg < 0x4000);
+	assert(dev == (m->md32_a0 && reg >= 0x3000 && reg <= 0x3018 ? 0x50 : 0x51) && !(reg & 3) && reg < 0x4000);
 	value = m->regs[reg / 4];
 	for (i = 0; i < 4; i++) buf[i] = value >> (8 * i);
 	return 0;
@@ -58,8 +58,8 @@ static int wr(void *ctx, u8 dev, u16 reg, const u8 *buf, size_t len)
 	int ret = transfer(m);
 	if (ret) return ret;
 	assert(len == 4);
-	if (dev == 0x50) {
-		assert(reg == 0x3008 || reg == 0x3014);
+	if (reg == 0x3008 || reg == 0x3014) {
+		assert(dev == 0x50);
 		bool pm = reg == 0x3008;
 		u32 *addr = &m->regs[(pm ? 0x3004 : 0x3010) / 4];
 		assert(!(m->regs[EN7573_MCU_ENABLE / 4] & 1));
@@ -70,12 +70,18 @@ static int wr(void *ctx, u8 dev, u16 reg, const u8 *buf, size_t len)
 		*addr += 4;
 		return 0;
 	}
-	assert(dev == 0x51 && !(reg & 3) && reg < 0x4000);
+	assert(dev == (m->md32_a0 && reg >= 0x3000 && reg <= 0x3018 ? 0x50 : 0x51) && !(reg & 3) && reg < 0x4000);
 	if (reg == EN7573_MCU_ENABLE && (unpack(buf) & 1)) {
 		assert(m->readbacks == (EN7573_PM_SIZE + EN7573_DM_SIZE) / 4);
 		m->start_seen = true;
 	}
 	m->regs[reg / 4] = unpack(buf);
+	if (m->output_mismatch && reg == 0x114)
+		m->regs[reg / 4] ^= 0x100;
+	if (m->output_unrelated_mismatch && reg == 0x114)
+		m->regs[reg / 4] ^= 0x80000000;
+	if (m->drop_tx_guard && reg == 0x114)
+		m->regs[EN7573_TX_CONTROL/4] &= ~EN7573_TX_DISABLE;
 	return 0;
 }
 
@@ -137,16 +143,17 @@ struct receiver_model { unsigned int calls, fail_at, erased_at; };
 static int receiver_read(void *ctx, u8 dev, u16 reg, u8 *data, size_t len)
 {
 	struct receiver_model *m = ctx;
-	const u16 expected[] = { 0x3018, 0x3018, 0x15c, 0x160, 0x80, 0x43c, 0x488 };
+	const u16 expected[] = { 0x3018, 0x3018, 0x15c, 0x160, 0x80, 0x43c, 0x488,
+		0x110, 0x114, 0x3e4, 0x60, 0x62, 0xae, 0xf2, 0xf6 };
 	unsigned int i = m->calls++;
 	u32 value = 0x10203040 + i;
 
-	assert(i < 7 && reg == expected[i] && dev == (i ? 0x51 : 0x50) && len == 4);
+	assert(i < 15 && reg == expected[i] && dev == (i ? 0x51 : 0x50) && len == (i < 10 ? 4 : 2));
 	if (m->calls == m->fail_at)
 		return -EREMOTEIO;
 	if (m->calls == m->erased_at)
 		value = ~0U;
-	for (i = 0; i < 4; i++)
+	for (i = 0; i < len; i++)
 		data[i] = value >> (i * 8);
 	return 0;
 }
@@ -159,16 +166,22 @@ static void test_receiver_read_only(void)
 	struct en7573_receiver sample, before;
 	unsigned int fail;
 
-	assert(!en7573_sample_receiver(&io, &sample) && m.calls == 7);
+	assert(!en7573_sample_receiver(&io, &sample) && m.calls == 15);
 	assert(sample.mcu_a0 == 0x10203040 && sample.mcu_a2 == 0x10203041);
 	assert(sample.apd == 0x10203042 && sample.ocp == 0x10203043);
 	assert(sample.firmware == 0x10203044 && sample.los_control == 0x10203045);
 	assert(sample.system_status == 0x10203046);
+	assert(sample.rx_output_control == 0x10203047 && sample.rx_output_shape == 0x10203048);
+	assert(sample.ocp_status == 0x10203049);
+	assert(sample.temperature_raw == 0x4a30 && sample.supply_raw == 0x4b30);
+	assert(sample.apd_voltage_raw == 0x304c && sample.rssi_adc == 0x304d);
+	assert(sample.rssi_current_raw == 0x304e);
 	before = sample;
-	for (fail = 1; fail <= 7; fail++) {
+	for (fail = 1; fail <= 15; fail++) {
 		m = (struct receiver_model) { .fail_at = fail };
 		assert(en7573_sample_receiver(&io, &sample) == -EREMOTEIO && m.calls == fail);
 		assert(!memcmp(&sample, &before, sizeof(sample)));
+		if (fail > 10) continue;
 		m = (struct receiver_model) { .erased_at = fail };
 		assert(en7573_sample_receiver(&io, &sample) == -EIO && m.calls == fail);
 		assert(!memcmp(&sample, &before, sizeof(sample)));
@@ -201,10 +214,10 @@ static void test_rx_power(void)
     io.read=NULL; assert(en7573_rx_power(&io,&power)==-EINVAL);
 }
 
-int main(void)
+static void test_loader(bool oem_a0)
 {
-	struct model m = {0};
-	struct en7573_io io = { .ctx = &m, .read = rd, .write = wr, .delay_ms = delay };
+	struct model m = { .md32_a0 = oem_a0 };
+	struct en7573_io io = { .ctx = &m, .md32_a0 = oem_a0, .read = rd, .write = wr, .delay_ms = delay };
 	u8 pm[101], dm[7], cal[513];
 	unsigned int i, calls;
 	u16 id;
@@ -225,27 +238,93 @@ int main(void)
 	/* Every I2C error must propagate immediately, including startup errors. */
 	for (i = 1; i <= calls; i++) {
 		int ret;
-		memset(&m, 0, sizeof(m)); m.fail_at = i;
+		memset(&m, 0, sizeof(m)); m.md32_a0 = oem_a0; m.fail_at = i;
 		ret = en7573_load(&io, pm, sizeof(pm), dm, sizeof(dm), cal);
 		if (!ret) ret = en7573_start_tx_disabled(&io);
 		assert(ret == -EREMOTEIO && m.calls == i);
 	}
-	memset(&m, 0, sizeof(m)); m.corrupt = true;
+	memset(&m, 0, sizeof(m)); m.md32_a0 = oem_a0; m.corrupt = true;
 	assert(en7573_load(&io, pm, sizeof(pm), dm, sizeof(dm), cal) == -EBADMSG);
 	assert(!m.start_seen);
-	memset(&m, 0, sizeof(m)); m.wrong_id = true;
+	memset(&m, 0, sizeof(m)); m.md32_a0 = oem_a0; m.wrong_id = true;
 	assert(en7573_identify(&io, &id) == -ENODEV && id == 0x1377);
 	assert(en7573_load(&io, pm, sizeof(pm), dm, sizeof(dm), cal) == -ENODEV);
 	assert(!m.start_seen);
-	memset(&m, 0, sizeof(m));
+	memset(&m, 0, sizeof(m)); m.md32_a0 = oem_a0;
 	assert(en7573_load(&io, pm, EN7573_PM_SIZE + 1, dm, sizeof(dm), cal) == -EINVAL);
 	assert(en7573_load(&io, pm, sizeof(pm), dm, EN7573_CAL_ADDRESS + 1, cal) == -EINVAL);
 	assert(m.calls == 0);
-	test_rx_power();
-	test_read_only_state();
-	test_tx_control();
-	test_receiver_read_only();
+
 	printf("EN7573 loader: layout, addressing, readback and %u I2C failure points passed\n", calls);
-	puts("EN7573 status: read-only samples and read failures passed");
+	printf("EN7573 transport: %s passed\n", oem_a0 ? "OEM A0" : "public A2");
+}
+
+static void test_rx_output(void)
+{
+	const u32 mask = 0x3f1f3f08, shapes[] = {0,0x14001400,0x1e001e00,0x36083208};
+	struct model m;
+	struct en7573_rx_output original;
+	struct en7573_io io = { .ctx=&m, .read=rd, .write=wr };
+	unsigned int profile, fail, calls;
+
+	for (profile=1; profile<=3; profile++) {
+		memset(&m,0,sizeof(m)); memset(&original,0,sizeof(original));
+		m.regs[0x3018/4]=1; m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+		m.regs[0x110/4]=0xaabbccdd; m.regs[0x114/4]=0x12345678;
+		assert(!en7573_apply_rx_output(&io,profile,&original));
+		assert(original.saved && original.control==0xaabbccdd && original.shape==0x12345678);
+		assert(m.regs[0x114/4]==((0x12345678&~mask)|shapes[profile]));
+		assert(m.regs[0x110/4]==((0xaabbccdd&~0x40)|(profile==3 ? 0 : 0x40)));
+		calls=m.calls;
+		assert(en7573_apply_rx_output(&io,profile,&original)==-EBUSY);
+		/* Restore only owned masks, retaining concurrent unrelated changes. */
+		m.regs[0x114/4]^=0x80000000; m.regs[0x110/4]^=0x80000000;
+		assert(!en7573_restore_rx_output(&io,&original) && !original.saved);
+		assert(m.regs[0x114/4]==(0x12345678^0x80000000));
+		assert(m.regs[0x110/4]==(0xaabbccdd^0x80000000));
+		for(fail=1; fail<=calls; fail++) {
+			memset(&m,0,sizeof(m)); memset(&original,0,sizeof(original));
+			m.regs[0x3018/4]=1; m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+			m.regs[0x110/4]=0xaabbccdd; m.regs[0x114/4]=0x12345678;
+			m.fail_at=fail;
+			assert(en7573_apply_rx_output(&io,profile,&original)==-EREMOTEIO && m.calls==fail);
+			m.fail_at=0;
+			assert(!en7573_restore_rx_output(&io,&original));
+			assert(m.regs[0x110/4]==0xaabbccdd && m.regs[0x114/4]==0x12345678);
+		}
+	}
+	memset(&m,0,sizeof(m)); memset(&original,0,sizeof(original));
+	assert(!en7573_apply_rx_output(&io,0,&original) && !m.calls);
+	assert(en7573_apply_rx_output(&io,4,&original)==-EINVAL && !m.calls);
+	assert(en7573_apply_rx_output(&io,1,&original)==-EACCES);
+	m.regs[0x3018/4]=1;
+	assert(en7573_apply_rx_output(&io,1,&original)==-EACCES);
+	m.regs[0x3e0/4]=EN7573_TX_DISABLE; m.output_mismatch=true;
+	assert(en7573_apply_rx_output(&io,1,&original)==-EIO && original.saved);
+	m.output_mismatch=false;
+	assert(!en7573_restore_rx_output(&io,&original));
+	m.output_unrelated_mismatch=true;
+	assert(en7573_apply_rx_output(&io,1,&original)==-EIO && original.saved);
+	m.output_unrelated_mismatch=false;
+	assert(!en7573_restore_rx_output(&io,&original));
+	m.drop_tx_guard=true;
+	assert(en7573_apply_rx_output(&io,1,&original)==-EACCES && original.saved);
+	assert(en7573_restore_rx_output(&io,&original)==-EACCES && original.saved);
+	m.drop_tx_guard=false; m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+	assert(!en7573_restore_rx_output(&io,&original));
+	/* Restoration failure leaves the saved record for power-off containment. */
+	assert(!en7573_apply_rx_output(&io,1,&original));
+	m.fail_at=m.calls+1;
+	assert(en7573_restore_rx_output(&io,&original)==-EREMOTEIO && original.saved);
+	m.fail_at=0;
+	assert(!en7573_restore_rx_output(&io,&original));
+}
+
+int main(void)
+{
+	test_loader(false); test_loader(true);
+	test_rx_power(); test_read_only_state(); test_tx_control();
+	test_receiver_read_only(); test_rx_output();
+	puts("EN7573 state, RX output guards/restore, observations and failures passed");
 	return 0;
 }

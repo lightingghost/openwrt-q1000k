@@ -1,6 +1,8 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
-**Next bench:** [remaining hypotheses and collection plan](XGSPON-RX-NEXT.q1000k.md)
+**Current bench:** [complete receiver acquisition experiments and collection plan](XGSPON-RX-ACQUISITION.q1000k.md)
+
+The prior passive plan is retained in [RX-NEXT](XGSPON-RX-NEXT.q1000k.md), with its insertion-handler claim corrected.
 rechecks PR #24577, adds passive NCPO/FIFO telemetry, and provides a standalone
 collector for a complete live dark/reconnect control. It does not repeat the
 13 known-negative trials by default. The historical evidence below remains

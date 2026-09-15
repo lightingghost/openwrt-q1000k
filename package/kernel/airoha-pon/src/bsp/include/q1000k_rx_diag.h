@@ -40,5 +40,17 @@
 	/* NCPO is read by the public XGPON poller without a latch write. */ \
 	X(tdc_ncpo, EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4) \
 	/* Passive snapshot only: no RX_DEBUG_0 latch/clear toggle. */ \
-	X(fifo_clock_status, EN7581_XPON_PMA_FIFO_CK_STATUS)
+	X(fifo_clock_status, EN7581_XPON_PMA_FIFO_CK_STATUS) \
+	/* Calibration exit / clock acquisition overrides, sampled passively. */ \
+	X(cdr_injection, EN7581_XPON_ANA_RG_PXP_CDR_PR_INJ_MODE) \
+	X(cdr_lpf_override, EN7581_XPON_PMA_rg_force_da_pxp_cdr_pr_lpf_c_en) \
+	X(fll_idac, EN7581_XPON_PMA_SS_RX_FLL_1) \
+	X(fll_load, EN7581_XPON_PMA_SS_RX_FLL_b) \
+	X(eye_reset_force, EN7581_XPON_PMA_RX_FORCE_MODE_0) \
+	X(eye_reset_mode, EN7581_XPON_PMA_RX_DISB_MODE_0) \
+	X(eye_pi_ready, EN7581_XPON_PMA_RX_FORCE_MODE_3) \
+	X(eye_pi_mode, EN7581_XPON_PMA_RX_DISB_MODE_3) \
+	X(eye_count_ready, EN7581_XPON_PMA_RX_FORCE_MODE_6) \
+	X(eye_count_mode, EN7581_XPON_PMA_RX_DISB_MODE_5) \
+	X(rx_peaking_control, EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan)
 #endif

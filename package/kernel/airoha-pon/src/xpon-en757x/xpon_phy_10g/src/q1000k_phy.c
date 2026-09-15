@@ -37,6 +37,7 @@ static bool qphy_rx_restore_pll;
 static bool qphy_rx_restore_gain;
 static u32 qphy_rx_probe_mode;
 static u32 qphy_rx_attempts, qphy_rx_no_sync;
+static bool qphy_rx_seen_light;
 static u32 qphy_rx_irqs, qphy_rx_polls;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
 	EN7581_XGPON_PHY_RX_LOF_INT_EN | EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN | \
@@ -196,7 +197,18 @@ static void qphy_poll_work(struct work_struct *work)
 		qphy_rx_polls++;
 		ret = qphy_rx_sample(&sample);
 		if (!ret && qphy_rx_reacquire && !qphy_rx_attempts && READ_ONCE(qphy_active)) {
-			if (sample.controller_los || sample.phy_los || sample.synced) {
+			bool dark_checker = qphy_rx_probe_mode == Q1000K_RX_PROBE_CHECKER_DARK;
+			bool eligible;
+
+			if (!sample.controller_los && !sample.phy_los)
+				qphy_rx_seen_light = true;
+			/* Fresh dark checker after illuminated initialization. Bench LOS
+			 * callbacks never invoke vendor power-save/insertion handlers.
+			 * Mixed LOS and a synchronized receiver never consume the budget.
+			 */
+			eligible = dark_checker ? qphy_rx_seen_light && sample.controller_los && sample.phy_los :
+				!sample.controller_los && !sample.phy_los;
+			if (!eligible || sample.synced) {
 				qphy_rx_no_sync = 0;
 			} else if (++qphy_rx_no_sync == 10) {
 				/* Consume the budget before touching hardware. The bounded
@@ -484,6 +496,7 @@ int q1000k_phy_start(void)
 	gpPhyPriv->phy_status = PHY_LINK_STATUS_UNKNOWN;
 	/* The IRQ thread may run as soon as the mask is enabled. */
 	qphy_rx_no_sync = 0;
+	qphy_rx_seen_light = false;
 	WRITE_ONCE(qphy_active, true);
 	ret = qphy_reg_write(EN7581_XGPON_PHY_XG_PON_INT_EN,
 		(qphy_rx_bench ? QPHY_RX_BENCH_IRQS :
@@ -1227,6 +1240,7 @@ int q1000k_phy_init(void)
 	qphy_rx_restore_gain = false;
 	qphy_rx_probe_mode = 0;
 	qphy_rx_attempts = qphy_rx_no_sync = 0;
+	qphy_rx_seen_light = false;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;
 	gpPhyPriv->wan_sel = SCU_WAN_CONF_REG_WAN_SEL_XGSPON;

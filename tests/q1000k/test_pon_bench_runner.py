@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,15 +21,31 @@ SPEC.loader.exec_module(RUN)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_old_artifact_rejects_new_modes_before_device_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory)
+            helper = artifact/'runtime/usr/sbin/q1000k-pon-bench'
+            helper.parent.mkdir(parents=True)
+            helper.write_text('RX_DIAGNOSTICS_VERSION=2\n')
+            old = dict(artifact=artifact, probe='checker', oem_md32=False, rx_output='unchanged')
+            RUN.validate_experiment_artifact(SimpleNamespace(**old))
+            for change in [dict(probe='checker-dark'), dict(probe='cdr-auto-release'),
+                           dict(oem_md32=True), dict(rx_output='400-flat')]:
+                with self.assertRaises(ValueError):
+                    RUN.validate_experiment_artifact(SimpleNamespace(**(old | change)))
+            helper.write_text('RX_DIAGNOSTICS_VERSION=3\n')
+            for probe in RUN.PROBES:
+                RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
+
     def test_diagnostic_schema_follows_artifact_helper(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact=Path(directory)
             helper=artifact/'runtime/usr/sbin/q1000k-pon-bench'
             helper.parent.mkdir(parents=True)
-            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2)):
+            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2),('RX_DIAGNOSTICS_VERSION=3\n',3)):
                 helper.write_text(text)
                 self.assertEqual(RUN.diagnostics_version(artifact),expected)
-            for text in ('RX_DIAGNOSTICS_VERSION=3\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
+            for text in ('RX_DIAGNOSTICS_VERSION=4\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
                 helper.write_text(text)
                 with self.assertRaises(ValueError): RUN.diagnostics_version(artifact)
 

@@ -4,13 +4,15 @@
 # may be visible. No service or boot hook calls this program.
 . /lib/q1000k-xgspon/common.sh
 export LC_ALL=C
-RX_DIAGNOSTICS_VERSION=2
+RX_DIAGNOSTICS_VERSION=3
 umask 077
 reacquire=0
 restore_pll=0
 restore_gain=0
 probe=0
 samples=30
+oem_md32=0
+rx_output=0
 
 fail() { echo "Q1000K bench: $*" >&2; exit 1; }
 preflight() {
@@ -49,6 +51,10 @@ controller_status() {
 		json_get_var value "$field"
 		[ "$type" = boolean ] && [ "$value" = 1 ] || return 1
 	done
+	json_get_type type bench_md32_a0; json_get_var value bench_md32_a0
+	[ "$type" = boolean ] && [ "$value" = "$oem_md32" ] || return 1
+	json_get_type type bench_rx_output; json_get_var value bench_rx_output
+	[ "$type" = int ] && [ "$value" = "$rx_output" ] || return 1
 	json_get_type type last_error
 	json_get_var value last_error
 	[ "$type" = int ] && [ "$value" = 0 ] || return 1
@@ -219,7 +225,7 @@ case "$1" in
 			fail 'Usage: q1000k-pon-bench controller|stack /tmp/CALIBRATION --fiber-disconnected'
 		mode=$1; calibration=$2; fiber=disconnected ;;
 	receive)
-		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once [--restore-pll] [--restore-gain]] [--probe NAME] [--samples 30|90|180]'
+		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once [--restore-pll] [--restore-gain]] [--probe NAME] [--oem-md32] [--rx-output unchanged|400-flat|600-flat|600-boost] [--samples 30|90|180]'
 		case "$3" in
 			--fiber-connected) fiber=connected ;;
 			--fiber-disconnected) fiber=disconnected ;;
@@ -227,7 +233,7 @@ case "$1" in
 		esac
 		mode=$1; calibration=$2
 		shift 3
-		samples_set=0
+		samples_set=0; output_set=0
 		while [ "$#" -gt 0 ]; do
 			case "$1" in
 				--reacquire-once)
@@ -246,9 +252,26 @@ case "$1" in
 						bit-order) probe=1 ;; descrambler) probe=2 ;; fec-oc) probe=3 ;; fec-off) probe=4 ;;
 						gain-auto) probe=5 ;; gain-low) probe=6 ;; tdc-delay) probe=7 ;;
 						pll-order) probe=8 ;; oem-order) probe=9 ;; checker) probe=10 ;;
+						cdr-auto-release) probe=11 ;; cdr-internal-auto) probe=12 ;;
+						prcal-finalize) probe=13 ;; fll-auto) probe=14 ;;
+						rx-sequence-auto) probe=15 ;; post-eye-ready) probe=16 ;;
+						oem-clock-cycle) probe=17 ;; oem-rx-acquire) probe=18 ;;
+						oem-peaking) probe=19 ;; checker-dark) probe=20 ;;
+						combined-auto) probe=21 ;; prcal-rerun) probe=22 ;;
 						*) fail 'Unknown bounded receiver probe.' ;;
 					esac
 					shift 2 ;;
+				--oem-md32)
+					[ "$oem_md32" = 0 ] || fail 'Specify OEM transport once.'
+					oem_md32=1; shift ;;
+				--rx-output)
+					[ "$#" -ge 2 ] && [ "$output_set" = 0 ] || fail 'Specify RX output once.'
+					case "$2" in
+						unchanged) rx_output=0 ;; 400-flat) rx_output=1 ;;
+						600-flat) rx_output=2 ;; 600-boost) rx_output=3 ;;
+						*) fail 'Unknown fixed electrical RX output candidate.' ;;
+					esac
+					output_set=1; shift 2 ;;
 				--samples)
 					[ "$#" -ge 2 ] && [ "$samples_set" = 0 ] || fail 'Specify samples once.'
 					case "$2" in 30|90|180) samples=$2 ;; *) fail 'Samples must be 30, 90 or 180.' ;; esac
@@ -288,7 +311,7 @@ mkdir /var/run/q1000k-pon-bench.lock || fail 'Another bench run holds the lock.'
 locked=1
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-load_module q1000k_pon_control
+load_module q1000k_pon_control bench_md32_a0="$oem_md32" bench_rx_output="$rx_output"
 controller=$(find_controller) || fail 'Controller did not bind.'
 controller_status off || fail 'Controller TX inhibit was not confirmed.'
 printf 'detect\n' > "$controller/operation" || fail 'Controller selection/detection failed.'

@@ -12,6 +12,7 @@ class PhyProbeTests(unittest.TestCase):
 
     def test_all_modes_and_failures(self):
         steps = (PHY/'src/q1000k_phy_probe_steps.h').read_text()
+        steps += (PHY/'src/q1000k_phy_probe_oem_steps.h').read_text()
         source, regs = production_source(PHY/'src/q1000k_phy_probe.c', extra=steps)
         marker = 'struct qprobe_step { u32 reg, end, start, value, delay_us; };'
         source = source.replace(marker, marker+'\n'+steps)

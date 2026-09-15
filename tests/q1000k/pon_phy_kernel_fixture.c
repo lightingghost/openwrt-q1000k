@@ -272,6 +272,11 @@ static void stop_during_reacquire(bool quiesce, bool restore_pll, bool restore_g
     check(!q1000k_phy_set_rx_probe(probe));
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
     registers[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+    if(probe==Q1000K_RX_PROBE_CHECKER_DARK) {
+        q1000k_phy_poll(); flush_work(&qphy_poll_job);
+        controller_los=true;
+        registers[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+    }
     for(n=0;n<9;n++) { q1000k_phy_poll(); flush_work(&qphy_poll_job); }
     check(reacquisitions==previous);
     reinit_completion(&event_entered); reinit_completion(&event_release); reinit_completion(&exit_done);

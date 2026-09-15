@@ -11,11 +11,12 @@
 
 struct qprobe_step { u32 reg, end, start, value, delay_us; };
 #include "q1000k_phy_probe_steps.h"
+#include "q1000k_phy_probe_oem_steps.h"
 
 /* Save distinct fields before their first update, including partial failures.
  * Replay originals in reverse order after callbacks drain, with TX still off.
  */
-static struct { u32 reg, end, start, value; } saved[64];
+static struct { u32 reg, end, start, value; } saved[128];
 static unsigned int saved_count;
 static u32 probe_writes;
 
@@ -141,6 +142,155 @@ static int probe_recover(u32 mode)
 	return probe_ready();
 }
 
+static int probe_oem_clock_cycle(void)
+{
+	int ret;
+
+	RUN(oem_tdc_off);
+	RUN(oem_rx_l2r);
+	RUN(oem_known_reset);
+	RUN(oem_rx_l2d);
+	/* OEM XPON_TDC_on @0x28a94 shares this public prefix, with 5ms
+	 * final settling and no final forced LPF reset. No FLL reset.
+	 */
+	ret = probe_steps(xpon_tdc_on, ARRAY_SIZE(xpon_tdc_on) - 4, true, false);
+	if (ret)
+		return ret;
+	RUN(txpll_on);
+	RUN(oem_rx_ready);
+	return probe_ready();
+}
+
+static int probe_prcal_finish(u32 idac)
+{
+	int ret;
+
+	/* A zero/sentinel cannot establish an already selected calibration.
+	 * This is a range guard, not a claim that the oscillator is locked.
+	 */
+	if (!idac || idac > 0x7ff)
+		return -ERANGE;
+	RUN(prcal_release);
+	ret = probe_write(EN7581_XPON_PMA_SS_RX_FLL_1, 10, 0, idac, true);
+	if (ret)
+		return ret;
+	RUN(prcal_power_latch);
+	return probe_ready();
+}
+
+static int probe_prcal_finalize(void)
+{
+	u32 value;
+	int ret = probe_read(EN7581_XPON_PMA_rg_force_da_pxp_cdr_pr_idac, &value);
+
+	return ret ?: probe_prcal_finish(value & 0x7ff);
+}
+
+static int probe_prcal_measure(u32 idac, unsigned int sample, u32 *meter)
+{
+	int ret;
+
+	ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_cdr_pr_idac, 10, 0, idac, true);
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_SS_RX_FREQ_DET_4, 2, 0, 3, true);
+	if (ret)
+		return ret;
+	usleep_range(5000, 5100);
+	ret = probe_read(EN7581_XPON_PMA_RO_RX_FREQDET, meter);
+	if (ret)
+		return ret;
+	pr_info("q1000k: RX PrCal sample=%u idac=%#x meter=%#x\n", sample, idac, *meter);
+	/* No completed oscillator count is available for either sentinel.
+	 * Stop the search; saved fields still unwind through normal cleanup.
+	 */
+	return !(*meter >> 16) || (*meter >> 16) == 0xffff ? -ERANGE : 0;
+}
+
+static int probe_prcal_rerun(void)
+{
+	u32 meter, selected = 0, candidate;
+	unsigned int coarse, sample = 0;
+	int bit, ret;
+
+	/* OEM/public XPON_PrCal_WK: XGS target 0xa49a; exactly seven coarse
+	 * and eight fine observations, with no retry. Keep TDC off while
+	 * calibrating the RX oscillator and finish with checked reacquisition.
+	 */
+	RUN(oem_tdc_off);
+	RUN(prcal_prepare);
+	for (coarse = 1; coarse < 8; coarse++) {
+		candidate = coarse << 8;
+		ret = probe_prcal_measure(candidate, ++sample, &meter);
+		if (ret)
+			return ret;
+		if ((meter >> 16) > 0xa49a)
+			selected = candidate;
+	}
+	for (bit = 7; bit >= 0; bit--) {
+		candidate = selected | BIT(bit);
+		ret = probe_prcal_measure(candidate, ++sample, &meter);
+		if (ret)
+			return ret;
+		selected = (meter >> 16) < 0xa49a ? candidate & ~BIT(bit) : candidate;
+	}
+	if (!selected || selected > 0x7ff)
+		return -ERANGE;
+	ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_cdr_pr_idac, 10, 0, selected, true);
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_SS_RX_FREQ_DET_4, 2, 0, 3, true);
+	if (!ret)
+		ret = probe_read(EN7581_XPON_PMA_RO_RX_FREQDET, &meter);
+	if (ret)
+		return ret;
+	pr_info("q1000k: RX PrCal selected=%#x observations=%u final_meter=%#x\n",
+		selected, sample, meter);
+	ret = probe_prcal_finish(selected);
+	return ret ?: probe_oem_clock_cycle();
+}
+
+static int probe_oem_peaking(void)
+{
+	u32 value;
+	int ret = probe_read(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan, &value);
+
+	if (ret)
+		return ret;
+	/* Public EO_Scan selects index0..7 into [19:17]; the same OEM scan
+	 * @0x27d00/@0x27dd4 writes that index into [19:16]. Translate once,
+	 * preserving other fields and avoiding a fresh unbounded eye scan.
+	 */
+	ret = probe_write(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan, 24, 24, 1, true);
+	return ret ?: probe_write(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan,
+				 19, 16, (value >> 17) & 7, true);
+}
+
+static int probe_oem_rx_acquire(bool automatic)
+{
+	int ret = probe_oem_peaking();
+
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl, 8, 8, 1, true);
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl, 1, 0, 1, true);
+	if (!ret)
+		ret = probe_prcal_finalize();
+	if (ret)
+		return ret;
+	RUN(post_eye_ready);
+	ret = probe_oem_clock_cycle();
+	if (ret || !automatic)
+		return ret;
+	/* An explicitly separate combination: public normal-mode hypotheses
+	 * differ from the OEM's forced-ready path, and may be insufficient.
+	 */
+	ret = probe_write(EN7581_XPON_PMA_SS_RX_FLL_3, 0, 0, 0, true);
+	if (ret)
+		return ret;
+	RUN(cdr_internal_auto);
+	RUN(rx_sequence_auto);
+	return probe_ready();
+}
+
 int q1000k_phy_rx_probe(u32 probe)
 {
 	u32 value = 0, route = 0, lane = 0;
@@ -176,7 +326,35 @@ int q1000k_phy_rx_probe(u32 probe)
 	case Q1000K_RX_PROBE_PLL_ORDER:
 	case Q1000K_RX_PROBE_OEM_ORDER:
 		return probe_recover(probe);
+	case Q1000K_RX_PROBE_CDR_AUTO_RELEASE:
+		RUN(oem_rx_l2r);
+		RUN(oem_rx_l2d);
+		return probe_ready();
+	case Q1000K_RX_PROBE_CDR_INTERNAL_AUTO:
+		RUN(cdr_internal_auto);
+		return probe_ready();
+	case Q1000K_RX_PROBE_PRCAL_FINALIZE:
+		return probe_prcal_finalize();
+	case Q1000K_RX_PROBE_FLL_AUTO:
+		return probe_write(EN7581_XPON_PMA_SS_RX_FLL_3, 0, 0, 0, true);
+	case Q1000K_RX_PROBE_RX_SEQUENCE_AUTO:
+		RUN(rx_sequence_auto);
+		return probe_ready();
+	case Q1000K_RX_PROBE_POST_EYE_READY:
+		RUN(post_eye_ready);
+		return probe_ready();
+	case Q1000K_RX_PROBE_OEM_CLOCK_CYCLE:
+		return probe_oem_clock_cycle();
+	case Q1000K_RX_PROBE_OEM_RX_ACQUIRE:
+		return probe_oem_rx_acquire(false);
+	case Q1000K_RX_PROBE_OEM_PEAKING:
+		return probe_oem_peaking();
+	case Q1000K_RX_PROBE_COMBINED_AUTO:
+		return probe_oem_rx_acquire(true);
+	case Q1000K_RX_PROBE_PRCAL_RERUN:
+		return probe_prcal_rerun();
 	case Q1000K_RX_PROBE_CHECKER:
+	case Q1000K_RX_PROBE_CHECKER_DARK:
 		/* Receiver PRBS checker only. The incoming XGS signal is not
 		 * PRBS: errors/comparing are activity evidence, never a BER test.
 		 * No generator, loopback or optical TX may be enabled.

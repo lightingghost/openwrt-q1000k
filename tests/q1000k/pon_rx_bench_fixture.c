@@ -120,7 +120,8 @@ int main(void) {
     assert(strstr(out,"\"gain_restore_enabled\":true"));
     assert(strstr(out,"\"rx_power_valid\":true,\"rx_power_nw\":19900"));
     assert(qrx_diagnostics_get(out,NULL)>0 && strlen(out)<4095 && strstr(out,"\"rx_meter_cycles\":4294967295"));
-    assert(strstr(out,"\"diagnostics_version\":2") && strstr(out,"\"tdc_ncpo\":4294967295"));
+    assert(strstr(out,"\"diagnostics_version\":3") && strstr(out,"\"tdc_ncpo\":4294967295"));
+    assert(strstr(out,"\"rx_peaking_control\":4294967295"));
     assert(strstr(out,"\"fifo_clock_status\":4294967295"));
     sample_error=-EIO; assert(qrx_diagnostics_get(out,NULL)==-EIO); sample_error=0;
     rx_probe=1; assert(q1000k_rx_bench_prepare()==-EINVAL);
