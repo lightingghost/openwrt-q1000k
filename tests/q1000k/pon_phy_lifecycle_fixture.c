@@ -358,6 +358,17 @@ static void rx_snapshot_faults(void)
         EN7581_XPON_PMA_ADD_RO_RX2ANA_1, EN7581_XPON_PMA_ADD_RO_RX2ANA_2,
         EN7581_XPON_PMA_ADD_RO_RX2ANA_3, EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_1,
         EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1,
+        EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_0,
+        EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_0,
+        EN7581_XPON_PMA_RX_FORCE_MODE_9,
+        EN7581_XPON_PMA_RX_DISB_MODE_8,
+        EN7581_XPON_PMA_rg_force_da_pxp_rx_oscal_en,
+        EN7581_XPON_PMA_RX_RESET_0,
+        EN7581_XPON_PMA_RX_RESET_1,
+        EN7581_XPON_PMA_SS_LCPLL_PWCTL_SETTING_0,
+        EN7581_XPON_PMA_SS_LCPLL_TDC_FLT_3,
+        EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_1,
+        EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_2,
     };
     struct q1000k_rx_sample sample, saved;
     const struct q1000k_rx_registers expected = {
@@ -365,6 +376,17 @@ static void rx_snapshot_faults(void)
         .cdr_control=0x105, .rx_frequency=0x106, .pll_status=0x107, .tdc_control=0x108,
         .rx_analog0=0x109, .rx_analog1=0x10a, .rx_analog2=0x10b,
         .rx_sequence_force=0x10c, .rx_sequence_disable=0x10d,
+        .rx_sequence_force0=0x10e,
+        .rx_sequence_disable0=0x10f,
+        .rx_lock_force=0x110,
+        .rx_lock_disable=0x111,
+        .rx_oscal_control=0x112,
+        .rx_reset0=0x113,
+        .rx_reset1=0x114,
+        .pll_power=0x115,
+        .pll_filter=0x116,
+        .pll_pcw1=0x117,
+        .pll_pcw2=0x118,
     };
     unsigned int n, count, before;
 

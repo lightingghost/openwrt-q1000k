@@ -42,6 +42,17 @@ int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
         .cdr_control=5, .rx_frequency=6, .pll_status=7, .tdc_control=8,
         .rx_analog0=9, .rx_analog1=10, .rx_analog2=11,
         .rx_sequence_force=12, .rx_sequence_disable=4294967294U,
+        .rx_sequence_force0=14,
+        .rx_sequence_disable0=15,
+        .rx_lock_force=16,
+        .rx_lock_disable=17,
+        .rx_oscal_control=18,
+        .rx_reset0=19,
+        .rx_reset1=20,
+        .pll_power=21,
+        .pll_filter=22,
+        .pll_pcw1=23,
+        .pll_pcw2=24,
     };
     return 0;
 }
@@ -69,12 +80,24 @@ int main(void) {
     provider_error=0; sample_error=-EIO;
     assert(qrx_status_get(out,NULL)==-EIO && samples==4 && mac_reads==2);
     sample_error=0; assert(qrx_status_get(out,NULL)>0 && samples==5 && mac_reads==3);
+    assert(strstr(out,"\"receiver_version\":2"));
     assert(strstr(out,"\"frames\":1234") && strstr(out,"\"sampled_ms\":123456789012"));
     assert(strstr(out,"\"registration_enabled\":false") && strstr(out,"\"tx_enabled\":false"));
     assert(strstr(out,"\"reacquire_enabled\":true,\"reacquire_attempts\":1"));
     assert(strstr(out,"\"receiver\":{\"rx_control\":1,\"pcs_reset\":2,\"pma_reset\":3,"
                       "\"clock_control\":4,\"cdr_control\":5,\"rx_frequency\":6,\"pll_status\":7,"
                       "\"tdc_control\":8,\"rx_analog0\":9,\"rx_analog1\":10,\"rx_analog2\":11,"
-                      "\"rx_sequence_force\":12,\"rx_sequence_disable\":4294967294}}\n"));
+                      "\"rx_sequence_force\":12,\"rx_sequence_disable\":4294967294,"
+                      "\"rx_sequence_force0\":14,"
+                      "\"rx_sequence_disable0\":15,"
+                      "\"rx_lock_force\":16,"
+                      "\"rx_lock_disable\":17,"
+                      "\"rx_oscal_control\":18,"
+                      "\"rx_reset0\":19,"
+                      "\"rx_reset1\":20,"
+                      "\"pll_power\":21,"
+                      "\"pll_filter\":22,"
+                      "\"pll_pcw1\":23,"
+                      "\"pll_pcw2\":24}}\n"));
     return 0;
 }

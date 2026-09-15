@@ -278,6 +278,8 @@ static int __init phy_test_init(void)
         check(!q1000k_phy_start());
         registers[(EN7581_XPON_PMA_RO_RX_FREQDET&0x1ffff)/4]=n;
         registers[(EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL&0x1ffff)/4]=0x12340000+n;
+        registers[(EN7581_XPON_PMA_RX_FORCE_MODE_9&0x1ffff)/4]=0x100+n;
+        registers[(EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_2&0x1ffff)/4]=0x200+n;
         q1000k_phy_poll(); flush_work(&qphy_poll_job);
         registers[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=QPHY_RX_BENCH_IRQS;
         reinit_completion(&irq_returned);
@@ -285,6 +287,7 @@ static int __init phy_test_init(void)
         check(wait_for_completion_timeout(&irq_returned,5*HZ));
         check(!q1000k_phy_rx_sample(&sample) && sample.controller_los && !sample.synced);
         check(sample.receiver.rx_frequency==n && sample.receiver.rx_control==0x12340000+n);
+        check(sample.receiver.rx_lock_force==0x100+n && sample.receiver.pll_pcw2==0x200+n);
         check(!controller.tx && q1000k_phy_set_rx_bench(false, false)==-EBUSY);
         check(!q1000k_phy_stop() && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
     }

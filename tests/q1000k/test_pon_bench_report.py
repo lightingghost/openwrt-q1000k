@@ -18,11 +18,13 @@ class ReportTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.capture = Path(self.temp.name)
 
-    def fixture(self, action='receive', fiber='disconnected'):
-        count = 30 if action == 'receive' else 5
+    def fixture(self, action='receive', fiber='disconnected', count=None):
+        count = count or (30 if action == 'receive' else 5)
         record = dict(schema_version=1, action=action, fiber=fiber, host='192.168.255.1',
                       status='passed', postflight='passed', input_cleanup='passed',
                       revision='a' * 40, serial_start=0, started=1, finished=50)
+        if action == 'receive':
+            record['samples'] = count
         controller = dict(mode='xgspon', gpon_detected=True, xgspon_detected=True,
                           md32_enabled=True, tx_disabled=True, tx_inhibited=True,
                           calibration_supplied=True, firmware_verified=True,
@@ -118,6 +120,45 @@ class ReportTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         REPORT.summarize(self.capture)
+
+    def test_extended_observation_requires_all_requested_samples(self):
+        for count in (90, 180):
+            fixture = self.fixture(fiber='connected', count=count)
+            self.save(*fixture)
+            self.assertEqual(REPORT.summarize(self.capture)['observations'], count)
+            fixture[3].pop()
+            self.save(*fixture)
+            with self.assertRaises(ValueError):
+                REPORT.summarize(self.capture)
+
+    def test_matrix_can_continue_only_after_isolated_downstream_failure(self):
+        for problem in ('none', 'tx', 'serial', 'cleanup', 'timeout', 'unknown-error'):
+            record, controller, omci, samples = self.fixture(fiber='connected')
+            record.update(status='failed', error='SSH failed (1); see attempt.log')
+            for sample in samples:
+                sample.update(frames=0, synced=False)
+            if problem == 'tx':
+                samples[12]['tx_enabled'] = True
+            if problem == 'cleanup':
+                record['postflight'] = 'failed'
+            if problem == 'timeout':
+                record['error'] = 'timed out'
+            self.save(record, controller, omci, samples)
+            with (self.capture / 'attempt.log').open('a') as output:
+                output.write('Q1000K bench: Downstream LOS/sync/frame stability was not established.\n')
+                if problem == 'unknown-error':
+                    output.write('Q1000K bench: another failure\n')
+            if problem == 'serial':
+                (self.capture / 'serial.log').write_text('Kernel panic\n')
+            with self.assertRaises(ValueError):
+                REPORT.summarize(self.capture)  # Never a passing report.
+            if problem == 'none':
+                report = REPORT.summarize(self.capture, allow_downstream_failure=True)
+                self.assertEqual(report['bench_result'], 'failed')
+                self.assertFalse(report['receive']['downstream_stable'])
+            else:
+                with self.assertRaises(ValueError):
+                    REPORT.summarize(self.capture, allow_downstream_failure=True)
 
     def test_refuses_missing_evidence_and_kernel_or_cleanup_failures(self):
         for problem in ('missing-sample', 'missing-leds', 'serial-error', 'cleanup', 'omci-assigned'):

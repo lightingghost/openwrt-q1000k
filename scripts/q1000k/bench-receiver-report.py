@@ -14,6 +14,10 @@ PHY_WORDS = ('rx_control', 'pcs_reset', 'pma_reset', 'clock_control',
              'rx_sequence_force', 'rx_sequence_disable')
 CONTROLLER_WORDS = ('mcu_a0', 'mcu_a2', 'apd_control', 'ocp_control',
                     'firmware_status', 'los_control', 'system_status')
+EXTENDED_PHY_WORDS = ('rx_sequence_force0', 'rx_sequence_disable0',
+                      'rx_lock_force', 'rx_lock_disable', 'rx_oscal_control',
+                      'rx_reset0', 'rx_reset1', 'pll_power', 'pll_filter',
+                      'pll_pcw1', 'pll_pcw2')
 COUNTERS = ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
             'fec_uncorrected', 'irq_calls', 'poll_calls')
 
@@ -42,8 +46,15 @@ def summarize(capture):
                if x.startswith('{')]
     rx = [x for x in objects if x.get('rx_bench') is True]
     controller = [x for x in objects if x.get('receiver_status') is True]
-    if len(rx) != 30 or len(controller) != 31:
-        raise ValueError('Expected thirty RX and thirty-one controller snapshots')
+    count = record.get('samples', 30)
+    if type(count) is not int or count not in (30, 90, 180):
+        raise ValueError('Invalid receive observation count')
+    if len(rx) != count or len(controller) != count + 1:
+        raise ValueError(f'Expected {count} RX and {count + 1} controller snapshots')
+    versions = {x.get('receiver_version', 1) for x in rx}
+    if versions not in ({1}, {2}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
+        raise ValueError('Inconsistent receiver diagnostic version')
+    names = PHY_WORDS + (EXTENDED_PHY_WORDS if versions == {2} else ())
     last = -1
     last_attempts = 0
     reacquire = record.get('reacquire_once', False)
@@ -81,15 +92,16 @@ def summarize(capture):
         'rx_samples': len(rx), 'controller_samples': len(controller),
         'tx_inhibited': True, 'tx_enabled': False, 'registration_enabled': False,
         'mac_irq_mask': 0,
+        'receiver_version': next(iter(versions)),
         'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
         'phy_words_before_reacquire': words([x['receiver'] for x in rx
-                                            if x.get('reacquire_attempts', 0) == 0], PHY_WORDS),
+                                            if x.get('reacquire_attempts', 0) == 0], names),
         'phy_words_after_reacquire': words([x['receiver'] for x in rx
-                                           if x.get('reacquire_attempts', 0) == 1], PHY_WORDS),
+                                           if x.get('reacquire_attempts', 0) == 1], names),
         'rx_states': {k: sorted({x[k] for x in rx}) for k in
                       ('controller_los', 'phy_los', 'synced', 'sync_status')},
         'counters': {k: {'first': rx[0][k], 'last': rx[-1][k]} for k in COUNTERS},
-        'phy_words': words([x['receiver'] for x in rx], PHY_WORDS),
+        'phy_words': words([x['receiver'] for x in rx], names),
         'controller_words': words(controller, CONTROLLER_WORDS),
         'elapsed_seconds': round(record['finished'] - record['started'], 3),
     }

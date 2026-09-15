@@ -76,6 +76,22 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(RUN.SSH[-1], 'root@192.168.255.1')
         self.assertNotIn('192.168.1.1', ' '.join(RUN.SSH))
 
+    def test_sample_bounds_and_context_are_checked_before_ssh(self):
+        for action, samples in [('stack', '90'), ('receive', '181'), ('receive', '-1')]:
+            with patch.object(RUN, 'ssh') as ssh, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    RUN.main([action, '--artifact', '/missing', '--output', '/missing',
+                              '--samples', samples, '--fiber-disconnected'])
+                ssh.assert_not_called()
+
+    def test_competing_runner_cannot_acquire_device_lock(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(RUN, 'REPO', Path(directory)):
+            (Path(directory) / 'tmp').mkdir()
+            with RUN.device_lock():
+                with self.assertRaises(BlockingIOError):
+                    with RUN.device_lock():
+                        self.fail('Concurrent staging and cleanup must be excluded')
+
     def test_resource_probe_unwinds_only_owned_modules(self):
         for failure in ('none', 'airoha_ecnt_scu', 'airoha_ecnt_xpon'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:

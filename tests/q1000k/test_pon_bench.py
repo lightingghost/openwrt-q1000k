@@ -118,7 +118,7 @@ else: raise AssertionError(action)
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
 
-    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False):
+    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None):
         args = [mode]
         if mode != 'status':
             args += [str(self.calibration)]
@@ -126,8 +126,10 @@ else: raise AssertionError(action)
                 args += ['--fiber-' + fiber]
             if reacquire:
                 args += ['--reacquire-once']
+            if samples is not None:
+                args += ['--samples', str(samples)]
         result = subprocess.run(['busybox', 'ash', str(self.script), *args],
-                                env=self.env, text=True, capture_output=True, timeout=15)
+                                env=self.env, text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
         return result
 
@@ -189,6 +191,20 @@ else: raise AssertionError(action)
         self.assertIn('rx_bench=1', loads[-1])
         self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
         self.assertEqual((self.root/'rx-count').read_text(), '30')
+
+    def test_long_window_keeps_one_attempt_and_unloads_every_module(self):
+        self.env['BENCH_FIBER']='connected'
+        self.env['BENCH_STATUS']=json.dumps({'los': False})
+        result=self.run_bench('receive', fiber='connected', reacquire=True, samples=180)
+        self.assertEqual((self.root/'rx-count').read_text(), '180')
+        self.assertIn('bench_window mode=receive samples=180 reacquire=1', result.stdout)
+        self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
+
+    def test_bad_windows_fail_before_any_mutation(self):
+        for samples in ('', '-1', '0', '29', '31', '181', '30 --reacquire-once'):
+            self.run_bench('receive', samples=samples, success=False)
+        self.run_bench('stack', samples=30, success=False)
+        self.assertEqual(self.calls(), [])
 
     def test_receive_connected_sync_and_frame_progress(self):
         self.env['BENCH_FIBER']='connected'

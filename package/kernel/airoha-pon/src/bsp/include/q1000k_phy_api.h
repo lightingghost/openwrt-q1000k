@@ -49,6 +49,9 @@ struct q1000k_rx_registers {
 	u32 cdr_control, rx_frequency, pll_status, tdc_control;
 	u32 rx_analog0, rx_analog1, rx_analog2;
 	u32 rx_sequence_force, rx_sequence_disable;
+	u32 rx_sequence_force0, rx_sequence_disable0, rx_lock_force, rx_lock_disable;
+	u32 rx_oscal_control, rx_reset0, rx_reset1;
+	u32 pll_power, pll_filter, pll_pcw1, pll_pcw2;
 };
 struct q1000k_rx_sample {
 	bool controller_los, phy_los, synced;

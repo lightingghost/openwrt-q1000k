@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Capture a verified Q1000K RAM bench run. Never boots or flashes a device."""
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import io
 import json
@@ -25,6 +27,14 @@ INPUTS = {
 }
 FIRMWARE = '/lib/firmware/airoha/q1000k'
 REPO = Path(__file__).resolve().parents[2]
+
+
+@contextmanager
+def device_lock():
+    """Serialize staging, hardware ownership and cleanup across host runners."""
+    with (REPO / 'tmp/q1000k-bench-device.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
 
 
 def module_update(original, replacement, sums):
@@ -158,7 +168,7 @@ dmesg
 '''
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['status', 'resources', 'controller', 'stack', 'receive'])
     parser.add_argument('--artifact', required=True, type=Path)
@@ -170,9 +180,13 @@ def main():
     fiber.add_argument('--fiber-connected', action='store_true', help='Only for the explicit receive-only test')
     parser.add_argument('--reacquire-once', action='store_true',
                         help='Connected receive only: opt into one bounded PMA out/in recovery')
+    parser.add_argument('--samples', type=int, choices=(30, 90, 180),
+                        help='Receive observations at one-second intervals (default: 30)')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.samples is not None and args.action != 'receive':
+        parser.error('--samples is only for receive')
     if args.reacquire_once and (args.action != 'receive' or not args.fiber_connected):
         parser.error('--reacquire-once requires receive --fiber-connected')
     if args.fiber_connected and args.action != 'receive':
@@ -183,6 +197,11 @@ def main():
         parser.error('Tests require --inputs; status is read-only')
     if args.registers and args.action != 'status':
         parser.error('--registers is only for a read-only status capture')
+    with device_lock():
+        return execute(args)
+
+
+def execute(args):
     artifact = args.artifact.resolve()
     revision = json.loads((artifact / 'selection.json').read_text())['revision']
     if not re.fullmatch('[0-9a-f]{40}', revision):
@@ -193,7 +212,7 @@ def main():
     update = None
     if args.modules_from:
         if args.action not in ('resources', 'stack'):
-            parser.error('--modules-from is only for a resources or stack test')
+            raise ValueError('--modules-from is only for a resources or stack test')
         update = module_update(artifact, args.modules_from.resolve(), sums)
     output = args.output.resolve()
     remote = '/tmp/q1000k-bench-' + output.name
@@ -204,11 +223,14 @@ def main():
     start = serial.seek(0, 2)
     fiber_flag = '--fiber-connected' if args.fiber_connected else '--fiber-disconnected'
     recovery_flag = ' --reacquire-once' if args.reacquire_once else ''
+    sample_flag = f' --samples {args.samples}' if args.samples is not None else ''
     run = dict(schema_version=1, action=args.action, host=HOST, revision=revision,
                fiber='connected' if args.fiber_connected else 'disconnected' if args.fiber_disconnected else 'unspecified',
                artifact=str(artifact), output=str(output), serial_log=str(args.serial_log.resolve()),
                serial_start=start, started=time.time(), status='running')
     run['reacquire_once'] = args.reacquire_once
+    if args.action == 'receive':
+        run['samples'] = args.samples or 30
     (output / 'checkpoint.json').write_text(json.dumps(run, indent=2) + '\n')
     base = guards(revision, sums)
     original_base = base
@@ -275,8 +297,8 @@ echo 'RAM inputs verified; runtime kernel.panic=0 confirmed.'
             ssh(stage, output / 'stage.log', args.inputs.read_bytes())
             run['ram_inputs'] = remote
             ssh(base + idle_guards() + f'''test "$(cat /proc/sys/kernel/panic)" = 0
-q1000k-pon-bench {args.action} {remote}/xgspon-calibration.bin {fiber_flag}{recovery_flag}
-''', output / 'attempt.log')
+q1000k-pon-bench {args.action} {remote}/xgspon-calibration.bin {fiber_flag}{recovery_flag}{sample_flag}
+''', output / 'attempt.log', timeout=120 + 2 * (args.samples or 30))
         run['status'] = 'passed'
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
         run['status'] = 'failed'

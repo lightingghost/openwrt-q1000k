@@ -167,7 +167,56 @@ After RAM booting a matching new image, opt in explicitly:
 python3 scripts/q1000k/bench-run.py receive --artifact /absolute/path/to/new-bench --output /new/capture --inputs /tmp/PRIVATE-INPUTS.tar --fiber-connected --reacquire-once
 ```
 
-The helper still observes thirty samples and requires final sync plus advancing
+The helper defaults to thirty samples and requires final sync plus advancing
 frames. Reacquisition does not relax acceptance, TX/registration guards, or
 reverse cleanup. The flag is rejected for status, controller, stack, resources
 and disconnected-fiber tests before any device mutation.
+
+### Multiple experiments on one RAM image
+
+Vendor r75 / helper r9 collect 24 PHY control/status words in every RX sample
+(`receiver_version=2`), together with the seven controller words, frame/FEC
+counters, LOS, OMCI inactivity, protocol errors and fiber LED brightness.
+The additional words cover forced clock-lock status, calibration controls,
+receiver reset releases and PLL configuration. All are ordinary register
+reads through the existing PHY owner; there are no arbitrary register accesses.
+
+`bench-run.py receive --samples 30|90|180` selects the bounded observation count
+without a rebuild. There is a one-second sleep between observations; device
+reads add overhead, so these are sample counts rather than exact durations.
+The host timeout scales with the count. The default stays 30 for old captures.
+All reports require the requested number of observations and retain failures.
+Host runners serialize staging through cleanup with a local device lock, in
+addition to the existing device-side module ownership lock.
+
+After a single matching RAM boot, the saved connected matrix runs a 30-sample
+baseline, then a 90-sample follow-up. If the baseline already has stable frames,
+the second run only observes. If light stays present without stable frames,
+it opts into the existing single PMA reacquisition. Any incomplete capture,
+TX/OMCI/controller guard failure, kernel diagnostic, uncertain light state or
+cleanup failure stops the matrix. It never retries a failed stage. The two
+runs unload and verify cleanup separately; there is at most one opt-in
+reacquisition in the entire matrix.
+
+```sh
+python3 scripts/q1000k/bench-matrix.py --artifact /absolute/path/to/new-bench --output /new/matrix --inputs /tmp/PRIVATE-INPUTS.tar --fiber-connected
+```
+
+Use `--dry-run` to print the sequence without SSH or file writes. Use
+`--extended-samples 180` for a longer follow-up on the same image. `matrix.json`
+records each completed stage, with full observations and receiver diagnostics
+under each capture. A completed matrix with no stable downstream frames still
+exits unsuccessfully; it does not claim optical service acceptance.
+
+| Work | Scheduling |
+| --- | --- |
+| PHY clocks, calibration controls, controller, counters, LED and OMCI status | Collect together in each RX observation window, under their existing locks. |
+| Baseline, optional PMA recovery, longer observation | Select at runtime from one image; execute sequentially on the shared PHY. |
+| Full image build and PHY UML tests using a separate cached UML source/build | Can run concurrently while the committed source is held fixed. |
+| Host tests that consume prepared vendor/kernel sources | Run after the image build finishes preparing those sources. |
+| Analysis of completed captures and OEM disassembly | Can run alongside compilation; never executes OEM binaries. |
+| New register writes, SCU recovery, optical TX or registration | Not part of this matrix; require separate implementation and review. |
+
+Build again when kernel/driver code, ABI, device tree or packaged files change.
+Do not build again just to change a supported sample count, choose observation
+versus single recovery, rerun a host report, or compare captured registers.

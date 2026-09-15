@@ -6,6 +6,7 @@
 export LC_ALL=C
 umask 077
 reacquire=0
+samples=30
 
 fail() { echo "Q1000K bench: $*" >&2; exit 1; }
 preflight() {
@@ -177,18 +178,28 @@ case "$1" in
 			fail 'Usage: q1000k-pon-bench controller|stack /tmp/CALIBRATION --fiber-disconnected'
 		mode=$1; calibration=$2; fiber=disconnected ;;
 	receive)
-		[ "$#" = 3 ] || [ "$#" = 4 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once]'
+		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once] [--samples 30|90|180]'
 		case "$3" in
 			--fiber-connected) fiber=connected ;;
 			--fiber-disconnected) fiber=disconnected ;;
 			*) fail 'Receive test requires an explicit fiber state.' ;;
 		esac
-		if [ "$#" = 4 ]; then
-			[ "$fiber" = connected ] && [ "$4" = --reacquire-once ] ||
-				fail 'A single receive reacquisition requires connected fiber.'
-			reacquire=1
-		fi
-		mode=$1; calibration=$2 ;;
+		mode=$1; calibration=$2
+		shift 3
+		samples_set=0
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				--reacquire-once)
+					[ "$fiber" = connected ] && [ "$reacquire" = 0 ] ||
+						fail 'A single receive reacquisition requires connected fiber and no duplicate option.'
+					reacquire=1; shift ;;
+				--samples)
+					[ "$#" -ge 2 ] && [ "$samples_set" = 0 ] || fail 'Specify samples once.'
+					case "$2" in 30|90|180) samples=$2 ;; *) fail 'Samples must be 30, 90 or 180.' ;; esac
+					samples_set=1; shift 2 ;;
+				*) fail 'Unknown receive option.' ;;
+			esac
+		done ;;
 	*) fail 'Commands: status, controller, stack, receive' ;;
 esac
 
@@ -243,7 +254,8 @@ if [ "$mode" != controller ]; then
 fi
 count=0; limit=5
 last_sample=-1; last_frames=-1; last_poll=0; last_attempts=0; stable=0
-[ "$mode" != receive ] || limit=30
+[ "$mode" != receive ] || limit=$samples
+printf 'bench_window mode=%s samples=%s reacquire=%s\n' "$mode" "$limit" "$reacquire"
 while [ "$count" -lt "$limit" ]; do
 	controller_status initialized || fail 'TX, LOS or controller health check failed.'
 	cat "$controller/receiver_status" || fail 'Controller receiver snapshot unavailable.'

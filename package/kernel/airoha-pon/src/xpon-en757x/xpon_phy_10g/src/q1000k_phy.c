@@ -727,6 +727,17 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		{ EN7581_XPON_PMA_ADD_RO_RX2ANA_3, &result.receiver.rx_analog2 },
 		{ EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_1, &result.receiver.rx_sequence_force },
 		{ EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1, &result.receiver.rx_sequence_disable },
+		{ EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_0, &result.receiver.rx_sequence_force0 },
+		{ EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_0, &result.receiver.rx_sequence_disable0 },
+		{ EN7581_XPON_PMA_RX_FORCE_MODE_9, &result.receiver.rx_lock_force },
+		{ EN7581_XPON_PMA_RX_DISB_MODE_8, &result.receiver.rx_lock_disable },
+		{ EN7581_XPON_PMA_rg_force_da_pxp_rx_oscal_en, &result.receiver.rx_oscal_control },
+		{ EN7581_XPON_PMA_RX_RESET_0, &result.receiver.rx_reset0 },
+		{ EN7581_XPON_PMA_RX_RESET_1, &result.receiver.rx_reset1 },
+		{ EN7581_XPON_PMA_SS_LCPLL_PWCTL_SETTING_0, &result.receiver.pll_power },
+		{ EN7581_XPON_PMA_SS_LCPLL_TDC_FLT_3, &result.receiver.pll_filter },
+		{ EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_1, &result.receiver.pll_pcw1 },
+		{ EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_2, &result.receiver.pll_pcw2 },
 	};
 	u32 sfp, irq_mask;
 	bool inhibited, tx;

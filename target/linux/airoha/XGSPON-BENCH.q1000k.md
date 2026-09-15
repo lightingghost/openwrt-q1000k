@@ -1309,3 +1309,54 @@ Retain before/after snapshots with `bench-receiver-report.py`. Treat the
 experiment as unproven until the hardware observations are collected. A
 reacquisition attempt alone cannot pass the downstream acceptance check,
 and the test cannot establish O5 registration, OMCI service or WAN traffic.
+
+### Consolidated receiver bench prepared — 2026-09-15
+
+The user requested fewer image builds and more useful tests per RAM boot.
+The pending r74 image has not been tested on hardware. Vendor r75 / helper r9
+consolidate the remaining read-only receiver hypotheses and add runtime
+observation windows before the next image is selected.
+
+Every RX sample now carries `receiver_version=2` with 24 PHY words. These
+eleven additional words are ordinary configuration registers used by the
+reference PMA initialization/reset paths; reads do not select probes, clear
+interrupts or replay strobes:
+
+| Field | Physical address | Reference register |
+| --- | --- | --- |
+| `rx_sequence_force0` | `0x1fa8b110` | RX_CTRL_SEQUENCE_FORCE_CTRL_0 |
+| `rx_sequence_disable0` | `0x1fa8b108` | RX_CTRL_SEQUENCE_DISB_CTRL_0 |
+| `rx_lock_force` | `0x1fa8b330` | RX_FORCE_MODE_9 |
+| `rx_lock_disable` | `0x1fa8b33c` | RX_DISB_MODE_8 |
+| `rx_oscal_control` | `0x1fa8b840` | rg_force_da_pxp_rx_oscal_en |
+| `rx_reset0` / `rx_reset1` | `0x1fa8b204` / `208` | RX_RESET_0 / 1 |
+| `pll_power` | `0x1fa8b000` | SS_LCPLL_PWCTL_SETTING_0 |
+| `pll_filter` | `0x1fa8b034` | SS_LCPLL_TDC_FLT_3 |
+| `pll_pcw1` / `pll_pcw2` | `0x1fa8b048` / `04c` | SS_LCPLL_TDC_PCW_1 / 2 |
+
+In particular, the paired force/disable words let us interpret the earlier
+FBCK-lock status; the sequence and OS-calibration controls observe a difference
+between the public driver and OEM disassembly without guessing a corrective
+write. PLL power/filter/frequency configuration and RX reset controls add
+context for the clear PLL lock2 bit. None is a measured frequency or a proven
+cause of failed synchronization. Snapshot publication remains atomic under
+the callback mutex and fails closed on any failed read.
+
+The same image offers 30, 90 and 180 receive samples. The saved host matrix
+combines baseline, optional one-time PMA recovery and longer observation in
+two sequential sessions on one boot. It selects longer observation without
+recovery if the baseline already passes. Before continuing after a downstream
+failure it independently validates all sample counts, TX/controller/OMCI
+guards, serial diagnostics and cleanup; uncertain light or another failure
+stops it. No extra retry budget, analog writes, SCU reset, TX or registration
+path is added. Existing direct `receive` defaults stay observational.
+
+Independent diagnostics are collected in the same window. Physical tests are
+serialized because they share the controller/PHY. Image compilation and the
+isolated cached PHY UML run can execute concurrently with immutable source;
+tests that read prepared vendor/kernel sources wait for compilation to finish.
+The full scheduling and saved commands are in `scripts/q1000k/README.md`.
+
+These changes have not accessed the device. New image build/inspection and
+updated UML evidence are pending at this source checkpoint. The existing
+downstream synchronization failure remains unresolved.

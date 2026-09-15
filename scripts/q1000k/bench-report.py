@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 
-def receive_summary(samples, fiber, reacquire=False):
+def receive_summary(samples, fiber, reacquire=False, require_stability=True):
     last_sample, last_poll, last_frames, stable = -1, 0, None, 0
     last_attempts = 0
     for item in samples:
@@ -39,11 +39,15 @@ def receive_summary(samples, fiber, reacquire=False):
                 raise ValueError('Disconnected receive has unexpected light/sync')
         stable = stable + 1 if lit and last_frames is not None and item['frames'] != last_frames else 0
         last_sample, last_poll, last_frames = item['sampled_ms'], item['poll_calls'], item['frames']
-    if not last_poll or (fiber == 'connected' and stable < 5):
+    if not last_poll:
+        raise ValueError('Receive polling did not run')
+    downstream_stable = fiber == 'connected' and stable >= 5
+    if require_stability and fiber == 'connected' and not downstream_stable:
         raise ValueError('Receive polling or final downstream stability failed')
     return {
         'samples': len(samples), 'registration_enabled': False, 'mac_irq_mask': 0,
         'final_stable_intervals': stable,
+        'downstream_stable': downstream_stable,
         'counters': {key: {'first': samples[0][key], 'last': samples[-1][key]}
                      for key in ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
                                  'fec_uncorrected', 'irq_calls', 'poll_calls')},
@@ -54,16 +58,29 @@ def receive_summary(samples, fiber, reacquire=False):
     }
 
 
-def summarize(capture):
+def summarize(capture, allow_downstream_failure=False):
     capture = capture.resolve(strict=True)
     record = json.loads((capture / 'checkpoint.json').read_text())
     for field, expected in {
         'schema_version': 1, 'host': '192.168.255.1',
-        'status': 'passed', 'postflight': 'passed', 'input_cleanup': 'passed',
+        'postflight': 'passed', 'input_cleanup': 'passed',
     }.items():
         if record.get(field) != expected:
             raise ValueError(f'{capture}: {field} is not {expected!r}')
     action, fiber = record.get('action'), record.get('fiber')
+    failed_downstream = record.get('status') == 'failed' and allow_downstream_failure
+    if record.get('status') != 'passed' and not failed_downstream:
+        raise ValueError('Capture did not pass')
+    attempt = (capture / 'attempt.log').read_text()
+    if failed_downstream:
+        # Matrix continuation accepts only this complete observational failure.
+        # Every controller, MAC, OMCI, TX, serial and cleanup guard below still
+        # has to pass; an SSH timeout or partial capture cannot advance it.
+        failures = [x for x in attempt.splitlines() if x.startswith('Q1000K bench:')]
+        if (action != 'receive' or fiber != 'connected' or failures != [
+                'Q1000K bench: Downstream LOS/sync/frame stability was not established.'] or
+                not record.get('error', '').startswith('SSH failed (1);')):
+            raise ValueError('Capture failure is not limited to downstream stability')
     reacquire = record.get('reacquire_once', False)
     if type(reacquire) is not bool or (reacquire and (action != 'receive' or fiber != 'connected')):
         raise ValueError('Invalid receive reacquisition request')
@@ -71,10 +88,12 @@ def summarize(capture):
         raise ValueError('Unknown bench action/fiber state')
     if action == 'stack' and fiber != 'disconnected':
         raise ValueError('Normal stack test requires disconnected fiber')
-    count = 30 if action == 'receive' else 5
+    count = record.get('samples', 30) if action == 'receive' else 5
+    if type(count) is not int or (action == 'receive' and count not in (30, 90, 180)):
+        raise ValueError('Invalid receive observation count')
     controller, omci, protocol, receive = [], [], [], []
     leds = {'green:wan-1': [], 'red:wan': []}
-    for line in (capture / 'attempt.log').read_text().splitlines():
+    for line in attempt.splitlines():
         led = re.fullmatch(r'fiber_led (green:wan-1|red:wan) brightness=([01])', line)
         if led:
             leds[led[1]].append(int(led[2]))
@@ -119,7 +138,11 @@ def summarize(capture):
                  r'(?:shutdown|reconfigure|activation) failed|'
                  r'FE write .*expected', serial):
         raise ValueError(f'{capture}: kernel failure diagnostic in serial capture')
+    rx = receive_summary(receive, fiber, reacquire, not failed_downstream) if action == 'receive' else None
+    if failed_downstream and rx['downstream_stable']:
+        raise ValueError('Downstream failure disagrees with the captured observations')
     return {
+        'bench_result': record['status'],
         'capture': str(capture), 'boot_revision': record['revision'], 'action': action, 'fiber': fiber,
         'observations': len(omci), 'controller_tx_disabled': True,
         'tx_inhibited': True, 'los': sorted({x['los'] for x in controller}), 'protocol_error': 0,
@@ -129,7 +152,7 @@ def summarize(capture):
         'elapsed_seconds': round(record['finished'] - record['started'], 3),
         'fiber_led_brightness': {key: sorted(set(values)) for key, values in leds.items()},
         'physical_led_requires_user_observation': True,
-        'receive': receive_summary(receive, fiber, reacquire) if action == 'receive' else None,
+        'receive': rx,
     }
 
 

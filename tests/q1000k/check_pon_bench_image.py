@@ -181,6 +181,11 @@ def inspect(image, revision):
             assert 'q1000k_phy_rx_reacquire' in symbols
     assert b'reacquire=0' in read('usr/sbin/q1000k-pon-bench')
     assert b'--reacquire-once' in read('usr/sbin/q1000k-pon-bench')
+    assert b'30|90|180' in read('usr/sbin/q1000k-pon-bench')
+    assert b'limit=$samples' in read('usr/sbin/q1000k-pon-bench')
+    mac = next(name for name in records if name.endswith('/xpon_10g.ko'))
+    for field in (b'"receiver_version":2', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
+        assert field in read(mac)
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:
         if name.startswith(('etc/modules.d/', 'etc/modules-boot.d/')):

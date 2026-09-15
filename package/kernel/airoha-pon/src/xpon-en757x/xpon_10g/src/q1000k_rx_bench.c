@@ -73,11 +73,17 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
 		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu,"
 		"\"reacquire_enabled\":%s,\"reacquire_attempts\":%u,"
-		"\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
+		"\"receiver_version\":2,\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
 		"\"clock_control\":%u,\"cdr_control\":%u,\"rx_frequency\":%u,"
 		"\"pll_status\":%u,\"tdc_control\":%u,\"rx_analog0\":%u,"
 		"\"rx_analog1\":%u,\"rx_analog2\":%u,\"rx_sequence_force\":%u,"
-		"\"rx_sequence_disable\":%u}}\n",
+		"\"rx_sequence_disable\":%u,"
+		"\"rx_sequence_force0\":%u,\"rx_sequence_disable0\":%u,"
+		"\"rx_lock_force\":%u,\"rx_lock_disable\":%u,"
+		"\"rx_oscal_control\":%u,\"rx_reset0\":%u,"
+		"\"rx_reset1\":%u,\"pll_power\":%u,"
+		"\"pll_filter\":%u,\"pll_pcw1\":%u,"
+		"\"pll_pcw2\":%u}}\n",
 		s.controller_los ? "true" : "false", s.phy_los ? "true" : "false",
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
@@ -87,7 +93,13 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		s.receiver.clock_control, s.receiver.cdr_control, s.receiver.rx_frequency,
 		s.receiver.pll_status, s.receiver.tdc_control, s.receiver.rx_analog0,
 		s.receiver.rx_analog1, s.receiver.rx_analog2, s.receiver.rx_sequence_force,
-		s.receiver.rx_sequence_disable);
+		s.receiver.rx_sequence_disable,
+		s.receiver.rx_sequence_force0, s.receiver.rx_sequence_disable0,
+		s.receiver.rx_lock_force, s.receiver.rx_lock_disable,
+		s.receiver.rx_oscal_control, s.receiver.rx_reset0,
+		s.receiver.rx_reset1, s.receiver.pll_power,
+		s.receiver.pll_filter, s.receiver.pll_pcw1,
+		s.receiver.pll_pcw2);
 }
 static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
 module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);
