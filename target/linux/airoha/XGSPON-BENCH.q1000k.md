@@ -1145,3 +1145,52 @@ colors have passed; these additions only read status. Keep TX, registration,
 DHCP and persistent storage disabled. Use the new snapshots to select a
 specific correction before introducing any receive recovery. This checkpoint
 has not accessed or modified the device and does not claim sync is fixed.
+
+### Receiver diagnostic RAM image ready — 2026-09-15
+
+Image source: `e26854f308a5204169173e90e309f18d7fca7dea`.
+Artifact directory:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-e26854f308/`.
+FIT: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`,
+7,602,176 bytes; SHA256
+`06596da17cbf23c31e44cbd6bfdc255baf5cfe081415e0d7f9008a06b823d435`.
+
+The saved builder completed the full build, **116 host PON tests**, and FIT,
+embedded kernel/initramfs and DT inspection. The package manifest confirms
+vendor r73, controller r7, bench helper r7, unchanged OMCI core r15 and CLI r2.
+Inspection confirms NAND disabled, immutable TX inhibit, management address
+`192.168.255.1`, panic timeout zero, no PON autoload, unloadable module
+lifecycles and the identity CLI/LuCI fields. The fourteen runtime file hashes
+and runtime copies are saved beside the FIT. Normal `.config` and
+`.config.old`, all three protected branch refs, the user's untracked board
+README and the normal builder are preserved. The cached feeds emit the same
+unrelated unselected-package dependency warnings as the earlier image.
+
+The new PHY UML run at `/tmp/q1000k-pon-phy-uml.H5AUg5/` passed fifty normal
+and fifty RX-only cycles with real kernel locking, RCU/context guards and
+concurrent poll/IRQ teardown. Its generated source matches this checkpoint;
+`bench-record-uml.py --phy-only` saved `uml-phy/` and
+`uml-phy-source-verification.json` in the artifact. No new OMCI core run is
+claimed: the core and its fixtures are unchanged from the tested `d84282fc86`
+image, whose independent evidence remains in that artifact directory.
+
+This image is ready for the next **RAM-only connected receive test**, not a
+flashable/service-validated PON release. The currently booted image is still
+`d84282fc86`; do not bypass exact-image guards or substitute the new controller
+module into it. After the user boots the new FIT through second-stage
+http-uboot and reports SSH ready, use the existing runner with a new capture:
+
+```sh
+python3 scripts/q1000k/bench-run.py receive \
+  --artifact ../build-artifacts/q1000k-xgspon/bench-e26854f308 \
+  --output ../build-artifacts/q1000k-xgspon/bench-e26854f308-receive-connected-01 \
+  --inputs /tmp/q1000k-controller-test-1093614699-inputs.tar \
+  --fiber-connected --serial-log /tmp/serial_output.log
+```
+
+Use the last confirmed connected fiber state unless the user changes it.
+The runner stages verified inputs in RAM, collects thirty samples with the
+new diagnostics, and performs bounded reverse cleanup. A failed downstream
+stability check must remain a failed test even if light and LED behavior are
+correct. No device access, flash, reboot, transmit activation or registration
+was performed while preparing this image.
