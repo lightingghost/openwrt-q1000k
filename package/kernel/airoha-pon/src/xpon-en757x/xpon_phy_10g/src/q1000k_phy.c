@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Sleepable Q1000K PHY control and callback lifetime. */
 #include <linux/interrupt.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
@@ -30,6 +31,13 @@ static bool qphy_active, qphy_dead;
 static int qphy_fault;
 static struct device *qphy_irq_dev;
 static int qphy_irq = -1;
+static bool qphy_rx_bench;
+static u32 qphy_rx_irqs, qphy_rx_polls;
+#define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
+	EN7581_XGPON_PHY_RX_LOF_INT_EN | EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN | \
+	EN7581_XGPON_PHY_RX_LOS_INT_EN)
+
+static int qphy_rx_sample(struct q1000k_rx_sample *sample);
 
 static int qphy_context(void)
 {
@@ -127,7 +135,7 @@ int q1000k_phy_trans_power(u32 operation)
 		return -EINVAL;
 	/* Only coordinated startup may authorize a later internal restore. */
 	if (operation == PHY_ENABLE &&
-	    (!READ_ONCE(qphy_active) || !gpPhyPriv->phyCfg.flags.txPowerEnFlag))
+	    (qphy_rx_bench || !READ_ONCE(qphy_active) || !gpPhyPriv->phyCfg.flags.txPowerEnFlag))
 		return -EACCES;
 	ret = q1000k_pon_set_tx(qphy_controller, operation == PHY_ENABLE);
 	if (!ret && !preserve)
@@ -172,14 +180,19 @@ static void qphy_failed(int error)
 
 static void qphy_poll_work(struct work_struct *work)
 {
+	struct q1000k_rx_sample sample;
 	int ret;
 
 	qphy_callback_lock();
 	if (!READ_ONCE(qphy_active))
 		goto out;
 	ret = q1000k_phy_controller_check();
-	if (!ret)
+	if (!ret && qphy_rx_bench) {
+		qphy_rx_polls++;
+		ret = qphy_rx_sample(&sample);
+	} else if (!ret) {
 		ret = ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
+	}
 	if (!ret)
 		ret = an7581_pon_phy_status();
 	if (ret)
@@ -200,6 +213,7 @@ void q1000k_phy_poll(void)
 
 static irqreturn_t qphy_irq_thread(int irq, void *data)
 {
+	struct q1000k_rx_sample sample;
 	u32 status, enabled, rogue, rogue_en;
 	int ret;
 	irqreturn_t handled = IRQ_NONE;
@@ -227,8 +241,22 @@ static irqreturn_t qphy_irq_thread(int irq, void *data)
 	 * Dispatch only after checking this PHY's enabled pending sources.
 	 */
 	ret = q1000k_phy_controller_check();
-	if (!ret)
+	if (!ret && qphy_rx_bench) {
+		/* Never dispatch vendor LOS/ready events into registration. Only
+		 * acknowledge our enabled RX W1C sources; PMA/TX remain masked.
+		 */
+		if (enabled != QPHY_RX_BENCH_IRQS || rogue_en)
+			ret = -EACCES;
+		else
+			ret = an7581_pon_phy_write(EN7581_XGPON_PHY_XG_PON_INT_STA,
+						 status & enabled);
+		if (!ret) {
+			qphy_rx_irqs++;
+			ret = qphy_rx_sample(&sample);
+		}
+	} else if (!ret) {
 		ret = ponPhyFunc[PHY_ISR_FUNC]((char *)gpPhyPriv);
+	}
 	if (!ret)
 		ret = an7581_pon_phy_status();
 fail:
@@ -432,6 +460,7 @@ int q1000k_phy_start(void)
 	/* The IRQ thread may run as soon as the mask is enabled. */
 	WRITE_ONCE(qphy_active, true);
 	ret = qphy_reg_write(EN7581_XGPON_PHY_XG_PON_INT_EN,
+		(qphy_rx_bench ? QPHY_RX_BENCH_IRQS :
 		EN7581_XGPON_PHY_TX_FAULT_INT_EN |
 		EN7581_XGPON_PHY_TX_BURST_SPACE_ERR_INT_EN |
 		EN7581_XGPON_PHY_TX_MPI_ERR_INT_EN |
@@ -443,7 +472,7 @@ int q1000k_phy_start(void)
 		EN7581_XGPON_PHY_RX_BER_HIGH_INT_EN |
 		EN7581_XGPON_PHY_RX_LOF_INT_EN |
 		EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN |
-		EN7581_XGPON_PHY_RX_LOS_INT_EN);
+		EN7581_XGPON_PHY_RX_LOS_INT_EN));
 	if (!ret)
 		ret = an7581_pon_phy_status();
 	if (ret) {
@@ -562,6 +591,10 @@ int q1000k_phy_set_tx(bool enable)
 	ret = qphy_ready();
 	if (!ret && (!qphy_controller || !gpPhyPriv->phy_init_done))
 		ret = -EAGAIN;
+	if (!ret && enable && qphy_rx_bench) {
+		ret = -EACCES;
+		qphy_failed(ret);
+	}
 	if (!ret && enable && !READ_ONCE(qphy_active))
 		ret = -EAGAIN;
 	if (!ret) {
@@ -604,6 +637,125 @@ int q1000k_phy_get_tx(bool *enabled)
 	return ret;
 }
 EXPORT_SYMBOL(q1000k_phy_get_tx);
+
+int q1000k_phy_set_rx_bench(bool enabled)
+{
+	bool inhibited, tx;
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret || enabled == qphy_rx_bench)
+		goto out;
+	if (qphy_active || qphy_irq_dev || gpPhyPriv->phy_init_done) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (enabled) {
+		if (!qphy_controller) {
+			struct q1000k_pon *controller = q1000k_pon_get();
+
+			if (IS_ERR(controller)) { ret = PTR_ERR(controller); goto out; }
+			qphy_controller = controller;
+		}
+		ret = q1000k_pon_get_tx_inhibit(qphy_controller, &inhibited);
+		if (!ret)
+			ret = q1000k_pon_get_tx(qphy_controller, &tx);
+		if (!ret && (!inhibited || tx))
+			ret = -EACCES;
+		if (ret)
+			goto out;
+	}
+	qphy_rx_bench = enabled;
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_set_rx_bench);
+
+/* Callback mutex held. Registers below are ordinary read-only snapshots;
+ * do not latch/clear counters or select a PHY debug probe.
+ */
+static int qphy_rx_sample(struct q1000k_rx_sample *sample)
+{
+	struct q1000k_rx_sample result = {};
+	u32 sfp, irq_mask;
+	bool inhibited, tx;
+	int ret;
+
+	if (!qphy_rx_bench || !qphy_controller || !qphy_active)
+		return -EAGAIN;
+	ret = q1000k_pon_get_tx_inhibit(qphy_controller, &inhibited);
+	if (!ret)
+		ret = q1000k_pon_get_tx(qphy_controller, &tx);
+	if (ret)
+		return ret;
+	if (!inhibited || tx)
+		return -EACCES;
+	ret = q1000k_pon_get_los(qphy_controller);
+	if (ret < 0)
+		return ret;
+	result.controller_los = !!ret;
+	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_SFP_STA, &sfp);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_SYNC_ST, &result.sync_status);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_XG_PON_INT_EN, &irq_mask);
+	if (ret)
+		return ret;
+	if (sfp == ~0U || result.sync_status == ~0U || irq_mask != QPHY_RX_BENCH_IRQS)
+		return -EIO;
+	result.phy_los = !!(sfp & EN7581_XGPON_PHY_SFP_RX_LOS_ST);
+	result.synced = !result.controller_los && !result.phy_los &&
+		(result.sync_status & EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC) ==
+		EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_FRAME2PHYD_CNT, &result.frames);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_LOF_CNT, &result.lof);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_TOTAL_CW_CNT, &result.fec_total);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_CORRECTED_CW_CNT, &result.fec_corrected);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_UNCORRECTED_CW_CNT, &result.fec_uncorrected);
+	if (ret)
+		return ret;
+	result.irq_calls = qphy_rx_irqs;
+	result.poll_calls = qphy_rx_polls;
+	result.sampled_ms = ktime_to_ms(ktime_get_boottime());
+	*sample = result;
+	return 0;
+}
+
+int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample)
+{
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (!sample)
+		return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (!ret) {
+		ret = qphy_rx_sample(sample);
+		if (ret && ret != -EAGAIN)
+			qphy_failed(ret);
+	}
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_rx_sample);
 
 static int qphy_reg_update(u32 reg, u32 mask, u32 value, u32 omit)
 {
@@ -842,6 +994,8 @@ int q1000k_phy_init(void)
 	gpPhyPriv = kzalloc(sizeof(*gpPhyPriv), GFP_KERNEL);
 	if (!gpPhyPriv)
 		return -ENOMEM;
+	qphy_rx_bench = false;
+	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;
 	gpPhyPriv->wan_sel = SCU_WAN_CONF_REG_WAN_SEL_XGSPON;
 	gpPhyPriv->rx_fec_setting = PHY_DEFAULT;

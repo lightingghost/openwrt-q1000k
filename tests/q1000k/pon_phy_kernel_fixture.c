@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/module.h>
+#include <linux/ktime.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
@@ -27,6 +28,7 @@ static bool fake_irq_owned, hold_event;
 static DECLARE_COMPLETION(event_entered);
 static DECLARE_COMPLETION(event_release);
 static DECLARE_COMPLETION(exit_done);
+static DECLARE_COMPLETION(irq_returned);
 static unsigned int polls,irqs;
 static int an7581_pon_phy_status(void) { return 0; }
 static struct device *get_pon_phy_dev(void) { return &fake_dev; }
@@ -48,7 +50,8 @@ static int an7581_pon_phy_write(u32 reg,u32 value)
 {
     unsigned long flags;
     spin_lock_irqsave(&register_lock,flags);
-    registers[(reg&0x1ffff)/4]=value;
+    if(reg==EN7581_XGPON_PHY_XG_PON_INT_STA) registers[(reg&0x1ffff)/4]&=~value;
+    else registers[(reg&0x1ffff)/4]=value;
     spin_unlock_irqrestore(&register_lock,flags);
     return 0;
 }
@@ -82,6 +85,7 @@ static void pon_phy_api_dispatch(struct ecnt_data *in)
 static void phy_event_poll(struct timer_list *timer) { q1000k_phy_poll(); }
 
 struct q1000k_pon { bool held, tx; };
+static bool controller_inhibit, controller_los=true;
 static struct q1000k_pon controller;
 static int controller_error, pins_error, pbus_error;
 static struct q1000k_pon *q1000k_pon_get(void)
@@ -96,6 +100,14 @@ static int q1000k_pon_check(struct q1000k_pon *p)
 static int q1000k_pon_get_tx(struct q1000k_pon *p,bool *enabled)
 {
     int ret=q1000k_pon_check(p); if (!ret) *enabled=p->tx; return ret;
+}
+static int q1000k_pon_get_tx_inhibit(struct q1000k_pon *p,bool *inhibited)
+{
+    int ret=q1000k_pon_check(p); if(!ret) *inhibited=controller_inhibit; return ret;
+}
+static int q1000k_pon_get_los(struct q1000k_pon *p)
+{
+    int ret=q1000k_pon_check(p); return ret ? ret : controller_los;
 }
 static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
 {
@@ -126,6 +138,7 @@ static int handle_irq(char *p) { irqs++; return handle_event(p); }
 static int irq_task(void *unused)
 {
     check(fake_irq_fn(75,&fake_dev)==IRQ_HANDLED);
+    complete(&irq_returned);
     while(!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
     __set_current_state(TASK_RUNNING);
     return 0;
@@ -155,7 +168,7 @@ static void stop_during_callback(bool irq, bool quiesce)
     reinit_completion(&event_entered); reinit_completion(&event_release); reinit_completion(&exit_done);
     WRITE_ONCE(hold_event,true);
     if(irq) {
-        an7581_pon_phy_write(EN7581_XGPON_PHY_XG_PON_INT_STA,EN7581_XGPON_PHY_RX_LOS_INT_EN);
+        registers[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=EN7581_XGPON_PHY_RX_LOS_INT_EN;
         fake_irq_task=kthread_run(irq_task,NULL,"qphy-irq-test");
         check(!IS_ERR(fake_irq_task));
     } else {
@@ -227,7 +240,25 @@ static int __init phy_test_init(void)
     stop_during_callback(true,true);
     control_during_callback();
     check(polls==53 && irqs==2);
-    pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 cycles, RCU guards, concurrent poll and IRQ teardown\n");
+    qphy_dead=false; qphy_fault=0; controller_inhibit=true;
+    check(!q1000k_phy_init()); check(!q1000k_phy_set_rx_bench(true));
+    check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
+    for(n=0;n<50;n++) {
+        struct q1000k_rx_sample sample;
+        check(!q1000k_phy_start());
+        q1000k_phy_poll(); flush_work(&qphy_poll_job);
+        registers[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=QPHY_RX_BENCH_IRQS;
+        reinit_completion(&irq_returned);
+        fake_irq_task=kthread_run(irq_task,NULL,"q1000k-rx-irq"); check(!IS_ERR(fake_irq_task));
+        check(wait_for_completion_timeout(&irq_returned,5*HZ));
+        check(!q1000k_phy_rx_sample(&sample) && sample.controller_los && !sample.synced);
+        check(!controller.tx && q1000k_phy_set_rx_bench(false)==-EBUSY);
+        check(!q1000k_phy_stop() && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
+    }
+    check(polls==53 && irqs==2 && qphy_rx_polls==50 && qphy_rx_irqs==50);
+    q1000k_phy_exit();
+    check(!controller.held && !gpPhyPriv);
+    pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 normal + 50 RX-only cycles, RCU guards, concurrent poll and IRQ teardown\n");
     return 0;
 }
 static void __exit phy_test_exit(void) {}

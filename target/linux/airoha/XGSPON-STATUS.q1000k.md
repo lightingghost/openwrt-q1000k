@@ -15,6 +15,17 @@ blink-to-steady, reference/unwind and backend observer tests pass; visual
 hardware confirmation awaits the next RAM image. Vendor r69/core r14 contain
 this fix. The previous hardware results below remain for r68/core r13.
 
+Receive-only preparation update: vendor r70/controller r6/bench r5 add a
+separate `receive` action with explicit connected/disconnected fiber flags.
+It verifies immutable TX inhibit, keeps registration and MAC IRQs stopped,
+suppresses vendor PHY callbacks, and checks 30 seconds of fresh LOS/sync/frame
+and FEC snapshots while ONU/OMCC remain unassigned. RX-only PHY tests pass
+50 Linux UML cycles in addition to 50 normal cycles; the full OMCI core UML
+suite and host lifecycle/bench guards pass. A new image build and user RAM
+boot are required before hardware validation. See the new section in
+[the bench report](XGSPON-BENCH.q1000k.md) and saved commands in
+[`scripts/q1000k/README.md`](../../../scripts/q1000k/README.md).
+
 **Local integration is progressing; working optical service has not been
  demonstrated.** Vendor r68 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst

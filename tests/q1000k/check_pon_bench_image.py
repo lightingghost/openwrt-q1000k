@@ -86,6 +86,11 @@ def inspect(image, revision):
     assert dt['/soc/pcs@1fa08000']['status'] == b'disabled\0'
     for path in ('/soc/phy@1faf0000', '/soc/pon@1fb64000'):
         assert dt[path]['status'] == b'okay\0'
+    mac = dt['/soc/pon@1fb64000']
+    assert mac['led-names'] == b'pon\0los\0'
+    for handle, pin in zip(struct.unpack('>II', mac['leds']), (22, 30)):
+        led = next(v for v in dt.values() if v.get('phandle') == struct.pack('>I', handle))
+        assert struct.unpack('>III', led['gpios'])[1:] == (pin, 0)
     lower = dt['/soc/ethernet@1fb50000/ethernet@2']
     assert lower['status'] == b'okay\0' and 'airoha,pon-port' in lower
     assert lower['phy-mode'] == b'internal\0' and 'pcs-handle' not in lower

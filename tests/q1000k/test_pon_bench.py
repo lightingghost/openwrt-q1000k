@@ -28,6 +28,8 @@ class BenchTests(unittest.TestCase):
         self.write('tmp/sysinfo/board_name', 'quantum,q1000k-ubi\n')
         self.write('proc/mounts', 'rootfs / rootfs rw 0 0\n')
         self.write('proc/sys/kernel/panic', '0\n')
+        self.write('sys/class/leds/green:wan-1/brightness', '0\n')
+        self.write('sys/class/leds/red:wan/brightness', '1\n')
         self.write('sys/class/net/ponraw/flags', '0x1002\n')
         (self.root / 'var/run').mkdir(parents=True)
         self.calibration = self.write('tmp/calibration', 'c' * 513)
@@ -58,6 +60,15 @@ if action=='cat':
                   calibration_supplied=initialized, los=True)
         data.update(json.loads(os.environ.get('BENCH_STATUS','{}')))
         print(json.dumps(data))
+    elif args==[str(root/'sys/module/xpon_10g/parameters/rx_bench_status')]:
+        counter=root/'rx-count'; n=int(counter.read_text())+1 if counter.exists() else 1; counter.write_text(str(n))
+        lit=os.environ.get('BENCH_FIBER')=='connected'
+        data=dict(rx_bench=True, registration_enabled=False, tx_inhibited=True,tx_enabled=False,
+                  mac_irq_mask=0, controller_los=not lit,phy_los=not lit,synced=lit,sync_status=0,
+                  frames=n if lit else 0,lof=0,fec_total=n if lit else 0,fec_corrected=0,
+                  fec_uncorrected=0,irq_calls=0,poll_calls=n,sampled_ms=n*1000)
+        data.update(json.loads(os.environ.get('BENCH_RX_STATUS','{}')))
+        print(json.dumps(data))
     else:
         for name in args:
             sys.stdout.buffer.write(pathlib.Path(name).read_bytes())
@@ -80,7 +91,11 @@ elif action=='rmmod':
 elif action=='ip': assert args[:4]==['link','set','dev','ponraw']
 elif action=='omci':
     assert args==['-i','pon','status']
-    print('{"schema_version":1,"service_error":0}')
+    data=dict(schema_version=1,state=1,onu_id=65535,gem_port_id=65535,agent_enabled=1,
+              agent_operational=0,authenticated=0,service_rules=0,service_error=0,
+              rx_packets='0',tx_packets='0',tx_errors='0')
+    data.update(json.loads(os.environ.get('BENCH_OMCI_STATUS','{}')))
+    print(json.dumps(data))
 else: raise AssertionError(action)
 '''
         for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep', 'omci'):
@@ -97,12 +112,12 @@ else: raise AssertionError(action)
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
 
-    def run_bench(self, mode='stack', success=True, acknowledged=True):
+    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected'):
         args = [mode]
         if mode != 'status':
             args += [str(self.calibration)]
             if acknowledged:
-                args += ['--fiber-disconnected']
+                args += ['--fiber-' + fiber]
         result = subprocess.run(['busybox', 'ash', str(self.script), *args],
                                 env=self.env, text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
@@ -147,12 +162,44 @@ else: raise AssertionError(action)
         calls = self.calls()
         loads = [c for c in calls if c[0] in ('modprobe', 'insmod')]
         self.assertEqual([c[1] for c in loads], MODULES)
-        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'wan_mac=02:00:00:00:00:01',
+        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'rx_bench=0', 'wan_mac=02:00:00:00:00:01',
                                    'pon_serial=TEST00000001', 'pon_reg_id=' + '0' * 72,
                                    'pon_lower=ponraw'])
         self.assertEqual([c[1] for c in calls if c[0] == 'rmmod'], MODULES[::-1])
         self.assertEqual(calls[-1], ['ip', 'link', 'set', 'dev', 'ponraw', 'down'])
         self.assertEqual(len([c for c in calls if c[0] == 'omci']), 5)
+
+    def test_receive_dark_cycle(self):
+        self.run_bench('receive')
+        loads=[c for c in self.calls() if c[0]=='insmod']
+        self.assertIn('rx_bench=1', loads[-1])
+        self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
+        self.assertEqual((self.root/'rx-count').read_text(), '30')
+
+    def test_receive_connected_sync_and_frame_progress(self):
+        self.env['BENCH_FIBER']='connected'
+        self.env['BENCH_STATUS']=json.dumps({'los': False})
+        self.run_bench('receive', fiber='connected')
+
+    def test_receive_guards_reject_tx_and_cleanup(self):
+        self.env['BENCH_RX_STATUS']=json.dumps({'tx_enabled': True})
+        self.run_bench('receive', success=False)
+        self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
+
+    def test_receive_rejects_assigned_onu(self):
+        self.env['BENCH_OMCI_STATUS']=json.dumps({'onu_id': 17})
+        self.run_bench('receive', success=False)
+        self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
+
+    def test_connected_without_frames_fails(self):
+        self.env['BENCH_FIBER']='connected'
+        self.env['BENCH_STATUS']=json.dumps({'los': False})
+        self.env['BENCH_RX_STATUS']=json.dumps({'frames': 0})
+        self.run_bench('receive', fiber='connected', success=False)
+
+    def test_connected_never_runs_normal_stack(self):
+        self.run_bench('stack', fiber='connected', success=False)
+        self.assertEqual(self.calls(), [])
 
     def test_unproven_tx_inhibit_and_los_fail_closed(self):
         for value in ({'tx_inhibited': False}, {'tx_inhibited': 'true'},

@@ -1,0 +1,57 @@
+Subject: [PATCH] hold Q1000K registration off in explicit RX-only RAM bench
+
+The PHY requires immutable controller TX inhibit. Keep the protocol executor
+stopped and refuse external readiness while collecting downstream status.
+
+--- a/xpon-en757x/xpon_10g/Makefile
++++ b/xpon-en757x/xpon_10g/Makefile
+@@ -74,7 +74,7 @@
+ 
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+ ifeq ($(TCSUPPORT_CPU_AN7583),)
+-TOTAL_OBJ += $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_key_exchange.o $(SRCDIR)/q1000k_protocol.o $(SRCDIR)/q1000k_gwan_rebuild.o $(SRCDIR)/q1000k_mac_keys.o $(SRCDIR)/q1000k_mac_cold.o $(SRCDIR)/q1000k_vlan.o $(SRCDIR)/q1000k_services.o $(SRCDIR)/q1000k_omci_backend.o
++TOTAL_OBJ += $(SRCDIR)/q1000k_rx_bench.o $(SRCDIR)/q1000k_identity.o $(SRCDIR)/q1000k_packet.o $(SRCDIR)/q1000k_omci.o $(SRCDIR)/q1000k_transport.o $(SRCDIR)/q1000k_tcont.o $(SRCDIR)/q1000k_gem.o $(SRCDIR)/q1000k_pipeline.o $(SRCDIR)/q1000k_auth.o $(SRCDIR)/q1000k_key_exchange.o $(SRCDIR)/q1000k_protocol.o $(SRCDIR)/q1000k_gwan_rebuild.o $(SRCDIR)/q1000k_mac_keys.o $(SRCDIR)/q1000k_mac_cold.o $(SRCDIR)/q1000k_vlan.o $(SRCDIR)/q1000k_services.o $(SRCDIR)/q1000k_omci_backend.o
+ endif
+ endif
+ 
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -66,6 +66,7 @@
+ #include "common/xpon_api.h"
+ #ifdef Q1000K_PON_IDENTITY
+ #include "common/q1000k_transport.h"
++#include "common/q1000k_rx_bench.h"
+ #endif
+ #include "common/xpon_daemon.h"
+ #include "epon/epon_act.h"
+@@ -162,7 +163,8 @@
+ 	if (!smp_load_acquire(&xpon_ready))
+ 		return false;
+ #ifdef Q1000K_PON_IDENTITY
+-	return !q1000k_protocol_status() && q1000k_transport_running();
++	return !q1000k_rx_bench_enabled() &&
++		!q1000k_protocol_status() && q1000k_transport_running();
+ #else
+ 	return true;
+ #endif
+@@ -1519,6 +1521,10 @@
+ 		goto fail;
+ #endif
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "rx-bench-guard";
++	ret = q1000k_rx_bench_prepare();
++	if (ret)
++		goto fail;
+ 	stage = "protocol-init";
+ 	ret = q1000k_protocol_init(get_xpon_irq(0), &xpon_protocol_ops);
+ 	if (ret)
+@@ -1616,7 +1622,8 @@
+ #endif
+ #ifdef Q1000K_PON_IDENTITY
+ 	stage = "protocol-start";
+-	ret = q1000k_protocol_start();
++	/* RX bench never consumes registration events or unmasks MAC IRQs. */
++	ret = q1000k_rx_bench_enabled() ? 0 : q1000k_protocol_start();
+ 	if (ret)
+ 		goto fail;
+ #endif

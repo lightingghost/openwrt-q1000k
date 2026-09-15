@@ -116,6 +116,9 @@ int main(void)
     p=create(); p->tx_inhibited=true;
     assert(q1000k_pon_set_tx(p,true)==-EPERM && !writes && !off);
     assert(q1000k_pon_get()==p);
+    bool inhibited=false;
+    assert(!q1000k_pon_get_tx_inhibit(p,&inhibited) && inhibited);
+    assert(q1000k_pon_get_tx_inhibit(p,NULL)==-EINVAL);
     assert(!q1000k_pon_set_tx(p,false) && writes==1 && hw_disabled);
     atomic_context=1;
     assert(q1000k_pon_set_tx(p,true)==-EWOULDBLOCK && writes==1 && !off);

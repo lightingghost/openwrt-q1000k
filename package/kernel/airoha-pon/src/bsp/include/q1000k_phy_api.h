@@ -33,6 +33,19 @@ int q1000k_phy_prepare_wan(void);
  * negative on invalid context/state. Does not change hardware.
  */
 int q1000k_phy_needs_configure(void);
+/* Bench mode can change only before configuration/IRQ ownership. It requires
+ * the controller's immutable TX inhibit; an existing mode is idempotent.
+ * IRQ/poll callbacks observe RX without invoking vendor registration events.
+ */
+int q1000k_phy_set_rx_bench(bool enabled);
+struct q1000k_rx_sample {
+	bool controller_los, phy_los, synced;
+	u32 sync_status, frames, lof, fec_total, fec_corrected, fec_uncorrected;
+	u32 irq_calls, poll_calls;
+	u64 sampled_ms;
+};
+/* Fresh, read-only status/counter sample. No counter latches or clears. */
+int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);
 /* Lifecycle owner: wait for callbacks; rejects invocation by a callback. */

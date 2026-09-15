@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise host-side rejection before any device command is issued."""
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -19,6 +20,14 @@ SPEC.loader.exec_module(RUN)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_connected_flag_cannot_reach_other_actions(self):
+        for action in ('status', 'resources', 'controller', 'stack'):
+            args=['bench-run', action, '--artifact', '/missing', '--output', '/missing', '--fiber-connected']
+            with self.subTest(action=action), patch('sys.argv', args), patch.object(RUN, 'ssh') as ssh:
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    RUN.main()
+                ssh.assert_not_called()
+
     def test_input_archive_rejects_links_duplicates_and_traversal(self):
         content = b'private fixture'
         digest = hashlib.sha256(content).hexdigest()

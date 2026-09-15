@@ -30,6 +30,8 @@ static void set_xpon_data(u32 reg,u32 value) {
     if(reg==0x5868) regs[reg/4]|=BIT(2); /* Independent OC FEC indication. */
     if(reg==0x582c) regs[reg/4]|=BIT(31); /* Independent TX-sync status. */
 }
+static bool rx_bench;
+static bool q1000k_rx_bench_enabled(void) { return rx_bench; }
 /* PRODUCTION */
 static void reset(void) {
     memset(regs,0,sizeof(regs)); memset(written,0,sizeof(written));
@@ -98,6 +100,8 @@ int main(void) {
     }
     reset(); assert(q1000k_mac_cold_interrupts(0x1234)==-EPERM && !writes);
     phase=2; assert(!q1000k_mac_cold_interrupts(0x1234) && regs[0x5040/4]==0x1234);
+    rx_bench=true; assert(!q1000k_mac_cold_interrupts(~0U) && !regs[0x5040/4]);
+    rx_bench=false;
     writes=0; fail_write=2;
     assert(q1000k_mac_cold_interrupts(0x1234)==-EIO);
     reset(); assert(q1000k_mac_profiles_invalidate()==-EPERM);

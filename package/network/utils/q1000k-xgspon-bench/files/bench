@@ -47,12 +47,75 @@ controller_status() {
 	json_get_var value last_error
 	[ "$type" = int ] && [ "$value" = 0 ] || return 1
 	if [ "$1" = initialized ]; then
-		for field in md32_enabled firmware_verified calibration_supplied los; do
+		for field in md32_enabled firmware_verified calibration_supplied; do
 			json_get_type type "$field"
 			json_get_var value "$field"
 			[ "$type" = boolean ] && [ "$value" = 1 ] || return 1
 		done
+		json_get_type type los
+		json_get_var value los
+		[ "$type" = boolean ] || return 1
+		[ "$fiber" = connected ] || [ "$value" = 1 ] || return 1
 	fi
+	printf '%s\n' "$data"
+}
+
+omci_status() {
+	local data field type value expected
+	data=$(/usr/sbin/q1000k-omci -i pon status) || return 1
+	if [ "$mode" = receive ]; then
+		json_load "$data" || return 1
+		for field in schema_version state onu_id gem_port_id agent_enabled agent_operational authenticated service_rules service_error; do
+			case "$field" in
+				schema_version|state|agent_enabled) expected=1 ;;
+				onu_id|gem_port_id) expected=65535 ;;
+				*) expected=0 ;;
+			esac
+			json_get_type type "$field"; json_get_var value "$field"
+			[ "$type" = int ] && [ "$value" = "$expected" ] || return 1
+		done
+		for field in rx_packets tx_packets tx_errors; do
+			json_get_type type "$field"; json_get_var value "$field"
+			[ "$type" = string ] && [ "$value" = 0 ] || return 1
+		done
+	fi
+	printf '%s\n' "$data"
+}
+
+rx_status() {
+	local data field type value controller_los phy_los synced frames sampled_ms poll_calls
+	data=$(cat /sys/module/xpon_10g/parameters/rx_bench_status) && json_load "$data" || return 1
+	for field in rx_bench tx_inhibited; do
+		json_get_type type "$field"; json_get_var value "$field"
+		[ "$type" = boolean ] && [ "$value" = 1 ] || return 1
+	done
+	for field in registration_enabled tx_enabled; do
+		json_get_type type "$field"; json_get_var value "$field"
+		[ "$type" = boolean ] && [ "$value" = 0 ] || return 1
+	done
+	for field in mac_irq_mask sync_status frames lof fec_total fec_corrected fec_uncorrected irq_calls poll_calls sampled_ms; do
+		json_get_type type "$field"; json_get_var value "$field"
+		[ "$type" = int ] && [ "$value" -ge 0 ] || return 1
+		[ "$field" != mac_irq_mask ] || [ "$value" = 0 ] || return 1
+	done
+	for field in controller_los phy_los synced; do
+		json_get_type type "$field"; json_get_var "$field" "$field"
+		[ "$type" = boolean ] || return 1
+	done
+	json_get_var frames frames; json_get_var sampled_ms sampled_ms; json_get_var poll_calls poll_calls
+	[ "$sampled_ms" -gt "$last_sample" ] && [ "$poll_calls" -ge "$last_poll" ] || return 1
+	last_sample=$sampled_ms; last_poll=$poll_calls
+	if [ "$fiber" = disconnected ]; then
+		[ "$controller_los" = 1 ] && [ "$phy_los" = 1 ] && [ "$synced" = 0 ] || return 1
+	else
+		if [ "$controller_los" = 0 ] && [ "$phy_los" = 0 ] && [ "$synced" = 1 ] &&
+			[ "$last_frames" -ge 0 ] && [ "$frames" != "$last_frames" ]; then
+			stable=$((stable + 1))
+		else
+			stable=0
+		fi
+	fi
+	last_frames=$frames
 	printf '%s\n' "$data"
 }
 
@@ -105,8 +168,16 @@ case "$1" in
 	controller|stack)
 		[ "$#" = 3 ] && [ "$3" = --fiber-disconnected ] ||
 			fail 'Usage: q1000k-pon-bench controller|stack /tmp/CALIBRATION --fiber-disconnected'
+		mode=$1; calibration=$2; fiber=disconnected ;;
+	receive)
+		[ "$#" = 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected'
+		case "$3" in
+			--fiber-connected) fiber=connected ;;
+			--fiber-disconnected) fiber=disconnected ;;
+			*) fail 'Receive test requires an explicit fiber state.' ;;
+		esac
 		mode=$1; calibration=$2 ;;
-	*) fail 'Commands: status, controller, stack' ;;
+	*) fail 'Commands: status, controller, stack, receive' ;;
 esac
 
 preflight
@@ -120,7 +191,7 @@ modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy
 for module in $modules; do
 	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
 done
-if [ "$mode" = stack ]; then
+if [ "$mode" != controller ]; then
 	read -r flags < /sys/class/net/ponraw/flags || fail 'Native PON endpoint is missing.'
 	printf '%s\n' "$flags" | grep -Eq '^0x[0-9a-fA-F]{1,8}$' || fail 'Invalid native endpoint flags.'
 	[ "$((flags & 1))" = 0 ] || fail 'Native PON endpoint is already up.'
@@ -137,8 +208,8 @@ printf 'detect\n' > "$controller/operation" || fail 'Controller selection/detect
 controller_status off || fail 'Detection did not return to TX-off state.'
 cat "$calibration" > "$controller/calibration" || fail 'Calibration staging failed.'
 printf 'initialize\n' > "$controller/operation" || fail 'Controller initialization failed.'
-controller_status initialized || fail 'Controller is not healthy with LOS asserted and TX inhibited.'
-if [ "$mode" = stack ]; then
+controller_status initialized || fail 'Controller health, fiber state or TX inhibit check failed.'
+if [ "$mode" != controller ]; then
 	ip link set dev ponraw up || fail 'Cannot open the native DMA endpoint.'
 	lower_owned=1
 	for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do
@@ -146,20 +217,38 @@ if [ "$mode" = stack ]; then
 	done
 	# Synthetic bench identity only: the immutable controller guard rejects TX.
 	# These values are never installed in subscriber UCI configuration.
-	load_module xpon_10g wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
+	rx_bench=0
+	[ "$mode" != receive ] || rx_bench=1
+	load_module xpon_10g rx_bench="$rx_bench" wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
 		pon_reg_id=000000000000000000000000000000000000000000000000000000000000000000000000 \
 		pon_lower=ponraw
 fi
-count=0
-while [ "$count" -lt 5 ]; do
+count=0; limit=5
+last_sample=-1; last_frames=-1; last_poll=0; stable=0
+[ "$mode" != receive ] || limit=30
+while [ "$count" -lt "$limit" ]; do
 	controller_status initialized || fail 'TX, LOS or controller health check failed.'
-	if [ "$mode" = stack ]; then
+	if [ "$mode" != controller ]; then
 		cat /proc/xgpon/status || fail 'MAC status unavailable.'
 		grep -qx 'protocol_error=0' /proc/xgpon/status || fail 'MAC reported a protocol fault.'
-		/usr/sbin/q1000k-omci -i pon status || fail 'OMCI status unavailable.'
+		omci_status || fail 'OMCI status unavailable or receive-only session is not unassigned.'
+	fi
+	if [ "$mode" = receive ]; then
+		rx_status || fail 'Receive-only guard/status check failed.'
+	fi
+	# Capture class brightness; software blinking may sample either phase.
+	if [ "$mode" != controller ]; then
+		for led in green:wan-1 red:wan; do
+			value=$(cat "/sys/class/leds/$led/brightness") || fail 'Fiber LED is missing.'
+			printf 'fiber_led %s brightness=%s\n' "$led" "$value"
+		done
 	fi
 	count=$((count + 1))
 	sleep 1 || fail 'Observation interrupted.'
 done
+if [ "$mode" = receive ]; then
+	[ "$last_poll" -gt 0 ] || fail 'Receive polling did not run.'
+	[ "$fiber" = disconnected ] || [ "$stable" -ge 5 ] || fail 'Downstream LOS/sync/frame stability was not established.'
+fi
 echo 'Bench observation passed; shutting down owned modules and the controller.'
 exit 0

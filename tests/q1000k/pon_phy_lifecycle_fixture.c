@@ -7,6 +7,7 @@
 #include <string.h>
 #include <errno.h>
 typedef uint32_t u32;
+typedef uint64_t u64;
 typedef uint8_t u8;
 static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|(u32)p[2]<<8|p[3]; }
 #include <q1000k_phy_api.h>
@@ -74,6 +75,8 @@ struct timer_list { bool armed, dead; };
 struct work_struct { bool queued; void (*fn)(struct work_struct *); };
 #define DECLARE_WORK(n,f) struct work_struct n={.fn=f}
 static unsigned long jiffies=100;
+#define ktime_to_ms(t) (t)
+static u64 ktime_get_boottime(void) { return jiffies; }
 static unsigned int msecs_to_jiffies(unsigned int n) { return n; }
 static void timer_setup(struct timer_list *t,void (*f)(struct timer_list *),int n) { memset(t,0,sizeof(*t)); }
 static void mod_timer(struct timer_list *t,unsigned long n) { assert(!t->dead); t->armed=true; }
@@ -119,7 +122,9 @@ static int an7581_pon_phy_read(u32 r,u32 *v) {
 }
 static int an7581_pon_phy_write(u32 r,u32 v) {
     writes++; if(writes==fail_write) return -EIO;
-    regs[(r&0x1ffff)/4]=v; return 0;
+    if(r==EN7581_XGPON_PHY_XG_PON_INT_STA) regs[(r&0x1ffff)/4]&=~v;
+    else regs[(r&0x1ffff)/4]=v;
+    return 0;
 }
 static int request_threaded_irq(int irq,void *primary,int (*thread)(int,void *),int flags,const char *name,void *dev) {
     assert(irq==75 && !primary && flags==(IRQF_SHARED|IRQF_ONESHOT) && dev==&device);
@@ -139,6 +144,7 @@ static void pon_phy_api_dispatch(struct ecnt_data *d) { struct xpon_phy_api_data
 static void phy_event_poll(struct timer_list *t) { q1000k_phy_poll(); }
 
 struct q1000k_pon { bool held, tx; };
+static bool controller_inhibit, controller_los=true;
 static struct q1000k_pon controller;
 static int controller_error, pins_error, pbus_error;
 static struct q1000k_pon *q1000k_pon_get(void)
@@ -153,6 +159,14 @@ static int q1000k_pon_check(struct q1000k_pon *p)
 static int q1000k_pon_get_tx(struct q1000k_pon *p,bool *enabled)
 {
     int ret=q1000k_pon_check(p); if (!ret) *enabled=p->tx; return ret;
+}
+static int q1000k_pon_get_tx_inhibit(struct q1000k_pon *p,bool *inhibited)
+{
+    int ret=q1000k_pon_check(p); if(!ret) *inhibited=controller_inhibit; return ret;
+}
+static int q1000k_pon_get_los(struct q1000k_pon *p)
+{
+    int ret=q1000k_pon_check(p); return ret ? ret : controller_los;
 }
 static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
 {
@@ -316,8 +330,45 @@ static void prepare_wan(void)
     assert(q1000k_phy_prepare_wan()==-EBUSY && !wan_writes);
     reset();
 }
+static void rx_bench_tests(void)
+{
+    struct q1000k_rx_sample sample, saved;
+    reset(); assert(!q1000k_phy_init()); controller_inhibit=false;
+    assert(!q1000k_phy_set_rx_bench(false));
+    assert(q1000k_phy_set_rx_bench(true)==-EACCES && !qphy_rx_bench);
+    controller_inhibit=true; controller.tx=true;
+    assert(q1000k_phy_set_rx_bench(true)==-EACCES && !qphy_rx_bench);
+    controller.tx=false; assert(!q1000k_phy_set_rx_bench(true));
+    assert(q1000k_phy_rx_sample(&sample)==-EAGAIN);
+    assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
+    assert(q1000k_phy_set_rx_bench(false)==-EBUSY);
+    assert(!q1000k_phy_set_rx_bench(true));
+    assert(!q1000k_phy_start());
+    regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+    controller_los=true;
+    assert(!q1000k_phy_rx_sample(&sample) && sample.controller_los && sample.phy_los && !sample.synced);
+    unsigned int old_writes=writes;
+    controller_los=false; regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+    regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+    regs[(EN7581_XGPON_PHY_DBG_RX_FRAME2PHYD_CNT&0x1ffff)/4]=~0U;
+    assert(!q1000k_phy_rx_sample(&sample) && sample.synced && sample.frames==~0U && old_writes==writes);
+    unsigned int old_polls=polls, old_isrs=isrs;
+    qphy_poll_work(&qphy_poll_job); assert(polls==old_polls && qphy_rx_polls==1);
+    regs[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=QPHY_RX_BENCH_IRQS|EN7581_XGPON_PHY_TX_FAULT_INT_EN;
+    assert(irq_fn(75,&device)==IRQ_HANDLED && isrs==old_isrs && qphy_rx_irqs==1);
+    assert(regs[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]==EN7581_XGPON_PHY_TX_FAULT_INT_EN);
+    assert(irq_fn(75,&device)==IRQ_NONE);
+    saved=sample; fail_read=reads+4;
+    assert(q1000k_phy_rx_sample(&sample)==-EIO && !memcmp(&sample,&saved,sizeof(sample)));
+    assert(qphy_fault==-EIO && !qphy_active && !controller.tx);
+    reset(); assert(!q1000k_phy_init()); assert(!q1000k_phy_set_rx_bench(true));
+    assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG)); assert(!q1000k_phy_start());
+    assert(q1000k_phy_set_tx(true)==-EACCES && !controller.tx && !qphy_active);
+    reset(); controller_inhibit=false; controller_los=true;
+}
 int main(void)
 {
+    rx_bench_tests();
     prepare_wan();
     unsigned int n;
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET,.cmd_id=99};

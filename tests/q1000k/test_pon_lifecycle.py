@@ -398,6 +398,10 @@ static int acquire(int id) {
 }
 static void release(int id) { assert(live[id]); live[id]=0; }
 static int q1000k_pon_identity_init(void) { return acquire(ID); }
+static bool rx_bench;
+static int rx_guard_error;
+static bool q1000k_rx_bench_enabled(void) { return rx_bench; }
+static int q1000k_rx_bench_prepare(void) { assert(live[ATTACH] && !live[PROTOCOL]); return rx_guard_error; }
 static int q1000k_protocol_init(int irq,void *ops) {
     assert(irq==100 && ops==&xpon_protocol_ops); return acquire(PROTOCOL);
 }
@@ -521,7 +525,14 @@ int main(void) {
     for(pipeline_error=-1;pipeline_error>=-10;pipeline_error--) {
         reset(0); assert(!xpondrv_init()); xpondrv_cleanup(); clean();
     }
-    pipeline_error=0; mac_error=-EIO;
+    pipeline_error=0;
+    reset(0); rx_bench=true;
+    assert(!xpondrv_init() && !xpon_is_ready() && live[COLD] && !live[PROTOSTART]);
+    xpondrv_cleanup(); clean(); rx_bench=false;
+    reset(0); rx_guard_error=-EPERM;
+    assert(xpondrv_init()==-EPERM && step==ATTACH);
+    assert(strstr(error_log,"at rx-bench-guard: -1")); clean(); rx_guard_error=0;
+    mac_error=-EIO;
     reset(0); assert(xpondrv_init()==-EIO && step==ID); clean(); mac_error=0;
     reset(0); irq_resources=0; assert(xpondrv_init()==-ENODEV && step==ID); clean();
     reset(0); irq_resources=1; providers=0; assert(!xpondrv_init()); xpondrv_cleanup(); clean();

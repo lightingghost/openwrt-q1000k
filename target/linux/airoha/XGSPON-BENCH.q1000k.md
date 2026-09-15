@@ -742,3 +742,49 @@ a separately prepared and explicitly authorized optical test, the subscriber's
 own provisioning identity and a suitable RAM image. Do not remove TX inhibit
 from this bench, connect fiber for this helper, or treat these results as
 flash/production readiness. Firmware flashing remains forbidden.
+
+## Receive-only preparation and fiber-state LEDs (2026-09-14)
+
+The user authorized preparation of the next receive-only optical test, and
+reported that the fiber-state LED was inactive. OEM DTS `pon_lnk_green` and
+`pon_lnk_red` identify GPIO22 and GPIO30 (both active high). They already exist
+as `green:wan-1` and `red:wan`; a read-only check of the running `30ea573aa3`
+image confirms brightness zero and no selected trigger on both. The MAC DT
+now references them. The core releases LED references on all unwind/unregister
+paths, cancels software blinking before steady brightness, and blanks the
+indicator on release. A cancellable backend observer reports fresh PHY LOS
+once per second, independently of the fixed 10G CPU carrier. Optical signal
+with discovery/registration blinks green; operational is steady green; LOS or
+unavailable PHY is red. GPIO24 is the distinct OEM activity LED and is not
+substituted for the fiber-state indicator. Visual confirmation remains pending.
+
+Vendor r70/controller r6/bench r5 add explicit `rx_bench=1` startup. The MAC
+checks the RAM bench DT, the PHY checks immutable controller TX inhibit and
+live TX off, and an already configured PHY cannot switch mode. The normal
+protocol worker never starts; its IRQ and all MAC sources stay masked and
+external readiness remains false. PHY IRQ/poll paths bypass legacy callbacks
+and acknowledge only the selected RX events. Fresh read-only snapshots include
+controller/PHY LOS, sync, frame/LOF/FEC counters, IRQ/poll counts and boot-time
+sample timestamps. Unexpected TX enable fails and contains the PHY.
+
+The helper and host runner have a dedicated `receive` command with an explicit
+fiber state. A 30-second dark run must pass before connecting fiber for a new
+run. A connected run additionally requires five consecutive final intervals
+with LOS clear, sync and changing frame counts. Both retain the checked cold
+pipeline/drain and complete reverse cleanup. They use only synthetic bench
+identity; no registration or subscriber traffic is attempted. The existing
+normal stack test remains disconnected-fiber only. This change requires a new
+user RAM boot, because it changes the controller/core and DT; the old-image
+module substitution guard deliberately refuses that combination.
+
+Host fixtures cover mode/inhibit guards, read failure without partial sample
+publication, RX IRQ W1C ownership, callback suppression, TX refusal, MAC masks,
+registration-start suppression, connected/dark helper decisions and cleanup.
+Linux UML passes 50 normal and 50 RX-only lifecycle cycles with real mutexes,
+workqueues and concurrent IRQ teardown; artifacts are in
+`/tmp/q1000k-pon-phy-uml.uNDXMz`. An earlier UML attempt exposed a fixture error:
+it tried to inject a pending interrupt by writing its new W1C register model.
+Direct modeled hardware injection fixes that test; no device was involved.
+The full OMCI core UML suite also passes at
+`/tmp/q1000k-omci-core-uml.y9bPZ1`. Build/image inspection and new hardware
+acceptance are still pending here.

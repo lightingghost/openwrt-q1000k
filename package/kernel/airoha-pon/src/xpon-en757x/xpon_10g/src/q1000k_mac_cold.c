@@ -6,6 +6,7 @@
 #include <linux/unaligned.h>
 #include <an7581_xpon.h>
 #include "common/q1000k_mac_cold.h"
+#include "common/q1000k_rx_bench.h"
 #include "common/q1000k_pipeline.h"
 #include "common/q1000k_protocol.h"
 
@@ -184,7 +185,7 @@ int q1000k_mac_cold_interrupts(u32 enables)
 	/* W1C status is not an ordinary readback register. Source enable is. */
 	set_xpon_data(0x5044, ~0U);
 	ret = an7581_xpon_status();
-	return ret ?: qcold_write(0x5040, enables, ~0U);
+	return ret ?: qcold_write(0x5040, q1000k_rx_bench_enabled() ? 0 : enables, ~0U);
 }
 
 int q1000k_mac_profiles_invalidate(void)

@@ -67,3 +67,34 @@ changing hardware clocks or resets. Private inputs are not used. It accepts
 only when `/dev/mem` is available. It never writes a value or reads interrupt
 status/FIFO registers. Current RAM images omit `/dev/mem`, so this check stops
 without reading hardware; resource-provider kernel diagnostics are used instead.
+
+The `receive` action is a separate, bounded RX-only test (vendor r70,
+controller r6, bench helper r5). It requires a new RAM image, including the
+controller API and fiber LED DT wiring; do not substitute it into an older
+boot using `--modules-from`. First run with `--fiber-disconnected` to validate
+its guarded startup and shutdown. Once that passes, the same action accepts
+`--fiber-connected` for a user-confirmed connected-fiber observation:
+
+```sh
+python3 scripts/q1000k/bench-run.py receive --artifact /absolute/path/to/new-bench --output /absolute/path/to/rx-dark-01 --inputs /tmp/PRIVATE-INPUTS.tar --fiber-disconnected
+python3 scripts/q1000k/bench-run.py receive --artifact /absolute/path/to/new-bench --output /absolute/path/to/rx-connected-01 --inputs /tmp/PRIVATE-INPUTS.tar --fiber-connected
+```
+
+The PHY verifies the cached controller TX inhibit and live TX-off state before
+accepting RX bench mode. The MAC protocol worker and its IRQ remain stopped,
+MAC source enables remain zero, and external packet hooks remain unavailable.
+Only RX LOS/ready/sync/LOF PHY interrupts are acknowledged; neither IRQ nor poll
+callbacks dispatch vendor registration events. Thirty one-second observations
+check the guards, fresh sample timestamps and poll activity; connected mode
+requires the final five intervals to have both LOS indications clear, sync,
+and advancing downstream frames. Full-width counters may wrap. FEC and IRQ
+counts are recorded without clearing counters; a passing sample does not
+establish acceptable BER or optical service. No subscriber credentials or
+transmit request are used. Normal `stack`, `controller` and `resources` actions
+continue to require disconnected fiber.
+
+The helper also records the fiber LED class brightness during stack/receive
+runs. The link indicator is red on LOS, blinking green during acquisition and
+steady green when registered. It turns off when the stack releases it.
+Software blinking can be sampled in either phase, so class brightness alone
+is not visual confirmation. The separate GPIO24 activity LED remains unused.

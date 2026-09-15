@@ -160,19 +160,23 @@ dmesg
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['status', 'resources', 'controller', 'stack'])
+    parser.add_argument('action', choices=['status', 'resources', 'controller', 'stack', 'receive'])
     parser.add_argument('--artifact', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path, help='New private capture directory')
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
     parser.add_argument('--inputs', type=Path, help='Verified private tar; never copied to the repository')
-    parser.add_argument('--fiber-disconnected', action='store_true')
+    fiber = parser.add_mutually_exclusive_group()
+    fiber.add_argument('--fiber-disconnected', action='store_true')
+    fiber.add_argument('--fiber-connected', action='store_true', help='Only for the explicit receive-only test')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args()
-    if args.action != 'status' and not args.fiber_disconnected:
-        parser.error('RAM module tests require --fiber-disconnected')
-    if args.action in ('controller', 'stack') and args.inputs is None:
-        parser.error('Tests require --fiber-disconnected and --inputs; status is read-only')
+    if args.fiber_connected and args.action != 'receive':
+        parser.error('--fiber-connected is only valid for receive')
+    if args.action != 'status' and not (args.fiber_disconnected or args.fiber_connected):
+        parser.error('RAM module tests require an explicit fiber state')
+    if args.action in ('controller', 'stack', 'receive') and args.inputs is None:
+        parser.error('Tests require --inputs; status is read-only')
     if args.registers and args.action != 'status':
         parser.error('--registers is only for a read-only status capture')
     artifact = args.artifact.resolve()
@@ -180,7 +184,7 @@ def main():
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('Invalid artifact revision')
     sums = runtime_manifest(artifact / 'runtime-sha256sums')
-    if args.action in ('controller', 'stack'):
+    if args.action in ('controller', 'stack', 'receive'):
         validate_inputs(args.inputs)
     update = None
     if args.modules_from:
@@ -194,7 +198,9 @@ def main():
     serial = args.serial_log.open('rb')  # Retain the descriptor across rotation.
     output.mkdir(mode=0o700)  # Never overwrite a prior capture.
     start = serial.seek(0, 2)
+    fiber_flag = '--fiber-connected' if args.fiber_connected else '--fiber-disconnected'
     run = dict(schema_version=1, action=args.action, host=HOST, revision=revision,
+               fiber='connected' if args.fiber_connected else 'disconnected' if args.fiber_disconnected else 'unspecified',
                artifact=str(artifact), output=str(output), serial_log=str(args.serial_log.resolve()),
                serial_start=start, started=time.time(), status='running')
     (output / 'checkpoint.json').write_text(json.dumps(run, indent=2) + '\n')
@@ -243,7 +249,7 @@ tar -xf - -C {module_dir}/new
                        module_backup=module_dir, updated_modules=list(updates))
         if args.action == 'resources':
             ssh(base + idle_guards() + resource_probe(), output / 'resources.log')
-        if args.action in ('controller', 'stack'):
+        if args.action in ('controller', 'stack', 'receive'):
             # All writes below are to verified RAM mounts or the runtime sysctl.
             stage = base + idle_guards() + f'''umask 077
  test ! -e {remote}
@@ -263,7 +269,7 @@ echo 'RAM inputs verified; runtime kernel.panic=0 confirmed.'
             ssh(stage, output / 'stage.log', args.inputs.read_bytes())
             run['ram_inputs'] = remote
             ssh(base + idle_guards() + f'''test "$(cat /proc/sys/kernel/panic)" = 0
-q1000k-pon-bench {args.action} {remote}/xgspon-calibration.bin --fiber-disconnected
+q1000k-pon-bench {args.action} {remote}/xgspon-calibration.bin {fiber_flag}
 ''', output / 'attempt.log')
         run['status'] = 'passed'
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
