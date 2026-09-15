@@ -26,7 +26,8 @@ typedef uint32_t u32;
 
 /* Control/address registers use 0x51, memory data ports use 0x50.
  * Register addresses are big endian, register words and memory are little
- * endian. Transport callbacks return zero only for a complete transaction.
+ * endian, except the published optical-power words, which are big endian.
+ * Transport callbacks return zero only for a complete transaction.
  */
 struct en7573_io {
 	void *ctx;
@@ -46,6 +47,11 @@ struct en7573_receiver {
 	u32 mcu_a0, mcu_a2, apd, ocp, firmware, los_control, system_status;
 };
 int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample);
+/* Published RX power: 0x51:0x0068, BE16 in 0.1 uW units. Zero/saturated
+ * words are unavailable (-ENODATA); errors leave the output unchanged.
+ * This reads the MCU's measurement, never its calibration command ports.
+ */
+int en7573_rx_power(struct en7573_io *io, u32 *nanowatts);
 
 int en7573_identify(struct en7573_io *io, u16 *id);
 int en7573_read_control(struct en7573_io *io, u16 reg, u32 *value);

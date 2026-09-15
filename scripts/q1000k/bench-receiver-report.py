@@ -6,7 +6,12 @@ Reads saved logs only. This is not the passing-bench acceptance report.
 """
 import argparse
 import json
+import importlib.util
 from pathlib import Path
+
+_spec = importlib.util.spec_from_file_location('bench_report', Path(__file__).with_name('bench-report.py'))
+_report = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_report)
 
 PHY_WORDS = ('rx_control', 'pcs_reset', 'pma_reset', 'clock_control',
              'cdr_control', 'rx_frequency', 'pll_status', 'tdc_control',
@@ -53,14 +58,18 @@ def summarize(capture):
     if len(rx) != count or len(controller) != count + 1:
         raise ValueError(f'Expected {count} RX and {count + 1} controller snapshots')
     versions = {x.get('receiver_version', 1) for x in rx}
-    if versions not in ({1}, {2}, {3}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
+    if versions not in ({1}, {2}, {3}, {4}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
         raise ValueError('Inconsistent receiver diagnostic version')
     names = PHY_WORDS + (EXTENDED_PHY_WORDS if versions != {1} else ())
-    names += PLL_PHY_WORDS if versions == {3} else ()
+    names += PLL_PHY_WORDS if versions in ({3}, {4}) else ()
+    names += ('rx_frontend_gain',) if versions == {4} else ()
     last = -1
     last_attempts = 0
+    restore_gain = record.get('restore_gain', False)
     restore_pll = record.get('restore_pll', False)
     reacquire = record.get('reacquire_once', False)
+    if type(restore_gain) is not bool or (restore_gain and not reacquire):
+        raise ValueError('Invalid receiver gain restoration request')
     if type(restore_pll) is not bool or (restore_pll and not reacquire):
         raise ValueError('Invalid PLL restoration request')
     if type(reacquire) is not bool or (reacquire and record['fiber'] != 'connected'):
@@ -81,6 +90,9 @@ def summarize(capture):
         if item['sampled_ms'] <= last:
             raise ValueError('Stale receive sample')
         last = item['sampled_ms']
+        if restore_gain or 'gain_restore_enabled' in item or item.get('receiver_version', 1) >= 4:
+            if item.get('gain_restore_enabled') is not restore_gain:
+                raise ValueError('Receiver gain restoration guard failed')
         if restore_pll or 'pll_restore_enabled' in item or item.get('receiver_version', 1) >= 3:
             if item.get('pll_restore_enabled') is not restore_pll:
                 raise ValueError('PLL restoration guard failed')
@@ -102,7 +114,8 @@ def summarize(capture):
         'mac_irq_mask': 0,
         'receiver_version': next(iter(versions)),
         'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
-        'pll_restore_requested': restore_pll,
+        'pll_restore_requested': restore_pll, 'gain_restore_requested': restore_gain,
+        'optical': _report.optical_summary(rx),
         'phy_words_before_reacquire': words([x['receiver'] for x in rx
                                             if x.get('reacquire_attempts', 0) == 0], names),
         'phy_words_after_reacquire': words([x['receiver'] for x in rx

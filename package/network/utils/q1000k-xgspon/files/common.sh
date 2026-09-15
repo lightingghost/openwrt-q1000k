@@ -207,7 +207,8 @@ xgspon_status() {
 	if [ "$omci_available" = 1 ]; then
 		json_add_object omci
 		for field in device_id ifindex onu_id gem_port_id authenticated agent_enabled \
-		             agent_operational service_rules service_error mib_sync mib_objects olt_profile; do
+		             agent_operational service_rules service_error mib_sync mib_objects olt_profile \
+		             telemetry_valid rx_power_nw tx_power_nw; do
 			omci_field "$field" int
 		done
 		for field in rx_packets rx_dropped tx_packets tx_errors responses unsupported; do

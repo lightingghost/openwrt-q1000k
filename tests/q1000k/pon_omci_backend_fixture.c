@@ -235,6 +235,12 @@ static int q1000k_gwan_refresh_checked(int (*install)(void *),int (*ready)(void 
 }
 static void xmcs_report_event(int type,int event,u8 state) { assert(owned && type==1 && event==2 && (state==1||state==7)); }
 static int q1000k_phy_set_tx(bool enable) { assert(owned); int ret=step(); if(!ret) optical_tx=enable; return ret; }
+static int phy_power_error=-ENODATA, phy_power_calls;
+static int q1000k_phy_get_rx_power(u32 *value) {
+    assert(owned); phy_power_calls++;
+    if(phy_power_error) return phy_power_error;
+    *value=19900; return 0;
+}
 static int phy_fec_value, phy_fec_calls, phy_los_value=1;
 int q1000k_phy_call(struct xpon_phy_api_data_s *q) {
     if(q->cmd_id==PON_GET_PHY_LOS_STATUS) { assert(!owned); return phy_los_value; }
@@ -425,6 +431,23 @@ int main(void)
         assert(phy_fec_calls==before && !memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)) && !owned);
         b->cold_started=b->started=b->active=true; b->request.reset=false; vendor.state=5; fault=0;
     }
+    phy_fec_value=1; phy_power_error=0;
+    assert(!qomci_ops.get_telemetry(b->omci,&telemetry));
+    assert(telemetry.valid==(OMCI_TELEMETRY_F_BOSA_RX_POWER|OMCI_TELEMETRY_F_FEC_UPSTREAM));
+    assert(telemetry.bosa_rx_power_nw==19900);
+    b->active=false; vendor.state=1;
+    int fec_before=phy_fec_calls;
+    assert(!qomci_ops.get_telemetry(b->omci,&telemetry));
+    assert(telemetry.valid==OMCI_TELEMETRY_F_BOSA_RX_POWER && telemetry.bosa_rx_power_nw==19900);
+    assert(phy_fec_calls==fec_before && !telemetry.upstream_fec);
+    saved_telemetry=telemetry;
+    phy_power_error=-EREMOTEIO;
+    assert(qomci_ops.get_telemetry(b->omci,&telemetry)==-EREMOTEIO);
+    assert(!memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)));
+    phy_power_error=-ENODATA;
+    assert(qomci_ops.get_telemetry(b->omci,&telemetry)==-ENODATA);
+    assert(!memcmp(&telemetry,&saved_telemetry,sizeof(telemetry)));
+    b->active=true; vendor.state=5;
     assert(qomci_ops.get_telemetry(b->omci,NULL)==-EINVAL);
     assert(b->ranged && b->delay==100 && vendor.gponCfg.eqd==400);
     int ranging_owner=q1000k_protocol_enter(),prior_calls=calls;

@@ -215,23 +215,29 @@ static int qomci_telemetry(struct omci_device *odev, struct omci_telemetry *tele
 	if (!telemetry) return -EINVAL;
 	token = q1000k_protocol_enter();
 	if (token < 0) return token;
-	/* An old TX status bit outside the established session is not a current
-	 * upstream FEC sample. The PHY query checks controller ownership/health
-	 * and reads the observed TX status, not the configured burst profile.
-	 */
-	if (!b->cold_started || !b->started || !b->active || b->request.reset ||
-	    GPON_CURR_STATE != GPON_10G_STATE_O5) {
+	if (!b->cold_started || !b->started || b->request.reset) {
 		ret = -ENODATA;
 		goto out;
 	}
-	ret = q1000k_phy_call(&query);
-	if (ret < 0) goto out;
-	if (ret > 1) { ret = -EIO; goto out; }
-	result.valid = OMCI_TELEMETRY_F_FEC_UPSTREAM;
-	result.upstream_fec = ret ? OMCI_FEC_STATUS_UP : OMCI_FEC_STATUS_DOWN;
-	/* RX FEC configuration is not an observation. Optical sensors require
-	 * their own calibrated controller interface; leave those bits invalid.
+	/* Optical power exists before O5, including the inhibited RX bench.
+	 * PHY/controller owners serialize this read with recovery and shutdown.
 	 */
+	ret = q1000k_phy_get_rx_power(&result.bosa_rx_power_nw);
+	if (!ret)
+		result.valid |= OMCI_TELEMETRY_F_BOSA_RX_POWER;
+	else if (ret != -ENODATA && ret != -EAGAIN)
+		goto out;
+	/* An old TX status bit outside an established session is not current
+	 * upstream FEC telemetry. Preserve that separate eligibility check.
+	 */
+	if (b->active && GPON_CURR_STATE == GPON_10G_STATE_O5) {
+		ret = q1000k_phy_call(&query);
+		if (ret < 0) goto out;
+		if (ret > 1) { ret = -EIO; goto out; }
+		result.valid |= OMCI_TELEMETRY_F_FEC_UPSTREAM;
+		result.upstream_fec = ret ? OMCI_FEC_STATUS_UP : OMCI_FEC_STATUS_DOWN;
+	}
+	if (!result.valid) { ret = -ENODATA; goto out; }
 	*telemetry = result;
 	ret = 0;
 out:

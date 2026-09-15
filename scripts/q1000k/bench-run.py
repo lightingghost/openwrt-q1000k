@@ -182,11 +182,15 @@ def main(argv=None):
                         help='Connected receive only: opt into one bounded PMA out/in recovery')
     parser.add_argument('--restore-pll', action='store_true',
                         help='Restore PHY PLL clocks after the single connected RX recovery')
+    parser.add_argument('--restore-gain', action='store_true',
+                        help='Apply the OEM RX frontend gain after the single recovery')
     parser.add_argument('--samples', type=int, choices=(30, 90, 180),
                         help='Receive observations at one-second intervals (default: 30)')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args(argv)
+    if args.restore_gain and not args.reacquire_once:
+        parser.error('--restore-gain requires --reacquire-once')
     if args.restore_pll and not args.reacquire_once:
         parser.error('--restore-pll requires --reacquire-once')
     if args.samples is not None and args.action != 'receive':
@@ -229,6 +233,8 @@ def execute(args):
     recovery_flag = ' --reacquire-once' if args.reacquire_once else ''
     if args.restore_pll:
         recovery_flag += ' --restore-pll'
+    if args.restore_gain:
+        recovery_flag += ' --restore-gain'
     sample_flag = f' --samples {args.samples}' if args.samples is not None else ''
     run = dict(schema_version=1, action=args.action, host=HOST, revision=revision,
                fiber='connected' if args.fiber_connected else 'disconnected' if args.fiber_disconnected else 'unspecified',
@@ -236,6 +242,7 @@ def execute(args):
                serial_start=start, started=time.time(), status='running')
     run['reacquire_once'] = args.reacquire_once
     run['restore_pll'] = args.restore_pll
+    run['restore_gain'] = args.restore_gain
     if args.action == 'receive':
         run['samples'] = args.samples or 30
     (output / 'checkpoint.json').write_text(json.dumps(run, indent=2) + '\n')

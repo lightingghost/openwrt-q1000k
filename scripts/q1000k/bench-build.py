@@ -126,6 +126,9 @@ def main():
                 raise ValueError('Source changed during build')
             run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/q1000k',
                  '-p', 'test_pon_*.py'], output / 'host-tests.log')
+            run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/q1000k',
+                 '-p', 'test_xgspon.py'], output / 'status-tests.log')
+            run(['node', REPO / 'tests/q1000k/test_xgspon_views.cjs'], output / 'views-tests.log')
             for name in (IMAGE, MANIFEST):
                 shutil.copy2(REPO / 'bin/targets/airoha/an7581' / name, output / name)
             shutil.copy2(selection / 'selection.json', output / 'selection.json')

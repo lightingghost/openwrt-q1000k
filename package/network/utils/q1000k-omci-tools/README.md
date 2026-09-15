@@ -98,3 +98,10 @@ credential redaction and malformed input. The disposable UML suite verifies
 the real core, cold identity, MIB reset, wire serialization and netlink redaction.
 For the runtime CLI/netlink boundary, compile the client for the host and set
 `Q1000K_OMCI_CLI` when running `tests/q1000k/run_omci_core_uml.sh`.
+
+RX optical telemetry is supplied by the active controller before registration,
+including receive-only O1. `status` reports `rx_power_nw` and `rx_power_dbm`
+(`10 * log10(nW / 1,000,000)`, rounded to two decimal places). Both are null when
+no usable measurement is published; zero/saturated controller words do not
+become a dBm value. This is controller-reported power, not independent meter
+calibration. Reading status does not enable transmission or start the stack.

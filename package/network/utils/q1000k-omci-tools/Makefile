@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-omci-tools
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -22,7 +22,7 @@ endef
 
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -I$(STAGING_DIR)/usr/include/q1000k-omci/uapi -Wall -Wextra -Werror \
-		-o $(PKG_BUILD_DIR)/q1000k-omci $(PKG_BUILD_DIR)/omci.c $(TARGET_LDFLAGS) -lmnl
+		-o $(PKG_BUILD_DIR)/q1000k-omci $(PKG_BUILD_DIR)/omci.c $(TARGET_LDFLAGS) -lmnl -lm
 endef
 
 define Package/q1000k-omci-tools/install

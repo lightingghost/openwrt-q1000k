@@ -10,6 +10,7 @@
 #include <net/if.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -283,6 +284,15 @@ static int print_status(FILE *out, struct client *c)
 		else
 			fprintf(out, "%" PRIu64, value);
 	}
+	uint64_t power;
+	int ret = scalar(c, OMCI_ATTR_BOSA_RX_POWER_NW, 4, &power);
+	if (ret && ret != -ENODATA)
+		return ret;
+	fputs(",\"rx_power_dbm\":", out);
+	if (ret || !power)
+		fputs("null", out);
+	else
+		fprintf(out, "%.2f", 10.0 * log10((double)power / 1000000.0));
 	fputs("}\n", out);
 	return 0;
 }

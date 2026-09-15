@@ -203,12 +203,15 @@ class BackendTests(unittest.TestCase):
                    str(self.root / 'omci.json') + '"\nexit "${OMCI_FAIL:-0}"\n').chmod(0o755)
         status = {'schema_version': 1, 'device_id': 7, 'ifindex': 9, 'state': 5,
                   'authenticated': 1, 'service_rules': 3, 'service_error': -22,
-                  'rx_packets': '18446744073709551615', 'mib_objects': 281}
+                  'rx_packets': '18446744073709551615', 'mib_objects': 281,
+                  'telemetry_valid': 64, 'rx_power_nw': 19900}
         sample = self.write('omci.json', json.dumps(status))
         _, d = self.call()
         self.assertEqual(d['registration'], 5)
         self.assertEqual(d['omci']['service_error'], -22)
         self.assertEqual(d['omci']['rx_packets'], '18446744073709551615')
+        self.assertEqual(d['omci']['rx_power_nw'], 19900)
+        self.assertIsNone(d['omci']['tx_power_nw'])
         self.assertIsNone(d['omci']['tx_packets'])
         self.assertFalse(d['controller']['available'])
         self.assertIsNone(d['service_ready'])

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Checked phase boundaries around the imported AN7581 analog sequences. */
 #include <linux/delay.h>
+#include <linux/printk.h>
 #include <an7581_pon_phy.h>
 #include <q1000k_phy_api.h>
 #include "phy_global.h"
@@ -60,12 +61,88 @@ static int qpma_restore_pll(void)
 	return qpma_ready();
 }
 
+static bool qpma_gain_saved;
+static u32 qpma_gain_original;
+
+static int qpma_restore_gain(void)
+{
+	const u32 reg = EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl;
+	u32 actual;
+	int i, ret;
+
+	ret = qpma_ready();
+	if (ret)
+		return ret;
+	if (qpma_gain_saved)
+		return -EBUSY;
+	ret = an7581_pon_phy_read(reg, &actual);
+	if (ret || actual == ~0U)
+		return ret ?: -EIO;
+	qpma_gain_original = actual;
+	qpma_gain_saved = true;
+	/* OEM XPON_RX_preset: 0x1fa8b88c[8]=1, then [1:0]=1.
+	 * Isolate this RX-only difference from the larger OEM reset sequence.
+	 * Preserve every unrelated bit and verify both writes immediately.
+	 */
+	for (i = 0; i < 2; i++) {
+		u32 end = i ? 1 : 8, start = i ? 0 : 8;
+		u32 mask = i ? 3 : BIT(8), expected = i ? 1 : BIT(8);
+
+		ret = qpma_ready();
+		if (ret)
+			return ret;
+		ret = an7581_pon_phy_update(reg, end, start, 1);
+		if (!ret)
+			ret = an7581_pon_phy_read(reg, &actual);
+		if (ret || actual == ~0U || (actual & mask) != expected)
+			return ret ?: -EIO;
+	}
+	return qpma_ready();
+}
+
+/* Called after RX callbacks have drained and optical TX is disabled. Restore
+ * only our two fields, preserving unrelated changes. A failure is returned to
+ * the lifecycle owner, so a capture cannot claim successful cleanup.
+ */
+int q1000k_phy_rx_cleanup(void)
+{
+	const u32 reg = EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl;
+	u32 actual;
+	int i, ret = q1000k_phy_callback_context();
+
+	if (ret || !qpma_gain_saved)
+		return ret;
+	if (!gpPhyPriv || gpPhyPriv->trans_tx_status != PHY_DISABLE ||
+	    gpPhyPriv->phyCfg.flags.txPowerEnFlag)
+		return -EACCES;
+	for (i = 0; i < 2; i++) {
+		u32 end = i ? 8 : 1, start = i ? 8 : 0;
+		u32 mask = i ? BIT(8) : 3;
+		u32 expected = qpma_gain_original & mask;
+
+		ret = qpma_ready();
+		if (ret)
+			return ret;
+		ret = an7581_pon_phy_update(reg, end, start, expected >> start);
+		if (!ret)
+			ret = an7581_pon_phy_read(reg, &actual);
+		if (ret || actual == ~0U || (actual & mask) != expected)
+			return ret ?: -EIO;
+	}
+	ret = qpma_ready();
+	if (!ret) {
+		qpma_gain_saved = false;
+		pr_info("q1000k: RX gain restored to %#x\n", qpma_gain_original & 0x103);
+	}
+	return ret;
+}
+
 /* RX bench callback owner only, after a fresh inhibited/TX-off RX sample.
  * Reuse the reference no-LOS/no-ready out/in sequence without its repeated
  * polling, registration dispatch, or SCU reset escalation. Initial calibration
  * must already have completed, so PMA reset can only take PLUG_IN here.
  */
-int q1000k_phy_rx_reacquire(bool restore_pll)
+int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain)
 {
 	int ret = q1000k_phy_callback_context();
 
@@ -86,6 +163,8 @@ int q1000k_phy_rx_reacquire(bool restore_pll)
 		ret = q1000k_phy_pma_reset();
 	if (!ret && restore_pll)
 		ret = qpma_restore_pll();
+	if (!ret && restore_gain)
+		ret = qpma_restore_gain();
 	return ret ?: qpma_ready();
 }
 

@@ -15,6 +15,10 @@ function state(v, yes, no) {
 function flag(v, yes, no) {
     return state(v === 0 ? false : v === 1 ? true : null, yes, no);
 }
+function power(nw) {
+    return Number.isInteger(nw) && nw > 0 ?
+        (10 * Math.log10(nw / 1000000)).toFixed(2) + ' dBm (' + nw + ' nW)' : _('Unavailable');
+}
 function rows(d) {
     var f = d.factory || {}, i = d.identity || {}, fw = d.firmware || {}, m = d.modules || {}, c = d.controller || {}, o = d.omci || {};
     return [
@@ -53,7 +57,8 @@ function rows(d) {
         [ _('OMCI received packets'), value(o.rx_packets) ],
         [ _('OMCI transmitted packets'), value(o.tx_packets) ],
         [ _('Provisioned service'), state(d.service_ready, _('Ready'), _('Not ready')) ],
-        [ _('Optical measurements'), _('Unavailable') ]
+        [ _('RX optical power (controller reported)'), power(o.rx_power_nw) ],
+        [ _('TX optical power'), power(o.tx_power_nw) ]
     ];
 }
 function table(d, failed) {

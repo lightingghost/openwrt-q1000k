@@ -71,7 +71,14 @@ int main(void)
     assert(strstr(json,"\"authenticated\":0"));
     assert(strstr(json,"\"service_error\":-117"));
     assert(strstr(json,"\"rx_packets\":\"18446744073709551615\""));
-    assert(strstr(json,"\"temperature_mc\":null")); free(json);
+    assert(strstr(json,"\"temperature_mc\":null"));
+    assert(strstr(json,"\"rx_power_dbm\":null")); free(json);
+    mnl_attr_put_u32(nlh,OMCI_ATTR_BOSA_RX_POWER_NW,19900);
+    memset(c.attrs,0,sizeof(c.attrs)); assert(reply_cb(nlh,&c)==MNL_CB_STOP);
+    json=NULL; bytes=0; out=open_memstream(&json,&bytes); assert(out);
+    assert(!print_status(out,&c)); assert(!fclose(out));
+    assert(strstr(json,"\"rx_power_nw\":19900"));
+    assert(strstr(json,"\"rx_power_dbm\":-17.01")); free(json);
     /* Duplicate, truncated and mis-sized attributes cannot become null. */
     mnl_attr_put_u8(nlh,OMCI_ATTR_STATE,4);
     memset(c.attrs,0,sizeof(c.attrs)); assert(reply_cb(nlh,&c)==MNL_CB_ERROR && errno==EPROTO);
@@ -99,5 +106,5 @@ int main(void)
             subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                             '-fsanitize=undefined', '-fno-sanitize-recover=all',
                             '-I' + str(work), '-I' + str(ROOT / 'package/kernel/q1000k-omci/src/include/uapi'),
-                            str(work / 'test.c'), '-l:libmnl.so.0', '-o', str(work / 'test')], check=True)
+                            str(work / 'test.c'), '-l:libmnl.so.0', '-lm', '-o', str(work / 'test')], check=True)
             subprocess.run([str(work / 'test')], check=True, timeout=20)

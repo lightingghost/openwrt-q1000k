@@ -303,6 +303,33 @@ int q1000k_pon_get_tx_inhibit(struct q1000k_pon *pon, bool *inhibited)
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_get_tx_inhibit);
 
+int q1000k_pon_get_rx_power(struct q1000k_pon *pon, u32 *nanowatts)
+{
+	u32 value;
+	int sensor, ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon) || !nanowatts)
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret) {
+		sensor = en7573_rx_power(&pon->io, &value);
+		/* Also verify health when the sensor is not ready. */
+		ret = pon_check_locked(pon);
+		if (!ret)
+			ret = sensor;
+	}
+	if (!ret)
+		*nanowatts = value;
+	else if (!pon->dead && pon->leased && ret != -EAGAIN && ret != -ENODATA)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_get_rx_power);
+
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 {
 	int ret = pon_context();

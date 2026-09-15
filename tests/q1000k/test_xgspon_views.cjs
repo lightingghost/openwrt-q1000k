@@ -16,8 +16,8 @@ function harness(file) {
         poll: { add: fn => polls.push(fn) },
         dom: { content: (node, children) => { node.children = children; } },
         uci: { load: () => Promise.resolve() },
-        form: { NamedSection: {}, Value: {}, Map: class {
-            section() { return { option(type, name) { return options[name] = {}; } }; }
+        form: { NamedSection: {}, Value: {}, Flag: {}, ListValue: {}, Map: class {
+            section() { return { tab() {}, taboption(tab, type, name) { return options[name] = { value() {} }; } }; }
             render() { return {}; }
         } }
     };
@@ -63,6 +63,14 @@ async function main() {
     assert.match(text(tree), /18446744073709551615/);
     assert.match(text(tree), /may be dormant/);
     assert.doesNotMatch(text(tree), /\[object Object\]/);
+    h.state.result = { ...sample, omci: { rx_power_nw: 19900 } };
+    await h.polls[0]();
+    assert.match(text(tree), /-17.01 dBm \(19900 nW\)/);
+    for (const invalid of [null, 0, -1, '19900', {}, false]) {
+        h.state.result = { ...sample, omci: { rx_power_nw: invalid } };
+        await h.polls[0]();
+        assert.doesNotMatch(text(tree), /dBm/);
+    }
     h.state.fail = true;
     await h.polls[0]();
     assert.match(text(tree), /last sample could not be refreshed/);

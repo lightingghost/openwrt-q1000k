@@ -34,6 +34,7 @@ static int qphy_irq = -1;
 static bool qphy_rx_bench;
 static bool qphy_rx_reacquire;
 static bool qphy_rx_restore_pll;
+static bool qphy_rx_restore_gain;
 static u32 qphy_rx_attempts, qphy_rx_no_sync;
 static u32 qphy_rx_irqs, qphy_rx_polls;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
@@ -202,7 +203,7 @@ static void qphy_poll_work(struct work_struct *work)
 				 * dispatches registration events, or resets the shared SCU.
 				 */
 				qphy_rx_attempts++;
-				ret = q1000k_phy_rx_reacquire(qphy_rx_restore_pll);
+				ret = q1000k_phy_rx_reacquire(qphy_rx_restore_pll, qphy_rx_restore_gain);
 				if (!ret && READ_ONCE(qphy_active))
 					ret = qphy_rx_sample(&sample);
 			}
@@ -559,6 +560,8 @@ static int qphy_stop(void)
 			ret = err;
 	}
 	if (!ret)
+		ret = q1000k_phy_rx_cleanup();
+	if (!ret)
 		ret = an7581_pon_phy_status();
 	if (ret)
 		qphy_failed(ret);
@@ -661,14 +664,40 @@ int q1000k_phy_get_tx(bool *enabled)
 }
 EXPORT_SYMBOL(q1000k_phy_get_tx);
 
-int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll)
+int q1000k_phy_get_rx_power(u32 *nanowatts)
+{
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (!nanowatts)
+		return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (!ret && (!qphy_controller || !gpPhyPriv->phy_init_done || !qphy_active))
+		ret = -EAGAIN;
+	if (!ret) {
+		ret = q1000k_pon_get_rx_power(qphy_controller, nanowatts);
+		if (ret && ret != -ENODATA)
+			qphy_failed(ret);
+	}
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_get_rx_power);
+
+int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain)
 {
 	bool inhibited, tx;
 	int ret = qphy_context();
 
 	if (ret)
 		return ret;
-	if ((reacquire && !enabled) || (restore_pll && !reacquire))
+	if ((reacquire && !enabled) || ((restore_pll || restore_gain) && !reacquire))
 		return -EINVAL;
 	if (READ_ONCE(qphy_owner) == current)
 		return -EDEADLK;
@@ -676,7 +705,7 @@ int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll)
 	qphy_callback_lock();
 	ret = qphy_ready();
 	if (ret || (enabled == qphy_rx_bench && reacquire == qphy_rx_reacquire &&
-		    restore_pll == qphy_rx_restore_pll))
+		    restore_pll == qphy_rx_restore_pll && restore_gain == qphy_rx_restore_gain))
 		goto out;
 	if (qphy_active || qphy_irq_dev || gpPhyPriv->phy_init_done) {
 		ret = -EBUSY;
@@ -700,6 +729,7 @@ int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll)
 	qphy_rx_bench = enabled;
 	qphy_rx_reacquire = reacquire;
 	qphy_rx_restore_pll = restore_pll;
+	qphy_rx_restore_gain = restore_gain;
 out:
 	qphy_callback_unlock();
 	mutex_unlock(&qphy_control);
@@ -745,6 +775,7 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		{ EN7581_XPON_ANA_RG_PXP_JCPLL_FREQ_MEAS_EN, &result.receiver.pll_measure },
 		{ EN7581_XPON_ANA_RG_PXP_TXPLL_TCL_KBAND_VREF, &result.receiver.pll_kband },
 		{ EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN, &result.receiver.pll_outputs },
+		{ EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl, &result.receiver.rx_frontend_gain },
 	};
 	u32 sfp, irq_mask;
 	bool inhibited, tx;
@@ -763,6 +794,10 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	if (ret < 0)
 		return ret;
 	result.controller_los = !!ret;
+	ret = q1000k_pon_get_rx_power(qphy_controller, &result.rx_power_nw);
+	if (ret && ret != -ENODATA)
+		return ret;
+	result.rx_power_valid = !ret;
 	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_SFP_STA, &sfp);
 	if (!ret)
 		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_SYNC_ST, &result.sync_status);
@@ -801,6 +836,7 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	result.poll_calls = qphy_rx_polls;
 	result.reacquire_enabled = qphy_rx_reacquire;
 	result.pll_restore_enabled = qphy_rx_restore_pll;
+	result.gain_restore_enabled = qphy_rx_restore_gain;
 	result.reacquire_attempts = qphy_rx_attempts;
 	result.sampled_ms = ktime_to_ms(ktime_get_boottime());
 	*sample = result;
@@ -1071,6 +1107,7 @@ int q1000k_phy_init(void)
 	qphy_rx_bench = false;
 	qphy_rx_reacquire = false;
 	qphy_rx_restore_pll = false;
+	qphy_rx_restore_gain = false;
 	qphy_rx_attempts = qphy_rx_no_sync = 0;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;

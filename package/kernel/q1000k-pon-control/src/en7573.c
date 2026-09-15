@@ -12,6 +12,24 @@
 #include <string.h>
 #endif
 
+int en7573_rx_power(struct en7573_io *io, u32 *nanowatts)
+{
+	u8 data[2];
+	u32 raw;
+	int ret;
+
+	if (!io || !io->read || !nanowatts)
+		return -EINVAL;
+	ret = io->read(io->ctx, EN7573_CONTROL, 0x0068, data, sizeof(data));
+	if (ret)
+		return ret;
+	raw = (u32)data[0] << 8 | data[1];
+	if (!raw || raw == 0xffff)
+		return -ENODATA;
+	*nanowatts = raw * 100;
+	return 0;
+}
+
 static u32 get_le32(const u8 *p)
 {
 	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);

@@ -142,6 +142,10 @@ def inspect(image, revision):
         ('package/network/utils/q1000k-xgspon-service/files/run', 'usr/libexec/q1000k-xgspon-run')):
         assert read(dest) == (repo / source).read_bytes(), dest
     assert stat.S_IMODE(records['etc/config/q1000k-xgspon'][0]) == 0o600
+    status = read('www/luci-static/resources/view/econet-xpon/status.js')
+    assert status == (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/status.js').read_bytes()
+    assert b'rx_power_nw' in status and b'Math.log10' in status
+    assert b'rx_power_dbm' in read('usr/sbin/q1000k-omci')
     settings = read('www/luci-static/resources/view/econet-xpon/settings.js')
     for field in ('serial', 'vendor_id', 'equipment_id', 'hardware_version',
                   'sync_circuit_pack', 'software_version_a', 'software_version_b',
@@ -172,6 +176,7 @@ def inspect(image, revision):
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])
+            assert b'parmtype=rx_restore_gain:bool' in read(matches[0])
             assert b'parmtype=rx_restore_pll:bool' in read(matches[0])
             assert 'q1000k_pon_fix_vlans' in symbols
             for param in ('vendor_id_hex', 'hardware_version_hex', 'software0_hex', 'software1_hex',
@@ -181,12 +186,13 @@ def inspect(image, revision):
         if name == 'phy_10g':
             assert 'q1000k_phy_rx_reacquire' in symbols
     assert b'reacquire=0' in read('usr/sbin/q1000k-pon-bench')
+    assert b'--restore-gain' in read('usr/sbin/q1000k-pon-bench')
     assert b'--restore-pll' in read('usr/sbin/q1000k-pon-bench')
     assert b'--reacquire-once' in read('usr/sbin/q1000k-pon-bench')
     assert b'30|90|180' in read('usr/sbin/q1000k-pon-bench')
     assert b'limit=$samples' in read('usr/sbin/q1000k-pon-bench')
     mac = next(name for name in records if name.endswith('/xpon_10g.ko'))
-    for field in (b'"receiver_version":3', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
+    for field in (b'"receiver_version":4', b'"gain_restore_enabled":', b'"rx_frontend_gain":', b'"rx_power_valid":', b'"rx_power_nw":', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
         assert field in read(mac)
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:

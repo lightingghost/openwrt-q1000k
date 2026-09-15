@@ -29,6 +29,7 @@ static void kref_put(struct kref *r,void (*free_ref)(struct kref *)) { assert(r-
 static int freed;
 static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
 static void kfree(void *p) { assert(p); freed++; free(p); }
+typedef uint32_t u32;
 struct en7573_io { void *ctx; };
 struct en7573_state { int md32_enabled,tx_disabled; };
 struct q1000k_pon {
@@ -46,6 +47,15 @@ static int en7573_sample_state(struct en7573_io *io,struct en7573_state *state)
 {
     struct q1000k_pon *p=io->ctx; assert(p->lock.held && !p->dead); samples++;
     if(sample_error) return sample_error; state->md32_enabled=hw_mcu; state->tx_disabled=hw_disabled; return 0;
+}
+static int power_error, power_reads, power_bad_health;
+static int en7573_rx_power(struct en7573_io *io,u32 *value)
+{
+    struct q1000k_pon *p=io->ctx;
+    assert(p->lock.held && p->leased && !p->dead); power_reads++;
+    if(power_bad_health) hw_mcu=0;
+    if(power_error) return power_error;
+    *value=19900; return 0;
 }
 static int en7573_set_tx(struct en7573_io *io,bool enable)
 {
@@ -67,20 +77,28 @@ int main(void)
     struct q1000k_pon *p;
     int before;
     bool tx=true;
+    u32 power=123;
     assert(PTR_ERR(q1000k_pon_get())==-ENODEV);
     p=create(); atomic_context=1;
     assert(PTR_ERR(q1000k_pon_get())==-EWOULDBLOCK && !samples);
     assert(q1000k_pon_get_tx(p,&tx)==-EWOULDBLOCK && tx && !samples);
+    assert(q1000k_pon_get_rx_power(p,&power)==-EWOULDBLOCK && power==123 && !power_reads);
     atomic_context=0;
     assert(q1000k_pon_get_tx(NULL,&tx)==-EINVAL && tx);
     assert(q1000k_pon_get_tx(p,NULL)==-EINVAL);
     assert(q1000k_pon_get_tx(p,&tx)==-EPERM && tx);
+    assert(q1000k_pon_get_rx_power(p,&power)==-EPERM && !power_reads);
+    assert(q1000k_pon_get_rx_power(p,NULL)==-EINVAL);
     p->initialized=false;
     assert(PTR_ERR(q1000k_pon_get())==-EAGAIN && p->ref.refs==1);
     p->initialized=true;
     assert(q1000k_pon_get()==p && p->leased && p->ref.refs==2 && !writes);
     assert(PTR_ERR(q1000k_pon_get())==-EBUSY && p->ref.refs==2);
     assert(!q1000k_pon_get_tx(p,&tx) && !tx);
+    assert(!q1000k_pon_get_rx_power(p,&power) && power==19900 && !writes && !off);
+    power=123; power_error=-ENODATA;
+    assert(q1000k_pon_get_rx_power(p,&power)==-ENODATA && power==123 && !off && !p->fault);
+    power_error=0;
     assert(!q1000k_pon_check(p));
     assert(!q1000k_pon_set_tx(p,true) && p->tx_enabled && !hw_disabled);
     assert(!q1000k_pon_check(p));
@@ -92,9 +110,10 @@ int main(void)
     assert(q1000k_pon_get()==p);
     before=freed; pon_unpublish(p); pon_drop_device_ref(p);
     assert(!pon_registered && p->dead && p->ref.refs==1 && freed==before);
-    samples=writes=los_calls=0;
+    samples=writes=los_calls=power_reads=0;
     assert(q1000k_pon_check(p)==-ENODEV);
     assert(q1000k_pon_get_tx(p,&tx)==-ENODEV && tx);
+    assert(q1000k_pon_get_rx_power(p,&power)==-ENODEV && power==123 && !power_reads);
     assert(q1000k_pon_set_tx(p,true)==-ENODEV);
     assert(q1000k_pon_get_los(p)==-ENODEV);
     assert(q1000k_pon_put(p)==-ENODEV && freed==before+1);
@@ -113,6 +132,15 @@ int main(void)
     p=create(); assert(q1000k_pon_get()==p); off_error=-EIO; tx_error=-ETIMEDOUT;
     assert(q1000k_pon_set_tx(p,false)==-ETIMEDOUT && p->fault==-ETIMEDOUT && p->mode==-2);
     assert(q1000k_pon_put(p)==-ETIMEDOUT); pon_unpublish(p); pon_drop_device_ref(p);
+    for(int kind=0;kind<3;kind++) {
+        p=create(); assert(q1000k_pon_get()==p); power=123;
+        power_error=kind==0 ? -EREMOTEIO : kind==1 ? -ENODATA : 0;
+        power_bad_health=kind!=0;
+        int error=kind==0 ? -EREMOTEIO : -EIO;
+        assert(q1000k_pon_get_rx_power(p,&power)==error && power==123 && off==1 && p->fault==error);
+        assert(q1000k_pon_put(p)==error); pon_unpublish(p); pon_drop_device_ref(p);
+    }
+    power_error=power_bad_health=0;
     p=create(); p->tx_inhibited=true;
     assert(q1000k_pon_set_tx(p,true)==-EPERM && !writes && !off);
     assert(q1000k_pon_get()==p);
@@ -128,6 +156,6 @@ int main(void)
     assert(q1000k_pon_set_tx(p,true)==-EPERM && writes==1);
     assert(q1000k_pon_put(p)==-EPERM);
     pon_unpublish(p); pon_drop_device_ref(p);
-    assert(freed==6);
+    assert(freed==9);
     return 0;
 }

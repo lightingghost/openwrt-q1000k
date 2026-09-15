@@ -1612,3 +1612,53 @@ yet available. Next implementation must preserve missing/invalid readings and
 label a controller-reported value separately from independent optical-meter
 validation. Further PHY writes require a supported, isolated candidate rather
 than copying undocumented OEM reset bits.
+
+## RX optical power and isolated receiver-gain trial — 2026-09-15
+
+Vendor r77, controller r8, bench helper r11, OMCI tools r3 and LuCI r6 add a
+read-only optical RX measurement to the same consolidated test image. The
+portable controller reader uses 0x51:0x0068, a two-byte register address and a
+big-endian two-byte payload, scaled by 100 to nanowatts. This follows the OEM
+`bob_info` evidence above; ordinary control registers remain little endian.
+Zero and 0xffff are deliberately reported unavailable (below resolution or
+saturated/unusable), not fabricated zero-dBm measurements. The read does not
+execute `ddmi_rx`, `ddmi_rx_done` or other calibration commands. The controller
+lease and health checks bracket the sensor read. A transport/health fault
+withholds the sample and contains the port; unavailable sensor data alone does
+not fault it. This is MCU-reported power, not independent optical-meter proof.
+
+The PHY serializes telemetry with callbacks/recovery/stop. OMCI supplies the
+existing RX-power telemetry attribute during pre-registration O1 as well as O5;
+upstream FEC retains its separate established-session guard. `q1000k-omci -i pon
+status` includes `rx_power_nw` and derived `rx_power_dbm` (both null if unavailable).
+LuCI displays RX power in dBm and nW, and clears readings on a failed refresh.
+TX power remains unavailable. Raw count 199 is a test fixture (19,900 nW,
+-17.01 dBm), **not a hardware measurement** or a value copied from the gateway.
+
+Receiver schema 4 adds power validity/value and the actual RX frontend gain
+control at 0x1fa8b88c. The earlier `rx_lock_force` observation is at 0x1fa8b330;
+it is not the frontend gain control. OEM `phy_10g.ko` `XPON_RX_preset` calls at
+0x26420 and 0x26438 set b88c[8]=1, then b88c[1:0]=1. The imported preset omits
+those two writes. An explicit `--restore-gain` option applies only this isolated
+candidate after the one permitted recovery, independently of `--restore-pll`.
+It does not replay the OEM upper digital-reset bits or change the default PHY
+path. Each update checks provider/controller health and masked readback.
+
+Gain bits are saved before alteration and restored after callbacks drain on
+stop/quiesce, with checked readback and a serial confirmation. A gain capture
+with an observed attempt cannot pass report validation without that confirmation.
+Only those two fields are restored; unrelated bits are preserved. Failed cleanup
+propagates through physical shutdown and stops matrix continuation. Both flags
+require RX bench mode, immutable TX inhibit and a single recovery budget. No
+normal registration or optical transmission is added.
+
+Next hardware comparison, after the user boots this exact new RAM image:
+30-sample baseline and 90-sample continuation with `--restore-gain`. Capture
+power, LOS, all 29 PHY words, controller words, frame/FEC counters and LEDs in
+both windows. Baseline remains unchanged. The same image also supports the
+existing plain/PLL recovery and gain+PLL combination, selected explicitly;
+these experiments run sequentially, never concurrently against the PHY. Select
+any further mode from the first comparison's evidence, without a rebuild.
+No device was accessed while preparing these changes. NAND stays disabled,
+management stays 192.168.255.1, optical TX stays inhibited, and flashing remains
+prohibited. Local build/concurrency results will be recorded after completion.

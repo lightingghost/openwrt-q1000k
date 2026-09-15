@@ -254,3 +254,22 @@ PHY words. Four new words cover `pll_force` (0x1fa8b854), `pll_measure`
 Reports check the requested mode against every sample and retain compatibility
 with saved versions 1 and 2. These raw controls are not measured clock
 frequencies, calibrated RX power, or proof of PLL lock.
+
+### RX power and optional OEM receiver gain
+
+The next consolidated bench (vendor r77, helper r11) reports MCU RX power in
+`rx_power_nw` and `rx_power_valid`, with a nullable dBm summary in saved reports.
+CLI status also supplies `rx_power_dbm`; LuCI shows dBm/nW. Unavailable readings
+remain null. The test records the sensor alongside the receiver diagnostics in
+every observation window, including pre-registration O1.
+
+`bench-matrix.py --restore-gain` selects the new isolated OEM RX frontend gain
+setting for the 90-sample continuation only. It requires the same connected,
+TX-inhibited RAM environment as the prior PLL trial. The helper accepts
+`--reacquire-once --restore-gain`, optionally with `--restore-pll`. All use one
+attempt after ten consecutive light/no-sync polls. Gain controls restore on
+stop; report validation requires the serial restoration confirmation when an
+attempt occurred. Schema 4 captures 29 PHY words, including `rx_frontend_gain`.
+
+The full build wrapper now also runs status-backend and LuCI view tests and
+stores their logs beside the existing PON test and image-inspection evidence.

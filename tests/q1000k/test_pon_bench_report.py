@@ -65,6 +65,17 @@ class ReportTests(unittest.TestCase):
                     self.assertEqual(result['receive']['samples'], 30)
                     self.assertEqual(result['receive']['final_stable_intervals'], 29 if fiber == 'connected' else 0)
 
+    def test_gain_experiment_requires_original_setting_restoration(self):
+        record, controller, omci, samples = self.fixture(fiber='connected')
+        record.update(reacquire_once=True, restore_gain=True)
+        for n, sample in enumerate(samples):
+            sample.update(reacquire_enabled=True, gain_restore_enabled=True,
+                          reacquire_attempts=int(n>=20))
+        self.save(record, controller, omci, samples)
+        with self.assertRaises(ValueError): REPORT.summarize(self.capture)
+        self.capture.joinpath('serial.log').write_text('[ 100.0] q1000k: RX gain restored to 0x103\n')
+        REPORT.summarize(self.capture)
+
     def test_receive_rejects_guard_counter_and_freshness_failures(self):
         changes = [('tx_enabled', True), ('registration_enabled', True), ('tx_inhibited', False),
                    ('mac_irq_mask', 1), ('sampled_ms', 1000), ('poll_calls', 0),

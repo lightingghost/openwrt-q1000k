@@ -2,11 +2,38 @@
 """Verify saved stack/receive bench observations and cleanup; no SSH access."""
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
 
-def receive_summary(samples, fiber, reacquire=False, require_stability=True, restore_pll=False):
+def optical_summary(samples):
+    present = ['rx_power_valid' in x or 'rx_power_nw' in x or
+               x.get('receiver_version', 1) >= 4 for x in samples]
+    if not any(present):
+        return {'source': 'controller', 'available_samples': 0, 'unavailable_samples': len(samples),
+                'rx_power_nw': None, 'rx_power_dbm': None}
+    if not all(present):
+        raise ValueError('Incomplete RX power telemetry')
+    readings = []
+    for row in samples:
+        valid, power = row.get('rx_power_valid'), row.get('rx_power_nw')
+        if type(valid) is not bool:
+            raise ValueError('Invalid RX power validity flag')
+        if valid:
+            if type(power) is not int or not 100 <= power <= 6553400 or power % 100:
+                raise ValueError('Invalid RX optical power')
+            readings.append(power)
+        elif 'rx_power_nw' not in row or power is not None:
+            raise ValueError('Unavailable RX power must be null')
+    def bounds(values):
+        return dict(first=values[0], last=values[-1], minimum=min(values), maximum=max(values)) if values else None
+    return dict(source='controller', available_samples=len(readings),
+                unavailable_samples=len(samples)-len(readings), rx_power_nw=bounds(readings),
+                rx_power_dbm=bounds([round(10 * math.log10(x / 1000000), 2) for x in readings]))
+
+
+def receive_summary(samples, fiber, reacquire=False, require_stability=True, restore_pll=False, restore_gain=False):
     last_sample, last_poll, last_frames, stable = -1, 0, None, 0
     last_attempts = 0
     for item in samples:
@@ -26,6 +53,9 @@ def receive_summary(samples, fiber, reacquire=False, require_stability=True, res
         if (item['mac_irq_mask'] or item['sampled_ms'] <= last_sample or
                 item['poll_calls'] < last_poll):
             raise ValueError('Receive IRQ mask or sample freshness failed')
+        if restore_gain or 'gain_restore_enabled' in item or item.get('receiver_version', 1) >= 4:
+            if item.get('gain_restore_enabled') is not restore_gain:
+                raise ValueError('Receiver gain restoration guard failed')
         if restore_pll or 'pll_restore_enabled' in item or item.get('receiver_version', 1) >= 3:
             if item.get('pll_restore_enabled') is not restore_pll:
                 raise ValueError('PLL restoration guard failed')
@@ -58,7 +88,8 @@ def receive_summary(samples, fiber, reacquire=False, require_stability=True, res
         'phy_los': sorted({x['phy_los'] for x in samples}),
         'synced': sorted({x['synced'] for x in samples}),
         'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
-        'pll_restore_requested': restore_pll,
+        'pll_restore_requested': restore_pll, 'gain_restore_requested': restore_gain,
+        'optical': optical_summary(samples),
     }
 
 
@@ -85,8 +116,11 @@ def summarize(capture, allow_downstream_failure=False):
                 'Q1000K bench: Downstream LOS/sync/frame stability was not established.'] or
                 not record.get('error', '').startswith('SSH failed (1);')):
             raise ValueError('Capture failure is not limited to downstream stability')
+    restore_gain = record.get('restore_gain', False)
     restore_pll = record.get('restore_pll', False)
     reacquire = record.get('reacquire_once', False)
+    if type(restore_gain) is not bool or (restore_gain and not reacquire):
+        raise ValueError('Invalid receiver gain restoration request')
     if type(restore_pll) is not bool or (restore_pll and not reacquire):
         raise ValueError('Invalid PLL restoration request')
     if type(reacquire) is not bool or (reacquire and (action != 'receive' or fiber != 'connected')):
@@ -145,7 +179,10 @@ def summarize(capture, allow_downstream_failure=False):
                  r'(?:shutdown|reconfigure|activation) failed|'
                  r'FE write .*expected', serial):
         raise ValueError(f'{capture}: kernel failure diagnostic in serial capture')
-    rx = receive_summary(receive, fiber, reacquire, not failed_downstream, restore_pll) if action == 'receive' else None
+    rx = receive_summary(receive, fiber, reacquire, not failed_downstream, restore_pll, restore_gain) if action == 'receive' else None
+    if restore_gain and rx['reacquire_attempts'] and len(re.findall(
+            r'q1000k: RX gain restored to (?:0x[0-9a-f]+|0)\b', serial)) != 1:
+        raise ValueError('Original receiver gain restoration was not confirmed')
     if failed_downstream and rx['downstream_stable']:
         raise ValueError('Downstream failure disagrees with the captured observations')
     return {

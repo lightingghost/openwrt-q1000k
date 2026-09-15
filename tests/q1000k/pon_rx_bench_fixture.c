@@ -17,7 +17,7 @@ struct kernel_param { int unused; };
 struct kernel_param_ops { int (*get)(char *,const struct kernel_param *); };
 struct device_node { int unused; };
 static struct device_node root;
-static bool board=true, bench=true, running=true, phy_mode, phy_reacquire, phy_restore_pll;
+static bool board=true, bench=true, running=true, phy_mode, phy_reacquire, phy_restore_pll, phy_restore_gain, power_valid;
 static int refs, preparations, phy_error, protocol_error, provider_error, samples, sample_error;
 static u32 mac_mask;
 static int mac_reads;
@@ -30,12 +30,13 @@ static bool q1000k_transport_running(void) { return running; }
 static u32 get_xpon_data(u32 reg) { assert(reg==0x5040); mac_reads++; return mac_mask; }
 static int an7581_xpon_status(void) { return provider_error; }
 /* PRODUCTION */
-int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll) {
-    preparations++; if(!phy_error) { phy_mode=enabled; phy_reacquire=reacquire; phy_restore_pll=restore_pll; } return phy_error;
+int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain) {
+    preparations++; if(!phy_error) { phy_mode=enabled; phy_reacquire=reacquire; phy_restore_pll=restore_pll; phy_restore_gain=restore_gain; } return phy_error;
 }
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
     samples++; if(sample_error) return sample_error;
     memset(s,0,sizeof(*s)); s->synced=true; s->frames=1234; s->sampled_ms=123456789012ULL;
+    s->gain_restore_enabled=phy_restore_gain; s->rx_power_valid=power_valid; s->rx_power_nw=power_valid ? 19900 : 0;
     s->pll_restore_enabled=phy_restore_pll; s->reacquire_enabled=phy_reacquire; s->reacquire_attempts=phy_reacquire ? 1 : 0;
     s->receiver=(struct q1000k_rx_registers){
         .rx_control=1, .pcs_reset=2, .pma_reset=3, .clock_control=4,
@@ -56,7 +57,7 @@ int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
         .pll_force=25,
         .pll_measure=26,
         .pll_kband=27,
-        .pll_outputs=28,
+        .pll_outputs=28, .rx_frontend_gain=29,
 
     };
     return 0;
@@ -88,7 +89,7 @@ int main(void) {
     assert(qrx_status_get(out,NULL)==-EIO && samples==4 && mac_reads==2);
     sample_error=0; assert(qrx_status_get(out,NULL)>0 && samples==5 && mac_reads==3);
     assert(strstr(out,"\"pll_restore_enabled\":true"));
-    assert(strstr(out,"\"receiver_version\":3"));
+    assert(strstr(out,"\"receiver_version\":4"));
     assert(strstr(out,"\"frames\":1234") && strstr(out,"\"sampled_ms\":123456789012"));
     assert(strstr(out,"\"registration_enabled\":false") && strstr(out,"\"tx_enabled\":false"));
     assert(strstr(out,"\"reacquire_enabled\":true,\"reacquire_attempts\":1"));
@@ -106,6 +107,12 @@ int main(void) {
                       "\"pll_power\":21,"
                       "\"pll_filter\":22,"
                       "\"pll_pcw1\":23,"
-                      "\"pll_pcw2\":24,\"pll_force\":25,\"pll_measure\":26,\"pll_kband\":27,\"pll_outputs\":28}}\n"));
+                      "\"pll_pcw2\":24,\"pll_force\":25,\"pll_measure\":26,\"pll_kband\":27,\"pll_outputs\":28,\"rx_frontend_gain\":29}}\n"));
+    assert(strstr(out,"\"rx_power_valid\":false,\"rx_power_nw\":null"));
+    rx_restore_gain=true; assert(!q1000k_rx_bench_prepare() && phy_restore_gain);
+    power_valid=true; assert(qrx_status_get(out,NULL)>0);
+    assert(strstr(out,"\"gain_restore_enabled\":true"));
+    assert(strstr(out,"\"rx_power_valid\":true,\"rx_power_nw\":19900"));
+    rx_reacquire=false; assert(q1000k_rx_bench_prepare()==-EINVAL);
     return 0;
 }

@@ -175,6 +175,32 @@ static void test_receiver_read_only(void)
 	}
 }
 
+static int sensor_read(void *ctx,u8 dev,u16 reg,u8 *data,size_t len)
+{
+    assert(dev==0x51 && reg==0x0068 && len==2);
+    int raw=*(int *)ctx;
+    if(raw<0) return raw;
+    data[0]=raw>>8; data[1]=raw; return 0;
+}
+static void test_rx_power(void)
+{
+    int raw=0;
+    struct en7573_io io={.ctx=&raw,.read=sensor_read};
+    u32 power;
+    /* Exercise every published word, including endian-sensitive values. */
+    for(raw=0;raw<=65535;raw++) {
+        power=0xdeadbeef;
+        int ret=en7573_rx_power(&io,&power);
+        if(!raw || raw==65535) assert(ret==-ENODATA && power==0xdeadbeef);
+        else assert(!ret && power==(u32)raw*100);
+    }
+    raw=-EREMOTEIO; power=123;
+    assert(en7573_rx_power(&io,&power)==-EREMOTEIO && power==123);
+    assert(en7573_rx_power(NULL,&power)==-EINVAL);
+    assert(en7573_rx_power(&io,NULL)==-EINVAL);
+    io.read=NULL; assert(en7573_rx_power(&io,&power)==-EINVAL);
+}
+
 int main(void)
 {
 	struct model m = {0};
@@ -215,6 +241,7 @@ int main(void)
 	assert(en7573_load(&io, pm, EN7573_PM_SIZE + 1, dm, sizeof(dm), cal) == -EINVAL);
 	assert(en7573_load(&io, pm, sizeof(pm), dm, EN7573_CAL_ADDRESS + 1, cal) == -EINVAL);
 	assert(m.calls == 0);
+	test_rx_power();
 	test_read_only_state();
 	test_tx_control();
 	test_receiver_read_only();

@@ -16,6 +16,10 @@ int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable);
 int q1000k_pon_get_tx(struct q1000k_pon *pon, bool *enabled);
 /* Read the immutable probe-time TX inhibit after verifying the lease/health. */
 int q1000k_pon_get_tx_inhibit(struct q1000k_pon *pon, bool *inhibited);
+/* Controller-reported RX power; no registration required. ENODATA means the
+ * MCU has not published a usable reading. Other errors invalidate the sample.
+ */
+int q1000k_pon_get_rx_power(struct q1000k_pon *pon, u32 *nanowatts);
 int q1000k_pon_get_los(struct q1000k_pon *pon);
 int q1000k_pon_check(struct q1000k_pon *pon);
 #endif
