@@ -82,9 +82,23 @@ class ProbeReportTests(unittest.TestCase):
             path=Path(directory); self.fixture(path)
             result=PROBE.summarize(path)
             self.assertEqual(result['checked_writes'],2)
-            self.assertEqual(result['checker_error_delta_mod32'],29)
+            self.assertIsNone(result['checker_error_delta_mod32'])
+            self.assertEqual(result['checker_error_phases']['before']['delta_mod32'],14)
+            self.assertEqual(result['checker_error_phases']['after']['delta_mod32'],14)
             self.assertTrue(result['restoration_confirmed'])
             self.assertEqual(result['rx_meter_upper16_within_configured_window'],[True])
+
+    def test_counter_restart_is_not_counted_as_activity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory); rows=self.fixture(path)
+            for row in rows:
+                if 'checker_errors' in row:
+                    row['checker_errors']=0 if row['attempts'] else 100
+            self.write(path,rows)
+            result=PROBE.summarize(path)
+            self.assertIsNone(result['checker_error_delta_mod32'])
+            self.assertEqual(result['checker_error_phases']['before']['delta_mod32'],0)
+            self.assertEqual(result['checker_error_phases']['after']['delta_mod32'],0)
 
     def test_incomplete_stale_unsafe_and_missing_restore_rejected(self):
         for kind in ('short','missing','bool','stale','tx','loopback','mode','writes','restore','order'):

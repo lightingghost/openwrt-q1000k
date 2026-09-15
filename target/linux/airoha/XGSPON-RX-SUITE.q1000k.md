@@ -66,7 +66,8 @@ keeps all raw values, before/after sets and provenance. The RX monitor's upper
 16 bits are compared with its configured window; this is not a measured MHz
 conversion or an independent CDR-lock assertion. Normal XGS-PON is not PRBS:
 checker activity can expose a blind spot in PCS counters but cannot measure
-optical BER. A quiet checker does not prove a broken receiver.
+optical BER. Error-count changes are calculated separately before and after
+the attempt; no delta crosses a recovery or checker restart. A quiet checker does not prove a broken receiver.
 
 Reports go in the suite directory and individual case directories. `suite.json`
 retains completed, untriggered, failed and not-run cases and lists external tests

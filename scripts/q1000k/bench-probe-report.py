@@ -61,6 +61,12 @@ def summarize(capture):
         raise ValueError('Probe field restoration was not confirmed exactly once')
     def words(items):
         return {key:[f'0x{x:08x}' for x in sorted({row[key] for row in items})] for key in FIELDS}
+    def counter_delta(items):
+        return dict(samples=len(items), first=items[0]['checker_errors'] if items else None,
+                    last=items[-1]['checker_errors'] if items else None,
+                    delta_mod32=(items[-1]['checker_errors']-items[0]['checker_errors']) & 0xffffffff if len(items)>1 else None)
+    before=[r for r in rows if not r['attempts']]
+    after=[r for r in rows if r['attempts']]
     meter = []
     for row in rows:
         target=row['rx_meter_lock_target']; result=row['rx_meter_result']>>16
@@ -71,9 +77,12 @@ def summarize(capture):
                 after=words([r for r in rows if r['attempts']]),
                 rx_meter_upper16_within_configured_window=sorted(set(meter)),
                 checker_event_values=sorted({r['checker_event'] for r in rows}),
-                checker_error_delta_mod32=(rows[-1]['checker_errors']-rows[0]['checker_errors']) & 0xffffffff,
+                checker_error_delta_mod32=None if attempts else counter_delta(rows)['delta_mod32'],
+                checker_error_phases=dict(before=counter_delta(before),after=counter_delta(after)),
+                counter_delta_crosses_intervention=False,
                 limits=['Frequency words are not a calibrated baud-rate measurement or CDR-lock proof.',
                         'Normal XGS-PON is not PRBS: checker errors are not an optical BER measurement.',
+                        'No counter delta is computed across recovery/checker restart, which may reset the counter.',
                         'Power/LOS cannot prove wavelength, modulation quality, differential wiring or absolute calibration.'])
 
 

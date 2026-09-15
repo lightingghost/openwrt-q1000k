@@ -4,10 +4,11 @@ This is a separate `quantum_q1000k-xgspon-bench` image target on
 `q1000k-xgspon`. It produces an initramfs FIT, no sysupgrade or bootloader
 artifact. The normal Q1000K UBI target remains unchanged. RAM boot,
 read-only preflight, controller startup and the complete disconnected-fiber
-PHY/MAC/OMCI startup/shutdown test have passed. The current device runs
-`30ea573aa3`; two cycles validate initial startup and warm reattachment.
-Optical service, loaded-pipeline drain and long-duration acceptance remain
-pending. See the latest hardware record below.
+PHY/MAC/OMCI startup/shutdown test have passed on earlier benches. The latest
+prepared image is `4ef30eb4d5`, with the consolidated receiver suite described
+in `XGSPON-RX-SUITE.q1000k.md`; its new probes await a user RAM boot and hardware
+execution. Optical service, loaded-pipeline drain and long-duration acceptance
+remain pending. See the chronological hardware and build records below.
 
 The bench DT disables the NAND controller and NAND chip, removes partition
 definitions and the persistent rootdisk reference, and uses console-only
@@ -1840,3 +1841,59 @@ capture and reconnected baseline, plus `idle-luci-status.json` at matrix root.
 The updated hypothesis document records what this evidence does and does not
 resolve; repeating the same recovery modes or longer unchanged observations
 is not the next step.
+
+
+## Consolidated receiver suite: image 4ef30eb4d5 (prepared, not device-tested)
+
+Implementation checkpoint `4ef30eb4d5baba01e654a9965aec6f99cf8b120e` builds all
+ten new RX probes and 32 additional diagnostic words into one image. The host
+suite runs 13 cases: baseline, public recovery, ten probes and baseline repeat.
+Default observation count is 1,050. Every hypothesis has explicit coverage in
+`XGSPON-RX-SUITE.q1000k.md`, including physical tests requiring user participation
+or external measurement. These are pending tests, not new exclusions.
+
+Artifact directory:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-4ef30eb4d5/`
+
+FIT: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`
+(7,602,176 bytes).
+SHA-256: `01a4dafc248ad0f94476017138aa39fb005418801fba857791ede71d8ea8df7c`.
+
+Vendor package r79 and bench helper r13; controller r8 and existing OMCI/LuCI
+identity/power support retained. The build wrapper completed successfully:
+153 PON host tests, 13 status/backend tests, Node view tests, FIT/kernel/DT/
+initramfs inspection and all recorded checksums passed. The image inspector
+confirmed disabled NAND, immutable optical TX inhibit, `192.168.255.1`, no PON
+autostart, normal unload support for all nine modules and matching embedded
+runtime hashes. No router access occurred during preparation.
+
+PHY UML evidence is attached under `uml-phy/`, sourced from
+`/tmp/q1000k-pon-phy-uml.bMM9NZ/`; generated source matches the image checkpoint.
+It passed 50 normal + 50 RX lifecycle cycles, callback/RCU guards, and concurrent
+stop/quiesce during each of the ten probe modes as well as prior recovery modes.
+The actual register-probe helper is separately exercised with modeled MMIO and
+failures at every operation/restore boundary in the host tests. None of these
+simulations establishes real optical reception.
+
+A subsequent host-only report correction separates checker error deltas before
+and after the intervention, suppressing a whole-window delta across a possible
+counter reset. All six targeted suite/report tests passed, including the new
+reset-with-no-activity case. This changes no embedded file and needs no rebuild.
+
+Normal `.config` / `.config.old`, user README, protected source branches and
+both builders were preserved. `suite-plan.json` beside the FIT records all cases
+and external controls. After the user RAM-boots this FIT through second-stage
+http-uboot and confirms firmly connected fiber, use:
+
+```sh
+python3 scripts/q1000k/bench-suite.py \
+  --artifact ../build-artifacts/q1000k-xgspon/bench-4ef30eb4d5 \
+  --output ../build-artifacts/q1000k-xgspon/bench-4ef30eb4d5-connected-suite-01 \
+  --inputs /tmp/q1000k-controller-test-1093614699-inputs.tar \
+  --fiber-connected
+```
+
+Run from the source repository; `--dry-run` prints the plan without device
+access. The runner verifies the exact boot/runtime before loading anything,
+uses only `192.168.255.1`, and requires normal cleanup between cases. Do not
+flash, use an HTTP recovery upload, write boot environment or enable optical TX.
