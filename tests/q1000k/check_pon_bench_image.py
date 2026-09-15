@@ -10,6 +10,7 @@ import posixpath
 import re
 import stat
 import struct
+import subprocess
 import zlib
 from pon_image_format import elf_defined_symbols, fdt, u32
 
@@ -143,7 +144,11 @@ def inspect(image, revision):
         assert read(dest) == (repo / source).read_bytes(), dest
     assert stat.S_IMODE(records['etc/config/q1000k-xgspon'][0]) == 0o600
     status = read('www/luci-static/resources/view/econet-xpon/status.js')
-    assert status == (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/status.js').read_bytes()
+    source = (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/status.js').read_bytes()
+    # luci.mk applies this host tool when packaging JavaScript. Check the exact
+    # packaged program, without mistaking whitespace removal for stale code.
+    minimized = subprocess.check_output([repo / 'staging_dir/hostpkg/bin/jsmin'], input=source)
+    assert status in (source, minimized), 'LuCI status differs from packaged source'
     assert b'rx_power_nw' in status and b'Math.log10' in status
     assert b'rx_power_dbm' in read('usr/sbin/q1000k-omci')
     settings = read('www/luci-static/resources/view/econet-xpon/settings.js')
@@ -166,9 +171,12 @@ def inspect(image, revision):
         assert read(name), name
     modules = ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu', 'airoha_ecnt_pon_phy',
                'airoha_ecnt_xpon', 'phy_10g', 'xpon_10g', 'xpon', 'omci')
+    runtime_paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
+                     'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
     for name in modules:
         matches = [p for p in records if p.startswith('lib/modules/') and p.endswith('/' + name + '.ko')]
         assert len(matches) == 1, name
+        runtime_paths.append(matches[0])
         assert read(matches[0]).startswith(b'\x7fELF')
         symbols = elf_defined_symbols(read(matches[0]))
         # Every bench module owns initialization, including the hook lists.
@@ -207,6 +215,7 @@ def inspect(image, revision):
                 unloadable_pon_modules=list(modules),
                 nand_disabled=True, tx_inhibited=True, management_ip='192.168.255.1',
                 configured_panic_timeout=panic, runtime_panic_readback_required=True,
+                runtime_sha256sums={p: hashlib.sha256(read(p)).hexdigest() for p in runtime_paths},
                 rootfs_checks='passed', identity_configuration_checks='passed', device_access=False)
 
 

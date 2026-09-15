@@ -280,3 +280,16 @@ these saved observations without device access; a schema-5 matrix saves
 `hypotheses.json` automatically for each stage. See
 `target/linux/airoha/XGSPON-RX-HYPOTHESES.q1000k.md` for the nine hypotheses,
 discriminating outcomes, physical controls and limits of the available tests.
+
+### Revalidate an inspector-only failure without another image build
+
+`bench-revalidate.py --artifact /absolute/path/to/bench` can finish a build that
+passed compilation and host/view tests but failed the final image inspector.
+Commit the inspector fix first. This tool rejects changes to production code or
+the original tests, verifies the saved evidence hashes, reruns the inspector and
+checks every exported runtime file against the embedded image. It preserves the
+original failure records and records the separate validation revision. Normal
+configuration and protected branch references must still match the build record.
+It never contacts the device or rebuilds the image. Other failures require the
+normal build workflow. The inspector compares LuCI with the actual `jsmin`
+packaging result, since the image contains compressed JavaScript.
