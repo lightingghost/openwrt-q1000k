@@ -164,6 +164,13 @@ static int q1000k_pon_put(struct q1000k_pon *p)
 }
 static int an7581_pon_phy_prepare_pins(void) { return pins_error; }
 static int an7581_pon_pbus_enable(void) { return pbus_error; }
+static int wan_error, wan_set_error, wan_writes;
+static int an7581_pon_wan_get(u32 *mode) { *mode=wan; return wan_error; }
+static int an7581_pon_wan_set(u32 mode)
+{
+    assert(controller.held && !controller.tx && mode==10);
+    wan_writes++; if(wan_set_error) return wan_set_error; wan=mode; return 0;
+}
 /* PRODUCTION */
 static void cancel_work_sync(struct work_struct *w)
 {
@@ -191,6 +198,7 @@ static int event(char *p)
         assert(q1000k_phy_stop()==-EDEADLK);
         assert(q1000k_phy_quiesce()==-EDEADLK);
         assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EDEADLK);
+        assert(q1000k_phy_prepare_wan()==-EDEADLK);
         assert(q1000k_phy_call(&call)==-EDEADLK);
     }
     return 0;
@@ -203,6 +211,7 @@ static void reset(void)
     assert(!allocated_irq && !allocs && !qphy_control.held && !qphy_callback.held);
     qphy_dead=false; qphy_fault=0; qphy_active=false;
     assert(!controller.held); controller_error=pins_error=pbus_error=0;
+    wan_error=wan_set_error=wan_writes=0;
     provider=1; provider_error=no_memory=irq_error=clear_error=mode_error=0;
     atomic_context=irq_context=preempt_rcu=0; hwid=14; wan=10;
     fail_read=fail_write=reads=writes=0; clears=polls=isrs=fw_calls=api_calls=mode_calls=0;
@@ -279,8 +288,34 @@ static void checked_queries(void)
     initialized(); controller_error=-ETIMEDOUT;
     assert(q1000k_phy_call(&q)==-ETIMEDOUT && qphy_fault==-ETIMEDOUT);
 }
+static void prepare_wan(void)
+{
+    reset(); assert(!q1000k_phy_init()); wan=0x12;
+    controller_error=-ENODEV;
+    assert(q1000k_phy_prepare_wan()==-ENODEV && !wan_writes && wan==0x12);
+    controller_error=0; controller.tx=true;
+    assert(q1000k_phy_prepare_wan()==-EBUSY && !wan_writes);
+    controller.tx=false;
+    assert(!q1000k_phy_prepare_wan() && wan==10 && wan_writes==1 && controller.held);
+    assert(!writes && !mode_calls && !allocated_irq && !controller.tx);
+    assert(!q1000k_phy_prepare_wan() && wan_writes==1);
+    for(int unknown=0;unknown<256;unknown++) {
+        if(unknown==10 || unknown==0x12) continue;
+        reset(); assert(!q1000k_phy_init()); wan=unknown;
+        assert(q1000k_phy_prepare_wan()==-EOPNOTSUPP && !wan_writes && !controller.held);
+    }
+    reset(); assert(!q1000k_phy_init()); wan=0x12; wan_error=-EIO;
+    assert(q1000k_phy_prepare_wan()==-EIO && !wan_writes);
+    reset(); assert(!q1000k_phy_init()); wan=0x12; wan_set_error=-EIO;
+    assert(q1000k_phy_prepare_wan()==-EIO && wan_writes==1 && wan==0x12);
+    assert(qphy_fault==-EIO && !controller.tx);
+    initialized(); wan=0x12;
+    assert(q1000k_phy_prepare_wan()==-EBUSY && !wan_writes);
+    reset();
+}
 int main(void)
 {
+    prepare_wan();
     unsigned int n;
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET,.cmd_id=99};
     struct q1000k_pon_profile profile={.repeat=255,.preamble_len=8,.delimiter_len=4,.fec=1,.version=15};
@@ -342,6 +377,7 @@ int main(void)
         assert(q1000k_phy_stop()==-EWOULDBLOCK);
         assert(q1000k_phy_quiesce()==-EWOULDBLOCK);
         assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EWOULDBLOCK);
+        assert(q1000k_phy_prepare_wan()==-EWOULDBLOCK);
         assert(q1000k_phy_call(&data)==-EWOULDBLOCK);
     }
     atomic_context=irq_context=preempt_rcu=0;

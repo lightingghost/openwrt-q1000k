@@ -58,6 +58,9 @@ int q1000k_pipeline_shutdown(void)
 	if (ret)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_CPU_PAUSED;
+	ret = q1000k_phy_prepare_wan();
+	if (ret)
+		goto fail;
 	ret = an7581_xpon_mac_stop(AN7581_XPON_MPI_RX_STOP, true);
 	if (ret)
 		goto fail;

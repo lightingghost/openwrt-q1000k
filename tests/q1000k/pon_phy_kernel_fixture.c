@@ -32,7 +32,10 @@ static int an7581_pon_phy_status(void) { return 0; }
 static struct device *get_pon_phy_dev(void) { return &fake_dev; }
 static int get_pon_phy_irq(void) { return 75; }
 static int GET_HIR(void) { return 14; }
-static int GET_WAN_CONF(void) { return 10; }
+static u32 wan_mode=0x12;
+static int GET_WAN_CONF(void) { return wan_mode; }
+static int an7581_pon_wan_get(u32 *mode) { *mode=wan_mode; return 0; }
+static int an7581_pon_wan_set(u32 mode) { check(mode==10); wan_mode=mode; return 0; }
 static int an7581_pon_phy_read(u32 reg,u32 *value)
 {
     unsigned long flags;
@@ -140,6 +143,7 @@ static void start_session(void)
 {
     qphy_dead=false; qphy_fault=0;
     check(!q1000k_phy_init());
+    check(!q1000k_phy_prepare_wan() && wan_mode==10 && !controller.tx);
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
     check(!q1000k_phy_start());
 }
@@ -202,6 +206,7 @@ static int __init phy_test_init(void)
     en7581_xgpon_func[PHY_ISR_FUNC]=handle_irq;
     en7581_xgpon_func[PHY_EVENT_POLL_FUNC]=handle_poll;
     check(!q1000k_phy_init());
+    check(!q1000k_phy_prepare_wan() && wan_mode==10 && !controller.tx);
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
     rcu_read_lock();
     check(q1000k_phy_start()==-EWOULDBLOCK && q1000k_phy_call(&data)==-EWOULDBLOCK);

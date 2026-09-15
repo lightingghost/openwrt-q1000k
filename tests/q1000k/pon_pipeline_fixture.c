@@ -30,10 +30,17 @@ static int an7581_xpon_mac_stop(u32 mask,bool hold);
 static int an7581_xpon_mac_wait_tx_empty(void);
 static int q1000k_transport_drain_rx(void);
 static int q1000k_phy_quiesce(void);
+static int q1000k_phy_prepare_wan(void);
+static int wan_prepare_fail;
 static void an7581_xpon_invalidate(void);
 /* PRODUCTION */
 static int step(void) { assert(held && !atomic_context); return ++calls==fail ? -ETIMEDOUT : 0; }
 static int containment(void) { assert(held && q1000k_pipeline.error==-ETIMEDOUT); return ++containment_calls==contain_fail ? -ENODEV : 0; }
+static int q1000k_phy_prepare_wan(void)
+{
+    assert(held && calls==1 && q1000k_pipeline.stage==Q1000K_PIPELINE_CPU_PAUSED);
+    return wan_prepare_fail ? -ETIMEDOUT : 0;
+}
 static int q1000k_transport_pause(unsigned int ms) { assert(ms==1000 && !calls); return step(); }
 static int q1000k_transport_retire_fe(unsigned int channel)
 {
@@ -79,7 +86,11 @@ int main(void)
 {
     struct q1000k_pipeline_status status;
     atomic_context=1; assert(q1000k_pipeline_shutdown()==-EWOULDBLOCK && !calls);
-    atomic_context=0; assert(!q1000k_pipeline_shutdown() && calls==39);
+    atomic_context=0; wan_prepare_fail=1;
+    assert(q1000k_pipeline_shutdown()==-ETIMEDOUT && calls==1 && poison==1);
+    assert(q1000k_pipeline.stage==Q1000K_PIPELINE_CPU_PAUSED && !q1000k_pipeline.retired);
+    reset(); wan_prepare_fail=0;
+    assert(!q1000k_pipeline_shutdown() && calls==39);
     q1000k_pipeline_status(&status);
     assert(status.stage==Q1000K_PIPELINE_PHY_STOPPED && status.retired==~0U);
     assert(!status.error && !status.containment_error && !containment_calls && !poison);

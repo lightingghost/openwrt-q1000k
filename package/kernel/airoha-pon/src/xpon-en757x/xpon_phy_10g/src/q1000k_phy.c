@@ -239,6 +239,61 @@ out:
 	return handled;
 }
 
+int q1000k_phy_prepare_wan(void)
+{
+	u32 mode;
+	bool enabled;
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret)
+		goto out;
+	ret = an7581_pon_wan_get(&mode);
+	if (ret || mode == SCU_WAN_CONF_REG_WAN_SEL_XGSPON)
+		goto out;
+	/* The second-stage Q1000K bootloader leaves the unused PON lane in
+	 * USXGMII mode. Its XG MAC register bank is inaccessible in that mode.
+	 * Only this known, unconfigured handoff may precede the physical drain.
+	 * Copper Ethernet uses separate PCS/SCU selectors, which we never write.
+	 */
+	if (mode != 0x12) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+	if (READ_ONCE(qphy_active) || qphy_irq_dev || gpPhyPriv->phy_init_done) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (!qphy_controller) {
+		struct q1000k_pon *controller = q1000k_pon_get();
+
+		if (IS_ERR(controller)) {
+			ret = PTR_ERR(controller);
+			goto out;
+		}
+		qphy_controller = controller;
+	}
+	ret = q1000k_pon_get_tx(qphy_controller, &enabled);
+	if (!ret && enabled)
+		ret = -EBUSY;
+	if (ret)
+		goto out;
+	ret = an7581_pon_wan_set(SCU_WAN_CONF_REG_WAN_SEL_XGSPON);
+	if (ret)
+		qphy_failed(ret);
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_prepare_wan);
+
 int q1000k_phy_configure(u32 mode)
 {
 	int ret = qphy_context();

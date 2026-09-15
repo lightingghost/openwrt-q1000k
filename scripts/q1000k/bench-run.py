@@ -28,7 +28,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def module_update(original, replacement, sums):
-    """Only the two diagnostic vendor modules may change on an existing kernel."""
+    """Only the vendor PHY/MAC/provider may change on an existing kernel."""
     before = json.loads((original / 'selection.json').read_text())['revision']
     after = json.loads((replacement / 'selection.json').read_text())['revision']
     if not re.fullmatch('[0-9a-f]{40}', after):
@@ -44,7 +44,7 @@ def module_update(original, replacement, sums):
             raise ValueError('Source change requires a new RAM boot: ' + name)
     old = {p: h for h, p in (line.split() for line in sums.splitlines())}
     new = {p: h for h, p in (line.split() for line in runtime_manifest(replacement / 'runtime-sha256sums').splitlines())}
-    allowed = {'airoha_ecnt_xpon.ko', 'xpon_10g.ko'}
+    allowed = {'airoha_ecnt_xpon.ko', 'xpon_10g.ko', 'phy_10g.ko'}
     if old.keys() != new.keys():
         raise ValueError('Replacement runtime paths differ')
     active, updates = dict(old), {}
@@ -143,7 +143,7 @@ def main():
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
     parser.add_argument('--inputs', type=Path, help='Verified private tar; never copied to the repository')
     parser.add_argument('--fiber-disconnected', action='store_true')
-    parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only MAC/provider modules in RAM')
+    parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args()
     if args.action != 'status' and (not args.fiber_disconnected or args.inputs is None):

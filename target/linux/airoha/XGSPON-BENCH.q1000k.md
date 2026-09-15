@@ -508,3 +508,31 @@ reporting for the SCU reset, WAN selector, local MAC reset and stop word.
 
 A fixed-list read-only register capture was attempted; the image has no
 `/dev/mem`, so it stopped at that guard. It did not read or write MMIO.
+
+## r66 reset/WAN evidence and r67 cold handoff
+
+The r66 image at `ef676230c858a4c3ac388466049e0e93ca4a1dcf` builds with
+97 passing host tests and passing FIT/initramfs inspection; image SHA-256 is
+`6baa98417ee1e16214642efcddff78c039d2904dd3fcfa7b896030e40df1fa8b`.
+The module retry in `bench-ef676230c8/stack-r66-01/` reports
+`scu-reset=0 wan=0x12 local-reset=0x0 stops=0x0`. The first MAC stop still fails
+at stage 1, before FE retirement. Cleanup and original-module restoration
+both pass, with LAN/SSH healthy.
+
+`0x12` is PON-lane USXGMII. The local http-uboot Ethernet initializer writes
+this value even for the separate copper path. Its source and proposed
+follow-up are recorded in [the bootloader note](XGSPON-HTTP-UBOOT.q1000k.md).
+No bootloader files were changed.
+
+Vendor r67 adds a guarded cold handoff after native attachment/CPU pause:
+from the known unconfigured USXGMII mode, acquire the verified optical
+controller, confirm TX off and select XGS-PON through the masked SCU helper.
+Existing XGS-PON mode is unchanged; unknown modes, an active/configured PHY,
+invalid context, controller failure and failed mode writes are rejected.
+The physical stop/drain checks still follow and are not bypassed. Hardware
+validation of this transition is pending.
+The host suite passes 97 tests; the real Linux UML PHY suite also passes
+50 lifecycle cycles with RCU/context checks and concurrent poll/IRQ teardown
+(`/tmp/q1000k-pon-phy-uml.EhJprl/`). That is simulated hardware, not optical
+acceptance. The native kernel is unchanged, so the saved runner can verify and
+stage the matching PHY/MAC/provider modules together for a RAM-only retry.

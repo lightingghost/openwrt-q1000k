@@ -24,6 +24,11 @@ static inline bool q1000k_pon_profile_valid(const struct q1000k_pon_profile *p)
  * phy_10g for the MAC's lifetime. PHY callbacks must only enqueue MAC events.
  */
 int q1000k_phy_configure(u32 mode);
+/* Lifecycle owner only, after native attachment and CPU/DMA pause. Select
+ * XGS-PON from the known USXGMII boot handoff with verified controller TX off.
+ * An already selected XGS-PON path is unchanged; unknown/active modes fail.
+ */
+int q1000k_phy_prepare_wan(void);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);
 /* Lifecycle owner: wait for callbacks; rejects invocation by a callback. */

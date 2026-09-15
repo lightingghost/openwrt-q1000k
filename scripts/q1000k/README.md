@@ -42,7 +42,7 @@ Keep capture directories private; serial/kernel output may contain identifiers.
 For a diagnosed vendor-only retry on the same bench kernel, add
 `--modules-from /absolute/path/to/new/bench-artifact` to `bench-run.py stack`.
 The new artifact must contain its verified `runtime/` files. Only
-`xpon_10g.ko` and `airoha_ecnt_xpon.ko` may be substituted; kernel configuration,
+`phy_10g.ko`, `xpon_10g.ko` and `airoha_ecnt_xpon.ko` may be substituted; kernel configuration,
 source changes and all other module hashes are checked first. Original modules
 are saved in RAM and restored after successful unload, including a failed test
 whose module cleanup succeeds. Any ambiguous staging/cleanup failure retains

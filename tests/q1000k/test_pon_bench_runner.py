@@ -79,7 +79,7 @@ class ModuleRetryTests(unittest.TestCase):
                       + '.ko' for n in RUN.MODULES]
             sums = ''.join('a' * 64 + '  ' + n + '\n' for n in names)
             updated = sums
-            for name in ('airoha_ecnt_xpon.ko', 'xpon_10g.ko'):
+            for name in ('airoha_ecnt_xpon.ko', 'xpon_10g.ko', 'phy_10g.ko'):
                 path = new / 'runtime/lib/modules/6.18.44' / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 data = b'\x7fELFfixture' + name.encode()
@@ -89,14 +89,14 @@ class ModuleRetryTests(unittest.TestCase):
             (new / 'runtime-sha256sums').write_text(updated)
             with patch.object(RUN.subprocess, 'check_output', return_value='scripts/q1000k/bench-run.py\n'):
                 result = RUN.module_update(old, new, sums)
-                self.assertEqual(len(result[2]), 2)
+                self.assertEqual(len(result[2]), 3)
                 (new / 'kernel.config').write_text('different kernel')
                 with self.assertRaisesRegex(ValueError, 'kernel configuration'):
                     RUN.module_update(old, new, sums)
                 (new / 'kernel.config').write_text('same kernel')
                 (new / 'runtime-sha256sums').write_text(updated.replace(
-                    'a' * 64 + '  /lib/modules/6.18.44/phy_10g.ko',
-                    'b' * 64 + '  /lib/modules/6.18.44/phy_10g.ko'))
+                    'a' * 64 + '  /lib/modules/6.18.44/airoha_ecnt_scu.ko',
+                    'b' * 64 + '  /lib/modules/6.18.44/airoha_ecnt_scu.ko'))
                 with self.assertRaisesRegex(ValueError, 'dependency changed'):
                     RUN.module_update(old, new, sums)
                 (new / 'runtime-sha256sums').write_text(updated)
