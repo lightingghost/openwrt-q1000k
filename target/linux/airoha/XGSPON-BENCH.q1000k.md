@@ -354,3 +354,34 @@ The image, manifest, test/build logs, inspection and checksums are under
 This image has not been booted. After user RAM boot, the new SSH target is
 192.168.255.1; use a host address such as 192.168.255.2/24 while DHCP remains
 disabled. The authorized stack retry remains the next hardware step.
+
+## Stack retry at 192.168.255.1 — 2026-09-14
+
+The user RAM-booted `de0b571776` and supplied SSH at 192.168.255.1. Read-only
+preflight confirms RAM root, no MTD/UBI devices, immutable TX inhibit and all
+13 helper/library/module/CLI hashes matching the inspected image. Verified
+unit calibration and OEM PM/DM inputs were restaged only in RAM.
+
+The authorized stack retry passes controller detection and firmware/calibration
+readback again: both paths report 0x1388, MD32 is enabled, TX disabled/inhibited,
+LOS asserted and last_error zero. Module parameters now reach the MAC. Startup
+passes native attachment/protocol initialization but then returns EBUSY before
+the observation loop. Automatic cleanup now unloads all nine PON modules,
+including SCU. Controller/I2C reservations and the bench lock are released;
+ponraw is down (0x1002), LAN retains 1G carrier and preflight still passes.
+No flash, reboot or forced unload was performed.
+
+WAN netdevice creation still requested new frame limits before physical drain.
+The native guard correctly rejects that change. Vendor patch 052 removes this
+premature Q1000K operation: the existing cold transaction already installs
+60/2000-byte limits after drain, reset and epoch replacement. Other targets
+retain their legacy setup. MAC initialization now names its failing stage
+without printing identity. Vendor release 63 contains the changes.
+
+All 90 host tests pass, including a regression where early frame configuration
+returns EBUSY, legacy WAN rollback, the later drained frame-limit installation
+and native rejection of undrained changes. Patch 052 passes checkpatch. The
+artifact `bench-de0b571776/stack-test/` retains the attempt and cleanup logs.
+Runtime validation of the fix remains next. Unlike the prior permanent-SCU
+failure, complete cleanup allows a matching replacement module in RAM without
+another boot. Full PHY/MAC/OMCI startup and physical drain remain unverified.

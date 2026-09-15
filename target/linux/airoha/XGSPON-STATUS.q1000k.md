@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r61 and OMCI core r13 implement the native packet path,
+ demonstrated.** Vendor r63 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -23,20 +23,19 @@ through all five observation samples. Cleanup released the controller module
 and I2C reservation; LAN remained healthy. The user then authorized the stack
 test. Its first attempt exposed ignored module parameters and a missing SCU
 unload handler, now fixed locally in vendor r62/bench r2/supervisor r3. The
-controller is off/unloaded and ponraw down; the old SCU remains loaded until
-another user RAM boot. Replacement image `cddd1983fa` builds and passes
-inspection, including unloadability of all nine PON modules. Full stack
-startup and physical drain remain untested.
-No firmware was flashed.
-The user has since requested 192.168.255.1 as the default for new bench
-images; historical runtime records at 192.168.0.1 remain unchanged.
+user RAM-booted the updated 192.168.255.1 image `de0b571776`. Its stack retry
+passes controller initialization and fully unloads all PON modules, but MAC
+startup returns EBUSY. Vendor r63 defers the premature WAN frame-limit change
+to the existing drained cold transaction and adds startup-stage diagnostics.
+All 90 host tests pass; matching-module RAM validation is next. Full stack
+startup and physical drain remain unverified. No firmware was flashed.
 See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
 EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 89 passing PON/WAN/bench host tests, including
+The current local evidence is 90 passing PON/WAN/bench host tests, including
 WAN setup with the real UCI parser, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,

@@ -209,6 +209,62 @@ int main(void) {
 }
 ''')
 
+    def test_q1000k_wan_creation_defers_hardware_until_cold_transaction(self):
+        production = ''.join(function('pwan/gpon_wan.c', name) for name in
+                             ['gwan_deinit', 'gwan_init'])
+        run_c(r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <string.h>
+#define Q1000K_PON_IDENTITY
+#define CONFIG_GPON_10G_MAX_TCONT 4
+#define CONFIG_GPON_10G_MAX_GEMPORT 8
+#define GPON_10G_MAX_GEM_ID 8
+#define GPON_10G_UNASSIGN_ALLOC_ID 0xffff
+#define GPON_GEM_IDX_MASK 0x7fff
+#define XMCS_IF_ONU_TYPE_SFU 1
+#define PWAN_IF_OMCI 0
+typedef int XMCSIF_OnuType_t;
+typedef struct { int valid; } GWAN_GemInfo_T;
+struct net_device_stats { int count; };
+typedef struct {
+    int allocId[4],gemIdToIndex[8];
+    struct { GWAN_GemInfo_T info; struct net_device_stats stats; } gemPort[8];
+    int gemNumbers,hgu_mode_txq,rx_omci_cnt,rx_omci_extend_cnt,gemMibTimer;
+} GWAN_Priv_T;
+static struct { GWAN_Priv_T gpon; } wan, *gpWanPriv=&wan;
+static int live_timer,live_task,netdev,create_error,clear_channel_task;
+static void xmcs_get_onu_type(int *p) { *p=XMCS_IF_ONU_TYPE_SFU; }
+#define GPON_CREATE_TIMER(t,fn,n) do { assert(!live_timer); live_timer=1; } while(0)
+#define tasklet_init(t,fn,n) do { assert(!live_task); live_task=1; } while(0)
+static void timer_shutdown_sync(int *t) { assert(live_timer); live_timer=0; }
+static void tasklet_kill(int *t) { assert(live_task && !live_timer); live_task=0; }
+static int pwan_create_net_interface(int i) {
+    assert(i==PWAN_IF_OMCI && !netdev && live_task && live_timer);
+    if(create_error) return create_error;
+    netdev=1; return 0;
+}
+/* Native RX is still running: changing limits must fail before drain.
+ * This models the real native guard, and catches the former early call.
+ */
+static int gwan_channel_init(void) { return -EBUSY; }
+static int pwan_delete_net_interface(int i) { assert(netdev); netdev=0; return 0; }
+''' + production + r'''
+int main(void) {
+    create_error=-ENOMEM;
+    assert(gwan_init(&wan.gpon)==-ENOMEM && !netdev && !live_timer && !live_task);
+    create_error=0;
+    for(int n=0;n<2;n++) {
+        assert(!gwan_init(&wan.gpon) && netdev && live_timer && live_task);
+        assert(wan.gpon.allocId[3]==0xffff && wan.gpon.gemIdToIndex[7]==0x7fff);
+        pwan_delete_net_interface(PWAN_IF_OMCI); gwan_deinit();
+        assert(!netdev && !live_timer && !live_task);
+    }
+    return 0;
+}
+''')
+
     def test_gpon_crypto_failure_never_enables_interrupts(self):
         production = ''.join(function('gpon/gpon_init.c', name) for name in [
             'gpon_init', 'gpon_start_interrupts', 'gpon_quiesce', 'gpon_stop_work',
@@ -293,6 +349,7 @@ int main(void) {
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #define Q1000K_PON_IDENTITY
 #define TCSUPPORT_CPU_EN7581
@@ -311,7 +368,8 @@ int main(void) {
 #define MODULE_VERSION_10GXPONMAC "test"
 #define LED_FLICKER 1
 #define pr_info(...) ((void)0)
-#define pr_err(...) ((void)0)
+static char error_log[256];
+#define pr_err(...) snprintf(error_log,sizeof(error_log),__VA_ARGS__)
 #define smp_load_acquire(p) (*(p))
 #define smp_store_release(p,v) (*(p)=(v))
 #define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-4095)
@@ -454,6 +512,8 @@ int main(void) {
         reset(fault);
         int expected=fault==ALLOC ? -ENOMEM : fault==HOOK ? -EBUSY : -EIO;
         assert(xpondrv_init()==expected && step==fault && ready_published==(fault>=COLD));
+        if(fault==WAN) assert(strstr(error_log,"at wan-init: -5"));
+        if(fault==COLD) assert(strstr(error_log,"at cold-start: -5"));
         clean();
         reset(0); assert(!xpondrv_init() && xpon_is_ready() && ready_published==1);
         xpondrv_cleanup(); clean(); /* complete startup and teardown after every failure */

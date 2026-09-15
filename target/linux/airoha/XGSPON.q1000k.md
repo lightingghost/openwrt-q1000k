@@ -37,7 +37,7 @@ below remain the full acceptance plan; they are not all complete.
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
 
-Current local evidence: 89 PON/WAN/bench host tests, the complete OMCI core UML
+Current local evidence: 90 PON/WAN/bench host tests, the complete OMCI core UML
 suite and matching AN7581 package builds. The builder's eight tests and real
 Kconfig resolution retain every experimental package. A full cached build at
 `cb0853acbc5b5ef178f7419b9926a6722f58df9f` produces both Q1000K UBI images;
@@ -61,9 +61,12 @@ inspection. The user RAM-booted it and the controller retry passed: both
 paths detected, firmware/calibration verified, TX disabled, LOS asserted and
 cleanup complete. The subsequently authorized stack test exposed ignored
 module parameters and a missing SCU unload handler. Replacement image
-`cddd1983fa` builds and passes inspection with both fixes; the retained old SCU
-requires another RAM boot before retrying. See the bench
-report for the failures, successful controller retry and cleanup evidence.
+`cddd1983fa` builds and passes inspection with both fixes. The user then
+RAM-booted the 192.168.255.1 revision `de0b571776`: controller initialization
+and complete module cleanup pass, but MAC startup returns EBUSY. Vendor r63
+moves the premature frame-limit change to the existing drained cold
+transaction, with 90 passing host tests. Matching-module RAM validation is
+next. See the bench report for runtime evidence and validation limits.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original

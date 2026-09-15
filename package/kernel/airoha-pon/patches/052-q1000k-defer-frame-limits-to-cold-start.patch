@@ -1,0 +1,190 @@
+Subject: [PATCH] defer Q1000K frame limits until the cold drain transaction
+
+WAN netdevice creation precedes physical drain. Changing the native frame
+limits there returns EBUSY on an ordinary cold boot. The cold transaction
+already installs the same limits after verified drain and epoch reset. Keep
+Keep legacy startup for other targets. Name failures without logging
+identity.
+
+---
+
+--- a/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
++++ b/xpon-en757x/xpon_10g/src/pwan/gpon_wan.c
+@@ -2061,19 +2061,9 @@
+ }
+ /*****************************************************************************
+ ******************************************************************************/
++#ifndef Q1000K_PON_IDENTITY
+ static int gwan_channel_init(void)
+ {
+-#ifdef Q1000K_PON_IDENTITY
+-	struct airoha_pon_port_config old, config;
+-	int ret = q1000k_transport_get_port_config(&old);
+-
+-	if (ret)
+-		return ret;
+-	config = old;
+-	config.min_len = GPON_PACKET_LEN_LOWER_LIMIT;
+-	config.max_len = GPON_PACKET_LEN_UPPER_LIMIT;
+-	return q1000k_transport_configure_port(&old, &config);
+-#else
+ 	int ret = feDevGdm2Cdm2Stop(XPON_RESET_HOLD_ON);
+ 
+ 	if (!ret)
+@@ -2082,8 +2072,8 @@
+ 		ret = FE_API_SET_PACKET_LENGTH(FE_GDM_SEL_GDMA2,
+ 			GPON_PACKET_LEN_UPPER_LIMIT, GPON_PACKET_LEN_LOWER_LIMIT);
+ 	return ret;
+-#endif
+-}
++}
++#endif
+ /*****************************************************************************
+ ******************************************************************************/
+ GPON_TRAFFIC_STATUS_t gwan_get_traffic_status(void){
+@@ -2152,12 +2142,17 @@
+ 		gwan_deinit();
+ 		return ret;
+ 	}
++	/* Q1000K frame limits belong to the later cold transaction, after
++	 * physical drain. Native attachment alone has not stopped RX.
++	 */
++#ifndef Q1000K_PON_IDENTITY
+ 	ret = gwan_channel_init();
+ 	if (ret) {
+ 		pwan_delete_net_interface(PWAN_IF_OMCI);
+ 		gwan_deinit();
+ 		return ret;
+ 	}
++#endif
+ 	return 0 ;	
+ }
+ /*****************************************************************************
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1487,6 +1487,7 @@
+ **____________________________________________________________________________*/
+ static int xpondrv_init(void)
+ {
++	const char *stage;
+ 	int ret;
+ #ifdef Q1000K_PON_IDENTITY
+ 	ret = q1000k_pon_identity_init();
+@@ -1512,70 +1513,84 @@
+ 		return -ENOMEM;
+ 	/* Reject a missing/wrong/down lower before MAC/PHY initialization. */
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "native-attachment";
+ 	ret = xpondrv_qdma_init();
+ 	if (ret)
+ 		goto fail;
+ #endif
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "protocol-init";
+ 	ret = q1000k_protocol_init(get_xpon_irq(0), &xpon_protocol_ops);
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.protocol = true;
+ #endif
++	stage = "globals";
+ 	ret = xpondrv_init_global_data();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.globals = true;
+ 	omci_oam_monitor_init(&gpPonSysData->Omci_Oam_Monitor);
+ 	xpon_owned.monitor = true;
++	stage = "wan-init";
+ 	ret = pwan_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.wan = true;
++	stage = "mci-init";
+ 	ret = xpon_mci_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.mci = true;
+ #ifndef Q1000K_PON_IDENTITY
++	stage = "epon-init";
+ 	ret = epon_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.epon = true;
+ #endif
++	stage = "gpon-init";
+ 	ret = gpon_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.gpon = true;
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "omci-backend";
+ 	ret = q1000k_omci_backend_init(gpWanPriv->pPonNetDev[PWAN_IF_DATA]);
+ 	if (ret)
+ 		goto fail;
+ #endif
+ #ifndef Q1000K_PON_IDENTITY
++	stage = "native-attachment";
+ 	ret = xpondrv_qdma_init();
+ 	if (ret)
+ 		goto fail;
+ #endif
+ #ifndef Q1000K_PON_IDENTITY
++	stage = "dying-gasp";
+ 	ret = xpon_dying_gasp_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.gasp = true;
+ #endif
++	stage = "proc-init";
+ 	ret = xpon_proc_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.proc = true;
++	stage = "hook-register";
+ 	ret = ecnt_register_hook(&xpondrv_hook_dispatch_ops);
+ 	if (ret != ECNT_REGISTER_SUCCESS) {
+ 		ret = -EBUSY;
+ 		goto fail;
+ 	}
+ 	xpon_owned.hook = true;
++	stage = "api-init";
+ 	ret = xpon_api_init();
+ 	if (ret)
+ 		goto fail;
+ 	xpon_owned.api = true;
++	stage = "worker-start";
+ 	gpPonSysData->xpon_daemon.task = kthread_run(xpon_daemon, NULL, "xpon_daemon");
+ 	if (IS_ERR(gpPonSysData->xpon_daemon.task)) {
+ 		ret = PTR_ERR(gpPonSysData->xpon_daemon.task);
+@@ -1583,6 +1598,7 @@
+ 		goto fail;
+ 	}
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "protocol-status";
+ 	ret = q1000k_protocol_status();
+ 	if (ret)
+ 		goto fail;
+@@ -1591,6 +1607,7 @@
+ 	gpPonSysData->sysMACStartup = PON_MAC_START;
+ 	smp_store_release(&xpon_ready, true);
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "cold-start";
+ 	ret = q1000k_omci_cold_start();
+ 	if (ret)
+ 		goto fail;
+@@ -1598,6 +1615,7 @@
+ 	gpon_start_interrupts();
+ #endif
+ #ifdef Q1000K_PON_IDENTITY
++	stage = "protocol-start";
+ 	ret = q1000k_protocol_start();
+ 	if (ret)
+ 		goto fail;
+@@ -1609,7 +1627,7 @@
+ 	pr_info("%s\n", MODULE_VERSION_10GXPONMAC);
+ 	return 0;
+ fail:
+-	pr_err("xpon: initialization failed: %d\n", ret);
++	pr_err("xpon: initialization failed at %s: %d\n", stage, ret);
+ 	xpondrv_cleanup();
+ 	return ret;
+ }
