@@ -53,19 +53,20 @@ GDM2 internal transport dependency. Normal LAN and failsafe use 192.168.0.1;
 LAN DHCP/RA and automatic PON startup are disabled. Its FIT/initramfs content
 inspection passes. The user has RAM-booted this image; read-only SSH confirms
 RAM root, absent MTD/UBI devices, native ponraw registration and disabled
-PON modules/service. The audited bench status preflight passes. Controller
-and stack smoke tests await explicit permission for temporary hardware changes.
+PON modules/service. The audited bench status preflight passes. The authorized
+controller-only test stopped at GPIO pin ownership before detection; the
+AN7581 pinmux fix requires another RAM image/boot. Stack testing remains
+separately gated. See the bench report for the failure and cleanup evidence.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original
 acceptance requirements. Their historical lists of unfinished software work
 are superseded by this table and the current checkpoint.
 
-The current continuation is restricted to **read-only device access and no
-firmware flashing**. Historical RAM tests do not authorize further hardware
-changes. Cold boots, module loading, GPIO/PHY activation, optical traffic,
-recovery and upgrade tests below are pending acceptance gates, not commands
-to execute under the current restriction. The [integration audit](XGSPON-INTEGRATION.q1000k.md)
+**Never flash firmware.** The current permission is read-only access plus
+the explicitly authorized controller-only RAM test with fiber disconnected.
+PHY/MAC/OMCI activation, optical traffic, recovery and upgrade tests below
+remain pending acceptance gates. The [integration audit](XGSPON-INTEGRATION.q1000k.md)
 records the current resource contract, unresolved interfaces and OMCI decision.
 
 The reference is [coolsnowwolf/lede commit f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358).

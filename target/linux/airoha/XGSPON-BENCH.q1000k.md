@@ -22,10 +22,11 @@ not be used for Q1000K SSH.** No default WAN or OLT identity is inferred.
 
 ## Staged device tests
 
-The user's device restriction remains read-only with no firmware flashing.
-The user has RAM-booted the bench and authorized read-only SSH access at
-192.168.0.1. Agree the exact runtime steps before loading modules. Keep the
-fiber physically disconnected. Do not use
+The user has RAM-booted the bench, provided SSH at 192.168.0.1, confirmed
+disconnected fiber and explicitly authorized the controller-only test. This
+permits RAM staging, controller module/GPIO/I2C operations and cleanup.
+PHY/MAC/OMCI activation still requires separate authorization. Keep the
+fiber physically disconnected. Firmware flashing remains forbidden. Do not use
 HTTP recovery upload, sysupgrade, MTD writes, UBI formatting or `saveenv`.
 The RAM transfer/boot commands depend on the bootloader actually running;
 inspect that bootloader and its memory map before providing commands.
@@ -58,7 +59,7 @@ and are not a RAM-boot transport.
    It loads only the controller, confirms TX inhibit, detects both paths,
    stages calibration, performs checked firmware load/readback, observes
    MCU/TX/LOS five times, then powers off and unloads its module.
-5. Only after reviewing controller results, run
+5. Only after reviewing controller results and obtaining stack-test approval, run
    `q1000k-pon-bench stack /tmp/CALIBRATION --fiber-disconnected`. It repeats
    controller initialization, opens `ponraw`, loads the vendor BSP/PHY/MAC
    and OMCI modules, and checks status five times. It uses an explicit
@@ -138,8 +139,45 @@ locally built files. The audited `q1000k-pon-bench status` command returns
 
 All device commands were reads. No calibration/firmware was copied to the
 device, no PON modules were loaded, no interface was changed, and no flash
-operation occurred. The controller test still needs explicit permission to
+operation occurred. At this baseline, the controller test still needed permission to
 stage RAM files and change GPIO/I2C state, plus confirmation that the fiber
 remains disconnected. The subsequent PHY/MAC/OMCI and shutdown/drain tests
 remain pending. Local raw logs and a summary are saved under the bench
 artifact directory's `read-only-boot/` directory; raw logs are kept private.
+
+## First authorized controller test — 2026-09-14
+
+With the fiber confirmed disconnected, the unit's validated 513-byte XGS
+calibration and SHA-checked OEM PM/DM files were staged into the RAM filesystem.
+The helper and controller module matched the inspected image. The controller
+test returned `Controller did not bind` before detection or initialization:
+
+```
+pin gpio9 already requested by 0-0051; cannot claim for ...:521
+q1000k-pon-control 0-0051: error -EINVAL: GPON enable GPIO
+```
+
+The GPIO offset/pin mapping is correct. The controller's default pinctrl
+state first selects the GPIO mux and preloads both active-low power enables
+inactive. AN7581 then rejects its GPIO descriptor request because the mux
+function lacks the GPIO flag/classifier required by strict pinmux ownership.
+GPIO9 corresponds to pinctrl pin 22 and the GPIO chip's offset 9 (global 521).
+
+Patch `9999k-pinctrl-airoha-identify-an7581-gpio-function.patch` flags the
+AN7581 GPIO function and exposes `pinmux_generic_function_is_gpio`. Strict
+peripheral ownership and the board's output preload/mux sequencing are
+preserved. A host regression compiles the production pinmux core, reproduces
+the original ownership failure, permits the flagged GPIO mux and continues
+to reject occupied GPIOs and conflicting peripheral mux owners.
+
+The helper unloaded the controller after failure. Read-only diagnostics
+confirm no PON modules remain, the bench preflight still passes and LAN SSH
+is intact. No controller detection, firmware initialization or MCU/TX/LOS
+sampling was reached. No PHY/MAC/OMCI module was loaded and no flash operation
+occurred. Physical optical TX state remains unmeasured.
+
+The fix changes the built-in pinctrl driver, so retry requires a newly built
+bench FIT and another user RAM boot. The controller-test authorization carries
+forward; do not expand it into stack activation. Test logs are retained in
+the original bench artifact's `controller-test/` directory, with raw logs
+private. This failed probe is not controller hardware acceptance.

@@ -12,9 +12,13 @@ SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
 Combined class 84/171 filtering is implemented. Advanced service paths and
 hardware acceptance remain incomplete.
 
-**Device access is read-only; never flash firmware.** No device access or
-activation occurred during this continuation. The controller bring-up tests
-below predate that restriction: both EN7573 paths detected, OEM MD32 firmware
+**Never flash firmware.** Read-only checks passed on the new RAM bench at
+192.168.0.1. The user then authorized a controller-only test with disconnected
+fiber; it stopped at an AN7581 GPIO ownership conflict before detection and
+cleaned up. The pinmux fix requires a new RAM boot; PHY/MAC/OMCI testing remains
+separately gated. See [the bench report](XGSPON-BENCH.q1000k.md).
+The older controller bring-up tests below used a different kernel: both
+EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
