@@ -23,6 +23,10 @@ static bool rx_restore_gain;
 module_param(rx_restore_gain, bool, 0400);
 MODULE_PARM_DESC(rx_restore_gain, "RX bench only: apply OEM receiver gain after the single recovery");
 
+static uint rx_probe;
+module_param(rx_probe, uint, 0400);
+MODULE_PARM_DESC(rx_probe, "RX bench experiment 1..10, immutable, one attempt per load");
+
 bool q1000k_rx_bench_enabled(void)
 {
 	return rx_bench;
@@ -32,7 +36,10 @@ int q1000k_rx_bench_prepare(void)
 {
 	struct device_node *root;
 	bool bench;
+	int ret;
 
+	if (rx_probe >= Q1000K_RX_PROBE_COUNT || (rx_probe && (!rx_reacquire || rx_restore_pll || rx_restore_gain)))
+		return -EINVAL;
 	if ((rx_reacquire && !rx_bench) || ((rx_restore_pll || rx_restore_gain) && !rx_reacquire))
 		return -EINVAL;
 	if (rx_bench) {
@@ -46,7 +53,8 @@ int q1000k_rx_bench_prepare(void)
 	/* The PHY independently verifies the controller's cached probe-time
 	 * inhibit, lease and live TX-off state before accepting this mode.
 	 */
-	return q1000k_phy_set_rx_bench(rx_bench, rx_reacquire, rx_restore_pll, rx_restore_gain);
+	ret = q1000k_phy_set_rx_bench(rx_bench, rx_reacquire, rx_restore_pll, rx_restore_gain);
+	return ret ?: q1000k_phy_set_rx_probe(rx_probe);
 }
 
 static int qrx_status_get(char *buffer, const struct kernel_param *kp)
@@ -148,3 +156,30 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 }
 static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
 module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);
+
+/* Separate attribute: maximum u32 values plus all keys fit below PAGE_SIZE. */
+static int qrx_diagnostics_get(char *buffer, const struct kernel_param *kp)
+{
+	struct q1000k_rx_diagnostics s;
+	int ret;
+
+	if (!rx_bench) return -EOPNOTSUPP;
+	ret = q1000k_protocol_status();
+	if (ret) return ret;
+	if (!q1000k_transport_running()) return -EAGAIN;
+	ret = q1000k_phy_rx_diagnostics(&s);
+	if (ret) return ret;
+	return scnprintf(buffer, PAGE_SIZE,
+		"{\"diagnostics_version\":1,\"probe\":%u,\"attempts\":%u,\"writes\":%u,"
+		"\"sampled_ms\":%llu"
+#define QDIAG_FORMAT(name, reg) ",\"" #name "\":%u"
+		Q1000K_RX_DIAG_FIELDS(QDIAG_FORMAT)
+#undef QDIAG_FORMAT
+		"}\n", s.probe, s.attempts, s.writes, (unsigned long long)s.sampled_ms
+#define QDIAG_VALUE(name, reg) , s.name
+		Q1000K_RX_DIAG_FIELDS(QDIAG_VALUE)
+#undef QDIAG_VALUE
+	);
+}
+static const struct kernel_param_ops qrx_diagnostics_ops = { .get = qrx_diagnostics_get };
+module_param_cb(rx_bench_diagnostics, &qrx_diagnostics_ops, NULL, 0400);

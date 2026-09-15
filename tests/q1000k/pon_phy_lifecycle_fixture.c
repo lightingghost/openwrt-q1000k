@@ -11,6 +11,7 @@ typedef uint64_t u64;
 typedef uint8_t u8;
 static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|(u32)p[2]<<8|p[3]; }
 #include <q1000k_phy_api.h>
+#define BIT(n) (1U << (n))
 #define EXPORT_SYMBOL(x)
 #define ERR_PTR(n) ((void *)(intptr_t)(n))
 #define PTR_ERR(p) ((intptr_t)(p))
@@ -200,6 +201,9 @@ int q1000k_phy_rx_cleanup(void) {
 
 static int reacquire_calls, reacquire_error;
 static bool reacquire_bad_tx, reacquire_restore_pll, reacquire_restore_gain;
+int q1000k_phy_rx_probe(u32 mode) { return q1000k_phy_rx_reacquire(false, false); }
+int q1000k_phy_rx_probe_cleanup(void) { return 0; }
+u32 q1000k_phy_rx_probe_writes(void) { return 0; }
 int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain)
 {
     assert(!q1000k_phy_callback_context() && controller_inhibit && !controller.tx);
@@ -554,6 +558,35 @@ static void rx_reacquire_tests(void)
     reset(); controller_los=true; controller_inhibit=false;
 }
 
+static void rx_probe_tests(void)
+{
+    struct q1000k_rx_diagnostics d, sentinel;
+    reset(); assert(q1000k_phy_rx_diagnostics(&d)==-ENODEV);
+    for (u32 mode=1; mode<Q1000K_RX_PROBE_COUNT; mode++) {
+        reset(); controller_inhibit=true; controller_los=false;
+        assert(!q1000k_phy_init());
+        assert(q1000k_phy_set_rx_probe(mode)==-EINVAL);
+        assert(!q1000k_phy_set_rx_bench(true,true,true,false));
+        assert(q1000k_phy_set_rx_probe(mode)==-EINVAL);
+        assert(!q1000k_phy_set_rx_bench(true,true,false,false));
+        assert(!q1000k_phy_set_rx_probe(mode));
+        assert(q1000k_phy_set_rx_bench(false,false,false,false)==-EINVAL);
+        assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
+        assert(q1000k_phy_set_rx_probe(0)==-EBUSY);
+        for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
+        assert(reacquire_calls==1 && !qphy_fault);
+        assert(!q1000k_phy_rx_diagnostics(&d) && d.probe==mode && d.attempts==1);
+        assert(!q1000k_phy_set_rx_probe(mode));
+        assert(q1000k_phy_rx_diagnostics(NULL)==-EINVAL);
+        memset(&d,0xa5,sizeof(d)); sentinel=d;
+        fail_read=reads+1;
+        assert(q1000k_phy_rx_diagnostics(&d)==-EIO && !memcmp(&d,&sentinel,sizeof(d)));
+        assert(!qphy_active && !controller.tx);
+        fail_read=0;
+    }
+    reset();
+}
+
 static void rx_bench_tests(void)
 {
     struct q1000k_rx_sample sample, saved;
@@ -593,6 +626,7 @@ static void rx_bench_tests(void)
 int main(void)
 {
     rx_reacquire_tests();
+    rx_probe_tests();
     rx_snapshot_faults();
     rx_bench_tests();
     prepare_wan();

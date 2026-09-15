@@ -44,6 +44,34 @@ int q1000k_phy_needs_configure(void);
  * registration or optical TX.
  */
 int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain);
+enum q1000k_rx_probe {
+	Q1000K_RX_PROBE_NONE,
+	Q1000K_RX_PROBE_BIT_ORDER,
+	Q1000K_RX_PROBE_DESCRAMBLER,
+	Q1000K_RX_PROBE_FEC_OC,
+	Q1000K_RX_PROBE_FEC_OFF,
+	Q1000K_RX_PROBE_GAIN_AUTO,
+	Q1000K_RX_PROBE_GAIN_LOW,
+	Q1000K_RX_PROBE_TDC_DELAY,
+	Q1000K_RX_PROBE_PLL_ORDER,
+	Q1000K_RX_PROBE_OEM_ORDER,
+	Q1000K_RX_PROBE_CHECKER,
+	Q1000K_RX_PROBE_COUNT,
+};
+/* Select before configuration, with RX bench + one-attempt recovery enabled.
+ * Exclusive with the older gain/PLL flags. Never enables an optical or PRBS TX.
+ */
+int q1000k_phy_set_rx_probe(u32 probe);
+/* A second bounded attribute keeps the original RX status below PAGE_SIZE. */
+#include <q1000k_rx_diag.h>
+struct q1000k_rx_diagnostics {
+	u64 sampled_ms;
+	u32 probe, attempts, writes;
+#define Q1000K_DIAG_MEMBER(name, reg) u32 name;
+	Q1000K_RX_DIAG_FIELDS(Q1000K_DIAG_MEMBER)
+#undef Q1000K_DIAG_MEMBER
+};
+int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *sample);
 /* Raw receiver control/status words, not measured frequencies or proof of
  * firmware execution. Read without selecting probes or changing hardware.
  */
@@ -123,6 +151,9 @@ int q1000k_phy_pma_reset(void);
 int q1000k_phy_pma_init(void);
 int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain);
 int q1000k_phy_rx_cleanup(void);
+int q1000k_phy_rx_probe(u32 probe);
+int q1000k_phy_rx_probe_cleanup(void);
+u32 q1000k_phy_rx_probe_writes(void);
 int q1000k_phy_controller_check(void);
 int q1000k_phy_board_profile(void);
 int q1000k_phy_trans_power(u32 operation);

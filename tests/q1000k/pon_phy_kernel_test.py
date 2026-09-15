@@ -13,5 +13,6 @@ types = types.replace('event_poll_timer_value,event_handle_lock,pma_reset_lock;'
                       'event_poll_timer_value;\n    spinlock_t event_handle_lock,pma_reset_lock;')
 fixture = Path(__file__).with_name('pon_phy_kernel_fixture.c').read_text()
 header = (BSP / 'include/q1000k_phy_api.h').read_text()
+header = header.replace('#include <q1000k_rx_diag.h>', (BSP / 'include/q1000k_rx_diag.h').read_text())
 print(fixture.replace('/* API */',header).replace('/* TYPES */',defs+regs+types)
       .replace('/* PRODUCTION */',re.sub(r'^EXPORT_SYMBOL[^\n]*\n','',source,flags=re.M)))

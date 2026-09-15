@@ -9,7 +9,7 @@ REPO = Path(__file__).resolve().parents[2]
 BSP = REPO / 'package/kernel/airoha-pon/src/bsp'
 PHY = BSP.parent / 'xpon-en757x/xpon_phy_10g'
 
-def production_source(path=None):
+def production_source(path=None, extra=""):
     source = (path or PHY / 'src/q1000k_phy.c').read_text()
     source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
     definitions = {}
@@ -19,7 +19,7 @@ def production_source(path=None):
         m = re.match(r'#define\s+(\w+)\s+(.*)', line)
         if m:
             definitions[m[1]] = m[2].split('//')[0]
-    needed = set(re.findall(r'\bEN7581_\w+', source))
+    needed = set(re.findall(r'\bEN7581_\w+', source + extra + (BSP / 'include/q1000k_rx_diag.h').read_text()))
     needed.update(n for n in definitions if n.startswith('PON_GET_PHY_'))
     pending = list(needed)
     while pending:

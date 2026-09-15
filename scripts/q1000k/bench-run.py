@@ -14,6 +14,8 @@ import subprocess
 import tarfile
 import time
 
+PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-low',
+          'tdc-delay', 'pll-order', 'oem-order', 'checker')
 HOST = '192.168.255.1'
 SSH = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
@@ -184,11 +186,14 @@ def main(argv=None):
                         help='Restore PHY PLL clocks after the single connected RX recovery')
     parser.add_argument('--restore-gain', action='store_true',
                         help='Apply the OEM RX frontend gain after the single recovery')
+    parser.add_argument('--probe', choices=PROBES, help='One bounded, checked RX experiment')
     parser.add_argument('--samples', type=int, choices=(30, 90, 180),
                         help='Receive observations at one-second intervals (default: 30)')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args(argv)
+    if args.probe and (not args.reacquire_once or args.restore_gain or args.restore_pll):
+        parser.error('--probe requires exclusive --reacquire-once')
     if args.restore_gain and not args.reacquire_once:
         parser.error('--restore-gain requires --reacquire-once')
     if args.restore_pll and not args.reacquire_once:
@@ -235,6 +240,8 @@ def execute(args):
         recovery_flag += ' --restore-pll'
     if args.restore_gain:
         recovery_flag += ' --restore-gain'
+    if getattr(args, 'probe', None):
+        recovery_flag += ' --probe ' + shlex.quote(args.probe)
     sample_flag = f' --samples {args.samples}' if args.samples is not None else ''
     run = dict(schema_version=1, action=args.action, host=HOST, revision=revision,
                fiber='connected' if args.fiber_connected else 'disconnected' if args.fiber_disconnected else 'unspecified',
@@ -243,6 +250,9 @@ def execute(args):
     run['reacquire_once'] = args.reacquire_once
     run['restore_pll'] = args.restore_pll
     run['restore_gain'] = args.restore_gain
+    if args.action == 'receive':
+        run['diagnostics_version'] = 1
+        run['probe'] = getattr(args, 'probe', None)
     if args.action == 'receive':
         run['samples'] = args.samples or 30
     (output / 'checkpoint.json').write_text(json.dumps(run, indent=2) + '\n')

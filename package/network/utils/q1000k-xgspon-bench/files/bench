@@ -8,6 +8,7 @@ umask 077
 reacquire=0
 restore_pll=0
 restore_gain=0
+probe=0
 samples=30
 
 fail() { echo "Q1000K bench: $*" >&2; exit 1; }
@@ -145,6 +146,27 @@ rx_status() {
 	printf '%s\n' "$data"
 }
 
+rx_diagnostics() {
+	local data field type value sampled_ms attempts writes checker route lane
+	data=$(cat /sys/module/xpon_10g/parameters/rx_bench_diagnostics) && json_load "$data" || return 1
+	for field in diagnostics_version probe attempts writes sampled_ms checker_control data_route_control bist_lane_control; do
+		json_get_type type "$field"; json_get_var value "$field"
+		[ "$type" = int ] && [ "$value" -ge 0 ] || return 1
+	done
+	json_get_var value diagnostics_version; [ "$value" = 1 ] || return 1
+	json_get_var value probe; [ "$value" = "$probe" ] || return 1
+	json_get_var sampled_ms sampled_ms
+	[ "$sampled_ms" -ge "$last_sample" ] && [ "$((sampled_ms - last_sample))" -le 1500 ] || return 1
+	json_get_var attempts attempts; json_get_var writes writes
+	[ "$attempts" -ge "$last_attempts" ] && [ "$attempts" -le "$reacquire" ] || return 1
+	[ "$writes" -ge "$last_probe_writes" ] || return 1
+	[ "$probe" != 0 ] || [ "$writes" = 0 ] || return 1
+	json_get_var checker checker_control; json_get_var route data_route_control; json_get_var lane bist_lane_control
+	[ "$((checker & 256))" = 0 ] && [ "$((route & 65792))" = 0 ] && [ "$((lane & 256))" = 0 ] || return 1
+	last_probe_writes=$writes
+	printf '%s\n' "$data"
+}
+
 owned_modules=
 controller=
 lower_owned=0
@@ -196,7 +218,7 @@ case "$1" in
 			fail 'Usage: q1000k-pon-bench controller|stack /tmp/CALIBRATION --fiber-disconnected'
 		mode=$1; calibration=$2; fiber=disconnected ;;
 	receive)
-		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once [--restore-pll] [--restore-gain]] [--samples 30|90|180]'
+		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once [--restore-pll] [--restore-gain]] [--probe NAME] [--samples 30|90|180]'
 		case "$3" in
 			--fiber-connected) fiber=connected ;;
 			--fiber-disconnected) fiber=disconnected ;;
@@ -217,6 +239,15 @@ case "$1" in
 				--restore-gain)
 					[ "$restore_gain" = 0 ] || fail 'Specify receiver gain restoration once.'
 					restore_gain=1; shift ;;
+				--probe)
+					[ "$#" -ge 2 ] && [ "$probe" = 0 ] || fail 'Specify one probe.'
+					case "$2" in
+						bit-order) probe=1 ;; descrambler) probe=2 ;; fec-oc) probe=3 ;; fec-off) probe=4 ;;
+						gain-auto) probe=5 ;; gain-low) probe=6 ;; tdc-delay) probe=7 ;;
+						pll-order) probe=8 ;; oem-order) probe=9 ;; checker) probe=10 ;;
+						*) fail 'Unknown bounded receiver probe.' ;;
+					esac
+					shift 2 ;;
 				--samples)
 					[ "$#" -ge 2 ] && [ "$samples_set" = 0 ] || fail 'Specify samples once.'
 					case "$2" in 30|90|180) samples=$2 ;; *) fail 'Samples must be 30, 90 or 180.' ;; esac
@@ -225,7 +256,8 @@ case "$1" in
 			esac
 		done
 		[ "$restore_pll" = 0 ] || [ "$reacquire" = 1 ] || fail 'PLL restoration requires --reacquire-once.'
-		[ "$restore_gain" = 0 ] || [ "$reacquire" = 1 ] || fail 'Receiver gain restoration requires --reacquire-once.' ;;
+		[ "$restore_gain" = 0 ] || [ "$reacquire" = 1 ] || fail 'Receiver gain restoration requires --reacquire-once.'
+		[ "$probe" = 0 ] || { [ "$reacquire" = 1 ] && [ "$restore_pll" = 0 ] && [ "$restore_gain" = 0 ]; } || fail 'Probe requires exclusive single recovery.' ;;
 	*) fail 'Commands: status, controller, stack, receive' ;;
 esac
 
@@ -274,12 +306,12 @@ if [ "$mode" != controller ]; then
 	# These values are never installed in subscriber UCI configuration.
 	rx_bench=0
 	[ "$mode" != receive ] || rx_bench=1
-	load_module xpon_10g rx_bench="$rx_bench" rx_reacquire="$reacquire" rx_restore_pll="$restore_pll" rx_restore_gain="$restore_gain" wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
+	load_module xpon_10g rx_bench="$rx_bench" rx_reacquire="$reacquire" rx_restore_pll="$restore_pll" rx_restore_gain="$restore_gain" rx_probe="$probe" wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
 		pon_reg_id=000000000000000000000000000000000000000000000000000000000000000000000000 \
 		pon_lower=ponraw $identity_params
 fi
 count=0; limit=5
-last_sample=-1; last_frames=-1; last_poll=0; last_attempts=0; stable=0
+last_probe_writes=0; last_sample=-1; last_frames=-1; last_poll=0; last_attempts=0; stable=0
 [ "$mode" != receive ] || limit=$samples
 printf 'bench_window mode=%s samples=%s reacquire=%s restore_pll=%s restore_gain=%s\n' "$mode" "$limit" "$reacquire" "$restore_pll" "$restore_gain"
 while [ "$count" -lt "$limit" ]; do
@@ -292,6 +324,7 @@ while [ "$count" -lt "$limit" ]; do
 	fi
 	if [ "$mode" = receive ]; then
 		rx_status || fail 'Receive-only guard/status check failed.'
+		rx_diagnostics || fail 'Receiver probe diagnostics/guard check failed.'
 	fi
 	# Capture class brightness; software blinking may sample either phase.
 	if [ "$mode" != controller ]; then

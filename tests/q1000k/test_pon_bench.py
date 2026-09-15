@@ -75,6 +75,15 @@ if action=='cat':
                   fec_uncorrected=0,irq_calls=0,poll_calls=n,sampled_ms=n*1000)
         data.update(json.loads(os.environ.get('BENCH_RX_STATUS','{}')))
         print(json.dumps(data))
+    elif args==[str(root/'sys/module/xpon_10g/parameters/rx_bench_diagnostics')]:
+        n=int((root/'rx-count').read_text())
+        params=json.loads((root/'module-params').read_text())
+        mode=int(params.get('rx_probe',0))
+        attempts=int(params.get('rx_reacquire')=='1' and n>=15)
+        data=dict(diagnostics_version=1,probe=mode,attempts=attempts,writes=attempts if mode else 0,
+                  sampled_ms=n*1000,checker_control=5,data_route_control=0,bist_lane_control=0)
+        data.update(json.loads(os.environ.get('BENCH_DIAGNOSTICS','{}')))
+        print(json.dumps(data))
     else:
         for name in args:
             sys.stdout.buffer.write(pathlib.Path(name).read_bytes())
@@ -119,12 +128,14 @@ else: raise AssertionError(action)
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
 
-    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None, restore_pll=False, restore_gain=False):
+    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None, restore_pll=False, restore_gain=False, probe=None):
         args = [mode]
         if mode != 'status':
             args += [str(self.calibration)]
             if acknowledged:
                 args += ['--fiber-' + fiber]
+            if probe:
+                args += ['--probe',probe]
             if restore_gain:
                 args += ['--restore-gain']
             if restore_pll:
@@ -183,7 +194,7 @@ else: raise AssertionError(action)
         calls = self.calls()
         loads = [c for c in calls if c[0] in ('modprobe', 'insmod')]
         self.assertEqual([c[1] for c in loads], MODULES)
-        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'rx_bench=0', 'rx_reacquire=0', 'rx_restore_pll=0', 'rx_restore_gain=0', 'wan_mac=02:00:00:00:00:01',
+        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'rx_bench=0', 'rx_reacquire=0', 'rx_restore_pll=0', 'rx_restore_gain=0', 'rx_probe=0', 'wan_mac=02:00:00:00:00:01',
                                    'pon_serial=TEST00000001', 'pon_reg_id=' + '0' * 72,
                                    'pon_lower=ponraw'])
         self.assertEqual([c[1] for c in calls if c[0] == 'rmmod'], MODULES[::-1])
@@ -204,6 +215,20 @@ else: raise AssertionError(action)
         self.assertEqual((self.root/'rx-count').read_text(), '180')
         self.assertIn('bench_window mode=receive samples=180 reacquire=1', result.stdout)
         self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
+
+    def test_probe_is_exclusive_and_forwards_immutable_mode(self):
+        self.env['BENCH_FIBER']='connected'
+        self.env['BENCH_STATUS']=json.dumps({'los':False})
+        self.run_bench('receive',fiber='connected',probe='checker',success=False)
+        self.run_bench('receive',fiber='connected',probe='checker',reacquire=True,restore_pll=True,success=False)
+        self.assertEqual(self.calls(),[])
+        self.run_bench('receive',fiber='connected',probe='checker',reacquire=True)
+        self.assertIn('rx_probe=10',[c for c in self.calls() if c[0]=='insmod'][-1])
+
+    def test_diagnostic_generator_guard_fails_and_cleans_up(self):
+        self.env['BENCH_DIAGNOSTICS']=json.dumps({'checker_control':256})
+        self.run_bench('receive',success=False)
+        self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'],MODULES[::-1])
 
     def test_bad_windows_fail_before_any_mutation(self):
         for samples in ('', '-1', '0', '29', '31', '181', '30 --reacquire-once'):

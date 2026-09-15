@@ -98,10 +98,19 @@ needed. The final connected sensor reading was 14,300 nW (-18.45 dBm).
 
 Next work should audit the controller-to-PHY receive path and the complete OEM
 clock/reset sequence. Known differences worth resolving before another build
-are PLL restoration before final PCS release versus our after-recovery trial,
+are reset release before L2D/TDC, PLL restoration before RX-ready,
 TDC settling/toggle order, and the OEM's upper five digital-reset fields whose
 meanings remain unknown. Do not replay unknown fields or remove TX inhibit.
 The public FEC_FORCE_OFF macro name is misleading: its enable handler sets
 that bit, so 0x310 must not be labeled disabled FEC based on the name alone.
 There is no evidence yet that http-uboot is responsible, and no basis to change
 ONT identity, OMCI profiles, DHCP or VLANs to fix this pre-sync PHY state.
+
+
+## Consolidated next-image coverage
+
+See [the receive suite](XGSPON-RX-SUITE.q1000k.md) for all 13 cases, ten bounded
+new probes, shared raw diagnostics and physical controls. The suite's coverage
+catalog maps every hypothesis above to on-image observations/experiments and
+identifies the external evidence still needed. None of the new interventions
+has been hardware-tested yet. No additional http-uboot change is indicated.

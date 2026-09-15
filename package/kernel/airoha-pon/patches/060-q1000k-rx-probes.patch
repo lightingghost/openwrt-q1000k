@@ -1,0 +1,11 @@
+--- a/xpon-en757x/xpon_phy_10g/Makefile
++++ b/xpon-en757x/xpon_phy_10g/Makefile
+@@ -35,7 +35,7 @@
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else	
+ ifneq ($(TCSUPPORT_CPU_EN7581),)
+-	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c q1000k_phy_reset.c q1000k_phy_pma.c
++	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7581.c a60972.c en7581_pma.c q1000k_phy.c q1000k_phy_reset.c q1000k_phy_pma.c q1000k_phy_probe.c
+ 	PHY_OBJ	:= $(PHY_SRC:%.c=$(SRCDIR)/%.o)
+ else
+ 	PHY_SRC	+= i2c.c phy.c phy_init.c phy_rx.c phy_tx.c en7580.c a60972.c en7580_pma.c

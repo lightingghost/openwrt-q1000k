@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+typedef unsigned int uint;
 typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
@@ -32,6 +33,11 @@ static int an7581_xpon_status(void) { return provider_error; }
 /* PRODUCTION */
 int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain) {
     preparations++; if(!phy_error) { phy_mode=enabled; phy_reacquire=reacquire; phy_restore_pll=restore_pll; phy_restore_gain=restore_gain; } return phy_error;
+}
+int q1000k_phy_set_rx_probe(u32 probe) { return phy_error; }
+int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *s) {
+    if (sample_error) return sample_error;
+    memset(s, 0xff, sizeof(*s)); return 0;
 }
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
     samples++; if(sample_error) return sample_error;
@@ -113,6 +119,11 @@ int main(void) {
     power_valid=true; assert(qrx_status_get(out,NULL)>0);
     assert(strstr(out,"\"gain_restore_enabled\":true"));
     assert(strstr(out,"\"rx_power_valid\":true,\"rx_power_nw\":19900"));
-    rx_reacquire=false; assert(q1000k_rx_bench_prepare()==-EINVAL);
+    assert(qrx_diagnostics_get(out,NULL)>0 && strlen(out)<4095 && strstr(out,"\"rx_meter_cycles\":4294967295"));
+    sample_error=-EIO; assert(qrx_diagnostics_get(out,NULL)==-EIO); sample_error=0;
+    rx_probe=1; assert(q1000k_rx_bench_prepare()==-EINVAL);
+    rx_restore_gain=rx_restore_pll=false; assert(!q1000k_rx_bench_prepare());
+    rx_probe=Q1000K_RX_PROBE_COUNT; assert(q1000k_rx_bench_prepare()==-EINVAL); rx_probe=0;
+    rx_reacquire=false; rx_restore_gain=true; assert(q1000k_rx_bench_prepare()==-EINVAL);
     return 0;
 }

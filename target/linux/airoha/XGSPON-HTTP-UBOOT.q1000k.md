@@ -101,3 +101,13 @@ local reset `0x1`, stops `0xc101c101`. Both reach O1 and shut down cleanly.
 The Linux handoff now handles both states. This adds no new bootloader fault
 and does not validate a bootloader change; the suggested copper-only selector
 audit above remains a separate follow-up.
+
+
+## Consolidated receiver experiments
+
+The next RAM bench tests documented Linux RX timing, bit order, descrambling,
+FEC modes, frontend gain and independent receiver diagnostics. The OEM ordering
+comparison puts digital reset release before L2D/TDC and PLL restoration before
+RX-ready; it does not establish that the bootloader must perform optical setup.
+Unknown upper reset bits are excluded. There is still no evidence that an
+http-uboot change would fix the present light-without-frames condition.

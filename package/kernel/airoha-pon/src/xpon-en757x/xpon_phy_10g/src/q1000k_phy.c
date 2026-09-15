@@ -35,6 +35,7 @@ static bool qphy_rx_bench;
 static bool qphy_rx_reacquire;
 static bool qphy_rx_restore_pll;
 static bool qphy_rx_restore_gain;
+static u32 qphy_rx_probe_mode;
 static u32 qphy_rx_attempts, qphy_rx_no_sync;
 static u32 qphy_rx_irqs, qphy_rx_polls;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
@@ -203,7 +204,8 @@ static void qphy_poll_work(struct work_struct *work)
 				 * dispatches registration events, or resets the shared SCU.
 				 */
 				qphy_rx_attempts++;
-				ret = q1000k_phy_rx_reacquire(qphy_rx_restore_pll, qphy_rx_restore_gain);
+				ret = qphy_rx_probe_mode ? q1000k_phy_rx_probe(qphy_rx_probe_mode) :
+					q1000k_phy_rx_reacquire(qphy_rx_restore_pll, qphy_rx_restore_gain);
 				if (!ret && READ_ONCE(qphy_active))
 					ret = qphy_rx_sample(&sample);
 			}
@@ -562,6 +564,8 @@ static int qphy_stop(void)
 	if (!ret)
 		ret = q1000k_phy_rx_cleanup();
 	if (!ret)
+		ret = q1000k_phy_rx_probe_cleanup();
+	if (!ret)
 		ret = an7581_pon_phy_status();
 	if (ret)
 		qphy_failed(ret);
@@ -726,6 +730,10 @@ int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool
 		if (ret)
 			goto out;
 	}
+	if (qphy_rx_probe_mode && (!enabled || !reacquire || restore_pll || restore_gain)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	qphy_rx_bench = enabled;
 	qphy_rx_reacquire = reacquire;
 	qphy_rx_restore_pll = restore_pll;
@@ -736,6 +744,80 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL(q1000k_phy_set_rx_bench);
+
+int q1000k_phy_set_rx_probe(u32 probe)
+{
+	bool inhibited, tx;
+	int ret = qphy_context();
+
+	if (ret) return ret;
+	if (probe >= Q1000K_RX_PROBE_COUNT) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret || probe == qphy_rx_probe_mode) goto out;
+	if (qphy_active || qphy_irq_dev || gpPhyPriv->phy_init_done) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (probe) {
+		if (!qphy_rx_bench || !qphy_rx_reacquire || qphy_rx_restore_pll ||
+		    qphy_rx_restore_gain || !qphy_controller) {
+			ret = -EINVAL;
+			goto out;
+		}
+		ret = q1000k_pon_get_tx_inhibit(qphy_controller, &inhibited);
+		if (!ret) ret = q1000k_pon_get_tx(qphy_controller, &tx);
+		if (!ret && (!inhibited || tx)) ret = -EACCES;
+		if (ret) goto out;
+	}
+	qphy_rx_probe_mode = probe;
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_set_rx_probe);
+
+int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *sample)
+{
+	struct q1000k_rx_diagnostics result = {};
+	int ret = qphy_context();
+
+	if (ret) return ret;
+	if (!sample) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret) goto out;
+	if (!ret && (!qphy_rx_bench || !qphy_active || !gpPhyPriv->phy_init_done))
+		ret = -EAGAIN;
+	if (!ret) ret = q1000k_phy_controller_check();
+#define QDIAG_READ(name, reg) if (!ret) ret = an7581_pon_phy_read(reg, &result.name);
+	Q1000K_RX_DIAG_FIELDS(QDIAG_READ)
+#undef QDIAG_READ
+	if (!ret) ret = an7581_pon_phy_status();
+	if (!ret && ((result.checker_control & BIT(8)) ||
+		    (result.data_route_control & (BIT(16) | BIT(8))) ||
+		    (result.bist_lane_control & BIT(8)))) ret = -EACCES;
+	if (!ret) {
+		result.sampled_ms = ktime_to_ms(ktime_get_boottime());
+		result.probe = qphy_rx_probe_mode;
+		result.attempts = qphy_rx_attempts;
+		result.writes = q1000k_phy_rx_probe_writes();
+		*sample = result;
+	} else if (ret != -EAGAIN) {
+		qphy_failed(ret);
+	}
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_rx_diagnostics);
+
 
 /* Callback mutex held. Registers below are ordinary read-only snapshots;
  * do not latch/clear counters or select a PHY debug probe.
@@ -1143,6 +1225,7 @@ int q1000k_phy_init(void)
 	qphy_rx_reacquire = false;
 	qphy_rx_restore_pll = false;
 	qphy_rx_restore_gain = false;
+	qphy_rx_probe_mode = 0;
 	qphy_rx_attempts = qphy_rx_no_sync = 0;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;

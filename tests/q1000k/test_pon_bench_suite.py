@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""All cases run after expected no-sync, never after a guard or cleanup error."""
+import argparse
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+from test_pon_bench_matrix import MATRIX
+
+SUITE=MATRIX.module('bench-suite')
+PROBE=MATRIX.module('bench-probe-report')
+
+
+def observation(probe=None,reacquire=False):
+    return dict(cleanup='passed',fiber='connected',receive=dict(
+        downstream_stable=False,reacquire_requested=reacquire,
+        controller_los=[False],phy_los=[False]),
+        probe_diagnostics=dict(probe=probe,attempts=int(reacquire)))
+
+
+class SuiteTests(unittest.TestCase):
+    def test_every_hypothesis_has_executable_and_external_coverage(self):
+        names={c[0] for c in SUITE.CASES}
+        self.assertEqual(len(SUITE.COVERAGE),9)
+        self.assertEqual(len(SUITE.CASES),13)
+        self.assertEqual(tuple(p for _,p,_ in SUITE.CASES if p),PROBE.PROBES)
+        for coverage in SUITE.COVERAGE.values():
+            self.assertLessEqual(set(coverage['cases']),names)
+            self.assertTrue(coverage['external'])
+
+    def test_all_cases_continue_for_expected_no_sync_and_stop_on_fault(self):
+        for fail in (None,0,5,12):
+            with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+                args=argparse.Namespace(output=Path(directory)/'suite',artifact=Path('/artifact'),samples=90)
+                results=[ValueError('unsafe') if i==fail else observation(p,r)
+                         for i,(_,p,r) in enumerate(SUITE.CASES)]
+                with patch.object(SUITE,'stage',side_effect=results) as stage:
+                    status=SUITE.execute(args)
+                self.assertEqual(stage.call_count,13 if fail is None else fail+1)
+                self.assertEqual(status,0 if fail is None else 1)
+                record=json.loads((args.output/'suite.json').read_text())
+                self.assertEqual(len(record['results']),13 if fail is None else fail)
+                self.assertFalse(record['optical_tx'])
+
+    def test_mismatch_missing_attempt_and_lost_light_reject_case(self):
+        for kind in ('attempt','light','cleanup','probe'):
+            record=observation('checker',True)
+            if kind=='attempt': record['probe_diagnostics']['attempts']=0
+            elif kind=='light': record['receive']['phy_los']=[True,False]
+            elif kind=='cleanup': record['cleanup']='failed'
+            else: record['probe_diagnostics']['probe']='bit-order'
+            with self.assertRaises(ValueError): SUITE.check_case(record,'checker',True)
+        record=observation('checker',True)
+        record['receive']['downstream_stable']=True
+        record['probe_diagnostics']['attempts']=0
+        self.assertEqual(SUITE.check_case(record,'checker',True),'not-triggered-already-synchronized')
+
+
+class ProbeReportTests(unittest.TestCase):
+    def fixture(self,path):
+        (path/'checkpoint.json').write_text(json.dumps(dict(diagnostics_version=1,probe='checker',
+            reacquire_once=True,restore_gain=False,restore_pll=False,samples=30)))
+        rows=[]
+        for i in range(30):
+            attempts=int(i>=15)
+            rows.append(dict(rx_bench=True,reacquire_attempts=attempts,sampled_ms=i*1000))
+            rows.append(dict.fromkeys(PROBE.FIELDS,0) | dict(diagnostics_version=1,probe=10,
+                attempts=attempts,writes=attempts*2,sampled_ms=i*1000+1,checker_control=5 | attempts*65536,
+                checker_errors=i,rx_meter_lock_target=0xa4ff_a436,rx_meter_result=0xa49a_0303))
+        (path/'serial.log').write_text('q1000k: RX probe fields restored\n')
+        self.write(path,rows)
+        return rows
+
+    def write(self,path,rows):
+        (path/'attempt.log').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+
+    def test_collects_raw_evidence_and_restoration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory); self.fixture(path)
+            result=PROBE.summarize(path)
+            self.assertEqual(result['checked_writes'],2)
+            self.assertEqual(result['checker_error_delta_mod32'],29)
+            self.assertTrue(result['restoration_confirmed'])
+            self.assertEqual(result['rx_meter_upper16_within_configured_window'],[True])
+
+    def test_incomplete_stale_unsafe_and_missing_restore_rejected(self):
+        for kind in ('short','missing','bool','stale','tx','loopback','mode','writes','restore','order'):
+            with tempfile.TemporaryDirectory() as directory:
+                path=Path(directory); rows=self.fixture(path)
+                if kind=='short': rows.pop()
+                elif kind=='missing': del rows[1]['checker_errors']
+                elif kind=='bool': rows[1]['checker_errors']=False
+                elif kind=='stale': rows[3]['sampled_ms']=0
+                elif kind=='tx': rows[1]['checker_control']|=256
+                elif kind=='loopback': rows[1]['data_route_control']=256
+                elif kind=='mode': rows[1]['probe']=3
+                elif kind=='writes': rows[-1]['writes']=0
+                elif kind=='restore': (path/'serial.log').write_text('')
+                elif kind=='order': rows[0],rows[1]=rows[1],rows[0]
+                self.write(path,rows)
+                with self.subTest(kind=kind), self.assertRaises(ValueError): PROBE.summarize(path)
+
+if __name__=='__main__': unittest.main()

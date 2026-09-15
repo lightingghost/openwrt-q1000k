@@ -7,6 +7,14 @@ import re
 from pathlib import Path
 
 
+def probe_summary(capture):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('bench_probe_report', Path(__file__).with_name('bench-probe-report.py'))
+    mod=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.summarize(capture)
+
+
 def optical_summary(samples):
     present = ['rx_power_valid' in x or 'rx_power_nw' in x or
                x.get('receiver_version', 1) >= 4 for x in samples]
@@ -197,6 +205,7 @@ def summarize(capture, allow_downstream_failure=False):
         'fiber_led_brightness': {key: sorted(set(values)) for key, values in leds.items()},
         'physical_led_requires_user_observation': True,
         'receive': rx,
+        'probe_diagnostics': probe_summary(capture) if record.get('diagnostics_version') else None,
     }
 
 
