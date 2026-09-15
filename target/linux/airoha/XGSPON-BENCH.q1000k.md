@@ -1721,3 +1721,66 @@ gain matrix described in `XGSPON-RX-HYPOTHESES.q1000k.md`. No new hardware RX
 power measurement, successful sync, O5 or subscriber service is claimed.
 No SSH, optical transmission, flash, remote reboot or bootloader change was
 performed while preparing this image.
+
+### Connected optical-power and gain matrix — 2026-09-15
+
+The user RAM-booted image `7e9c0edc1d` and confirmed the fiber firmly connected.
+Read-only preflight matched all fourteen runtime hashes, management at
+192.168.255.1, RAM root, no MTD/UBI devices, immutable TX inhibit, disabled
+normal PON service and an idle endpoint. Runtime panic timeout was already 0.
+
+The 30-sample baseline and 90-sample gain continuation completed on this boot.
+Neither established downstream synchronization; the original failed acceptance
+results are retained. Observation, guard and cleanup validation passed in both.
+
+| Observation | Baseline | Gain continuation |
+|---|---|---|
+| Valid RX-power samples | 30/30 | 90/90 |
+| MCU RX power | 12,800–13,700 nW (-18.93 to -18.63 dBm) | 13,400–13,600 nW (-18.73 to -18.66 dBm) |
+| Last MCU RX power | 13,600 nW (-18.66 dBm) | 13,500 nW (-18.70 dBm) |
+| Both LOS indications | Clear throughout | Clear throughout |
+| Sync state | HUNT (0) throughout | HUNT (0) throughout |
+| Frames, LOF, FEC, PHY IRQ calls | Zero throughout | Zero throughout |
+| All seven added PCS counters | Zero throughout | Zero throughout |
+| Recovery attempts | 0 | 1 |
+| Elapsed including setup/cleanup | 53.953 s | 121.174 s |
+
+This is the first Q1000K hardware RX-power measurement; it is not copied from
+the gateway. CLI telemetry reports validity bit 64 and the same nW/dBm values.
+The controller reading is about 1.7 dB below the gateway's previously inferred
+-17 dBm. That comparison is not a calibration or modulation-quality proof.
+
+The gain attempt was first observed in sample 15 at poll 10, 15.734 seconds
+after the first snapshot, leaving 84.253 seconds of post-attempt observation.
+The gain control changed from 0x102 immediately before recovery to 0x101 and
+stayed there. Normal cleanup confirmed `RX gain restored to 0x102`. The
+separate initial baseline had gain 0x103; calibration can produce different
+starting values across starts, so do not claim identical gain baselines.
+The isolated OEM gain choice was insufficient to restore reception.
+
+New stable observations included PCS debug control 0x310, RX input control 0,
+SFP status 0/polarity 9, digital status 1, SerDes control 0x000c0000, RX clock
+divider 0x01000100, bus width 1, CDR ratio 0x00800000, rate control 2, OSR
+control 0x01000000, signal control 0x00010001, equalizer 0x01010100 and frontend
+power 0x02000401. RX enable, released PCS reset, inactive counter-clear and
+enabled descrambling weaken the simple disabled/reset/held-clear explanation.
+The sampled rate/divider/bus/OSR fields match the imported XPON_RX 9/10G branch;
+this does not prove recovered clock or correct physical routing. All-zero
+codeword/HEC/MAC-boundary counters fail to uncover earlier receive activity.
+The misleading FEC_FORCE_OFF macro name is not decoded as disabled FEC:
+the imported enable handler deliberately sets that field.
+
+TX stayed inhibited/off, registration disabled, MAC IRQ mask zero, O1 with
+unassigned ONU/OMCC, MIB count 322 and no protocol/service/kernel fault. Green
+LED class brightness alternated 0/1 and red stayed 0; no new physical LED
+observation is claimed. All nine modules unloaded, controller powered off,
+ponraw went down/unenslaved, private staged inputs were removed, and SSH stayed
+healthy. No flash, reboot, TX enable or persistent change occurred.
+
+Captures in the parent workspace:
+`build-artifacts/q1000k-xgspon/bench-7e9c0edc1d-preflight-01/` and
+`build-artifacts/q1000k-xgspon/bench-7e9c0edc1d-connected-gain-matrix-01/`.
+The latter includes the independently validated `comparison.json` and per-stage
+`observations.json`, `receiver-report.json`, `hypotheses.json` and raw evidence.
+Next is a user-confirmed disconnected control, followed by reconnection, to
+test the sensor/LOS response without a new image or speculative register write.
