@@ -18,7 +18,12 @@ The new image retains observation and that recovery, and adds optional
 Use the saved matrix with `--restore-pll` after verifying the new RAM boot.
 Its default 30-sample baseline and 90-sample continuation share one image and
 retain at most one recovery attempt. Stable baseline frames select observation
-only. This new clock experiment has not been run on hardware.
+only. The connected hardware matrix has now run: both stages saw light but no sync
+or frames. Exactly one PLL-restoration attempt completed without a reported
+control error; 82.570 seconds of later observations still showed no frames.
+All modules and private RAM inputs were cleaned up successfully. See the
+2026-09-15 connected PLL matrix section in the bench report. The user has
+requested controller-reported RX power in the next consolidated bench.
 
 No evidence establishes a TX/RX mapping swap; correct RX setup remains
 unproved. Calibrated Q1000K RX power is still unavailable. The user's AT&T

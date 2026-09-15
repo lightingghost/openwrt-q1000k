@@ -1562,3 +1562,53 @@ and run the existing connected matrix with `--restore-pll`; use 30 baseline
 samples and the default 90-sample continuation. The previous image does not
 contain this experiment. Successful local validation does not predict whether
 PLL restoration will establish downstream sync or advancing frames.
+
+## Connected PLL-restoration matrix — 2026-09-15
+
+The user RAM-booted `6fb4b2bae0` at 192.168.255.1 with the fiber connected.
+Read-only preflight verified the exact revision, all 14 runtime hashes, RAM
+mounts, absent MTD/UBI, immutable TX inhibit, idle modules and LAN carrier.
+The saved matrix ran its 30-sample baseline and 90-sample PLL continuation.
+
+Both downstream acceptance tests failed solely for missing sync/frame progress.
+Both LOS inputs remained false throughout all 120 samples; sync stayed HUNT
+(0), and frames, LOF, FEC and IRQ counters stayed zero. Poll counters advanced
+0..21 and 0..64. Exactly one recovery was first observed at sample 15/poll 10,
+15.400 seconds after the first continuation sample. Another 82.570 seconds of
+observations showed no frames or sync. The extra PLL updates/readbacks did not
+report an error. This rules out that isolated restoration as a sufficient fix,
+not every possible PLL/reset sequencing issue.
+
+The four new controls were constant before/after recovery:
+PLL force 0x01010101, measurement 0, Kband 0x0001000f, outputs 0x00000101.
+PLL status changed 0x07000101 -> 0x00000100 -> 0x00000101, the same pattern as
+the prior recovery without restoration. RX frequency changed 0xa49a0313 ->
+0xa49a0303. Analog observations changed 0x7d7d0042 -> 0x7d7d0003 and
+0x03000502 -> 0x10000502. Forced lock flags remain unsuitable as independent
+clock-lock proof. TX remained inhibited/off, registration false, MAC IRQ mask
+zero, ONU/OMCC unassigned and MIB count 322. No protocol/service or kernel fault
+was observed. Green LED class brightness alternated 0/1, red remained 0; no new
+physical LED observation is claimed.
+
+Both normal reverse unloads and private-input cleanup passed. The device was
+left idle with ponraw down/unenslaved and SSH healthy. No flash, reboot or
+transmission occurred. Capture directories in the parent workspace:
+`build-artifacts/q1000k-xgspon/bench-6fb4b2bae0-preflight-01/` and
+`build-artifacts/q1000k-xgspon/bench-6fb4b2bae0-connected-pll-matrix-01/`.
+The latter contains `comparison.json`, independently validated per-stage reports
+and private raw/serial logs. The two stages took 53.341 and 119.092 seconds
+including setup/cleanup. No unchanged 180-sample rerun was performed.
+
+The user requested controller RX power in the next consolidated bench. OEM
+`en7572.ko` `bob_info` reads word 0x0068 using I2C address 0x51 with a two-byte
+register address (`read2Bytes`, call at 0x3acc), then byte-swaps its LE helper
+result to BE before the optical-power conversion. Its TxPwr uses 0x0066.
+The RxPwr format string is `.rodata.str1.8+0xa50`; the logarithmic conversion
+is consistent with 0.1 microwatt units, or 100 nW per count. This is a read-only
+published sensor word, distinct from `ddmi_rx` and `ddmi_rx_done`, which write
+calibration/command registers and must not be invoked for a sensor reading.
+Power is currently null in all captured CLI telemetry; no Q1000K dBm value is
+yet available. Next implementation must preserve missing/invalid readings and
+label a controller-reported value separately from independent optical-meter
+validation. Further PHY writes require a supported, isolated candidate rather
+than copying undocumented OEM reset bits.
