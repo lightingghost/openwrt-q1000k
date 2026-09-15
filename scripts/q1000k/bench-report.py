@@ -1,22 +1,71 @@
 #!/usr/bin/env python3
-"""Summarize saved, completed disconnected-fiber stack captures; no SSH access."""
+"""Verify saved stack/receive bench observations and cleanup; no SSH access."""
 import argparse
 import json
 import re
 from pathlib import Path
 
 
+def receive_summary(samples, fiber):
+    last_sample, last_poll, last_frames, stable = -1, 0, None, 0
+    for item in samples:
+        for key, expected in {
+            'rx_bench': True, 'tx_inhibited': True,
+            'registration_enabled': False, 'tx_enabled': False,
+        }.items():
+            if item.get(key) is not expected:
+                raise ValueError('Receive guard failed: ' + key)
+        for key in ('mac_irq_mask', 'sync_status', 'frames', 'lof', 'fec_total',
+                    'fec_corrected', 'fec_uncorrected', 'irq_calls', 'poll_calls', 'sampled_ms'):
+            if type(item.get(key)) is not int or item[key] < 0:
+                raise ValueError('Invalid receive counter: ' + key)
+        for key in ('controller_los', 'phy_los', 'synced'):
+            if type(item.get(key)) is not bool:
+                raise ValueError('Invalid receive flag: ' + key)
+        if (item['mac_irq_mask'] or item['sampled_ms'] <= last_sample or
+                item['poll_calls'] < last_poll):
+            raise ValueError('Receive IRQ mask or sample freshness failed')
+        lit = not item['controller_los'] and not item['phy_los'] and item['synced']
+        if fiber == 'disconnected':
+            if not item['controller_los'] or not item['phy_los'] or item['synced']:
+                raise ValueError('Disconnected receive has unexpected light/sync')
+        stable = stable + 1 if lit and last_frames is not None and item['frames'] != last_frames else 0
+        last_sample, last_poll, last_frames = item['sampled_ms'], item['poll_calls'], item['frames']
+    if not last_poll or (fiber == 'connected' and stable < 5):
+        raise ValueError('Receive polling or final downstream stability failed')
+    return {
+        'samples': len(samples), 'registration_enabled': False, 'mac_irq_mask': 0,
+        'final_stable_intervals': stable,
+        'counters': {key: {'first': samples[0][key], 'last': samples[-1][key]}
+                     for key in ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
+                                 'fec_uncorrected', 'irq_calls', 'poll_calls')},
+        'controller_los': sorted({x['controller_los'] for x in samples}),
+        'phy_los': sorted({x['phy_los'] for x in samples}),
+        'synced': sorted({x['synced'] for x in samples}),
+    }
+
+
 def summarize(capture):
     capture = capture.resolve(strict=True)
     record = json.loads((capture / 'checkpoint.json').read_text())
     for field, expected in {
-        'schema_version': 1, 'action': 'stack', 'host': '192.168.255.1',
+        'schema_version': 1, 'host': '192.168.255.1',
         'status': 'passed', 'postflight': 'passed', 'input_cleanup': 'passed',
     }.items():
         if record.get(field) != expected:
             raise ValueError(f'{capture}: {field} is not {expected!r}')
-    controller, omci, protocol = [], [], []
+    action, fiber = record.get('action'), record.get('fiber')
+    if action not in ('stack', 'receive') or fiber not in ('connected', 'disconnected'):
+        raise ValueError('Unknown bench action/fiber state')
+    if action == 'stack' and fiber != 'disconnected':
+        raise ValueError('Normal stack test requires disconnected fiber')
+    count = 30 if action == 'receive' else 5
+    controller, omci, protocol, receive = [], [], [], []
+    leds = {'green:wan-1': [], 'red:wan': []}
     for line in (capture / 'attempt.log').read_text().splitlines():
+        led = re.fullmatch(r'fiber_led (green:wan-1|red:wan) brightness=([01])', line)
+        if led:
+            leds[led[1]].append(int(led[2]))
         if line.startswith('protocol_error='):
             protocol.append(int(line.split('=', 1)[1]))
         if not line.startswith('{'):
@@ -26,14 +75,22 @@ def summarize(capture):
             controller.append(item)
         elif 'mib_objects' in item:
             omci.append(item)
-    if len(omci) != 5 or len(controller) != 6 or protocol != [0] * 5:
-        raise ValueError(f'{capture}: incomplete five-sample stack observation')
+        elif 'rx_bench' in item:
+            receive.append(item)
+    if len(omci) != count or len(controller) != count + 1 or protocol != [0] * count:
+        raise ValueError(f'{capture}: incomplete {count}-sample observation')
+    if (action == 'receive' or any(leds.values())) and any(len(values) != count for values in leds.values()):
+        raise ValueError(f'{capture}: incomplete LED observation')
+    if len(receive) != (count if action == 'receive' else 0):
+        raise ValueError(f'{capture}: incomplete receive observation')
     for item in controller:
         if any(item.get(key) is not True for key in (
             'gpon_detected', 'xgspon_detected', 'md32_enabled', 'tx_disabled',
-            'tx_inhibited', 'calibration_supplied', 'firmware_verified', 'los',
+            'tx_inhibited', 'calibration_supplied', 'firmware_verified',
         )) or item.get('last_error') != 0:
             raise ValueError(f'{capture}: controller observation failed')
+        if type(item.get('los')) is not bool or (fiber == 'disconnected' and not item['los']):
+            raise ValueError(f'{capture}: controller LOS observation failed')
     for item in omci:
         for key, expected in {
             'schema_version': 1, 'state': 1, 'onu_id': 65535, 'gem_port_id': 65535,
@@ -51,13 +108,16 @@ def summarize(capture):
                  r'FE write .*expected', serial):
         raise ValueError(f'{capture}: kernel failure diagnostic in serial capture')
     return {
-        'capture': str(capture), 'boot_revision': record['revision'],
+        'capture': str(capture), 'boot_revision': record['revision'], 'action': action, 'fiber': fiber,
         'observations': len(omci), 'controller_tx_disabled': True,
-        'tx_inhibited': True, 'los': True, 'protocol_error': 0,
+        'tx_inhibited': True, 'los': sorted({x['los'] for x in controller}), 'protocol_error': 0,
         'omci_state': 1, 'mib_objects': sorted({x['mib_objects'] for x in omci}),
         'service_error': 0, 'cleanup': 'passed',
         'serial_start': record['serial_start'],
         'elapsed_seconds': round(record['finished'] - record['started'], 3),
+        'fiber_led_brightness': {key: sorted(set(values)) for key, values in leds.items()},
+        'physical_led_requires_user_observation': True,
+        'receive': receive_summary(receive, fiber) if action == 'receive' else None,
     }
 
 
@@ -70,7 +130,7 @@ def main():
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f'Cannot report a passing bench: {error}\n')
     print(json.dumps({
-        'schema_version': 1, 'result': 'disconnected-fiber stack passed',
+        'schema_version': 2, 'result': 'bench observations and cleanup passed',
         'optical_service_verified': False, 'runs': runs,
     }, indent=2))
 

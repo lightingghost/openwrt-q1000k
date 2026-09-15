@@ -916,3 +916,72 @@ A read-only SSH check observed the device still running source `30ea573aa3`
 not been booted or flashed. Physical LED illumination, dark receive and
 connected receive acceptance require the user's next RAM boot. No TX,
 registration or DHCP test was performed.
+
+### Identity image: disconnected hardware acceptance — 2026-09-14
+
+The user RAM-booted `d84282fc8618aeebaeeef233c33a690c09dc1c6d` and confirmed
+fiber disconnected. The saved runner verified all fourteen runtime hashes,
+RAM root, disabled NAND/no MTD or UBI, immutable TX inhibit, management
+`192.168.255.1`, disabled DHCP/PON services and runtime panic timeout zero.
+Both the five-sample normal stack run and thirty-sample receive-only dark run
+passed, including reverse module teardown, `ponraw` down and removal of only
+the owned, hash-verified private RAM inputs. Management remained available.
+
+Captures under `/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/`:
+
+- `bench-d84282fc86-stack-20260914-01/`: five OMCI samples, six initialized
+  controller samples; both EN7573 controllers detected, verified firmware and
+  calibration, TX disabled/inhibited, LOS true, O1/unassigned, 322 MIB objects,
+  no service or protocol error. Elapsed including setup/cleanup: 25.195 s.
+- `bench-d84282fc86-receive-dark-20260914-01/`: thirty fresh RX samples from
+  boot milliseconds 355663 to 386884, polling calls 0 to 20; both LOS sources
+  true, no sync, frame/FEC/LOF counters zero, registration disabled, MAC IRQ
+  mask zero and TX disabled. Elapsed including setup/cleanup: 52.171 s.
+- Each contains baseline/attempt/postflight/cleanup, checkpoint and new serial
+  output. No kernel failure diagnostics occurred. The receive directory's
+  `report.json` independently validates both captures with the saved
+  `scripts/q1000k/bench-report.py`; its four host tests cover incomplete
+  evidence, bad guards, stale counters, connected final stability, counter
+  wrap, kernel errors and failed cleanup. It performs no device operations.
+
+Every LED sample was green=0/red=1. The user visually confirmed **red during
+the test, off afterward**. Read-only idle brightness was zero for both LEDs.
+This verifies physical LOS indication and teardown; green indication on
+received light and operational service remain separate acceptance checks.
+
+Read-only `q1000k-omci config list` and `config validate` succeeded on the
+actual bench: all seventeen keys are exposed, subscriber identity is unset,
+`sync_circuit_pack=1`, `mib_profile=native-pptp`, `fix_vlans=0`. No staged
+configuration was changed. The optional final file-mode check in that SSH
+command found `stat` absent; the preceding CLI and LED reads succeeded and
+image inspection already records the identity file's 0600 mode. This did not
+affect either hardware test.
+
+No flash, optical TX, registration, authentication or subscriber traffic was
+attempted. Connected receive acceptance follows only after the user's explicit
+fiber-connected confirmation.
+
+### First connected receive capture — 2026-09-14
+
+After the user confirmed fiber connected, the same immutable image completed
+all thirty observations but **failed downstream acceptance**: controller LOS
+and PHY LOS stayed true, sync false, frames/FEC/LOF zero throughout. Polling
+advanced 0 to 20, timestamps advanced 1675998 to 1707196 ms, O1/ONU-ID and
+OMCC-ID 65535 remained unchanged, and all TX/registration/IRQ guards held.
+All LED samples were red=1/green=0. No kernel failure diagnostics occurred;
+postflight and owned-input cleanup passed, management remained available,
+all nine modules were released and `ponraw` returned down. There is no O5 or
+subscriber-service acceptance. Capture:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-d84282fc86-receive-connected-20260914-01/`.
+
+The first host launch was rejected before execution because automatic approval
+review timed out. Its permitted identical retry started the captured test;
+there was no duplicate hardware run.
+
+Local investigation compares QKX001-06.00.44.00's `en7572.ko` and
+`etc/init.d/xponconfig` with the pinned public loader. The OEM binary accesses
+MD32 control/address/data at 0x50; the public reference and current loader
+access MD32 control/address at 0x51, data at 0x50. Whether these addresses alias
+on this part has not been established. MCU-enable readback alone does not
+prove firmware execution. Do not change routing or APD analog values based
+only on LOS; first add serialized, read-only receiver/control observations.
