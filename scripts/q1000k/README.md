@@ -48,3 +48,8 @@ are saved in RAM and restored after successful unload, including a failed test
 whose module cleanup succeeds. Any ambiguous staging/cleanup failure retains
 evidence for inspection instead of forcing recovery. A kernel change requires
 a user RAM boot of the new image.
+
+`status --registers` reads a fixed list of seven configuration/reset words
+only when `/dev/mem` is available. It never writes a value or reads interrupt
+status/FIFO registers. Current RAM images omit `/dev/mem`, so this check stops
+without reading hardware; resource-provider kernel diagnostics are used instead.

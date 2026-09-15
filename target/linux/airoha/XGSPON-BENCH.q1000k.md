@@ -485,3 +485,26 @@ remain healthy. Physical drain and full PHY/OMCI startup are still unverified.
 No optical activation, firmware flash, force-unload or agent reboot occurred.
 
 See [reusable script instructions](../../../scripts/q1000k/README.md).
+
+## r65 physical failure localized
+
+Checkpoint `ed4e42c64b0a199eb3c8db7687c9a2ae6bda8281` builds through
+`scripts/q1000k/bench-build.py`: 97 host tests and FIT/initramfs inspection pass.
+Normal configurations are restored and protected refs remain unchanged. The
+7,602,176-byte image hash is
+`a913b643617c74c2b786ee2eae47157ee9172486b0dc740be6ea5081cdc87403`.
+It includes the effective userspace panic override as well as the DT setting.
+
+The saved runner temporarily installed the verified MAC/provider diagnostic
+modules on the same f885e80846 RAM kernel. Its source/kernel/dependency checks
+passed. `bench-ed4e42c64b/stack-r65-01/` records CPU pause completion (stage 1),
+then failed MPI RX stop: control `0x10000`, readback zero, expected completion
+`0x40000000`. Containment's all-stop request also reads back zero. No FE channel
+has been retired (`retired=0`). This failure precedes FE retirement and PHY
+startup. All modules unload and original module hashes are restored; private
+inputs are removed and LAN/SSH remain healthy. The reset/clock state needs
+inspection before changing the sequence. Vendor r66 adds read-only probe
+reporting for the SCU reset, WAN selector, local MAC reset and stop word.
+
+A fixed-list read-only register capture was attempted; the image has no
+`/dev/mem`, so it stopped at that guard. It did not read or write MMIO.

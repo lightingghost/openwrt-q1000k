@@ -15,6 +15,7 @@
 #include <linux/spinlock.h>
 #include <an7581_xpon.h>
 #include <an7581_xpon_map.h>
+#include <an7581_pon_scu.h>
 
 struct an7581_xpon {
 	struct device *dev;
@@ -307,7 +308,8 @@ static int an7581_xpon_probe(struct platform_device *pdev)
 	static const char * const irqs[] = { "mac", "dying-gasp" };
 	struct an7581_xpon *priv;
 	unsigned long flags;
-	int i, ret = 0;
+	u32 wan;
+	int i, mac_reset, ret = 0;
 
 	if (!of_machine_is_compatible("quantum,q1000k-ubi"))
 		return -ENODEV;
@@ -336,6 +338,15 @@ static int an7581_xpon_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->reset))
 		return dev_err_probe(&pdev->dev, PTR_ERR(priv->reset),
 				     "cannot acquire PON MAC reset\n");
+	mac_reset = reset_control_status(priv->reset);
+	if (mac_reset < 0)
+		return mac_reset;
+	ret = an7581_pon_wan_get(&wan);
+	if (ret)
+		return ret;
+	/* Read configuration only; probe must not release resets or clocks. */
+	dev_info(&pdev->dev, "cold resources: scu-reset=%d wan=%#x local-reset=%#x stops=%#x\n",
+		 mac_reset, wan, readl(priv->base[1]), readl(priv->base[1] + 4));
 	/* Do not publish partially initialized resources after probe failure. */
 	mutex_lock(&xpon_lifecycle);
 	write_lock_irqsave(&xpon_lock, flags);

@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -70,7 +71,7 @@ class ModuleRetryTests(unittest.TestCase):
             old, new = Path(directory) / 'old', Path(directory) / 'new'
             for path, revision in ((old, 'a' * 40), (new, 'b' * 40)):
                 path.mkdir()
-                (path / 'selection.json').write_text(__import__('json').dumps({'revision': revision}))
+                (path / 'selection.json').write_text(json.dumps({'revision': revision}))
                 (path / 'kernel.config').write_text('same kernel')
             names = ['/usr/sbin/q1000k-pon-bench', '/lib/q1000k-xgspon/common.sh',
                      '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci']

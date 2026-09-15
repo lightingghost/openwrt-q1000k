@@ -144,9 +144,12 @@ def main():
     parser.add_argument('--inputs', type=Path, help='Verified private tar; never copied to the repository')
     parser.add_argument('--fiber-disconnected', action='store_true')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only MAC/provider modules in RAM')
+    parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args()
     if args.action != 'status' and (not args.fiber_disconnected or args.inputs is None):
         parser.error('Tests require --fiber-disconnected and --inputs; status is read-only')
+    if args.registers and args.action != 'status':
+        parser.error('--registers is only for a read-only status capture')
     artifact = args.artifact.resolve()
     revision = json.loads((artifact / 'selection.json').read_text())['revision']
     if not re.fullmatch('[0-9a-f]{40}', revision):
@@ -181,6 +184,20 @@ ip route show
 cat /sys/class/net/lan1/carrier
 dmesg
 ''' + idle_guards(), output / 'baseline.log')
+        if args.registers:
+            # Configuration/reset words only: no interrupt/FIFO/clear-on-read
+            # registers and never a value argument to devmem. Addresses come
+            # from en7581.dtsi, clk-en7523.c and the imported XG MAC layout.
+            script = base + idle_guards() + 'test -c /dev/mem\n'
+            for address, name in ((0x1fb00070, 'SCU_WAN_CONF'),
+                                  (0x1fb0082c, 'SCU_CLK_CFG'),
+                                  (0x1fb00830, 'SCU_RESET2'),
+                                  (0x1fb00834, 'SCU_RESET1'),
+                                  (0x1fb0092c, 'SCU_RESET_ACCESS_CHECK'),
+                                  (0x1fb65000, 'XG_MAC_RESET'),
+                                  (0x1fb65004, 'XG_MBI_MPI_STOP')):
+                script += f"echo {name}\nbusybox devmem {address:#x} 32\n"
+            ssh(script, output / 'registers.log')
         if update:
             after, active_sums, updates, payload = update
             stage = base + idle_guards() + f'''umask 077
