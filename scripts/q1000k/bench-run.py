@@ -3,6 +3,7 @@
 """Capture a verified Q1000K RAM bench run. Never boots or flashes a device."""
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -23,6 +24,50 @@ INPUTS = {
     'A60993.elf.dm': (56, '21618dc3694a1e6f6b28c7da7141964dea1d6e57f2d2956bbe72a780ca6166a4'),
 }
 FIRMWARE = '/lib/firmware/airoha/q1000k'
+REPO = Path(__file__).resolve().parents[2]
+
+
+def module_update(original, replacement, sums):
+    """Only the two diagnostic vendor modules may change on an existing kernel."""
+    before = json.loads((original / 'selection.json').read_text())['revision']
+    after = json.loads((replacement / 'selection.json').read_text())['revision']
+    if not re.fullmatch('[0-9a-f]{40}', after):
+        raise ValueError('Invalid replacement source revision')
+    if (original / 'kernel.config').read_bytes() != (replacement / 'kernel.config').read_bytes():
+        raise ValueError('Replacement requires a different kernel configuration; RAM boot it instead')
+    changed = subprocess.check_output(['git', '-C', str(REPO), 'diff', '--name-only',
+                                       before, after], text=True).splitlines()
+    for name in changed:
+        if not (name.startswith(('package/kernel/airoha-pon/', 'tests/q1000k/', 'scripts/q1000k/',
+                                 'package/network/utils/q1000k-xgspon-bench/')) or
+                (name.startswith('target/linux/airoha/') and name.endswith('.md'))):
+            raise ValueError('Source change requires a new RAM boot: ' + name)
+    old = {p: h for h, p in (line.split() for line in sums.splitlines())}
+    new = {p: h for h, p in (line.split() for line in runtime_manifest(replacement / 'runtime-sha256sums').splitlines())}
+    allowed = {'airoha_ecnt_xpon.ko', 'xpon_10g.ko'}
+    if old.keys() != new.keys():
+        raise ValueError('Replacement runtime paths differ')
+    active, updates = dict(old), {}
+    for path, checksum in new.items():
+        if Path(path).name not in allowed:
+            if path.endswith('.ko') and old[path] != checksum:
+                raise ValueError('Additional dependency changed: ' + path)
+            continue
+        payload = (replacement / 'runtime' / path.lstrip('/')).read_bytes()
+        if not payload.startswith(b'\x7fELF') or hashlib.sha256(payload).hexdigest() != checksum:
+            raise ValueError('Replacement module hash/format mismatch: ' + path)
+        if checksum != old[path]:
+            updates[path] = payload
+            active[path] = checksum
+    if not updates:
+        raise ValueError('No diagnostic modules changed')
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode='w') as archive:
+        for path, payload in updates.items():
+            member = tarfile.TarInfo(Path(path).name)
+            member.size, member.mode = len(payload), 0o600
+            archive.addfile(member, io.BytesIO(payload))
+    return after, ''.join(f'{h}  {p}\n' for p, h in active.items()), updates, data.getvalue()
 
 
 def validate_inputs(path):
@@ -98,6 +143,7 @@ def main():
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
     parser.add_argument('--inputs', type=Path, help='Verified private tar; never copied to the repository')
     parser.add_argument('--fiber-disconnected', action='store_true')
+    parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only MAC/provider modules in RAM')
     args = parser.parse_args()
     if args.action != 'status' and (not args.fiber_disconnected or args.inputs is None):
         parser.error('Tests require --fiber-disconnected and --inputs; status is read-only')
@@ -108,6 +154,11 @@ def main():
     sums = runtime_manifest(artifact / 'runtime-sha256sums')
     if args.action != 'status':
         validate_inputs(args.inputs)
+    update = None
+    if args.modules_from:
+        if args.action != 'stack':
+            parser.error('--modules-from is only for an explicitly requested stack retry')
+        update = module_update(artifact, args.modules_from.resolve(), sums)
     output = args.output.resolve()
     remote = '/tmp/q1000k-bench-' + output.name
     if not re.fullmatch(r'/tmp/q1000k-bench-[-A-Za-z0-9_.]+', remote):
@@ -120,6 +171,8 @@ def main():
                serial_start=start, started=time.time(), status='running')
     (output / 'checkpoint.json').write_text(json.dumps(run, indent=2) + '\n')
     base = guards(revision, sums)
+    original_base = base
+    module_dir = remote + '-modules'
     try:
         ssh(base + '''cat /build_info /proc/cmdline /proc/sys/kernel/panic /proc/mounts
 cat /proc/mtd
@@ -128,6 +181,24 @@ ip route show
 cat /sys/class/net/lan1/carrier
 dmesg
 ''' + idle_guards(), output / 'baseline.log')
+        if update:
+            after, active_sums, updates, payload = update
+            stage = base + idle_guards() + f'''umask 077
+test ! -e {module_dir}
+mkdir -m 700 {module_dir}
+mkdir {module_dir}/old {module_dir}/new
+tar -xf - -C {module_dir}/new
+'''
+            # Verify all new bytes before replacing any installed RAM module.
+            for path, data in updates.items():
+                stage += f"echo '{hashlib.sha256(data).hexdigest()}  {module_dir}/new/{Path(path).name}' | sha256sum -c\n"
+            for path in updates:
+                name = Path(path).name
+                stage += f'cp {path} {module_dir}/old/{name}\ncp {module_dir}/new/{name} {path}\n'
+            ssh(stage, output / 'module-stage.log', payload)
+            base = guards(revision, active_sums)
+            run.update(module_source_revision=after, module_artifact=str(args.modules_from.resolve()),
+                       module_backup=module_dir, updated_modules=list(updates))
         if args.action != 'status':
             # All writes below are to verified RAM mounts or the runtime sysctl.
             stage = base + idle_guards() + f'''umask 077
@@ -178,6 +249,23 @@ dmesg
                 run['input_cleanup'] = 'passed'
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
                 run['input_cleanup'] = str(error)
+                run['status'] = 'failed'
+        if run['postflight'] == 'passed' and 'module_backup' in run:
+            try:
+                restore = base + idle_guards()
+                old = {p: h for h, p in (line.split() for line in sums.splitlines())}
+                for path in run['updated_modules']:
+                    restore += f"echo '{old[path]}  {module_dir}/old/{Path(path).name}' | sha256sum -c\n"
+                for path in run['updated_modules']:
+                    restore += f'cp {module_dir}/old/{Path(path).name} {path}\n'
+                restore += original_base
+                for path in run['updated_modules']:
+                    restore += f'rm {module_dir}/old/{Path(path).name} {module_dir}/new/{Path(path).name}\n'
+                restore += f'rmdir {module_dir}/old {module_dir}/new {module_dir}\n'
+                ssh(restore, output / 'module-restore.log')
+                run['module_restore'] = 'passed'
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+                run['module_restore'] = str(error)
                 run['status'] = 'failed'
         serial.seek(start)
         (output / 'serial.log').write_bytes(serial.read())

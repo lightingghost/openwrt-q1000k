@@ -96,6 +96,8 @@ int an7581_xpon_mac_stop(u32 controls, bool hold)
 		udelay(1);
 	}
 fault:
+	pr_err_ratelimited("an7581-xpon: stop failed: %d controls=%#x hold=%u readback=%#x done=%#x\n",
+			   ret, controls, hold, value, done);
 	xpon->mac_fault = true;
 out:
 	write_unlock_irqrestore(&xpon_lock, flags);

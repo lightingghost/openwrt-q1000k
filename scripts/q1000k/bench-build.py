@@ -145,6 +145,10 @@ def main():
                     raise ValueError('Missing/ambiguous module: ' + name)
                 paths.append(str(modules[0].relative_to(root)))
             (output / 'runtime-sha256sums').write_text(''.join(digest(root / p) + '  /' + p + '\n' for p in paths))
+            for path in paths:
+                target = output / 'runtime' / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / path, target)
             record.update(status='passed', image=str(output / IMAGE), sha256=digest(output / IMAGE))
         except BaseException as error:
             record.update(status='failed', error=str(error))

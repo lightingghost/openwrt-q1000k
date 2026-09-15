@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <assert.h>
+#include <stdio.h>
+#define pr_err(...) do { if (0) fprintf(stderr, __VA_ARGS__); } while (0)
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>

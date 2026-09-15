@@ -64,6 +64,49 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(RUN.SSH[-1], 'root@192.168.255.1')
         self.assertNotIn('192.168.1.1', ' '.join(RUN.SSH))
 
+class ModuleRetryTests(unittest.TestCase):
+    def test_module_retry_checks_kernel_sources_dependencies_and_payloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old, new = Path(directory) / 'old', Path(directory) / 'new'
+            for path, revision in ((old, 'a' * 40), (new, 'b' * 40)):
+                path.mkdir()
+                (path / 'selection.json').write_text(__import__('json').dumps({'revision': revision}))
+                (path / 'kernel.config').write_text('same kernel')
+            names = ['/usr/sbin/q1000k-pon-bench', '/lib/q1000k-xgspon/common.sh',
+                     '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci']
+            names += ['/lib/modules/6.18.44/' + (n.replace('_', '-') if n == 'q1000k_pon_control' else n)
+                      + '.ko' for n in RUN.MODULES]
+            sums = ''.join('a' * 64 + '  ' + n + '\n' for n in names)
+            updated = sums
+            for name in ('airoha_ecnt_xpon.ko', 'xpon_10g.ko'):
+                path = new / 'runtime/lib/modules/6.18.44' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                data = b'\x7fELFfixture' + name.encode()
+                path.write_bytes(data)
+                updated = updated.replace('a' * 64 + '  /lib/modules/6.18.44/' + name,
+                                          hashlib.sha256(data).hexdigest() + '  /lib/modules/6.18.44/' + name)
+            (new / 'runtime-sha256sums').write_text(updated)
+            with patch.object(RUN.subprocess, 'check_output', return_value='scripts/q1000k/bench-run.py\n'):
+                result = RUN.module_update(old, new, sums)
+                self.assertEqual(len(result[2]), 2)
+                (new / 'kernel.config').write_text('different kernel')
+                with self.assertRaisesRegex(ValueError, 'kernel configuration'):
+                    RUN.module_update(old, new, sums)
+                (new / 'kernel.config').write_text('same kernel')
+                (new / 'runtime-sha256sums').write_text(updated.replace(
+                    'a' * 64 + '  /lib/modules/6.18.44/phy_10g.ko',
+                    'b' * 64 + '  /lib/modules/6.18.44/phy_10g.ko'))
+                with self.assertRaisesRegex(ValueError, 'dependency changed'):
+                    RUN.module_update(old, new, sums)
+                (new / 'runtime-sha256sums').write_text(updated)
+                (new / 'runtime/lib/modules/6.18.44/xpon_10g.ko').write_bytes(b'corrupt')
+                with self.assertRaisesRegex(ValueError, 'hash/format'):
+                    RUN.module_update(old, new, sums)
+            with patch.object(RUN.subprocess, 'check_output', return_value='target/linux/airoha/patches-6.18/new.patch\n'):
+                with self.assertRaisesRegex(ValueError, 'new RAM boot'):
+                    RUN.module_update(old, new, sums)
+
+
 BUILD_SPEC = importlib.util.spec_from_file_location('bench_build', ROOT / 'scripts/q1000k/bench-build.py')
 BUILD = importlib.util.module_from_spec(BUILD_SPEC)
 BUILD_SPEC.loader.exec_module(BUILD)

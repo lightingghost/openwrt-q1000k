@@ -96,6 +96,9 @@ int q1000k_pipeline_shutdown(void)
 fail:
 	q1000k_pipeline.error = ret;
 	q1000k_pipeline_contain();
+	pr_err("q1000k: shutdown failed after stage %u: %d retired=%#x containment=%d\n",
+	       q1000k_pipeline.stage, ret, q1000k_pipeline.retired,
+	       q1000k_pipeline.containment_error);
 out:
 	mutex_unlock(&q1000k_pipeline_lock);
 	return ret;
@@ -228,6 +231,8 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 fail:
 	q1000k_pipeline.error = ret;
 	q1000k_pipeline_contain();
+	pr_err("q1000k: reconfigure failed after stage %u: %d containment=%d\n",
+	       q1000k_pipeline.stage, ret, q1000k_pipeline.containment_error);
 out:
 	mutex_unlock(&q1000k_pipeline_lock);
 	return ret;
@@ -281,6 +286,8 @@ int q1000k_pipeline_activate_checked(bool transmit, int (*ready)(void *), void *
 fail:
 	q1000k_pipeline.error = ret;
 	q1000k_pipeline_contain();
+	pr_err("q1000k: activation failed after stage %u: %d containment=%d\n",
+	       q1000k_pipeline.stage, ret, q1000k_pipeline.containment_error);
 out:
 	mutex_unlock(&q1000k_pipeline_lock);
 	return ret;
