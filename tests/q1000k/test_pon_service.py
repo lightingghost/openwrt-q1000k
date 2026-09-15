@@ -47,6 +47,11 @@ case "$*" in
 *identity.registration_id) printf '%s' "$TEST_REG" ;;
 *identity.equipment_id) printf '%s\n' "$TEST_EQUIPMENT" ;;
 *identity.omci_version) printf '%s\n' "$TEST_VERSION" ;;
+*identity.hardware_version) printf '%s\n' "$TEST_HARDWARE" ;;
+*identity.software_version_a) printf '%s\n' "$TEST_SOFTWARE_A" ;;
+*identity.software_version_b) printf '%s\n' "$TEST_SOFTWARE_B" ;;
+*identity.logical_password) printf '%s\n' "$TEST_LOGICAL_PASSWORD" ;;
+*identity.active_bank) printf '%s\n' "$TEST_BANK" ;;
 esac
 ''').chmod(0o755)
         # These absolute fixture programs replace every loader/CLI invocation;
@@ -136,6 +141,24 @@ else:
         if self.env['TEST_REG']:
             self.assertNotIn(self.env['TEST_REG'], out + err)
         return err
+
+    def test_separate_presentation_and_short_registration_reach_the_loader(self):
+        self.env.update(TEST_HARDWARE='BGW320-500_2.1', TEST_SOFTWARE_A='BGW320_4.27.7',
+                        TEST_SOFTWARE_B='other-version', TEST_LOGICAL_PASSWORD='secret',
+                        TEST_BANK='1', TEST_REG='0123')
+        p = self.running()
+        p.terminate()
+        out, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0, err)
+        args = next(c[2:] for c in self.calls() if c[:2] == ['insmod', 'xpon_10g'])
+        params = dict(arg.split('=', 1) for arg in args)
+        self.assertEqual(params['pon_reg_id'], '0123' + '00' * 34)
+        for key, value in [('hardware_version', 'BGW320-500_2.1'), ('software0', 'BGW320_4.27.7'),
+                           ('software1', 'other-version'), ('logical_password', 'secret')]:
+            self.assertEqual(params['pon_' + key + '_hex'], value.encode().hex())
+        self.assertEqual(params['pon_active_bank'], '1')
+        self.assertNotIn('secret', out + err)
+        self.assertEqual([c[1] for c in self.calls() if c[0] == 'rmmod'], MODULES[::-1])
 
     def test_preflight_never_loads_modules(self):
         for key, bad in [('TEST_ENABLED', '0'), ('TEST_LOWER', ''), ('TEST_LOWER', '../eth2'),

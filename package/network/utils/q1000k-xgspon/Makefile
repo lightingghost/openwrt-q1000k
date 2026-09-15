@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -30,10 +30,11 @@ define Build/Compile
 endef
 
 define Package/q1000k-xgspon/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/config $(1)/lib/q1000k-xgspon
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/config $(1)/lib/q1000k-xgspon $(1)/usr/libexec
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/q1000k-pon-factory $(1)/usr/sbin/
 	$(INSTALL_BIN) ./files/q1000k-xgspon $(1)/usr/sbin/
 	$(INSTALL_CONF) ./files/q1000k-xgspon.config $(1)/etc/config/q1000k-xgspon
+	$(INSTALL_BIN) ./files/omci-config $(1)/usr/libexec/q1000k-omci-config
 	$(INSTALL_DATA) ./files/common.sh $(1)/lib/q1000k-xgspon/
 endef
 

@@ -70,27 +70,7 @@ load_module() {
 	owned_modules="$module $owned_modules"
 }
 
-identity_text_hex() {
-	local text hex
-	# Keep trailing value newlines for validation. Remove only UCI's one
-	# output newline; command substitution must not trim the value itself.
-	text=$(uci -q get "q1000k-xgspon.identity.$1"; printf '.')
-	text=${text%.}
-	case "$text" in
-		*'
-') text=${text%?} ;;
-		'') return 0 ;;
-		*) return 1 ;;
-	esac
-	[ -n "$text" ] || return 0
-	[ "${#text}" -le "$2" ] && printf '%s\n' "$text" | grep -Eq '^[ -~]+$' || return 1
-	# Reject embedded newlines even if each line separately matches grep.
-	case "$text" in *'
-'*) return 1 ;; esac
-	hex=$(printf '%s' "$text" | hexdump -v -e '1/1 "%02x"') || return 1
-	[ "${#hex}" = "$(( ${#text} * 2 ))" ] || return 1
-	printf '%s' "$hex"
-}
+
 
 controller_ready() {
 	local data schema mode firmware calibrated mcu error tx
@@ -140,11 +120,9 @@ read_identity
 read_firmware
 [ "$identity_valid" = 1 ] && [ "$factory_available" = 1 ] &&
 	[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Validated identity, factory calibration and OEM firmware are required.'
-registration=$(uci -q get q1000k-xgspon.identity.registration_id)
-[ "${#registration}" = 72 ] && printf '%s\n' "$registration" | grep -Eq '^[0-9A-Fa-f]{72}$' ||
-	fail 'Registration ID must contain exactly 72 hexadecimal digits.'
-equipment_hex=$(identity_text_hex equipment_id 20) || fail 'OMCI equipment ID must be at most 20 printable ASCII bytes.'
-version_hex=$(identity_text_hex omci_version 14) || fail 'OMCI version must be at most 14 printable ASCII bytes.'
+registration=
+identity_options || fail 'PON identity configuration is invalid.'
+[ -n "$registration" ] || fail 'An explicit registration ID is required.'
 lower=$(uci -q get q1000k-xgspon.service.lower)
 [ -n "$lower" ] && [ "${#lower}" -le 15 ] && printf '%s\n' "$lower" | grep -Eq '^[A-Za-z0-9_.-]+$' ||
 	fail 'An explicit native PON lower device is required.'
@@ -169,8 +147,8 @@ for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_x
 	load_module "$module"
 done
 set -- "wan_mac=$wan_mac" "pon_serial=$serial" "pon_reg_id=$registration" "pon_lower=$lower"
-[ -z "$equipment_hex" ] || set -- "$@" "pon_equipment_id_hex=$equipment_hex"
-[ -z "$version_hex" ] || set -- "$@" "pon_omci_version_hex=$version_hex"
+# identity_params contains fixed names and validated hex/scalars only.
+set -- "$@" $identity_params
 load_module xpon_10g "$@"
 registration=
 health || fail 'MAC/OMCI startup verification failed.'

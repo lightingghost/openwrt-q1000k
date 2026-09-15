@@ -50,6 +50,11 @@ int main(void)
     assert(!config_value(config_find("olt-profile-force"),"none",value,&length) && value[0]==0);
     assert(config_value(config_find("olt-profile"),"none",value,&length)==-EINVAL);
     assert(!config_value(config_find("onu-type"),"sfu",value,&length) && value[0]==1);
+    assert(!config_value(config_find("hardware-version"),"BGW320-500_2.1",value,&length));
+    assert(!config_value(config_find("active-bank"),"1",value,&length) && value[0]==1);
+    assert(config_value(config_find("committed-bank"),"2",value,&length)==-EINVAL);
+    assert(!config_value(config_find("logical-password"),"",value,&length) && length==0);
+    assert(config_value(config_find("logical-onu-id"),"1234567890123456789012345",value,&length)==-EINVAL);
     request_start(&c,OMCI_CMD_GET,false);
     nlh=reply(&c,data);
     mnl_attr_put_u32(nlh,OMCI_ATTR_DEV_ID,0);

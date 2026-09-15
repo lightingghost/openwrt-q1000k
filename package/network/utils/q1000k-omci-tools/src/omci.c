@@ -307,6 +307,7 @@ static int print_mib(FILE *out, struct client *c, uint32_t *next)
 		json_string(out, mnl_attr_get_payload(name), mnl_attr_get_payload_len(name) - 1);
 	else
 		fputs("null", out);
+	if (class == 256) fputs(",\"credentials_redacted\":true", out);
 	fputs(",\"data_hex\":", out);
 	json_hex(out, mnl_attr_get_payload(data), mnl_attr_get_payload_len(data));
 	fputc('}', out);
@@ -321,8 +322,14 @@ static const char *const profiles[] = {
 static const char *const onu_types[] = { "other", "sfu", "hgu", "mdu", "sbu", "mtu", "cbu" };
 static const struct config configs[] = {
 	{ "serial", OMCI_CONFIG_SERIAL_NUMBER, 8, false, false },
-	{ "vendor", OMCI_CONFIG_VENDOR_ID, 4, true, false },
+	{ "vendor", OMCI_CONFIG_VENDOR_ID, 4, true, true },
 	{ "version", OMCI_CONFIG_VERSION, 14, true, true },
+	{ "hardware-version", OMCI_CONFIG_HARDWARE_VERSION, 14, true, true },
+	{ "sync-circuit-pack", OMCI_CONFIG_SYNC_CIRCUIT_PACK, 1, false, true },
+	{ "active-bank", OMCI_CONFIG_ACTIVE_BANK, 1, false, true },
+	{ "committed-bank", OMCI_CONFIG_COMMITTED_BANK, 1, false, true },
+	{ "logical-onu-id", OMCI_CONFIG_LOGICAL_ONU_ID, 24, true, true },
+	{ "logical-password", OMCI_CONFIG_LOGICAL_PASSWORD, 12, true, true },
 	{ "equipment", OMCI_CONFIG_EQUIPMENT_ID, 20, true, true },
 	{ "software0", OMCI_CONFIG_SOFTWARE_VERSION_0, 14, true, true },
 	{ "software1", OMCI_CONFIG_SOFTWARE_VERSION_1, 14, true, true },
@@ -350,11 +357,19 @@ static int config_value(const struct config *config, const char *input, unsigned
 		return -EOPNOTSUPP;
 	if (config->text) {
 		*length = strlen(input);
-		if (!*length || *length > config->limit)
+		if ((!*length && config->key != OMCI_CONFIG_LOGICAL_ONU_ID &&
+		     config->key != OMCI_CONFIG_LOGICAL_PASSWORD) || *length > config->limit)
 			return -EINVAL;
 		for (size_t i = 0; i < *length; i++)
 			if ((unsigned char)input[i] < 32 || (unsigned char)input[i] >= 127)
 				return -EINVAL;
+		if (config->key == OMCI_CONFIG_VENDOR_ID) {
+			if (*length != 4) return -EINVAL;
+			for (size_t i = 0; i < 4; i++)
+				if (!((input[i] >= 'A' && input[i] <= 'Z') ||
+				      (input[i] >= 'a' && input[i] <= 'z') ||
+				      (input[i] >= '0' && input[i] <= '9'))) return -EINVAL;
+		}
 		memcpy(value, input, *length);
 	} else {
 		const char *const *names = NULL;
@@ -388,7 +403,10 @@ static void usage(FILE *out)
 	      "  set KEY VALUE                Apply validated runtime configuration\n"
 	      "Keys: serial, vendor, version, equipment, software0, software1, enabled,\n"
 	      "      onu-type, uni-count, olt-profile, olt-profile-force, omcc-version\n"
-	      "Serial and vendor are read-only; registration identity belongs to the loader.\n"
+	      "      hardware-version, sync-circuit-pack, active-bank, committed-bank,\n"
+	      "      logical-onu-id, logical-password (banks: 0=A, 1=B).\n"
+	      "  config list|get|set|clear|validate   Staged UCI identity (no module needed)\n"
+	      "Serial and registration are configured with config set; applied at next startup.\n"
 	      "Default device ID: 0. Output is JSON; 64-bit counters are decimal strings.\n"
 	      "IDs accept decimal or 0x-prefixed hex. No module loading or MIB reset.\n", out);
 	fputs("Profiles: generic, auto, nokia, dasan, huawei, fiberhome, zte; force also accepts none.\n"
@@ -496,6 +514,11 @@ int main(int argc, char **argv)
 	FILE *out;
 	int ret;
 
+	if (argc >= 2 && !strcmp(argv[1], "config")) {
+		execv("/usr/libexec/q1000k-omci-config", argv + 1);
+		perror("q1000k-omci config");
+		return 1;
+	}
 	if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
 		usage(stdout); return 0;
 	}

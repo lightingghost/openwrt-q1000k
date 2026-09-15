@@ -1,0 +1,49 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Staging only: no module, controller, network or bootloader operations.
+. /lib/q1000k-xgspon/common.sh
+umask 077
+command=$1
+shift 2>/dev/null || exit 2
+error() { echo "$1" >&2; exit 2; }
+case "$command" in
+	list)
+		[ "$#" = 0 ] || error 'Usage: q1000k-omci config list'
+		json_init
+		for key in $identity_keys; do
+			identity_option_read "$key" || error "Invalid PON identity option: $key"
+			case "$key" in
+				registration_id|logical_password|logical_onu_id)
+					[ -z "$identity_value" ] || identity_value='[redacted]' ;;
+			esac
+			json_add_string "$key" "$identity_value"
+		done
+		json_dump
+		;;
+	get|set|clear)
+		key=$1
+		case " $identity_keys " in *" $key "*) [ -n "$key" ] || error 'Missing key' ;; *) error 'Unknown identity key' ;; esac
+		if [ "$command" = get ]; then
+			[ "$#" = 1 ] || error 'Usage: q1000k-omci config get KEY'
+			identity_option_read "$key" || error 'Invalid stored value'
+			printf '%s\n' "$identity_value"
+		else
+			if [ "$command" = set ]; then
+				[ "$#" = 2 ] || error 'Usage: q1000k-omci config set KEY VALUE'
+				identity_option_valid "$key" "$2" || error "Invalid PON identity option: $key"
+				uci -q set "q1000k-xgspon.identity.$key=$2" || exit 1
+			else
+				[ "$#" = 1 ] || error 'Usage: q1000k-omci config clear KEY'
+				uci -q set "q1000k-xgspon.identity.$key=" || exit 1
+			fi
+			uci -q commit q1000k-xgspon || exit 1
+			echo 'Saved; takes effect at the next explicit PON stack startup.'
+		fi
+		;;
+	validate)
+		[ "$#" = 0 ] || error 'Usage: q1000k-omci config validate'
+		identity_options || exit 1
+		echo '{"valid":true,"activation":"next-explicit-startup"}'
+		;;
+	*) error "Commands: list, get KEY, set KEY VALUE, clear KEY, validate. Keys: $identity_keys" ;;
+esac

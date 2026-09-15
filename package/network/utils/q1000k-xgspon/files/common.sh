@@ -231,3 +231,66 @@ xgspon_validate() {
 	json_dump
 	[ "$identity_valid" = 1 ]
 }
+
+# Identity schema shared by the staged OMCI CLI and both launchers.
+identity_keys='serial vendor_id equipment_id hardware_version sync_circuit_pack software_version_a software_version_b active_bank committed_bank registration_id logical_onu_id logical_password wan_mac omci_version mib_profile fix_vlans'
+identity_option_valid() {
+	local key="$1" value="$2" maximum
+	case " $identity_keys " in *" $key "*) ;; *) return 1 ;; esac
+	[ -n "$value" ] || return 0
+	case "$value" in *'
+'*) return 1 ;; esac
+	case "$key" in
+		serial) valid_serial "$value" ;;
+		wan_mac) valid_mac "$value" ;;
+		vendor_id) [ "${#value}" = 4 ] && printf '%s\n' "$value" | grep -Eq '^[A-Za-z0-9]{4}$' ;;
+		registration_id)
+			[ "${#value}" -le 72 ] && [ "$(( ${#value} % 2 ))" = 0 ] &&
+				printf '%s\n' "$value" | grep -Eq '^[0-9a-fA-F]+$' ;;
+		sync_circuit_pack|active_bank|committed_bank|fix_vlans) [ "$value" = 0 ] || [ "$value" = 1 ] ;;
+		mib_profile) [ "$value" = native-pptp ] ;;
+		*)
+			case "$key" in
+				equipment_id) maximum=20 ;;
+				logical_onu_id) maximum=24 ;;
+				logical_password) maximum=12 ;;
+				*) maximum=14 ;;
+			esac
+			[ "${#value}" -le "$maximum" ] &&
+				! printf '%s' "$value" | grep -q '[^ -~]'
+			;;
+	esac
+}
+identity_option_read() {
+	# Keep embedded/trailing newlines so they are rejected, not silently stripped.
+	identity_value=$(uci -q get "q1000k-xgspon.identity.$1"; printf '.')
+	identity_value=${identity_value%.}
+	identity_value=${identity_value%'
+'}
+	identity_option_valid "$1" "$identity_value"
+}
+identity_options() {
+	local key param encoded
+	identity_params= registration=
+	for key in $identity_keys; do
+		identity_option_read "$key" || { echo "Invalid PON identity option: $key" >&2; return 1; }
+		[ -n "$identity_value" ] || continue
+		case "$key" in
+			serial|wan_mac|mib_profile) continue ;;
+			registration_id)
+				registration=$identity_value
+				while [ "${#registration}" -lt 72 ]; do registration="${registration}00"; done
+				continue ;;
+			sync_circuit_pack|active_bank|committed_bank|fix_vlans)
+				identity_params="$identity_params pon_$key=$identity_value"
+				continue ;;
+			software_version_a) param=software0 ;;
+			software_version_b) param=software1 ;;
+			omci_version) param=omci_version ;;
+			*) param=$key ;;
+		esac
+		encoded=$(printf '%s' "$identity_value" | hexdump -v -e '1/1 "%02x"') || return 1
+		identity_params="$identity_params pon_${param}_hex=$encoded"
+	done
+	identity_value=
+}

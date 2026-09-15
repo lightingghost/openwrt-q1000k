@@ -10,6 +10,38 @@
 #include <xpon_public_const.h>
 #include "common/q1000k_identity.h"
 
+static char *pon_vendor_id_hex;
+module_param(pon_vendor_id_hex, charp, 0);
+MODULE_PARM_DESC(pon_vendor_id_hex, "Optional OMCI vendor_id, up to 4 ASCII bytes as hex");
+static char *pon_hardware_version_hex;
+module_param(pon_hardware_version_hex, charp, 0);
+MODULE_PARM_DESC(pon_hardware_version_hex, "Optional OMCI hardware_version, up to 14 ASCII bytes as hex");
+static char *pon_software0_hex;
+module_param(pon_software0_hex, charp, 0);
+MODULE_PARM_DESC(pon_software0_hex, "Optional OMCI software0, up to 14 ASCII bytes as hex");
+static char *pon_software1_hex;
+module_param(pon_software1_hex, charp, 0);
+MODULE_PARM_DESC(pon_software1_hex, "Optional OMCI software1, up to 14 ASCII bytes as hex");
+static char *pon_logical_onu_id_hex;
+module_param(pon_logical_onu_id_hex, charp, 0);
+MODULE_PARM_DESC(pon_logical_onu_id_hex, "Optional OMCI logical_onu_id, up to 24 ASCII bytes as hex");
+static char *pon_logical_password_hex;
+module_param(pon_logical_password_hex, charp, 0);
+MODULE_PARM_DESC(pon_logical_password_hex, "Optional OMCI logical_password, up to 12 ASCII bytes as hex");
+static int pon_sync_circuit_pack = -1;
+module_param(pon_sync_circuit_pack, int, 0);
+MODULE_PARM_DESC(pon_sync_circuit_pack, "Optional advertised OMCI sync_circuit_pack: 0 or 1; -1 keeps the native default");
+static int pon_active_bank = -1;
+module_param(pon_active_bank, int, 0);
+MODULE_PARM_DESC(pon_active_bank, "Optional advertised OMCI active_bank: 0 or 1; -1 keeps the native default");
+static int pon_committed_bank = -1;
+module_param(pon_committed_bank, int, 0);
+MODULE_PARM_DESC(pon_committed_bank, "Optional advertised OMCI committed_bank: 0 or 1; -1 keeps the native default");
+
+static int pon_fix_vlans;
+module_param(pon_fix_vlans, int, 0);
+MODULE_PARM_DESC(pon_fix_vlans, "Enable subscriber VLAN-0 normalization (0 or 1)");
+
 static char *wan_mac;
 static char *pon_serial;
 static char *pon_reg_id;
@@ -58,6 +90,7 @@ int q1000k_pon_identity_init(void)
 	memset(&identity_overrides, 0, sizeof(identity_overrides));
 	if (!of_machine_is_compatible("quantum,q1000k-ubi"))
 		return -ENODEV;
+	if (pon_fix_vlans < 0 || pon_fix_vlans > 1) return -EINVAL;
 	if (!wan_mac || !pon_serial || !pon_reg_id)
 		return -ENODATA;
 	if (strlen(wan_mac) != 17 || !mac_pton(wan_mac, mac) ||
@@ -82,6 +115,49 @@ int q1000k_pon_identity_init(void)
 				   sizeof(overrides.version));
 	if (ret < 0) return ret;
 	if (ret) overrides.valid |= OMCI_IDENTITY_F_VERSION;
+	overrides.presentation_source = OMCI_CONFIG_SOURCE_DRIVER;
+	ret = q1000k_identity_text(pon_vendor_id_hex, overrides.vendor_id, sizeof(overrides.vendor_id));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_VENDOR_ID;
+	if (ret) {
+		if (strlen(pon_vendor_id_hex) != 8) return -EINVAL;
+		for (i = 0; i < 4; i++) {
+			u8 c = overrides.vendor_id[i];
+			if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			      (c >= '0' && c <= '9'))) return -EINVAL;
+		}
+		overrides.vendor_source = OMCI_CONFIG_SOURCE_DRIVER;
+	}
+	ret = q1000k_identity_text(pon_hardware_version_hex, overrides.hardware_version, sizeof(overrides.hardware_version));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_HARDWARE_VERSION;
+	ret = q1000k_identity_text(pon_software0_hex, overrides.software_version[0], sizeof(overrides.software_version[0]));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_SOFTWARE_VERSION_0;
+	ret = q1000k_identity_text(pon_software1_hex, overrides.software_version[1], sizeof(overrides.software_version[1]));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_SOFTWARE_VERSION_1;
+	ret = q1000k_identity_text(pon_logical_onu_id_hex, overrides.logical_onu_id, sizeof(overrides.logical_onu_id));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_LOGICAL_ONU_ID;
+	ret = q1000k_identity_text(pon_logical_password_hex, overrides.logical_password, sizeof(overrides.logical_password));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_LOGICAL_PASSWORD;
+	if (pon_sync_circuit_pack < -1 || pon_sync_circuit_pack > 1) return -EINVAL;
+	if (pon_sync_circuit_pack >= 0) {
+		overrides.sync_circuit_pack = pon_sync_circuit_pack;
+		overrides.valid |= OMCI_IDENTITY_F_SYNC_CIRCUIT_PACK;
+	}
+	if (pon_active_bank < -1 || pon_active_bank > 1) return -EINVAL;
+	if (pon_active_bank >= 0) {
+		overrides.active_bank = pon_active_bank;
+		overrides.valid |= OMCI_IDENTITY_F_ACTIVE_BANK;
+	}
+	if (pon_committed_bank < -1 || pon_committed_bank > 1) return -EINVAL;
+	if (pon_committed_bank >= 0) {
+		overrides.committed_bank = pon_committed_bank;
+		overrides.valid |= OMCI_IDENTITY_F_COMMITTED_BANK;
+	}
 	if (strlen(pon_reg_id) != sizeof(registration) * 2 ||
 	    hex2bin(registration, pon_reg_id, sizeof(registration))) {
 		memzero_explicit(registration, sizeof(registration));
@@ -139,6 +215,28 @@ int q1000k_pon_get_omci_overrides(struct omci_identity *identity)
 		memcpy(identity->version, identity_overrides.version, sizeof(identity->version));
 		identity->version_source = OMCI_CONFIG_SOURCE_DRIVER;
 	}
+	if (identity_overrides.valid & OMCI_IDENTITY_F_VENDOR_ID)
+		memcpy(identity->vendor_id, identity_overrides.vendor_id, sizeof(identity->vendor_id));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_HARDWARE_VERSION)
+		memcpy(identity->hardware_version, identity_overrides.hardware_version, sizeof(identity->hardware_version));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_SOFTWARE_VERSION_0)
+		memcpy(identity->software_version[0], identity_overrides.software_version[0], sizeof(identity->software_version[0]));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_SOFTWARE_VERSION_1)
+		memcpy(identity->software_version[1], identity_overrides.software_version[1], sizeof(identity->software_version[1]));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_LOGICAL_ONU_ID)
+		memcpy(identity->logical_onu_id, identity_overrides.logical_onu_id, sizeof(identity->logical_onu_id));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_LOGICAL_PASSWORD)
+		memcpy(identity->logical_password, identity_overrides.logical_password, sizeof(identity->logical_password));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_SYNC_CIRCUIT_PACK)
+		identity->sync_circuit_pack = identity_overrides.sync_circuit_pack;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_ACTIVE_BANK)
+		identity->active_bank = identity_overrides.active_bank;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_COMMITTED_BANK)
+		identity->committed_bank = identity_overrides.committed_bank;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_VENDOR_ID)
+		identity->vendor_source = OMCI_CONFIG_SOURCE_DRIVER;
+	if (identity_overrides.valid & ~0x1fU)
+		identity->presentation_source = OMCI_CONFIG_SOURCE_DRIVER;
 	identity->valid |= identity_overrides.valid;
 	return 0;
 }
@@ -150,4 +248,9 @@ char get_onutype(void)
 	 * MAC startup validates the board, identity and mode before calling this.
 	 */
 	return (XMCS_IF_WAN_DETECT_MODE_XGSPON << 4) | 1;
+}
+
+int q1000k_pon_fix_vlans(void)
+{
+	return identity_ready && pon_fix_vlans;
 }

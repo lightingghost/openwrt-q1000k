@@ -158,13 +158,18 @@ static int omci_normalize_password(const u8 *data, size_t len,
 static int omci_normalize_string(const u8 *data, size_t len, u8 *output,
 				 size_t output_len)
 {
-	const u8 *trimmed = data;
+	size_t i;
 
-	len = omci_trim_input(&trimmed, len);
+	while (len && (data[len - 1] == 0 || data[len - 1] == 0xff))
+		len--;
+	/* sysfs adds a newline; printable spaces are part of the advertised ID. */
+	if (len && data[len - 1] == '\n') len--;
 	if (!len || len > output_len)
 		return -EINVAL;
+	for (i = 0; i < len; i++)
+		if (data[i] < 0x20 || data[i] > 0x7e) return -EINVAL;
 	memset(output, 0, output_len);
-	memcpy(output, trimmed, len);
+	memcpy(output, data, len);
 	return 0;
 }
 
@@ -275,6 +280,20 @@ int omci_identity_normalize_config(u16 key, const void *value, size_t len,
 	if (!value || !output || !output_len)
 		return -EINVAL;
 	switch (key) {
+	case OMCI_CONFIG_LOGICAL_ONU_ID:
+	case OMCI_CONFIG_LOGICAL_PASSWORD: {
+		size_t capacity = key == OMCI_CONFIG_LOGICAL_ONU_ID ? 24 : 12;
+		size_t i;
+		const u8 *text = value;
+		if (len > capacity || *output_len < capacity) return -EINVAL;
+		for (i = 0; i < len && text[i]; i++)
+			if (text[i] < 0x20 || text[i] > 0x7e) return -EINVAL;
+		if (i < len && memchr_inv(text + i, 0, len - i)) return -EINVAL;
+		memset(output, 0, capacity);
+		memcpy(output, value, len);
+		*output_len = capacity;
+		return 0;
+	}
 	case OMCI_CONFIG_SERIAL_NUMBER:
 		required = 8;
 		if (*output_len < required)

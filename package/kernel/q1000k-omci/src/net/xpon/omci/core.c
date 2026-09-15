@@ -676,11 +676,17 @@ static int omci_put_mib_object(struct sk_buff *msg,
 			       const struct omci_mib_object *object,
 			       u32 next_index, const char *name)
 {
+	u8 public_data[OMCI_MAX_ATTR_DATA];
+
+	memcpy(public_data, object->data, sizeof(public_data));
+	/* Public MIB diagnostics never disclose logical authentication credentials. */
+	if (object->class_id == OMCI_CLASS_ONU_G)
+		memset(public_data + 32, 0, 36);
 	if (nla_put_u16(msg, OMCI_ATTR_CLASS_ID, object->class_id) ||
 	    nla_put_u16(msg, OMCI_ATTR_ENTITY_ID, object->entity_id) ||
 	    nla_put_u16(msg, OMCI_ATTR_ATTR_MASK, object->attr_mask) ||
 	    nla_put(msg, OMCI_ATTR_ATTR_DATA, sizeof(object->data),
-		    object->data) ||
+		    public_data) ||
 	    nla_put_u8(msg, OMCI_ATTR_ORIGIN, object->origin) ||
 	    nla_put_u32(msg, OMCI_ATTR_INDEX, next_index) ||
 	    (name && nla_put_string(msg, OMCI_ATTR_NAME, name)))
@@ -1373,7 +1379,8 @@ omci_device_register(struct xpon_device *xpon, u32 capabilities,
 {
 	struct omci_device *odev;
 
-	if (!xpon || !ops || !ops->xmit)
+	if (!xpon || !ops || !ops->xmit || ops->uni_count > 16 ||
+	    ops->onu_type > OMCI_ONU_TYPE_CBU)
 		return ERR_PTR(-EINVAL);
 	if (xpon->omci)
 		return ERR_PTR(-EBUSY);
@@ -1574,6 +1581,38 @@ void omci_device_set_identity_info(struct omci_device *odev,
 					     identity->equipment_id,
 					     sizeof(identity->equipment_id),
 					     identity->equipment_source);
+	if (identity->valid & OMCI_IDENTITY_F_HARDWARE_VERSION)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_HARDWARE_VERSION,
+			identity->hardware_version, sizeof(identity->hardware_version),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_SOFTWARE_VERSION_0)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_SOFTWARE_VERSION_0,
+			identity->software_version[0], sizeof(identity->software_version[0]),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_SOFTWARE_VERSION_1)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_SOFTWARE_VERSION_1,
+			identity->software_version[1], sizeof(identity->software_version[1]),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_SYNC_CIRCUIT_PACK)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_SYNC_CIRCUIT_PACK,
+			&identity->sync_circuit_pack, sizeof(identity->sync_circuit_pack),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_ACTIVE_BANK)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_ACTIVE_BANK,
+			&identity->active_bank, sizeof(identity->active_bank),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_COMMITTED_BANK)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_COMMITTED_BANK,
+			&identity->committed_bank, sizeof(identity->committed_bank),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_LOGICAL_ONU_ID)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_LOGICAL_ONU_ID,
+			identity->logical_onu_id, sizeof(identity->logical_onu_id),
+			identity->presentation_source);
+	if (identity->valid & OMCI_IDENTITY_F_LOGICAL_PASSWORD)
+		omci_agent_config_set_source(odev, OMCI_CONFIG_LOGICAL_PASSWORD,
+			identity->logical_password, sizeof(identity->logical_password),
+			identity->presentation_source);
 }
 EXPORT_SYMBOL_GPL(omci_device_set_identity_info);
 

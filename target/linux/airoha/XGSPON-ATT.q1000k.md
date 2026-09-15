@@ -49,16 +49,46 @@ This is tested locally, not against AT&T. Combined class 84/171 pipelines and
 unicast key exchange are implemented, but actual OLT provisioning, encrypted
 traffic and successful DHCP still need hardware acceptance. See the
 [VLAN contract](XGSPON-VLAN.q1000k.md).
-The device remains restricted to read-only access, with no firmware flashing.
+The current RAM bench permits bounded tests with TX inhibited; firmware flashing
+remains prohibited. Connected-fiber receive testing does not authorize registration.
 
-The supervisor accepts optional `identity.equipment_id` (20 printable ASCII
-bytes maximum) and `identity.omci_version` (14 bytes maximum) before PON
-startup. The latter feeds ONU-G and both software-image version fields in the
-generic core. Both default to empty; no values are inferred from BGW320-500 or
-the optical module. Use values established for the subscriber's own service
-if overrides are needed. These settings do not replace the serial or the
-36-byte registration ID. See the
-[supervisor configuration](../../../package/network/utils/q1000k-xgspon-service/README.md).
+## Identity and 8311 compatibility settings
+
+Vendor r72/core r15 and the OMCI CLI/LuCI expose every PON identity control
+shown in the user's 8311 screenshot. See the [complete setting table and CLI
+examples](../../../package/network/utils/q1000k-omci-tools/README.md).
+The source for the screenshot's meanings is the
+[8311 firmware builder](https://github.com/djGrrr/8311-was-110-firmware-builder/blob/master/README.md).
+The BGW320-500 guide gives these reference values:
+
+- Equipment ID: `iONT320500X`.
+- Hardware version: `BGW320-500_2.1`, Circuit Pack synchronization enabled.
+- Software A/B: `BGW320_4.27.7` is an example, not an assertion about this
+  subscriber's current firmware. Both fields are independently configurable.
+- ONT ID: obtain the complete `HUMA…` identity from the user's own gateway;
+  it is not available to this development task and has not been invented.
+
+No subscriber values are baked into the image. The registration and logical
+credentials remain explicit and unset. An OMCI vendor override does not alter
+the loader's PLOAM serial. Software bank overrides change only reported ME7
+metadata; there is no flash or boot selection operation.
+
+The `prx300_1U.ini` role maps to `mib_profile=native-pptp`: the hardware provider
+pins SFU and one Ethernet UNI and omits the imported VEIP defaults. Foreign
+PRX300 MIB files and firmware environment commands are not imported.
+
+`fix_vlans=1` adds the priority-tagged VLAN-0 compatibility at the subscriber
+boundary while preserving the OLT's service mapping, filters, drops and queues.
+It tries untagged rules first, then retries an unmatched untagged upstream frame
+as PCP-0/VLAN-0; downstream it strips a lone 802.1Q VLAN-0 tag. This is narrower
+than 8311's multi-service remapping. It does not rewrite arbitrary nonzero WAN
+VLANs or provision TV/voice. Actual AT&T class 84/171/GEM provisioning remains
+necessary to establish whether this line needs any additional adaptation.
+
+The new RAM bench can use configured OMCI presentation fields for local MIB
+inspection, but deliberately retains its synthetic PLOAM serial and registration
+ID. Receive-only testing does not send any identity to the OLT and cannot prove
+AT&T authentication, O5, encryption, OMCI exchange or DHCP.
 
 ## Local inactive WAN configuration
 

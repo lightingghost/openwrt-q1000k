@@ -54,6 +54,8 @@ static int __skb_vlan_pop(struct sk_buff *skb,u16 *tci) {
     memmove(skb->data+12,skb->data+16,skb->len-16); skb->len-=4;
     skb->protocol=get_unaligned_be16(skb->data+12); return 0;
 }
+static bool fixture_fix_vlans;
+static int q1000k_pon_fix_vlans(void) { return fixture_fix_vlans; }
 /* SERVICES */
 static void make_tag(struct sk_buff *skb,u16 vid,u8 pcp)
 {
@@ -205,6 +207,14 @@ int main(void)
         skb.tci=5<<13; assert(!q1000k_services_tx(&skb) && !skb.vlan && skb.len==64);
         assert(get_unaligned_be16(skb.data+14)==((5<<13)|123));
         assert(!q1000k_services_rx(&skb,500) && skb.len==64 && get_unaligned_be16(skb.data+14)==(5<<13));
+        /* Optional AT&T priority-tag fallback uses the same OLT mapping. */
+        memset(&skb,0,sizeof(skb)); skb.len=60; skb.data[12]=8; skb.data[13]=6;
+        assert(q1000k_services_tx(&skb)==-ENOENT);
+        fixture_fix_vlans=true;
+        assert(!q1000k_services_tx(&skb) && get_unaligned_be16(skb.data+14)==123);
+        assert(!q1000k_services_rx(&skb,500) && skb.len==60 && skb.data[12]==8);
+        make_tag(&skb,42,0); assert(q1000k_services_tx(&skb)==-ENOENT);
+        fixture_fix_vlans=false;
         /* Class 84 sees the bridge-side tag, in both packet directions. */
         {
             struct omci_service_config pipeline=tag, pair[2];

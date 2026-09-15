@@ -5,6 +5,7 @@
 #define Q1000K_PON_IDENTITY
 struct omci_identity;
 int q1000k_pon_identity_init(void);
+int q1000k_pon_fix_vlans(void);
 int q1000k_pon_get_serial(unsigned char *serial, int len);
 int q1000k_pon_get_registration(unsigned char *registration, int len);
 int q1000k_pon_get_omci_overrides(struct omci_identity *identity);

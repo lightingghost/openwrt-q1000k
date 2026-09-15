@@ -1,61 +1,100 @@
 # q1000k-omci command
 
-`q1000k-omci-tools` installs `/usr/sbin/q1000k-omci`, a userspace management
-client for the `kmod-q1000k-omci` kernel core. It uses Generic Netlink and
-libmnl. It does not replace the in-kernel OMCI agent, bind its raw packet
-observer, load modules or initialize optics. The package remains optional
-and marked BROKEN with the experimental PON stack.
+`q1000k-omci-tools` provides the CLI for the Q1000K kernel OMCI agent. It does
+not load optical modules, start another OMCI daemon, transmit raw PDUs, change
+bootloader variables or perform firmware operations. The package remains
+experimental/BROKEN. Runtime commands require matching Generic Netlink v16.
 
-Examples on an already initialized matching build:
+## Staged identity (also available in LuCI)
+
+These commands work with the stack unloaded. They modify only the
+`q1000k-xgspon.identity` UCI section, using the same validation and parameter
+builder as the supervisor and RAM bench. Each set/clear commits this UCI
+package; it does not activate PON. In the RAM image the configuration is
+volatile. On an installed system it has normal UCI persistence.
+
+```sh
+q1000k-omci config list
+q1000k-omci config get hardware_version
+q1000k-omci config set equipment_id iONT320500X
+q1000k-omci config set hardware_version BGW320-500_2.1
+q1000k-omci config set sync_circuit_pack 1
+q1000k-omci config clear active_bank
+q1000k-omci config validate
+```
+
+`list` redacts registration and logical credentials. An explicit `get KEY`
+returns that configured value, including secrets. `validate` checks syntax
+of all fields; it does not establish completeness, provisioning or optical
+readiness. Empty optional fields restore native defaults on next startup.
+Serial and WAN MAC default to the factory identity in the normal supervisor.
+Registration must be explicitly configured before that supervisor can start.
+
+| UCI/CLI key | Accepted value and effect |
+| --- | --- |
+| `serial` | 4 ASCII vendor letters/digits + 8 hex digits; PLOAM and OMCI serial |
+| `vendor_id` | 4 ASCII letters/digits; OMCI vendor, derived from serial if empty; independent of PLOAM serial |
+| `equipment_id` | Up to 20 printable ASCII bytes; ONU2-G and equipment MEs |
+| `hardware_version` | Up to 14 printable ASCII bytes; ONU-G version |
+| `sync_circuit_pack` | `1` follows hardware version; `0` retains native `OpenWrt` Circuit Pack version; native default `1` |
+| `software_version_a`, `software_version_b` | Independent 14-byte Software Image ME7 versions, instances 0 and 1 |
+| `active_bank`, `committed_bank` | Empty means native A; `0`=A, `1`=B; advertised ME7 metadata only, no boot or flash effect |
+| `registration_id` | 1–36 bytes as 2–72 hex digits, padded with zeros on the right to 36 bytes; empty remains unconfigured |
+| `logical_onu_id` | Up to 24 printable ASCII bytes, ONU-G attribute 10 |
+| `logical_password` | Up to 12 printable ASCII bytes, ONU-G attribute 11; separate from registration ID |
+| `wan_mac` | Nonzero unicast Ethernet address |
+| `mib_profile` | `native-pptp`: one physical Ethernet UNI in SFU mode; no foreign platform MIB file |
+| `fix_vlans` | `1` enables subscriber VLAN-0 normalization; `0` keeps strict OLT rule matching |
+| `omci_version` | Legacy combined 14-byte fallback; separate hardware and software fields take precedence |
+
+For a registration password occupying the final 12 bytes, supply the complete
+36-byte registration value, including the leading padding. Do not use a
+short password expecting it to be automatically moved to the end.
+
+`fix_vlans=1` first tries the native OLT-provisioned class 84/171 rules. An
+unmatched untagged upstream frame can then be classified as VLAN 0, PCP 0,
+through those same rules, filters, queue selection and drop actions. Downstream,
+a lone 802.1Q VLAN-0 tag is removed at the subscriber boundary. Nonzero VLANs,
+double tags and explicit drops are preserved. This covers an untagged Internet
+WAN with priority-tagged provisioning; it is not the full 8311 multi-service
+TV/voice remapper and does not guess optical VLANs.
+
+## Runtime inspection and configuration
 
 ```sh
 q1000k-omci -i pon status
 q1000k-omci -i pon mib
-q1000k-omci -i pon mib 277 0x8003
-q1000k-omci -i pon get serial
-q1000k-omci -i pon get olt-profile
-q1000k-omci -i pon set olt-profile auto
-q1000k-omci -i pon set version Q1000K-test
+q1000k-omci -i pon mib 7 0
+q1000k-omci -i pon get hardware-version
+q1000k-omci -i pon get software0
+q1000k-omci -i pon get vendor
 ```
 
-These are command examples, not instructions to run them during the current
-read-only hardware work. No command was installed or executed on the Q1000K.
-Local tests use a disposable UML kernel and synthetic `pon-test` interface.
+Runtime `get/set` keys: `serial` (read only), `vendor`, `version` (legacy
+combined), `hardware-version`, `equipment`, `software0`, `software1`,
+`sync-circuit-pack`, `active-bank`, `committed-bank`, `logical-onu-id`,
+`logical-password`, `enabled`, `onu-type`, `uni-count`, `olt-profile`,
+`olt-profile-force`, `omcc-version`. Banks and booleans use 0/1. The Q1000K
+provider pins SFU/one UNI; runtime attempts to select another physical model
+are rejected. Runtime changes do not update UCI and disappear on reload.
+Use staged configuration for the next cold startup and its initial MIB.
 
-Use `--help` for all keys. `-d ID` selects a core device ID; the default is ID 0.
-`-i INTERFACE` selects its actual interface index and never falls back to ID 0.
-Only one selector is accepted. IDs accept decimal or `0x` hex. Profiles accept
-`generic`, `auto`, `nokia`, `dasan`, `huawei`, `fiberhome`, `zte`; the forced
-profile also accepts `none`. ONU types accept their UAPI names, such as `sfu`.
-Serial/vendor reads are available, but changing registration identity belongs
-to the module loader. Password/key material has no CLI accessor.
+`-d ID` selects a core device ID (default 0); `-i INTERFACE` selects that
+interface without falling back to ID 0. Only one selector is accepted.
+Profiles accept `generic`, `auto`, `nokia`, `dasan`, `huawei`, `fiberhome`, `zte`;
+forced profile also accepts `none`. IDs accept decimal or `0x` hexadecimal.
 
-Output is JSON; `--json` is accepted explicitly. Unavailable telemetry is
-`null`, and 64-bit counters are decimal strings to retain precision in LuCI.
-`authenticated` describes core session admission. `agent_operational` records
-agent exchanges; neither that flag nor a nonzero `service_rules` count proves
-optical Internet service. `service_rules` counts configured rules, which may
-still be dormant awaiting PLOAM allocation. `service_error` reports a retained
-physical fault or the latest reconciliation error. No key or epoch value is
-exposed in status.
+Runtime output is JSON. Unavailable telemetry is `null`; 64-bit counters are
+decimal strings. `authenticated`, `agent_operational` and `service_rules` do
+not prove Internet access. `service_error` retains physical/reconciliation
+failures. Status has no credentials. MIB diagnostics redact logical credentials
+and mark ONU-G `credentials_redacted:true`; OLT GET responses retain them.
+`mib` is a bounded inspection, not an atomic restart image. Errors return a
+negative errno JSON object, stderr explanation and nonzero exit status.
 
-`mib` walks the live MIB with bounded, monotonically advancing cursors. It is
-an inspection operation, not an atomic backup/export or a restart image.
-Output is buffered until the operation succeeds, so errors do not leave a
-partial JSON array. Configuration writes go through kernel validation and
-return success only after the kernel acknowledges them. They are runtime
-settings, not persistent UCI writes. The command does not offer raw PDU TX,
-MIB reset/delete, optical start, firmware or flash operations.
-
-The client checks the Generic Netlink family version, response command,
-sequence, kernel sender, scalar lengths and malformed/duplicate attributes.
-Socket receives time out after three seconds. Errors produce a negative errno
-JSON object, a stderr explanation and a nonzero exit status.
-
-Validation: `test_pon_omci_cli.py` compiles the actual client parser with UBSan
-and tests malformed replies, integer bounds, named settings, identity write
-rejection and JSON escaping. It needs the staged libmnl header and a host
-libmnl runtime. For the real userspace/kernel boundary, compile this source
-for the host and set `Q1000K_OMCI_CLI` to that absolute executable path when
-running `tests/q1000k/run_omci_core_uml.sh`. The runner creates only a synthetic
-interface inside UML, tests status/MIB/get/set/errors, then unregisters it.
+Host tests cover the actual CLI parser, UCI parser/commits in isolated temporary
+directories, LuCI validators, hex parameter forwarding, byte boundaries,
+credential redaction and malformed input. The disposable UML suite verifies
+the real core, cold identity, MIB reset, wire serialization and netlink redaction.
+For the runtime CLI/netlink boundary, compile the client for the host and set
+`Q1000K_OMCI_CLI` when running `tests/q1000k/run_omci_core_uml.sh`.

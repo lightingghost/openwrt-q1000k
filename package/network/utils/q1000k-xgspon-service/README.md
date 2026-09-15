@@ -6,9 +6,9 @@ by default, and is not selected by the diagnostics configuration. Board PON
 resources remain disabled. It has been tested with simulated modules and
 controller files only. It is not evidence of working optical service.
 
-The current development session permits only read-only device access and
-never flashing. The activation interface below documents future acceptance
-work; it must not be executed under that restriction.
+Hardware work uses an explicitly authorized RAM bench with immutable TX
+inhibition. Never flash during this development session. The normal supervisor
+below is separate from the bounded bench helper and remains disabled there.
 
 ## Configuration and commands
 
@@ -16,13 +16,17 @@ The existing `/etc/config/q1000k-xgspon` contains:
 
 - `identity.serial` and `identity.wan_mac`: empty values use validated factory
   identity. Overrides have the same validation as the diagnostics backend.
-- `identity.registration_id`: an explicit 36-byte registration ID encoded as
-  exactly 72 hexadecimal digits. The supervisor never invents this credential.
+- `identity.registration_id`: an explicit 1–36-byte registration ID encoded as
+  pairs of hexadecimal digits, zero-padded on the right to 36 bytes. The supervisor never invents this credential.
 - `identity.equipment_id`: optional printable ASCII text, at most 20 bytes.
 - `identity.omci_version`: optional printable ASCII text, at most 14 bytes.
   The core applies this to ONU-G version and both software-image versions.
   Empty equipment/version values retain the native Q1000K/OpenWrt defaults;
   the gateway model alone does not establish appropriate override values.
+- Additional vendor, hardware, separate software A/B, Circuit Pack sync, bank
+  metadata, logical credentials, native MIB profile and VLAN-0 settings are
+  documented in the [OMCI CLI contract](../q1000k-omci-tools/README.md).
+  The separate version fields override the legacy combined version.
 - `service.enabled`: defaults to `0`; must explicitly be `1` for startup.
 - `service.lower`: the native PON lower interface, already administratively
   up. The native driver additionally validates its hardware role at attach.

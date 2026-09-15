@@ -23,6 +23,23 @@ int q1000k_omci_telemetry_test(void)
 	unsigned int i;
 	int ret = 0, mode;
 
+	/* MIB diagnostics redact credentials without altering the actual OLT MIB. */
+	{
+		struct omci_mib_object object = { .class_id = OMCI_CLASS_ONU_G };
+		struct nlattr *data;
+		memset(object.data, 'x', sizeof(object.data));
+		msg = alloc_skb(512, GFP_KERNEL);
+		if (!msg) return -ENOMEM;
+		ret = omci_put_mib_object(msg, &object, 0, "ONU-G");
+		data = nla_find((struct nlattr *)msg->data, msg->len, OMCI_ATTR_ATTR_DATA);
+		if (ret || !data || nla_len(data) != OMCI_MAX_ATTR_DATA ||
+		    memchr_inv((u8 *)nla_data(data) + 32, 0, 36) ||
+		    ((u8 *)nla_data(data))[0] != 'x' || object.data[56] != 'x') {
+			kfree_skb(msg);
+			return -EINVAL;
+		}
+		kfree_skb(msg);
+	}
 	odev.ops = &ops;
 	for (mode = 0; mode < 4; mode++) {
 		msg = alloc_skb(256, GFP_KERNEL);

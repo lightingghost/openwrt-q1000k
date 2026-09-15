@@ -28,7 +28,7 @@ class PonIdentityTests(unittest.TestCase):
     def test_validation_cached_identity_and_callers(self):
         source = re.sub(r'^#include[^\n]*\n', '', SRC.read_text(), flags=re.M)
         header = (REPO / 'package/kernel/q1000k-omci/src/include/net/xpon/omci.h').read_text()
-        source = re.search(r'struct omci_identity \{.*?\n\};', header, re.S).group(0) + '\n' + source
+        source = '#define BIT(n) (1U << (n))\n' + '\n'.join(re.findall(r'^#define OMCI_IDENTITY_F_.*$', header, re.M)) + '\n' + re.search(r'struct omci_identity \{.*?\n\};', header, re.S).group(0) + '\n' + source
         mac = BSP.parent / 'xpon-en757x/xpon_10g/src'
         for filename, name in [('pwan/xpon_netif.c', 'get_interface_mac_addr'),
                                ('epon/epon_dev.c', 'get_onu_mac_address'),
@@ -51,8 +51,6 @@ class PonIdentityTests(unittest.TestCase):
 #define OMCI_OLT_VENDOR_ID_LEN 4
 #define OMCI_OLT_VERSION_LEN 14
 #define OMCI_OLT_EQUIPMENT_ID_LEN 20
-#define OMCI_IDENTITY_F_VERSION 8
-#define OMCI_IDENTITY_F_EQUIPMENT_ID 16
 #define OMCI_CONFIG_SOURCE_DRIVER 1
 typedef uint32_t u32;
 typedef uint8_t u8;
@@ -201,6 +199,40 @@ int main(void) {
     assert(!get_interface_mac_addr(out) && !memcmp(out,mac,6));
     assert(!get_onu_mac_address(out) && !memcmp(out,mac,6));
     assert(!getPonMacfromflash(out) && !memcmp(out,mac,6));
+    /* All presentation parameters are validated before identity becomes ready. */
+    {
+        char hex[52];
+        char **params[]={&pon_vendor_id_hex,&pon_hardware_version_hex,&pon_software0_hex,
+            &pon_software1_hex,&pon_logical_onu_id_hex,&pon_logical_password_hex};
+        unsigned int capacity[]={4,14,14,14,24,12};
+        for(unsigned int field=0;field<6;field++) {
+            for(unsigned int n=1;n<=capacity[field]+1;n++) {
+                memset(hex,'7',n*2); hex[n*2]=0;
+                *params[field]=hex;
+                bool valid=n<=capacity[field] && (field || n==4);
+                assert((q1000k_pon_identity_init()==0)==valid);
+                if(valid) {
+                    struct omci_identity presentation={};
+                    assert(!q1000k_pon_get_omci_overrides(&presentation));
+                    assert(presentation.presentation_source==OMCI_CONFIG_SOURCE_DRIVER || field==0);
+                    unsigned char copied[8];
+                    assert(!q1000k_pon_get_serial(copied,8) && !memcmp(copied,sn,8));
+                } else unavailable();
+            }
+            *params[field]=NULL;
+        }
+        int *params_int[]={&pon_sync_circuit_pack,&pon_active_bank,&pon_committed_bank};
+        for(unsigned int field=0;field<3;field++) {
+            for(int value=-2;value<=2;value++) {
+                *params_int[field]=value;
+                assert((q1000k_pon_identity_init()==0)==(value>=-1 && value<=1));
+            }
+            *params_int[field]=-1;
+        }
+        pon_fix_vlans=2; assert(q1000k_pon_identity_init()==-EINVAL);
+        pon_fix_vlans=1; assert(!q1000k_pon_identity_init() && q1000k_pon_fix_vlans());
+        pon_fix_vlans=0; assert(!q1000k_pon_identity_init() && !q1000k_pon_fix_vlans());
+    }
     /* Cached bytes must not alias the module parameter buffers. */
     valid_mac[0]='4'; valid_sn[0]='Z';
     assert(!get_ethaddr(out,6) && !memcmp(out,mac,6));

@@ -16,6 +16,15 @@ struct sk_buff;
 #define OMCI_IDENTITY_F_PASSWORD	BIT(2)
 #define OMCI_IDENTITY_F_VERSION	BIT(3)
 #define OMCI_IDENTITY_F_EQUIPMENT_ID	BIT(4)
+#define OMCI_IDENTITY_F_HARDWARE_VERSION BIT(5)
+#define OMCI_IDENTITY_F_SOFTWARE_VERSION_0 BIT(6)
+#define OMCI_IDENTITY_F_SOFTWARE_VERSION_1 BIT(7)
+#define OMCI_IDENTITY_F_SYNC_CIRCUIT_PACK BIT(8)
+#define OMCI_IDENTITY_F_ACTIVE_BANK BIT(9)
+#define OMCI_IDENTITY_F_COMMITTED_BANK BIT(10)
+#define OMCI_IDENTITY_F_LOGICAL_ONU_ID BIT(11)
+#define OMCI_IDENTITY_F_LOGICAL_PASSWORD BIT(12)
+
 
 /**
  * struct omci_identity - normalized ONU identity and registration data
@@ -43,6 +52,15 @@ struct omci_identity {
 	u8 password_source;
 	u8 version_source;
 	u8 equipment_source;
+	/* Optional OMCI presentation; independent of the PLOAM identity. */
+	u8 presentation_source;
+	u8 software_version[2][14];
+	u8 hardware_version[14];
+	u8 sync_circuit_pack;
+	u8 active_bank;
+	u8 committed_bank;
+	u8 logical_onu_id[24];
+	u8 logical_password[12];
 };
 
 /**
@@ -371,6 +389,8 @@ struct omci_traffic_scheduler_config {
  *	if needed. The fault is permanent for this device registration.
  */
 struct omci_device_ops {
+	/* Nonzero values pin the physical UNI model before the first MIB. */
+	u8 onu_type, uni_count;
 	int (*start)(struct omci_device *odev);
 	void (*stop)(struct omci_device *odev);
 	int (*xmit)(struct omci_device *odev, struct sk_buff *skb,

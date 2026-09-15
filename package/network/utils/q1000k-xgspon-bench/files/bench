@@ -187,6 +187,11 @@ case "$calibration" in /tmp/*) ;; *) fail 'Stage this unit’s calibration in /t
 	[ "$(wc -c < "$calibration")" -eq 513 ] || fail 'Calibration must be a regular 513-byte file.'
 read_firmware
 [ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Stage the verified OEM firmware pair in RAM first.'
+# Validate staged presentation before any module or controller operation.
+registration=
+identity_options || fail 'Invalid staged OMCI identity.'
+# Receive tests never need the subscriber registration secret.
+registration=
 modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
 for module in $modules; do
 	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
@@ -221,7 +226,7 @@ if [ "$mode" != controller ]; then
 	[ "$mode" != receive ] || rx_bench=1
 	load_module xpon_10g rx_bench="$rx_bench" wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
 		pon_reg_id=000000000000000000000000000000000000000000000000000000000000000000000000 \
-		pon_lower=ponraw
+		pon_lower=ponraw $identity_params
 fi
 count=0; limit=5
 last_sample=-1; last_frames=-1; last_poll=0; stable=0

@@ -230,8 +230,8 @@ static const struct omci_get_attr_layout omci_onu_g_attr_layout[] = {
 	{ BIT(9), 29, 1 },		/* Administrative state */
 	{ BIT(8), 30, 1 },		/* Operational state */
 	{ BIT(7), 31, 1 },		/* ONU survival time */
-	{ BIT(6), OMCI_ATTR_VALUE_ZERO, 24 },	/* Logical ONU ID */
-	{ BIT(5), OMCI_ATTR_VALUE_ZERO, 12 },	/* Logical password */
+	{ BIT(6), 32, 24 },	/* Logical ONU ID */
+	{ BIT(5), 56, 12 },	/* Logical password */
 	{ BIT(4), OMCI_ATTR_VALUE_ZERO, 1 },	/* Credentials status */
 	{ BIT(3), OMCI_ATTR_VALUE_ZERO, 1 },	/* Extended TC layer */
 };
@@ -1464,6 +1464,8 @@ static void omci_agent_refresh_identity_locked(struct omci_agent *agent)
 			memcpy(object->data,
 			       agent->config.software_version[object->entity_id],
 			       OMCI_SOFTWARE_VERSION_LEN);
+			object->data[14] = object->entity_id == agent->config.committed_bank;
+			object->data[15] = object->entity_id == agent->config.active_bank;
 		} else if (object->class_id == OMCI_CLASS_CARDHOLDER) {
 			memcpy(object->data + 3, agent->config.equipment_id,
 			       sizeof(agent->config.equipment_id));
@@ -1472,8 +1474,10 @@ static void omci_agent_refresh_identity_locked(struct omci_agent *agent)
 		} else if (object->class_id == OMCI_CLASS_CIRCUIT_PACK) {
 			memcpy(object->data + 2, agent->config.serial_number,
 			       sizeof(agent->config.serial_number));
-			memcpy(object->data + 10, agent->config.version,
-			       sizeof(agent->config.version));
+			memset(object->data + 10, 0, sizeof(agent->config.version));
+			memcpy(object->data + 10, agent->config.sync_circuit_pack ?
+			       agent->config.version : (const u8 *)"OpenWrt",
+			       agent->config.sync_circuit_pack ? sizeof(agent->config.version) : 7);
 			memcpy(object->data + 24, agent->config.vendor_id,
 			       sizeof(agent->config.vendor_id));
 			memcpy(object->data + 31, agent->config.equipment_id,
@@ -1491,6 +1495,8 @@ static void omci_agent_refresh_identity_locked(struct omci_agent *agent)
 		memcpy(object->data + 18, agent->config.serial_number,
 		       sizeof(agent->config.serial_number));
 		object->data[26] = agent->config.traffic_mgmt_option;
+		memcpy(object->data + 32, agent->config.logical_onu_id, 24);
+		memcpy(object->data + 56, agent->config.logical_password, 12);
 	}
 
 	object = omci_mib_lookup(agent, OMCI_CLASS_ONU2_G, 0);
@@ -1773,8 +1779,8 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 		memset(data, 0, sizeof(data));
 		memcpy(data, agent->config.software_version[i],
 		       OMCI_SOFTWARE_VERSION_LEN);
-		data[14] = i == 0; /* Committed image. */
-		data[15] = i == 0; /* Active image. */
+		data[14] = i == agent->config.committed_bank;
+		data[15] = i == agent->config.active_bank;
 		data[16] = 1;      /* Valid image. */
 		ret = omci_mib_add_default_mask(agent, OMCI_CLASS_SOFTWARE_IMAGE,
 						i, GENMASK(15, 12), data,
@@ -1794,11 +1800,13 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 					       agent->config.uni_count, false, data);
 	if (ret)
 		return ret;
-	ret = omci_agent_add_equipment_default(agent, &topology,
-					       OMCI_VEIP_SLOT, OMCI_VEIP_UNIT_TYPE,
-					       1, false, data);
-	if (ret)
-		return ret;
+	if (odev->ops->onu_type != OMCI_ONU_TYPE_SFU) {
+		ret = omci_agent_add_equipment_default(agent, &topology,
+						       OMCI_VEIP_SLOT, OMCI_VEIP_UNIT_TYPE,
+						       1, false, data);
+		if (ret)
+			return ret;
+	}
 
 	ret = omci_mib_add_default(agent, OMCI_CLASS_ONU_G, 0, data,
 				   sizeof(data));
@@ -1833,34 +1841,36 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 			return ret;
 	}
 
-	memset(data, 0, sizeof(data));
-	data[0] = 0; /* Administrative state unlocked. */
-	ret = omci_mib_add_default(agent, OMCI_CLASS_VEIP,
-				   OMCI_UNI_ENTITY_ID(OMCI_VEIP_SLOT, 1), data,
-				   sizeof(data));
-	if (ret)
-		return ret;
-	omci_uni_g_default_data(data);
-	ret = omci_mib_add_default_mask(agent, OMCI_CLASS_UNI_G,
-					OMCI_UNI_ENTITY_ID(OMCI_VEIP_SLOT, 1),
-					GENMASK(15, 12), data, sizeof(data));
-	if (ret)
-		return ret;
+	if (odev->ops->onu_type != OMCI_ONU_TYPE_SFU) {
+		memset(data, 0, sizeof(data));
+		data[0] = 0; /* Administrative state unlocked. */
+		ret = omci_mib_add_default(agent, OMCI_CLASS_VEIP,
+					   OMCI_UNI_ENTITY_ID(OMCI_VEIP_SLOT, 1), data,
+					   sizeof(data));
+		if (ret)
+			return ret;
+		omci_uni_g_default_data(data);
+		ret = omci_mib_add_default_mask(agent, OMCI_CLASS_UNI_G,
+						OMCI_UNI_ENTITY_ID(OMCI_VEIP_SLOT, 1),
+						GENMASK(15, 12), data, sizeof(data));
+		if (ret)
+			return ret;
 
-	/* Also seed Slot 6 VEIP (0x0601) for compatibility with Alcatel-Lucent / EcoNet OLT profiles */
-	memset(data, 0, sizeof(data));
-	data[0] = 0;
-	ret = omci_mib_add_default(agent, OMCI_CLASS_VEIP,
-				   OMCI_UNI_ENTITY_ID(6, 1), data,
-				   sizeof(data));
-	if (ret)
-		return ret;
-	omci_uni_g_default_data(data);
-	ret = omci_mib_add_default_mask(agent, OMCI_CLASS_UNI_G,
-					OMCI_UNI_ENTITY_ID(6, 1),
-					GENMASK(15, 12), data, sizeof(data));
-	if (ret)
-		return ret;
+		/* Also seed Slot 6 VEIP (0x0601) for compatibility with Alcatel-Lucent / EcoNet OLT profiles */
+		memset(data, 0, sizeof(data));
+		data[0] = 0;
+		ret = omci_mib_add_default(agent, OMCI_CLASS_VEIP,
+					   OMCI_UNI_ENTITY_ID(6, 1), data,
+					   sizeof(data));
+		if (ret)
+			return ret;
+		omci_uni_g_default_data(data);
+		ret = omci_mib_add_default_mask(agent, OMCI_CLASS_UNI_G,
+						OMCI_UNI_ENTITY_ID(6, 1),
+						GENMASK(15, 12), data, sizeof(data));
+		if (ret)
+			return ret;
+	}
 
 	for (i = 0; i < topology.tcont_count; i++) {
 		u16 scheduler_id = topology.scheduler_base + i;
@@ -1910,8 +1920,16 @@ int omci_agent_init(struct omci_device *odev)
 	agent->fake_omci = false;
 	agent->dying_gasp = false;
 	agent->config.dying_gasp_source = OMCI_CONFIG_SOURCE_DEFAULT;
-	agent->config.uni_count = 4;
-	agent->config.onu_type = OMCI_ONU_TYPE_HGU;
+	agent->config.uni_count = odev->ops->uni_count ?: 4;
+	/* Preserve native Circuit Pack synchronization unless explicitly disabled. */
+	agent->config.sync_circuit_pack = 1;
+	agent->config.sync_circuit_pack_source = OMCI_CONFIG_SOURCE_DEFAULT;
+	agent->config.active_bank_source = OMCI_CONFIG_SOURCE_DEFAULT;
+	agent->config.committed_bank_source = OMCI_CONFIG_SOURCE_DEFAULT;
+	agent->config.logical_onu_id_source = OMCI_CONFIG_SOURCE_DEFAULT;
+	agent->config.logical_password_source = OMCI_CONFIG_SOURCE_DEFAULT;
+
+	agent->config.onu_type = odev->ops->onu_type ?: OMCI_ONU_TYPE_HGU;
 	agent->config.onu_type_source = OMCI_CONFIG_SOURCE_DEFAULT;
 	agent->config.traffic_mgmt_option = 0;
 	agent->config.olt_profile = OMCI_OLT_PROFILE_AUTO;
@@ -4660,6 +4678,26 @@ int omci_agent_config_get(struct omci_device *odev, u16 key,
 		source_len = strnlen(agent->config.equipment_id,
 				     sizeof(agent->config.equipment_id));
 		break;
+	case OMCI_CONFIG_SYNC_CIRCUIT_PACK:
+		source = &agent->config.sync_circuit_pack;
+		source_len = sizeof(agent->config.sync_circuit_pack);
+		break;
+	case OMCI_CONFIG_ACTIVE_BANK:
+		source = &agent->config.active_bank;
+		source_len = sizeof(agent->config.active_bank);
+		break;
+	case OMCI_CONFIG_COMMITTED_BANK:
+		source = &agent->config.committed_bank;
+		source_len = sizeof(agent->config.committed_bank);
+		break;
+	case OMCI_CONFIG_LOGICAL_ONU_ID:
+		source = agent->config.logical_onu_id;
+		source_len = strnlen(agent->config.logical_onu_id, sizeof(agent->config.logical_onu_id));
+		break;
+	case OMCI_CONFIG_LOGICAL_PASSWORD:
+		source = agent->config.logical_password;
+		source_len = strnlen(agent->config.logical_password, sizeof(agent->config.logical_password));
+		break;
 	case OMCI_CONFIG_PASSWORD:
 		source = agent->config.password;
 		source_len = sizeof(agent->config.password);
@@ -4754,7 +4792,9 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 	     key <= OMCI_CONFIG_PASSWORD) ||
 	    key == OMCI_CONFIG_HARDWARE_VERSION ||
 	    key == OMCI_CONFIG_SOFTWARE_VERSION_0 ||
-	    key == OMCI_CONFIG_SOFTWARE_VERSION_1) {
+	    key == OMCI_CONFIG_SOFTWARE_VERSION_1 ||
+	    key == OMCI_CONFIG_LOGICAL_ONU_ID ||
+	    key == OMCI_CONFIG_LOGICAL_PASSWORD) {
 		ret = omci_identity_normalize_config(key, value, len,
 						     normalized, &normalized_len);
 		if (ret)
@@ -4790,10 +4830,7 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 		changed = memcmp(agent->config.vendor_id, value, len);
 		memcpy(agent->config.vendor_id, value, len);
 		agent->config.vendor_source = source;
-		memcpy(agent->config.serial_number, value,
-		       sizeof(agent->config.vendor_id));
-		agent->config.serial_source = max(agent->config.serial_source,
-						  source);
+		/* An OMCI vendor override must not rewrite the PLOAM serial. */
 		break;
 	case OMCI_CONFIG_VERSION:
 		if (len != sizeof(agent->config.version)) {
@@ -4844,6 +4881,51 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 		       sizeof(agent->config.equipment_id));
 		memcpy(agent->config.equipment_id, value, len);
 		agent->config.equipment_source = source;
+		break;
+	case OMCI_CONFIG_SYNC_CIRCUIT_PACK:
+		if (len != sizeof(agent->config.sync_circuit_pack) || *(const u8 *)value > 1) {
+			ret = -EINVAL;
+			break;
+		}
+		changed = agent->config.sync_circuit_pack != *(const u8 *)value;
+		agent->config.sync_circuit_pack = *(const u8 *)value;
+		agent->config.sync_circuit_pack_source = source;
+		break;
+	case OMCI_CONFIG_ACTIVE_BANK:
+		if (len != sizeof(agent->config.active_bank) || *(const u8 *)value > 1) {
+			ret = -EINVAL;
+			break;
+		}
+		changed = agent->config.active_bank != *(const u8 *)value;
+		agent->config.active_bank = *(const u8 *)value;
+		agent->config.active_bank_source = source;
+		break;
+	case OMCI_CONFIG_COMMITTED_BANK:
+		if (len != sizeof(agent->config.committed_bank) || *(const u8 *)value > 1) {
+			ret = -EINVAL;
+			break;
+		}
+		changed = agent->config.committed_bank != *(const u8 *)value;
+		agent->config.committed_bank = *(const u8 *)value;
+		agent->config.committed_bank_source = source;
+		break;
+	case OMCI_CONFIG_LOGICAL_ONU_ID:
+		if (len != sizeof(agent->config.logical_onu_id)) {
+			ret = -EINVAL;
+			break;
+		}
+		changed = memcmp(agent->config.logical_onu_id, value, len);
+		memcpy(agent->config.logical_onu_id, value, len);
+		agent->config.logical_onu_id_source = source;
+		break;
+	case OMCI_CONFIG_LOGICAL_PASSWORD:
+		if (len != sizeof(agent->config.logical_password)) {
+			ret = -EINVAL;
+			break;
+		}
+		changed = memcmp(agent->config.logical_password, value, len);
+		memcpy(agent->config.logical_password, value, len);
+		agent->config.logical_password_source = source;
 		break;
 	case OMCI_CONFIG_PASSWORD:
 		if (len != sizeof(agent->config.password)) {
@@ -4929,7 +5011,8 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 			changed = agent->config.traffic_mgmt_option != scalar;
 			agent->config.traffic_mgmt_option = scalar;
 		} else if (key == OMCI_CONFIG_ONU_TYPE) {
-			if (scalar > OMCI_ONU_TYPE_CBU) {
+			if (scalar > OMCI_ONU_TYPE_CBU ||
+			    (odev->ops->onu_type && scalar != odev->ops->onu_type)) {
 				ret = -EINVAL;
 				break;
 			}
@@ -4937,6 +5020,10 @@ __omci_agent_config_set_source(struct omci_device *odev, u16 key,
 			agent->config.onu_type = scalar;
 			agent->config.onu_type_source = source;
 		} else if (key == OMCI_CONFIG_UNI_COUNT) {
+			if (odev->ops->uni_count && scalar != odev->ops->uni_count) {
+				ret = -EOPNOTSUPP;
+				break;
+			}
 			scalar = clamp_t(u8, scalar, 1, 16);
 			changed = agent->config.uni_count != scalar;
 			agent->config.uni_count = scalar;
@@ -5038,6 +5125,21 @@ int omci_agent_config_source_get(struct omci_device *odev, u16 key, u8 *source)
 		break;
 	case OMCI_CONFIG_EQUIPMENT_ID:
 		*source = agent->config.equipment_source;
+		break;
+	case OMCI_CONFIG_SYNC_CIRCUIT_PACK:
+		*source = agent->config.sync_circuit_pack_source;
+		break;
+	case OMCI_CONFIG_ACTIVE_BANK:
+		*source = agent->config.active_bank_source;
+		break;
+	case OMCI_CONFIG_COMMITTED_BANK:
+		*source = agent->config.committed_bank_source;
+		break;
+	case OMCI_CONFIG_LOGICAL_ONU_ID:
+		*source = agent->config.logical_onu_id_source;
+		break;
+	case OMCI_CONFIG_LOGICAL_PASSWORD:
+		*source = agent->config.logical_password_source;
 		break;
 	case OMCI_CONFIG_PASSWORD:
 		*source = agent->config.password_source;

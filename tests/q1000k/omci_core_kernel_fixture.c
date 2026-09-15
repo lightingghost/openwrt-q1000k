@@ -173,6 +173,7 @@ static void fixture_service_fault(struct omci_device *odev, int error)
 }
 
 static const struct omci_device_ops fixture_ops = {
+	.onu_type = OMCI_ONU_TYPE_SFU, .uni_count = 1,
 	.start = fixture_start, .stop = fixture_stop, .xmit = fixture_xmit,
 	.get_ani_topology = fixture_topology, .set_tcont = fixture_tcont,
 	.set_gem_port = fixture_gem, .get_gem_encryption = fixture_gem_encryption, .set_uni = fixture_uni,
@@ -203,7 +204,19 @@ int q1000k_omci_core_test(void)
 	struct omci_mib_object object = {};
 	struct omci_mib_object *identity_object;
 	struct omci_identity identity = {
-		.valid = OMCI_IDENTITY_F_VERSION | OMCI_IDENTITY_F_EQUIPMENT_ID,
+		.valid = OMCI_IDENTITY_F_VERSION | OMCI_IDENTITY_F_EQUIPMENT_ID |
+			OMCI_IDENTITY_F_VENDOR_ID | OMCI_IDENTITY_F_HARDWARE_VERSION |
+			OMCI_IDENTITY_F_SOFTWARE_VERSION_0 | OMCI_IDENTITY_F_SOFTWARE_VERSION_1 |
+			OMCI_IDENTITY_F_LOGICAL_ONU_ID | OMCI_IDENTITY_F_LOGICAL_PASSWORD |
+			OMCI_IDENTITY_F_SYNC_CIRCUIT_PACK | OMCI_IDENTITY_F_ACTIVE_BANK |
+			OMCI_IDENTITY_F_COMMITTED_BANK,
+		.vendor_id = "HUMA", .vendor_source = OMCI_CONFIG_SOURCE_DRIVER,
+		.hardware_version = "BGW320-500_2.1",
+		.software_version = {"BGW320_4.27.7", "other-image"},
+		.logical_onu_id = "logical-identity24-bytes",
+		.logical_password = "password-12!",
+		.sync_circuit_pack = 1, .active_bank = 1, .committed_bank = 0,
+		.presentation_source = OMCI_CONFIG_SOURCE_DRIVER,
 		.version = "TEST-version14",
 		.equipment_id = "TEST-equipment-20byt",
 		.version_source = OMCI_CONFIG_SOURCE_DRIVER,
@@ -252,15 +265,50 @@ int q1000k_omci_core_test(void)
 	fixture_start_error = 0;
 	CHECK(!omci_device_start(odev));
 	CHECK(!fixture_tx);
+	CHECK(omci_mib_count_class(&odev->agent, OMCI_CLASS_PPTP_ETHERNET_UNI) == 1);
+	CHECK(!omci_mib_count_class(&odev->agent, OMCI_CLASS_VEIP));
 	/* Driver overrides must be in the first MIB, before OLT traffic. */
 	identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU_G, 0);
-	CHECK(identity_object && !memcmp(identity_object->data + 4, identity.version, 14));
+	CHECK(identity_object && !memcmp(identity_object->data + 4, identity.hardware_version, 14));
 	CHECK(!memcmp(identity_object->data + 18, serial, sizeof(serial)));
 	identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU2_G, 0);
 	CHECK(identity_object && !memcmp(identity_object->data, identity.equipment_id, 20));
 	for (i = 0; i < 2; i++) {
 		identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_SOFTWARE_IMAGE, i);
-		CHECK(identity_object && !memcmp(identity_object->data, identity.version, 14));
+		CHECK(identity_object && !memcmp(identity_object->data, identity.software_version[i], 14));
+	}
+	/* Independent vendor, versions and bank metadata reach cold MIB and GET. */
+	{
+		u8 response[80], scalar = 0;
+		size_t length = 0;
+		struct omci_mib_object *onu = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU_G, 0);
+		CHECK(!memcmp(onu->data, "HUMA", 4));
+		CHECK(!memcmp(onu->data + 18, serial, 8));
+		CHECK(!memcmp(onu->data + 32, identity.logical_onu_id, 24));
+		CHECK(!memcmp(onu->data + 56, identity.logical_password, 12));
+		CHECK(omci_agent_get_masked_object(onu, omci_onu_g_attr_layout,
+			ARRAY_SIZE(omci_onu_g_attr_layout), OMCI_ONU_G_ATTR_MASK, BIT(6) | BIT(5),
+			response, sizeof(response), &length) == OMCI_RESULT_SUCCESS);
+		CHECK(length == 39 && !memcmp(response + 3, identity.logical_onu_id, 24));
+		CHECK(!memcmp(response + 27, identity.logical_password, 12));
+		for (i = 0; i < 2; i++) {
+			identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_SOFTWARE_IMAGE, i);
+			CHECK(identity_object->data[14] == (i == 0));
+			CHECK(identity_object->data[15] == (i == 1));
+		}
+		identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_CIRCUIT_PACK,
+			OMCI_EQUIPMENT_ENTITY_ID(OMCI_GPON_SLOT));
+		CHECK(identity_object && !memcmp(identity_object->data + 10, identity.hardware_version, 14));
+		CHECK(!omci_agent_config_set(odev, OMCI_CONFIG_SYNC_CIRCUIT_PACK, &scalar, 1));
+		CHECK(!memcmp(identity_object->data + 10, "OpenWrt", 7));
+		scalar = 1;
+		CHECK(!omci_agent_config_set(odev, OMCI_CONFIG_SYNC_CIRCUIT_PACK, &scalar, 1));
+		scalar = 2;
+		CHECK(omci_agent_config_set(odev, OMCI_CONFIG_ACTIVE_BANK, &scalar, 1) == -EINVAL);
+		CHECK(omci_agent_config_set(odev, OMCI_CONFIG_LOGICAL_PASSWORD, "bad\nvalue", 9) == -EINVAL);
+		CHECK(!omci_agent_config_set(odev, OMCI_CONFIG_LOGICAL_PASSWORD, "", 0));
+		CHECK(!memchr_inv(onu->data + 56, 0, 12));
+		omci_device_set_identity_info(odev, &identity);
 	}
 	/* Extended content length must not wrap a u16 in TX validation. */
 	skb = alloc_skb(13, GFP_KERNEL);
@@ -439,6 +487,10 @@ int q1000k_omci_core_test(void)
 		stale = omci_mib_lookup(&odev->agent, OMCI_CLASS_TCONT, 0x8000);
 		CHECK(stale && get_unaligned_be16(stale->data) == 0xffff);
 		CHECK(!odev->agent.resetting_registration);
+		stale = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU_G, 0);
+		CHECK(stale && !memcmp(stale->data + 56, identity.logical_password, 12));
+		stale = omci_mib_lookup(&odev->agent, OMCI_CLASS_SOFTWARE_IMAGE, 1);
+		CHECK(stale && stale->data[15] && !stale->data[14]);
 		omci_device_set_channel(odev, 7, true);
 		CHECK(!omci_device_set_auth_epoch(odev, ++fixture_auth_epoch));
 	}

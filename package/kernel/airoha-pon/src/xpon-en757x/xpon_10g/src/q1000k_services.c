@@ -7,6 +7,7 @@
 #include <linux/unaligned.h>
 #include "common/q1000k_services.h"
 #include "common/q1000k_vlan.h"
+#include "common/q1000k_identity.h"
 #include "common/q1000k_gwan.h"
 #include "common/q1000k_protocol.h"
 #include "common/q1000k_transport.h"
@@ -826,7 +827,8 @@ int q1000k_services_tx(struct sk_buff *skb)
 	const struct omci_service_config *selected = NULL;
 	struct qs_rules *rules = rcu_dereference(qs_current);
 	struct q1000k_gwan_binding binding;
-	struct q1000k_vlan_frame input, output, selected_output = {};
+	struct q1000k_vlan_frame input, original, output, selected_output = {};
+	bool normalized = false;
 	int score = -1, ret, selected_result = 0;
 	unsigned int bytes;
 	size_t i;
@@ -839,6 +841,8 @@ int q1000k_services_tx(struct sk_buff *skb)
 		return -ENODATA;
 	ret = qs_frame(skb, &input);
 	if (ret) return ret;
+	original = input;
+retry:
 	qs_vlan_winners(rules, true, &input, winners);
 	for (i = 0; i < rules->count; i++) {
 		const struct omci_service_config *s = &rules->rule[i];
@@ -861,11 +865,21 @@ int q1000k_services_tx(struct sk_buff *skb)
 			ambiguous = true;
 		}
 	}
+	if (!selected && !normalized && !input.count && q1000k_pon_fix_vlans()) {
+		/* Retry only an unmatched untagged frame as a priority-tagged WAN.
+		 * The same OLT rules, drop actions, filters and queue selection apply.
+		 */
+		input.count = 1;
+		input.tag[0].tpid = ETH_P_8021Q;
+		input.tag[0].tci = 0;
+		normalized = true;
+		goto retry;
+	}
 	if (!selected) return -ENOENT;
 	if (selected_result) return selected_result;
 	if (ambiguous) return -EEXIST;
-	if (selected->vlan_treatment_valid) {
-		ret = qs_rewrite(skb, &input, &selected_output);
+	if (selected->vlan_treatment_valid || normalized) {
+		ret = qs_rewrite(skb, &original, &selected_output);
 		if (ret) return ret;
 	}
 	if (skb_shared(skb) || skb_is_gso(skb))
@@ -939,7 +953,14 @@ int q1000k_services_rx(struct sk_buff *skb, u16 gem)
 		}
 	if (!selected) return -ENOENT;
 	if (ambiguous) return -EEXIST;
-	if (selected->vlan_treatment_valid) {
+	/* Only remove a lone 802.1Q priority tag at the subscriber boundary. */
+	if (q1000k_pon_fix_vlans() && selected_output.count == 1 &&
+	    selected_output.tag[0].tpid == ETH_P_8021Q &&
+	    !(selected_output.tag[0].tci & VLAN_VID_MASK)) {
+		selected_output.count = 0;
+		memset(selected_output.tag, 0, sizeof(selected_output.tag));
+	}
+	if (selected->vlan_treatment_valid || input.count != selected_output.count) {
 		ret = qs_rewrite(skb, &input, &selected_output);
 		if (ret) return ret;
 	}

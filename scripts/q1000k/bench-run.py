@@ -95,10 +95,10 @@ def runtime_manifest(path):
             raise ValueError('Invalid runtime checksum manifest')
         names.append(match[1])
     expected = {'/usr/sbin/q1000k-pon-bench', '/lib/q1000k-xgspon/common.sh',
-                '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci'}
+                '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config'}
     expected_modules = {m.replace('_', '-') if m == 'q1000k_pon_control' else m for m in MODULES}
     modules = [p for p in names if re.fullmatch(r'/lib/modules/[0-9][0-9A-Za-z.+-]*/[-a-z0-9_]+\.ko', p)]
-    if (len(names) != 13 or len(set(names)) != 13 or set(names) - set(modules) != expected
+    if (len(names) != 14 or len(set(names)) != 14 or set(names) - set(modules) != expected
             or {Path(p).stem for p in modules} != expected_modules):
         raise ValueError('Runtime manifest must identify the helper and all nine PON modules')
     return data

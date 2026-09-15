@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-omci-tools
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -11,7 +11,7 @@ define Package/q1000k-omci-tools
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Q1000K kernel OMCI management command
-  DEPENDS:=@BROKEN @TARGET_airoha_an7581 +kmod-q1000k-omci +libmnl
+  DEPENDS:=@BROKEN @TARGET_airoha_an7581 +kmod-q1000k-omci +libmnl +q1000k-xgspon
 endef
 
 define Package/q1000k-omci-tools/description

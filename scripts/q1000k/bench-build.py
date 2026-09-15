@@ -137,7 +137,7 @@ def main():
                  output / IMAGE, revision], output / 'inspection.json')
             root = REPO / 'build_dir/target-aarch64_cortex-a53_musl/root-airoha'
             paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
-                     'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci']
+                     'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
             for name in ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu',
                          'airoha_ecnt_pon_phy', 'airoha_ecnt_xpon', 'phy_10g', 'xpon', 'omci', 'xpon_10g'):
                 modules = list(root.glob('lib/modules/*/' + name + '.ko'))

@@ -170,8 +170,7 @@ static void qomci_config_changed(struct omci_device *odev, u16 key,
 	 * this module lifetime. A changed core identity cannot share its keys.
 	 */
 	if (READ_ONCE(b->started) &&
-	    (memcmp(identity->serial_number, b->serial, 8) ||
-	     memcmp(identity->vendor_id, b->serial, 4))) {
+	    memcmp(identity->serial_number, b->serial, 8)) {
 		qomci_close(b);
 		q1000k_protocol_fail(-ESTALE);
 	}
@@ -241,6 +240,8 @@ out:
 }
 
 static const struct omci_device_ops qomci_ops = {
+	.onu_type = OMCI_ONU_TYPE_SFU,
+	.uni_count = 1,
 	.start = qomci_start, .stop = qomci_stop, .xmit = qomci_xmit,
 	.get_ani_topology = q1000k_services_topology,
 	.set_tcont = q1000k_services_tcont, .set_gem_port = q1000k_services_gem_config,

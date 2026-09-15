@@ -59,7 +59,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_runtime_manifest_requires_every_module_without_shell_syntax(self):
         names = ['/usr/sbin/q1000k-pon-bench', '/lib/q1000k-xgspon/common.sh',
-                 '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci']
+                 '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config']
         names += ['/lib/modules/6.18.44/' + (n.replace('_', '-') if n == 'q1000k_pon_control' else n)
                   + '.ko' for n in RUN.MODULES]
         with tempfile.TemporaryDirectory() as directory:
@@ -114,7 +114,7 @@ class ModuleRetryTests(unittest.TestCase):
                 (path / 'selection.json').write_text(json.dumps({'revision': revision}))
                 (path / 'kernel.config').write_text('same kernel')
             names = ['/usr/sbin/q1000k-pon-bench', '/lib/q1000k-xgspon/common.sh',
-                     '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci']
+                     '/usr/share/libubox/jshn.sh', '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config']
             names += ['/lib/modules/6.18.44/' + (n.replace('_', '-') if n == 'q1000k_pon_control' else n)
                       + '.ko' for n in RUN.MODULES]
             sums = ''.join('a' * 64 + '  ' + n + '\n' for n in names)

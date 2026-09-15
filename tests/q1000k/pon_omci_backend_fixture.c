@@ -80,6 +80,7 @@ struct device { int unused; };
 struct crypto_lskcipher { int unused; };
 struct xpon_device { int unused; };
 struct xpon_device_desc { struct net_device *netdev; unsigned int mode,modes; };
+#define OMCI_ONU_TYPE_SFU 1
 /* TYPES */
 struct omci_device { const struct omci_device_ops *ops; void *priv; u16 onu,gem; u64 epoch,last; bool channel; u8 state; };
 typedef struct { u8 msk[16],sk[16],ploamIk[2][16],omciIk[2][16],kek[2][16];

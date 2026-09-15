@@ -836,3 +836,55 @@ GPIO class readings cannot establish physical illumination; user visual
 confirmation remains required. The bench intentionally leaves the stack
 unloaded at boot, so it has no live optical status to display until testing.
 The synthetic identity remains unassigned and no optical TX is requested.
+
+## Identity-capable receive bench
+
+The next image includes vendor r72, core r15 (Generic Netlink v16), OMCI CLI
+r2, diagnostics r6, supervisor r4, bench helper r6 and LuCI r5. All identity
+controls from the 8311 PON page are exposed in LuCI and `q1000k-omci config`.
+The [CLI contract](../../../package/network/utils/q1000k-omci-tools/README.md)
+explains each field, defaults, secret handling and runtime readback.
+
+Both launchers validate staged values before loading any module. The normal
+supervisor forwards the subscriber serial/registration. The bounded bench
+retains `TEST00000001`, its synthetic WAN MAC and zero registration ID, while
+applying the configured OMCI presentation (equipment, vendor, hardware,
+software, banks and logical credentials). This permits local inspection
+without transmitting subscriber identity. Empty vendor derives from the
+synthetic serial in this bench; it derives from the real serial in the normal
+supervisor. Staged configuration itself remains visible in LuCI/CLI even
+when the stack is unloaded.
+
+The connected-fiber acceptance sequence remains:
+
+1. User RAM boots the newly built FIT through second-stage http-uboot. Keep
+   fiber disconnected initially. Management is `192.168.255.1`, DHCP disabled.
+2. Read-only preflight verifies the image revision/runtime hashes, NAND/UBI
+   absence, TX inhibit, idle modules and unenslaved/down `ponraw`.
+3. Run the disconnected stack test and confirm the physical fiber LED is red
+   during LOS, then off after teardown. Readbacks alone cannot prove the LED
+   is physically illuminated.
+4. Run `receive --fiber-disconnected`, which must retain LOS, O1/unassigned,
+   no registration, zero MAC interrupt mask and TX disabled throughout.
+5. After the user connects the fiber, run `receive --fiber-connected`. For
+   30 seconds collect fresh controller/PHY LOS, receive synchronization,
+   frame/FEC/LOF counters, protocol state and LED class readings. Pass requires
+   five final consecutive samples with both LOS indications clear, sync
+   acquired and a progressing frame counter, while all transmit guards hold.
+   The fiber LED should indicate received light/discovery, not O5 service.
+6. Reverse teardown must leave every owned module released, controller off,
+   and `ponraw` down. Retained modules, stale samples or uncertain cleanup
+   fail the run; do not force-unload or automatically reboot.
+
+Use the saved `scripts/q1000k/bench-run.py` for the exact verified artifact:
+`stack --fiber-disconnected`, then `receive --fiber-disconnected`, then
+`receive --fiber-connected`, each with `--artifact`, a separate `--output`,
+and the private `--inputs` archive. The wrapper verifies fourteen immutable
+runtime files, including the staged configuration CLI helper, before testing.
+Configuration can be inspected using `q1000k-omci config list` (secrets
+redacted) and `config validate`; it is not auto-applied to the running stack.
+
+This is a receive-only connected-fiber test. O5 registration, PLOAM/OMCI TX,
+AT&T authentication, encrypted traffic and DHCP require a later explicitly
+authorized test with a different transmit policy. This image cannot enable
+optical TX through CLI or LuCI settings. No flashing is part of the sequence.
