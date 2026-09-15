@@ -597,3 +597,30 @@ This is native kernel code. It cannot be tested by replacing the three vendor
 modules on f885e80846. Build and inspect a complete replacement bench, then
 have the user RAM-load it from the second-stage http-uboot. The old bench is
 left idle; no flash, reboot, force-unload or optical activation is authorized.
+
+## Replacement image ready: d928eb20b6
+
+The saved builder completed source `d928eb20b6673329d76da024ac6a122798921a8b`
+with vendor r68 and native RX-width patch `9999l`. All 98 host tests pass.
+The actual patched native sources match those tested in Linux UML: 100
+transport cycles pass, including channel 31, RCU/IRQ control, late DMA,
+pause-timeout retry and RX generation checks. No kernel diagnostics were
+reported by that guest. The real PHY UML suite also passed at r68.
+
+Artifact directory (workspace-relative):
+`build-artifacts/q1000k-xgspon/bench-d928eb20b6/`.
+Image: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`.
+Size: 7,602,176 bytes. SHA-256:
+`577e20c0ae5866e05c64e713f41f7589953c161da1d0c4c3b25bb174eb04b141`.
+`checkpoint.json` records absolute paths, source/builder revisions, normal
+config hashes, unchanged protected refs and successful restoration.
+`inspection.json`, `host-tests.log` and `uml-transport/` retain validation.
+
+Inspection confirms NAND disabled, immutable TX inhibit, management/failsafe
+192.168.255.1, no PON autostart, and packaged panic timeout zero. The live
+panic timeout must still pass readback. The user must RAM-load this FIT using
+the second-stage http-uboot and keep fiber disconnected. After SSH returns,
+run saved `bench-run.py status` using this artifact, then the already-authorized
+stack test with the verified private inputs. Do not use `--modules-from` to
+put this change on f885e80846: the native kernel changed. This image has not
+been booted or flashed, and complete physical drain remains unverified.

@@ -51,14 +51,16 @@ The current [RAM bench](XGSPON-BENCH.q1000k.md) runs `f885e80846` at
 off. Authorized disconnected-fiber tests pass controller detection, verified
 firmware/calibration, TX-disable/LOS checks, hook and OMCI registration, and
 complete module/input cleanup. Vendor r67 fixes the USXGMII WAN handoff and
-makes MAC stop controls writable. MPI completion still times out before FE
-retirement; a resource-only probe confirms that local MAC reset is released.
+makes MAC stop controls writable. That retry times out before FE retirement
+while waiting for MPI completion; a resource-only probe confirms that local MAC reset is released.
 Vendor r68's cold PHY preparation passes on hardware, followed by MPI RX
 stop and FE channels 0–15. Channel 16 fails: the adaptation assumed 32 RX
 enable bits, while the native initializer uses 16 RX and 32 TX bits. Patch
 `9999l` corrects the RX width and adds register readback diagnostics. A new
 kernel RAM boot is required for validation. Full physical drain
-and integrated startup are not yet demonstrated. See the
+and integrated startup are not yet demonstrated. Replacement image
+`d928eb20b6` is built and inspected, with 98 passing host tests and 100 native
+transport UML cycles; it awaits the user's RAM boot. See the
 [bootloader note](XGSPON-HTTP-UBOOT.q1000k.md) for handoff findings.
 192.168.1.1 belongs to the working router and is never a Q1000K SSH target.
 

@@ -20,7 +20,7 @@ module parameters, hook initialization and OMCI registration without a panic.
 
 Vendor r67's matching-module retry (`cff7bf6b24`) fixes the bootloader's
 USXGMII WAN handoff after native CPU/DMA pause and verified controller TX off.
-MAC stop controls become writable. Startup now times out on MPI stop completion
+MAC stop controls become writable. That retry timed out on MPI stop completion
 before any FE retirement; both MBI completion bits do respond. A resource-only
 probe confirms WAN `0x0a`, deasserted SCU reset and released local MAC reset
 `0x1`. No early MAC reset release is justified. Cleanup unloads all nine PON
@@ -38,6 +38,10 @@ bits but only 16 RX bits; patch `9999l` corrects retirement's RX width and
 separates RX activation from the upstream T-CONT bitmap. It adds failing-write
 diagnostics. This kernel change requires a new user RAM boot; the current
 bench is idle. Full physical retirement and integrated startup remain pending.
+Replacement image `d928eb20b6` builds and passes all 98 host tests and image
+inspection. Its patched native sources pass 100 Linux UML transport cycles.
+The complete artifact and checksum are recorded in the bench report; hardware
+validation awaits the user's second-stage RAM boot with fiber disconnected.
 See [the bench report](XGSPON-BENCH.q1000k.md) and
 [http-uboot findings](XGSPON-HTTP-UBOOT.q1000k.md).
 
