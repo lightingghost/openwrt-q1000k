@@ -31,8 +31,9 @@ struct airoha_gdm_dev { struct airoha_eth *eth; };
 struct airoha_pon {
     void *netdev;
     struct airoha_gdm_dev *dma_dev;
-    bool admission_lock,control_fault;
-    u32 retiring,configuring;
+    bool admission_lock,control_fault,paused,pause_ready,rx_closed,rx_drained;
+    u32 retiring,configuring,fe_retired,tx_enabled;
+    int pending;
     u8 closed[32];
     int channel_pending[32];
 };
@@ -171,6 +172,42 @@ int main(void)
     check_unmodified_lan();
     reset_fixture(); actual=sentinel; fault_during=true;
     assert(airoha_pon_get_qos(&pon,17,&actual)==-EIO);
+    assert(!memcmp(&actual,&sentinel,sizeof(actual)));
+    check_unmodified_lan();
+    /* Snapshot all retired schedulers before the namespace epoch advances.
+     * Every missing drain condition rejects the read without a command or
+     * published result; even a complete drain cannot authorize QoS writes.
+     */
+    for(k=0;k<8;k++) {
+        reset_fixture();
+        pon.retiring=pon.fe_retired=~0U;
+        pon.paused=pon.pause_ready=pon.rx_closed=pon.rx_drained=true;
+        switch(k) {
+        case 1: pon.paused=false; break;
+        case 2: pon.pause_ready=false; break;
+        case 3: pon.rx_closed=false; break;
+        case 4: pon.rx_drained=false; break;
+        case 5: pon.fe_retired&=~BIT(31); break;
+        case 6: pon.tx_enabled=BIT(31); break;
+        case 7: pon.pending=1; break;
+        }
+        for(c=0;c<32;c++) {
+            actual=sentinel; n=writes;
+            int ret=airoha_pon_get_qos(&pon,c,&actual);
+            assert(ret==(k?-ESHUTDOWN:0));
+            if(k) assert(writes==n && !memcmp(&actual,&sentinel,sizeof(actual)));
+            else assert(actual.mode==0 && !memcmp(actual.weights,cfg.weights,sizeof(cfg.weights)));
+            n=writes;
+            assert(airoha_pon_set_qos(&pon,c,&cfg)==-ESHUTDOWN && writes==n);
+            assert(pon.retiring==~0U);
+        }
+        check_unmodified_lan();
+    }
+    reset_fixture();
+    pon.retiring=pon.fe_retired=~0U;
+    pon.paused=pon.pause_ready=pon.rx_closed=pon.rx_drained=true;
+    actual=sentinel; fault_during=true;
+    assert(airoha_pon_get_qos(&pon,31,&actual)==-EIO);
     assert(!memcmp(&actual,&sentinel,sizeof(actual)));
     check_unmodified_lan();
     return 0;

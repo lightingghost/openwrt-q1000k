@@ -1,0 +1,52 @@
+Subject: [PATCH] net: airoha: allow QoS snapshots after complete PON retirement
+
+The MAC table-clear callback saves all channel schedulers after FE/MAC/RX
+retirement and before namespace replacement. The retiring guard rejected
+this required read with -ESHUTDOWN on the disconnected-fiber RAM bench.
+
+Permit reads with CPU admission paused, all FE channels retired, RX drained,
+no enabled TX channel and no pending DMA. RTNL pins this state throughout
+the indirect command. Keep writes and partial drains rejected; admission,
+epoch advancement and failure containment are unchanged.
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -471,6 +471,7 @@
+ 	unsigned long flags;
+ 	u32 mode, mask, value;
+ 	int i, ret = 0;
++	bool drained_read;
+ 
+ 	/* These commands poll and therefore cannot run from MAC IRQ/tasklets. */
+ 	if (!pon || !qos || channel >= 32)
+@@ -489,11 +490,19 @@
+ 	}
+ 	rtnl_lock();
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
++	/* The namespace owner snapshots the scheduler after complete retirement,
++	 * before reset_epoch clears the retiring bits. RTNL pins that drain;
++	 * reads may use the indirect command engine without reopening admission.
++	 * Writes still require the channel's retirement to have ended.
++	 */
++	drained_read = !write && pon->paused && pon->pause_ready &&
++		pon->rx_closed && pon->rx_drained && pon->fe_retired == U32_MAX &&
++		!pon->tx_enabled && !atomic_read_acquire(&pon->pending);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+ 	else if (pon->control_fault)
+ 		ret = -EIO;
+-	else if (pon->retiring & BIT(channel))
++	else if ((pon->retiring & BIT(channel)) && !drained_read)
+ 		ret = -ESHUTDOWN;
+ 	else if (pon->closed[channel] != 0xff)
+ 		ret = -EBUSY;
+@@ -559,7 +568,7 @@
+ 	/* An unrelated concurrent IRQ control failure also invalidates this result. */
+ 	if (!ret && pon->control_fault)
+ 		ret = -EIO;
+-	if (!ret && (pon->retiring & BIT(channel)))
++	if (!ret && (pon->retiring & BIT(channel)) && !drained_read)
+ 		ret = -ESHUTDOWN;
+ 	if (!ret && !write)
+ 		*qos = actual;

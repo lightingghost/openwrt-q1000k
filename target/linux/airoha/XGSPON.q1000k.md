@@ -32,7 +32,7 @@ below remain the full acceptance plan; they are not all complete.
 | 1. Hardware and dependencies | OEM inventory, controller mapping, firmware/calibration format and native resource ownership are documented. | Electrical calibration, cold-start timing and current production DT behavior require hardware evidence. |
 | 2. Imports and build | Vendor and LuCI imports retain provenance; native adaptations and the generic OMCI core build without unresolved symbols. Full experimental initramfs/sysupgrade builds and offline FIT/rootfs inspection pass. | Hardware acceptance and any release/publication remain separate. |
 | 3. Factory data and controller | Current RAM bench detects both EN7573 paths, verifies XGS firmware/calibration readback, samples MCU/TX/LOS and cleans up successfully. | Sustained analog/firmware health and integrated stack cold boot/rollback are untested on hardware. |
-| 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Physical FIFO/DMA retirement, optical burst/ranging timing and copper regression checks need hardware. Advanced rate shaping/policing remains unsupported. |
+| 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Idle FIFO/DMA retirement passes on the disconnected-fiber bench; loaded retirement, optical burst/ranging timing and copper regression checks still need hardware. Advanced rate shaping/policing remains unsupported. |
 | 5. OMCI and subscriber | Generic core, authenticated PLOAM/OMCI, unicast data keys, supported VLAN/bridge/GEM provisioning and identity parameters are implemented. | The subscriber's actual identity and OLT service MIB are unknown; registration, encryption and DHCP are unproven. Advanced/multicast service modes remain unsupported. |
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
@@ -46,23 +46,20 @@ packaged modules/userspace defaults. It has not been booted or flashed. See
 [build preparation](XGSPON-BUILD.q1000k.md) and the
 [current checkpoint](XGSPON-STATUS.q1000k.md) for validation limits.
 
-The current [RAM bench](XGSPON-BENCH.q1000k.md) runs `f885e80846` at
+The current [RAM bench](XGSPON-BENCH.q1000k.md) runs `d928eb20b6` at
 192.168.255.1. NAND is disabled, TX is inhibited, DHCP/RA and PON autostart are
-off. Authorized disconnected-fiber tests pass controller detection, verified
-firmware/calibration, TX-disable/LOS checks, hook and OMCI registration, and
-complete module/input cleanup. Vendor r67 fixes the USXGMII WAN handoff and
-makes MAC stop controls writable. That retry times out before FE retirement
-while waiting for MPI completion; a resource-only probe confirms that local MAC reset is released.
-Vendor r68's cold PHY preparation passes on hardware, followed by MPI RX
-stop and FE channels 0–15. Channel 16 fails: the adaptation assumed 32 RX
-enable bits, while the native initializer uses 16 RX and 32 TX bits. Patch
-`9999l` corrects the RX width and adds register readback diagnostics. A new
-kernel RAM boot is required for validation. Full physical drain
-and integrated startup are not yet demonstrated. Replacement image
-`d928eb20b6` is built and inspected, with 98 passing host tests and 100 native
-transport UML cycles; it awaits the user's RAM boot. See the
-[bootloader note](XGSPON-HTTP-UBOOT.q1000k.md) for handoff findings.
-192.168.1.1 belongs to the working router and is never a Q1000K SSH target.
+off. Authorized disconnected-fiber testing now completes controller startup,
+cold PHY preparation, all 32 FE retirements, MAC/FIFO/RX DMA drain, PHY quiesce
+and MAC reset. Table clearing then fails with `-ESHUTDOWN`: the native QoS
+guard rejects the required snapshot while channels are marked retiring.
+Containment and module/input cleanup pass; LAN/SSH remain healthy.
+Patch `9999m` allows only verified fully drained scheduler reads while keeping
+writes blocked until epoch replacement. Host regression and real Linux UML
+lifecycle checks cover that ordering. Another user RAM boot is required for
+this kernel fix. Integrated startup, loaded-pipeline drain and optical service
+remain acceptance gates. See the [bootloader note](XGSPON-HTTP-UBOOT.q1000k.md)
+for handoff findings. 192.168.1.1 belongs to the working router and is never a
+Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original
 acceptance requirements. Their historical lists of unfinished software work

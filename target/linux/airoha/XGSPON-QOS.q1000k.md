@@ -32,3 +32,21 @@ resource and packet semantics, plus failure containment and testing.
 Reference: [ITU-T G.988 (11/2022), section 9.2.3 and Appendix II](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-G.988-202211-I!!PDF-E&lang=e&type=items).
 This is a local software contract, not evidence of optical throughput or OLT
 interoperability. No device writes or firmware flashing were performed.
+
+## Scheduler snapshots during retirement
+
+The `d928eb20b6` disconnected-fiber RAM test completes native retirement but
+fails at the first table-clear QoS snapshot with `-ESHUTDOWN`. FE retirement
+sets every channel's retiring bit; namespace epoch replacement deliberately
+clears those bits only after table clearing. Patch `9999m` allows an indirect
+read in that interval only while CPU admission is paused and ready, all FE
+channels are retired, RX is closed and drained, TX enables are zero and no
+DMA is pending. RTNL pins the lifecycle during the command. Readback and
+sticky-fault checks still apply; partial retirement and every scheduler write
+remain rejected. No queue, service record or epoch is reopened by a snapshot.
+
+The host fixture exercises all 32 channels and every missing drain condition.
+The native Linux UML sequence now performs the actual pause/FE retire/RX
+drain/snapshot/reset-epoch/QoS replay ordering; it previously tested QoS and
+retirement separately. Hardware validation of this fix requires a new kernel
+RAM boot. This is a Linux lifecycle correction, not an http-uboot issue.

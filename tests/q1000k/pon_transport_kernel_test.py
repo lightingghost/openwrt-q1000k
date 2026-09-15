@@ -363,11 +363,31 @@ static int __init pon_transport_test_init(void)
         atomic_set(&hold_dma,0);
         CHECK(!airoha_pon_pause(pon,1000));
         CHECK(!airoha_pon_retire_fe(pon,31));
+        {
+            struct airoha_pon_qos actual;
+            CHECK(airoha_pon_get_qos(pon,31,&actual)==-ESHUTDOWN);
+        }
         for(i=0;i<31;i++) CHECK(!airoha_pon_retire_fe(pon,i));
+        {
+            struct airoha_pon_qos actual;
+            CHECK(airoha_pon_get_qos(pon,31,&actual)==-ESHUTDOWN);
+        }
         CHECK(!airoha_pon_drain_rx(pon));
         CHECK(pon->rx_closed && pon->rx_drained && rx_drain_calls==1);
+        /* Match the MAC lifecycle: snapshot after full drain, before epoch
+         * replacement. The prior isolated QoS/retirement tests missed this.
+         */
+        for(i=0;i<32;i++) {
+            struct airoha_pon_qos actual;
+            CHECK(!airoha_pon_get_qos(pon,i,&actual));
+            CHECK(!actual.mode && actual.byte_mode && !actual.scale16);
+            for(int q=0;q<8;q++) CHECK(actual.weights[q]==i*8+q+1);
+            CHECK(airoha_pon_set_qos(pon,i,&actual)==-ESHUTDOWN);
+        }
+        CHECK(pon->retiring==U32_MAX && pon->fe_retired==U32_MAX);
         CHECK(airoha_pon_resume(pon)==-EBUSY);
         CHECK(!airoha_pon_reset_epoch(pon));
+        CHECK(!check_qos(pon));
         {
             struct airoha_pon_port_config old,config;
             CHECK(!airoha_pon_get_port_config(pon,&old));

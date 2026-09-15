@@ -624,3 +624,33 @@ run saved `bench-run.py status` using this artifact, then the already-authorized
 stack test with the verified private inputs. Do not use `--modules-from` to
 put this change on f885e80846: the native kernel changed. This image has not
 been booted or flashed, and complete physical drain remains unverified.
+
+## d928eb20b6 hardware result and drained QoS correction
+
+The user RAM-booted this image. `bench-d928eb20b6/preflight-01/` confirms the
+exact revision and 13 runtime hashes, RAM root, absent NAND/UBI, immutable TX
+inhibit, idle PON stack and live panic timeout zero. The authorized run in
+`bench-d928eb20b6/stack-r68-01/` uses the saved runner and verified private
+inputs with fiber disconnected. Serial capture starts at byte 44942 of the
+unmodified host `/tmp/serial_output.log`.
+
+Controller startup and cold PHY preparation pass. With RX-width patch
+`9999l`, all 32 FE channels retire and the checked MAC stops, alignment FIFO,
+native RX DMA drain, PHY quiesce and MAC reset complete. At uptime about
+138 seconds the transaction fails at stage 8 (tables changing), error `-108`
+(`-ESHUTDOWN`), containment zero. This is the QoS snapshot at the start of the
+clear callback: native FE retirement has set every channel's retiring bit,
+which the original scheduler guard rejects. Namespace replacement has not
+completed. All nine PON modules unload, private inputs are removed, ponraw
+returns down and LAN/SSH remain healthy. No flash or optical TX activation
+occurred. This is idle physical-drain evidence, not loaded or optical service.
+
+Patch `9999m` allows reads of retired schedulers only after complete native
+drain, while preserving all write and epoch guards. The focused host fixture
+covers all channels, each missing drain precondition, fault propagation and
+unchanged outputs on error. The real Linux UML transport test now snapshots
+all 32 schedulers between RX drain and epoch reset, rejects premature reads
+and writes, then verifies replay after reset. It passes 100 lifecycle cycles
+without kernel diagnostics in `/tmp/q1000k-pon-transport-uml.6dAU5Z/`.
+The kernel must be rebuilt and RAM-booted by the user before retrying the
+stack. Matching vendor-module substitution cannot change this native code.
