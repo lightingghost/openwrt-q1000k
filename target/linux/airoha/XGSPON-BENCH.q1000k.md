@@ -1335,9 +1335,10 @@ interrupts or replay strobes:
 | `pll_pcw1` / `pll_pcw2` | `0x1fa8b048` / `04c` | SS_LCPLL_TDC_PCW_1 / 2 |
 
 In particular, the paired force/disable words let us interpret the earlier
-FBCK-lock status; the sequence and OS-calibration controls observe a difference
-between the public driver and OEM disassembly without guessing a corrective
-write. PLL power/filter/frequency configuration and RX reset controls add
+FBCK-lock status; the sequence and OS-calibration controls allow comparison
+with the OEM initialization without guessing a corrective write. The later
+matrix analysis below corrects the earlier suspected OSCal tail difference.
+PLL power/filter/frequency configuration and RX reset controls add
 context for the clear PLL lock2 bit. None is a measured frequency or a proven
 cause of failed synchronization. Snapshot publication remains atomic under
 the callback mutex and fails closed on any failed read.
@@ -1409,3 +1410,82 @@ selects the opt-in recovery if the baseline has persistent light without
 stable frames. Use `--extended-samples 180` for a longer second window on the
 same image when justified by the observations. Do not flash, reboot remotely,
 enable optical TX/registration or bypass the exact-image/runtime guards.
+
+### Connected matrix captured on one RAM boot — 2026-09-15
+
+The user reported the consolidated bench ready, with the last confirmed fiber
+state connected. The saved matrix verified source `13b833a711`, all fourteen
+runtime hashes and the RAM/storage/TX guards before either hardware session.
+Capture: `/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-13b833a711-connected-matrix-01/`.
+
+Both planned sessions completed on the same boot:
+
+| Observation | Baseline | Single recovery |
+| --- | --- | --- |
+| RX/controller snapshots | 30 / 31 | 90 / 91 |
+| Session time including setup/cleanup | 53.405 s | 118.930 s |
+| Controller and PHY LOS | false throughout | false throughout |
+| Sync / frames / FEC counts | HUNT / 0 / 0 | HUNT / 0 / 0 |
+| PHY polls / IRQ callbacks | 21 / 0 | 64 / 0 |
+| Reacquisition attempts | 0 | exactly 1 |
+| Downstream acceptance | failed | failed |
+| Postflight and private input cleanup | passed | passed |
+
+The one attempt first appears in sample 15, at poll 10, 15.390 seconds after
+the first RX observation. Another 82.403 seconds of samples follow it without
+sync or frames. This is sufficient evidence that this particular recovery
+sequence did not fix the observed state; an unchanged 180-sample repeat was
+not run. The saved `comparison.json`, produced by `bench-matrix-report.py`,
+records observations around the transition:
+
+| Word | Last before recovery | First after | Final |
+| --- | --- | --- | --- |
+| RX frequency status | `0xa49b0313` | `0xa49a0303` | `0xa49a0303` |
+| PLL status | `0x07000101` | `0x00000100` | `0x00000101` |
+| RX analog 0 | `0x7c7e0042` | `0x7c7e0003` | `0x7c7e0003` |
+| RX analog 1 | `0x02000603` | `0x10000603` | `0x10000603` |
+
+The PLL lock2 bit remains clear. `rx_lock_force=0x101` and
+`rx_lock_disable=0x01000000` confirm that the reference code forces FBCK-lock
+status; the separate status bit cannot establish genuine clock acquisition.
+The new control words remain unchanged across the attempt: sequence force0
+and disable0 zero, OS-calibration control `0x01000100`, RX reset words
+`0x01010101`/`0x00010101`, PLL power `0x01000000`, filter `1`, and both PLL
+frequency configuration words `0x0fecdd0c`. These observations describe the
+state; they are not independent frequency measurements or a root-cause proof.
+
+All 120 RX observations retain TX inhibited/off, registration disabled and
+MAC IRQ mask zero. OMCI stays unassigned in O1 with 322 MIB objects and no
+packets/service/protocol errors. Serial captures contain no kernel failure.
+LED class samples show green blinking and red off during the baseline; red
+also appears transiently during the recovery run. No new physical LED
+observation was requested or claimed. Both sessions unload the nine modules,
+turn the controller off, lower `ponraw`, remove their private RAM inputs and
+retain SSH management. No flash, reboot or optical transmission was performed.
+
+The OEM reference was re-extracted with the saved script; its source and
+module hashes match the earlier recorded reference. Offline comparison gives
+a more specific next investigation:
+
+- OEM `fiber_plug_reset(PLUG_IN)` calls `XPON_DIG_reset`, `XPON_RX_L2D`,
+  `XPON_TDC_on`, **`TXPLL_on`**, RX-ready/status and normal R2T selection.
+  The OEM call to `TXPLL_on` is at module offset `0x234bc`. The imported
+  reconnect path instead holds/releases digital reset around TDC restoration
+  and omits that PLL call. This is a verified sequence difference, not yet a
+  demonstrated fix. The imported startup already uses `TXPLL_on`; its name
+  alone must not be confused with optical transmitter authorization.
+- Rechecking `XPON_RX_OSCal` shows its final write is
+  `0x1fa8b110[0]=1` in **both** the prepared source and OEM disassembly
+  (OEM offset `0x26b4c`). The earlier suspected OSCal-tail discrepancy is
+  unsupported and must not justify a register change. Later calibration
+  stages modify these controls, so their final sampled zero is insufficient
+  evidence of a missing write.
+
+The next code investigation is the clock restoration and digital-reset
+ordering around reconnect, including the exact register effects and failure
+handling. Do not blindly replay the OEM initialization script or restore its
+whole registration poller. There is no new evidence of an http-uboot fault.
+The bench remains idle on the tested image; this checkpoint changes only
+host-side reporting and notes, so no replacement image was built. The two
+new transition-report tests and revalidation of the actual completed matrix
+passed; the image retains its previously recorded 131-test validation.

@@ -220,3 +220,9 @@ exits unsuccessfully; it does not claim optical service acceptance.
 Build again when kernel/driver code, ABI, device tree or packaged files change.
 Do not build again just to change a supported sample count, choose observation
 versus single recovery, rerun a host report, or compare captured registers.
+
+`bench-matrix-report.py /absolute/path/to/completed-matrix` revalidates both
+stages and produces a compact comparison, including the first observed
+recovery sample, post-recovery observation time and changed PHY words. It
+uses saved logs only and preserves each failed result. This can be rerun
+without a new image, another hardware experiment or subscriber credentials.
