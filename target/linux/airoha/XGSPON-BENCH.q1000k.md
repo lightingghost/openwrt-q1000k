@@ -1360,3 +1360,52 @@ The full scheduling and saved commands are in `scripts/q1000k/README.md`.
 These changes have not accessed the device. New image build/inspection and
 updated UML evidence are pending at this source checkpoint. The existing
 downstream synchronization failure remains unresolved.
+
+### Consolidated RAM image ready — 2026-09-15
+
+Source checkpoint: `13b833a711d9180eab264f9024e81bdc281f4677`.
+Artifact: `/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-13b833a711/`.
+FIT: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`,
+7,602,176 bytes; SHA256
+`773ac9a8d840906360c247d5812353c006628eda3e095e3eabcbce3a480d5e78`.
+This image supersedes the untested `90952676e4` image for the next RAM boot.
+
+Full build, **131 host tests**, and FIT/kernel/initramfs/DT inspection passed.
+The manifest confirms vendor r75, controller r7 and helper r9. Inspection
+checks the version-2 diagnostics, bounded sample options and disabled default
+recovery, alongside NAND disabled, immutable TX inhibit, panic zero,
+management `192.168.255.1`, no PON autoload and CLI/LuCI identity fields.
+Normal configurations, all protected source refs and the user's board README
+remain unchanged. Fourteen exact runtime file hashes/copies and the dry-run
+`matrix-plan.json` are saved beside the image.
+
+The isolated PHY UML run `/tmp/q1000k-pon-phy-uml.SjbWRm/` ran concurrently
+with image compilation using its own cached source/build. It passed fifty
+normal and fifty RX cycles, expanded register checks, callback/IRQ teardown
+and exit/quiesce races during recovery. `bench-record-uml.py --phy-only`
+verified generated-source equivalence and saved the evidence under `uml-phy/`
+and `uml-phy-source-verification.json`. The unchanged OMCI core retains its
+earlier independent evidence; no new core UML run is claimed.
+
+Offline replay of the complete `e26854f308` failed capture validates the matrix
+decision: retain the failed downstream result, recognize successful guarded
+cleanup and select the single-recovery follow-up. No device access occurred
+while consolidating, building or validating this image.
+
+After the user RAM-boots this FIT through second-stage http-uboot and reports
+SSH ready, run the saved connected matrix against the exact artifact:
+
+```sh
+python3 scripts/q1000k/bench-matrix.py \
+  --artifact ../build-artifacts/q1000k-xgspon/bench-13b833a711 \
+  --output ../build-artifacts/q1000k-xgspon/bench-13b833a711-connected-matrix-01 \
+  --inputs /tmp/q1000k-controller-test-1093614699-inputs.tar \
+  --fiber-connected --serial-log /tmp/serial_output.log
+```
+
+The matrix collects 30 baseline samples and 90 follow-up samples, with all
+diagnostics in each window and complete cleanup between stages. It only
+selects the opt-in recovery if the baseline has persistent light without
+stable frames. Use `--extended-samples 180` for a longer second window on the
+same image when justified by the observations. Do not flash, reboot remotely,
+enable optical TX/registration or bypass the exact-image/runtime guards.
