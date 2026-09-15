@@ -181,3 +181,31 @@ bench FIT and another user RAM boot. The controller-test authorization carries
 forward; do not expand it into stack activation. Test logs are retained in
 the original bench artifact's `controller-test/` directory, with raw logs
 private. This failed probe is not controller hardware acceptance.
+
+## Replacement image for controller retry — 2026-09-14
+
+Source `0e4acc9d70880ed4c3520c956822945ffaf165ea` builds successfully with the
+AN7581 GPIO classification fix. Both changed pinctrl files cross-compile;
+the AArch64 object contains the generic GPIO classifier reference. The kernel
+patch passes checkpatch with no errors or warnings. All 88 PON/WAN/bench host
+tests pass, and the pinmux regression also passes against the prepared kernel
+sources. The existing builder/profile is unchanged. The full build retains
+unrelated vendor and module metadata warnings.
+
+The new `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`
+is 7,602,176 bytes; SHA-256:
+`0636ec23539a77f95856151f2b98e13bf2b5e53c7d6f52b33c333b81dcf03275`.
+The artifact, manifest, resolved configuration, test/build logs, inspection
+and checksums are under
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-0e4acc9d70`.
+
+Offline inspection passes for both FIT hashes, the exact source revision and
+all 1,154 embedded initramfs entries. NAND/PCS remain disabled, partitions and
+rootdisk absent, controller TX inhibited, LAN/failsafe at 192.168.0.1, and
+DHCP/RA plus automatic PON startup disabled. The ordinary development config,
+protected branches, normal builder and user-owned README were preserved.
+
+This replacement has not been booted. The next action is another user RAM
+boot through second-stage `http-uboot-q1000k`, then read-only preflight and
+the already authorized controller retry with fiber disconnected. No new
+device test or flash operation was performed while building the fix.

@@ -15,8 +15,10 @@ hardware acceptance remain incomplete.
 **Never flash firmware.** Read-only checks passed on the new RAM bench at
 192.168.0.1. The user then authorized a controller-only test with disconnected
 fiber; it stopped at an AN7581 GPIO ownership conflict before detection and
-cleaned up. The pinmux fix requires a new RAM boot; PHY/MAC/OMCI testing remains
-separately gated. See [the bench report](XGSPON-BENCH.q1000k.md).
+cleaned up. The pinmux fix builds in replacement image `0e4acc9d70`; all 88
+PON/WAN/bench tests and offline image inspection pass. It requires a new RAM
+boot; PHY/MAC/OMCI testing remains separately gated.
+See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
 EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those

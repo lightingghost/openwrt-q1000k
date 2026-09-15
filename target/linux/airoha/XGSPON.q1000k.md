@@ -37,7 +37,7 @@ below remain the full acceptance plan; they are not all complete.
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
 
-Current local evidence: 87 PON/WAN/bench host tests, the complete OMCI core UML
+Current local evidence: 88 PON/WAN/bench host tests, the complete OMCI core UML
 suite and matching AN7581 package builds. The builder's eight tests and real
 Kconfig resolution retain every experimental package. A full cached build at
 `cb0853acbc5b5ef178f7419b9926a6722f58df9f` produces both Q1000K UBI images;
@@ -55,7 +55,8 @@ inspection passes. The user has RAM-booted this image; read-only SSH confirms
 RAM root, absent MTD/UBI devices, native ponraw registration and disabled
 PON modules/service. The audited bench status preflight passes. The authorized
 controller-only test stopped at GPIO pin ownership before detection; the
-AN7581 pinmux fix requires another RAM image/boot. Stack testing remains
+AN7581 pinmux fix builds in replacement image `0e4acc9d70` and passes offline
+inspection. It requires another user RAM boot. Stack testing remains
 separately gated. See the bench report for the failure and cleanup evidence.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
