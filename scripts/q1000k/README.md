@@ -138,3 +138,15 @@ Raw frequency/firmware words are not measured Hz or proof of running firmware.
 The register map and next connected-test rationale are recorded in
 `target/linux/airoha/XGSPON-BENCH.q1000k.md`. These controller changes require a
 new RAM boot; the runner must not substitute them into the old image.
+
+`bench-receiver-report.py /absolute/path/to/receive-capture` summarizes the
+thirty RX and thirty-one controller snapshots, including hexadecimal register
+values, even when downstream stability failed. It requires completed cleanup
+and retains the original bench failure; it never produces a passing service
+report. Keep using `bench-report.py` for acceptance.
+
+`oem-pon-reference.py --image /absolute/path/to/OEM.squashfs --output /new/directory`
+saves the two OEM PON controller/PHY modules, initialization script, disassembly
+and input hashes for offline comparison. It reads only the fixed file list,
+creates a private output directory, never executes the extracted OEM code,
+and never contacts a device.

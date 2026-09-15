@@ -1194,3 +1194,45 @@ new diagnostics, and performs bounded reverse cleanup. A failed downstream
 stability check must remain a failed test even if light and LED behavior are
 correct. No device access, flash, reboot, transmit activation or registration
 was performed while preparing this image.
+
+### Connected receiver diagnostics captured — 2026-09-15
+
+The user RAM-booted the new image and reported the bench ready. The guarded
+connected receive run verified source `e26854f308`, all fourteen runtime
+hashes and the RAM/storage/TX guards before staging inputs. Capture:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-e26854f308-receive-connected-01/`.
+It contains thirty RX and thirty-one controller snapshots and completed in
+52.903 seconds. Both LOS signals were false throughout, but synchronization
+stayed in HUNT (`0`), with no frames, FEC/LOF counts or RX IRQs. Polls advanced
+0 to 20. The downstream acceptance check remains **failed**.
+
+New observations, interpreted against the imported header and OEM disassembly:
+
+- PCS receiver enabled: `rx_control=0x00030202`; PCS resets released:
+  `pcs_reset=3`; PMA reset releases: `pma_reset=0x7f`.
+- CDR control `0x01010101` selects forced lock-to-data. RX frequency status
+  `0xa49a0313` / `0xa49b0313` has the vendor's FBCK-lock bit set. This is a
+  reported status, not independent clock validation: the calibration code
+  also contains forced-lock controls.
+- LCPLL status `0x07000101` has the OEM `freq_check()` TX clock lock2 bit
+  (16) clear; TDC control is `0x101`. Do not infer from the RX status that
+  every optical clock is locked, or enable optical TX to investigate this.
+- Both controller MCU address views read `1`; APD control is `0x93a`; OCP
+  changes from `5` before PHY startup to `0x43000005` during observation.
+  Firmware status is `0xff277573`, LOS control `0x0306000c`, system status
+  `0`. The address discrepancy alone is not evidence for a loader rewrite.
+
+All samples retain TX disabled/inhibited, registration disabled, MAC IRQ mask
+zero, O1/ONU/OMCC unassigned, 322 MIB objects and zero OMCI/service/protocol
+errors. The serial interval has no kernel failure. Postflight and input
+cleanup passed: PON modules unloaded, controller off, `ponraw` down, private
+RAM inputs removed and management available. No flash or reboot occurred.
+
+`scripts/q1000k/bench-receiver-report.py` saved the aggregate observations in
+`receiver-report.json` without converting the failed test into a pass.
+`scripts/q1000k/oem-pon-reference.py` saved local OEM source hashes and
+disassembly under `build-artifacts/q1000k-xgspon/oem-pon-reference-20260915/`.
+The OEM binaries were only read/disassembled, never executed. Its polling
+handler includes a no-LOS/no-ready PMA reacquisition path. Preparing an opt-in,
+single bounded attempt of that path is the next experiment; no such retry
+was run on this device during this capture.
