@@ -246,12 +246,15 @@ static int __init phy_test_init(void)
     for(n=0;n<50;n++) {
         struct q1000k_rx_sample sample;
         check(!q1000k_phy_start());
+        registers[(EN7581_XPON_PMA_RO_RX_FREQDET&0x1ffff)/4]=n;
+        registers[(EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL&0x1ffff)/4]=0x12340000+n;
         q1000k_phy_poll(); flush_work(&qphy_poll_job);
         registers[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=QPHY_RX_BENCH_IRQS;
         reinit_completion(&irq_returned);
         fake_irq_task=kthread_run(irq_task,NULL,"q1000k-rx-irq"); check(!IS_ERR(fake_irq_task));
         check(wait_for_completion_timeout(&irq_returned,5*HZ));
         check(!q1000k_phy_rx_sample(&sample) && sample.controller_los && !sample.synced);
+        check(sample.receiver.rx_frequency==n && sample.receiver.rx_control==0x12340000+n);
         check(!controller.tx && q1000k_phy_set_rx_bench(false)==-EBUSY);
         check(!q1000k_phy_stop() && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
     }

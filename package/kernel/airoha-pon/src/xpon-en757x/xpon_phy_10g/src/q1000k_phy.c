@@ -685,9 +685,27 @@ EXPORT_SYMBOL(q1000k_phy_set_rx_bench);
 static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 {
 	struct q1000k_rx_sample result = {};
+	const struct {
+		u32 reg;
+		u32 *value;
+	} receiver[] = {
+		{ EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL, &result.receiver.rx_control },
+		{ EN7581_XGPON_PHY_XG_PHY_RST_N, &result.receiver.pcs_reset },
+		{ EN7581_XPON_PMA_SW_RST_SET, &result.receiver.pma_reset },
+		{ EN7581_XPON_PMA_PON_CK_SET, &result.receiver.clock_control },
+		{ EN7581_XPON_PMA_rg_force_da_pxp_cdr_lpf_lck2data, &result.receiver.cdr_control },
+		{ EN7581_XPON_PMA_RO_RX_FREQDET, &result.receiver.rx_frequency },
+		{ EN7581_XPON_PMA_ADD_LCPLL_RO_1, &result.receiver.pll_status },
+		{ EN7581_XPON_PMA_SS_LCPLL_TDC_PW_0, &result.receiver.tdc_control },
+		{ EN7581_XPON_PMA_ADD_RO_RX2ANA_1, &result.receiver.rx_analog0 },
+		{ EN7581_XPON_PMA_ADD_RO_RX2ANA_2, &result.receiver.rx_analog1 },
+		{ EN7581_XPON_PMA_ADD_RO_RX2ANA_3, &result.receiver.rx_analog2 },
+		{ EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_1, &result.receiver.rx_sequence_force },
+		{ EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1, &result.receiver.rx_sequence_disable },
+	};
 	u32 sfp, irq_mask;
 	bool inhibited, tx;
-	int ret;
+	int i, ret;
 
 	if (!qphy_rx_bench || !qphy_controller || !qphy_active)
 		return -EAGAIN;
@@ -715,6 +733,16 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	result.synced = !result.controller_los && !result.phy_los &&
 		(result.sync_status & EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC) ==
 		EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+	/* The reference freq_check() and PMA initialization use these ordinary
+	 * control/status words. Snapshot them without running recovery, touching
+	 * the debug mux, or replaying reset strobes. All-ones is a failed control
+	 * read; the full-width traffic counters below may legitimately wrap.
+	 */
+	for (i = 0; i < ARRAY_SIZE(receiver); i++) {
+		ret = an7581_pon_phy_read(receiver[i].reg, receiver[i].value);
+		if (ret || *receiver[i].value == ~0U)
+			return ret ?: -EIO;
+	}
 	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_FRAME2PHYD_CNT, &result.frames);
 	if (!ret)
 		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_LOF_CNT, &result.lof);

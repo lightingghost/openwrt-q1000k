@@ -986,7 +986,7 @@ on this part has not been established. MCU-enable readback alone does not
 prove firmware execution. Do not change routing or APD analog values based
 only on LOS; first add serialized, read-only receiver/control observations.
 
-### Paused checkpoint: receiver diagnostics prepared, not built
+### Historical paused checkpoint: receiver diagnostics prepared, not built
 
 The user requested a pause after the first connected-fiber capture. Controller
 r7 and bench helper r7 source now add a serialized, read-only `receiver_status`
@@ -1087,3 +1087,61 @@ brightness values zero, all nine PON modules absent and `ponraw` down. Together
 with the earlier disconnected red indication, both link colors now have user
 visual confirmation. Blinking green indicates received light/discovery only;
 it does not establish downstream frame sync, O5 registration or service.
+
+### Receiver acquisition diagnostic checkpoint — 2026-09-15
+
+The imported AN7581 `en7581_xgpon_phy_event_poll()` has a no-LOS/no-ready
+recovery path: `pma_no_los_no_ready_reset()` performs `PLUG_OUT` followed by
+the PMA reset path, and every tenth unsuccessful cycle can reset the optical
+SCU. RX bench deliberately bypasses that polling handler because it also
+dispatches registration events. Missing reacquisition is therefore a possible
+explanation for the light/no-sync observations, not a demonstrated root cause.
+The initial board profile and PMA rate settings match the OEM boot log; the
+connected captures do not yet distinguish controller output from CDR/PCS state.
+Do not enable the complete vendor poll handler to investigate this.
+
+Vendor r73 now adds a `receiver` object to the existing guarded RX sample.
+The observations use the owned PHY provider and callback mutex, require the
+immutable controller TX inhibit and live TX-off state, and publish only when
+every read succeeds. No reset, debug probe selection, analog write, counter
+clear or registration callback is added. The following raw words are sampled:
+
+| Field | AN7581 physical address | Reference register |
+| --- | --- | --- |
+| `rx_control` | `0x1faf0a04` | XG_PON_RX_SYNC_CTRL |
+| `pcs_reset` | `0x1faf0a0c` | XG_PHY_RST_N |
+| `pma_reset` | `0x1fa8b460` | SW_RST_SET |
+| `clock_control` | `0x1fa8b450` | PON_CK_SET |
+| `cdr_control` | `0x1fa8b818` | rg_force_da_pxp_cdr_lpf_lck2data |
+| `rx_frequency` | `0x1fa8b530` | RO_RX_FREQDET |
+| `pll_status` | `0x1fa8b420` | ADD_LCPLL_RO_1 |
+| `tdc_control` | `0x1fa8b010` | SS_LCPLL_TDC_PW_0 |
+| `rx_analog0` / `1` / `2` | `0x1fa8b424` / `428` / `42c` | ADD_RO_RX2ANA_1 / 2 / 3 |
+| `rx_sequence_force` | `0x1fa8b114` | RX_CTRL_SEQUENCE_FORCE_CTRL_1 |
+| `rx_sequence_disable` | `0x1fa8b10c` | RX_CTRL_SEQUENCE_DISB_CTRL_1 |
+
+The reference `freq_check()` interprets `rx_frequency` bit 0 as FBCK lock,
+and `cdr_control` bit 8 as forced CDR selection with bit 0 selecting data
+versus reference lock. `rx_control` bit 16 enables the PCS receiver. Keep the
+raw values alongside these interpretations: they are not an independently
+measured frequency or proof of frame reception. Controller r7's separately
+serialized seven-word snapshot observes its two MCU address views, APD/OCP,
+firmware, LOS and system controls before PHY startup and at every sample.
+The address discrepancy remains an observation target, not a loader change.
+
+Focused host validation passes: read-only field publication, every RX MMIO
+read failure, all-ones receiver words, partial-sample rejection, fail-closed
+TX/callback handling, JSON field encoding, all 15,388 controller loader I2C
+failure points, and all fifteen shell bench tests including missing controller
+diagnostics. The PHY UML fixture now checks receiver values across fifty
+receive-only start/IRQ/poll/stop cycles. A full local build, image inspection
+and the UML execution are still pending at this source checkpoint.
+
+Next hardware action after those checks is a user RAM boot of the new FIT
+through second-stage http-uboot. Repeat the already-authorized connected
+receive-only observation at `192.168.255.1` with the exact new artifact and
+saved private inputs. The earlier disconnected startup/cleanup and both LED
+colors have passed; these additions only read status. Keep TX, registration,
+DHCP and persistent storage disabled. Use the new snapshots to select a
+specific correction before introducing any receive recovery. This checkpoint
+has not accessed or modified the device and does not claim sync is fixed.

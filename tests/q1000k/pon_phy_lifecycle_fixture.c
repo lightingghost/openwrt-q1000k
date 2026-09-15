@@ -330,6 +330,60 @@ static void prepare_wan(void)
     assert(q1000k_phy_prepare_wan()==-EBUSY && !wan_writes);
     reset();
 }
+static void rx_snapshot_start(void)
+{
+    reset(); controller_inhibit=true; controller_los=false;
+    assert(!q1000k_phy_init() && !q1000k_phy_set_rx_bench(true));
+    assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
+}
+
+static void rx_snapshot_faults(void)
+{
+    const u32 receiver_regs[] = {
+        EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL, EN7581_XGPON_PHY_XG_PHY_RST_N,
+        EN7581_XPON_PMA_SW_RST_SET, EN7581_XPON_PMA_PON_CK_SET,
+        EN7581_XPON_PMA_rg_force_da_pxp_cdr_lpf_lck2data, EN7581_XPON_PMA_RO_RX_FREQDET,
+        EN7581_XPON_PMA_ADD_LCPLL_RO_1, EN7581_XPON_PMA_SS_LCPLL_TDC_PW_0,
+        EN7581_XPON_PMA_ADD_RO_RX2ANA_1, EN7581_XPON_PMA_ADD_RO_RX2ANA_2,
+        EN7581_XPON_PMA_ADD_RO_RX2ANA_3, EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_1,
+        EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1,
+    };
+    struct q1000k_rx_sample sample, saved;
+    const struct q1000k_rx_registers expected = {
+        .rx_control=0x101, .pcs_reset=0x102, .pma_reset=0x103, .clock_control=0x104,
+        .cdr_control=0x105, .rx_frequency=0x106, .pll_status=0x107, .tdc_control=0x108,
+        .rx_analog0=0x109, .rx_analog1=0x10a, .rx_analog2=0x10b,
+        .rx_sequence_force=0x10c, .rx_sequence_disable=0x10d,
+    };
+    unsigned int n, count, before;
+
+    rx_snapshot_start();
+    for(n=0;n<ARRAY_SIZE(receiver_regs);n++) regs[(receiver_regs[n]&0x1ffff)/4]=0x101+n;
+    before=writes; count=reads;
+    assert(!q1000k_phy_rx_sample(&sample));
+    count=reads-count;
+    assert(!memcmp(&sample.receiver,&expected,sizeof(expected)) && writes==before);
+    assert(!sample.synced && !sample.controller_los && !sample.phy_los);
+    memset(&saved,0xa5,sizeof(saved));
+    /* Every MMIO failure, including the last counter, must withhold the
+     * entire snapshot and contain callbacks/TX. No partial JSON is usable.
+     */
+    for(n=1;n<=count;n++) {
+        rx_snapshot_start(); sample=saved; fail_read=reads+n;
+        assert(q1000k_phy_rx_sample(&sample)==-EIO);
+        assert(!memcmp(&sample,&saved,sizeof(sample)) && qphy_fault==-EIO);
+        assert(!qphy_active && !controller.tx);
+        assert(!regs[(EN7581_XGPON_PHY_XG_PON_INT_EN&0x1ffff)/4]);
+    }
+    for(n=0;n<ARRAY_SIZE(receiver_regs);n++) {
+        rx_snapshot_start(); sample=saved;
+        regs[(receiver_regs[n]&0x1ffff)/4]=~0U;
+        assert(q1000k_phy_rx_sample(&sample)==-EIO);
+        assert(!memcmp(&sample,&saved,sizeof(sample)) && !qphy_active && !controller.tx);
+    }
+    reset(); controller_inhibit=false; controller_los=true;
+}
+
 static void rx_bench_tests(void)
 {
     struct q1000k_rx_sample sample, saved;
@@ -368,6 +422,7 @@ static void rx_bench_tests(void)
 }
 int main(void)
 {
+    rx_snapshot_faults();
     rx_bench_tests();
     prepare_wan();
     unsigned int n;

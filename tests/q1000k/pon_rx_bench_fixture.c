@@ -33,7 +33,14 @@ static int an7581_xpon_status(void) { return provider_error; }
 int q1000k_phy_set_rx_bench(bool enabled) { preparations++; if(!phy_error) phy_mode=enabled; return phy_error; }
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
     samples++; if(sample_error) return sample_error;
-    memset(s,0,sizeof(*s)); s->synced=true; s->frames=1234; s->sampled_ms=123456789012ULL; return 0;
+    memset(s,0,sizeof(*s)); s->synced=true; s->frames=1234; s->sampled_ms=123456789012ULL;
+    s->receiver=(struct q1000k_rx_registers){
+        .rx_control=1, .pcs_reset=2, .pma_reset=3, .clock_control=4,
+        .cdr_control=5, .rx_frequency=6, .pll_status=7, .tdc_control=8,
+        .rx_analog0=9, .rx_analog1=10, .rx_analog2=11,
+        .rx_sequence_force=12, .rx_sequence_disable=4294967294U,
+    };
+    return 0;
 }
 int main(void) {
     char out[4096];
@@ -59,5 +66,9 @@ int main(void) {
     sample_error=0; assert(qrx_status_get(out,NULL)>0 && samples==5 && mac_reads==3);
     assert(strstr(out,"\"frames\":1234") && strstr(out,"\"sampled_ms\":123456789012"));
     assert(strstr(out,"\"registration_enabled\":false") && strstr(out,"\"tx_enabled\":false"));
+    assert(strstr(out,"\"receiver\":{\"rx_control\":1,\"pcs_reset\":2,\"pma_reset\":3,"
+                      "\"clock_control\":4,\"cdr_control\":5,\"rx_frequency\":6,\"pll_status\":7,"
+                      "\"tdc_control\":8,\"rx_analog0\":9,\"rx_analog1\":10,\"rx_analog2\":11,"
+                      "\"rx_sequence_force\":12,\"rx_sequence_disable\":4294967294}}\n"));
     return 0;
 }

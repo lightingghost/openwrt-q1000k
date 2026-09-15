@@ -124,3 +124,17 @@ contents. It has no device access. For example:
 ```sh
 python3 scripts/q1000k/bench-record-uml.py --artifact /absolute/path/to/bench-artifact --phy-run /tmp/q1000k-pon-phy-uml.RUN --core-run /tmp/q1000k-omci-core-uml.RUN
 ```
+
+For a PHY-only change, use `--phy-only` in place of `--core-run`. This writes
+`uml-phy-source-verification.json` and preserves only the new PHY evidence;
+it does not claim a new OMCI core run.
+
+Vendor r73 includes thirteen receiver control/status words in the nested
+`receiver` object of each `rx_bench_status` sample. Controller r7 and helper r7
+also record `receiver_status` before PHY startup and at each observation.
+These are read-only snapshots under the existing driver locks. They do not
+change clocks, reset the receiver, or dispatch vendor registration callbacks.
+Raw frequency/firmware words are not measured Hz or proof of running firmware.
+The register map and next connected-test rationale are recorded in
+`target/linux/airoha/XGSPON-BENCH.q1000k.md`. These controller changes require a
+new RAM boot; the runner must not substitute them into the old image.

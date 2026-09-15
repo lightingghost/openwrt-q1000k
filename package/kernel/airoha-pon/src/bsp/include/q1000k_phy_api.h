@@ -38,11 +38,21 @@ int q1000k_phy_needs_configure(void);
  * IRQ/poll callbacks observe RX without invoking vendor registration events.
  */
 int q1000k_phy_set_rx_bench(bool enabled);
+/* Raw receiver control/status words, not measured frequencies or proof of
+ * firmware execution. Read without selecting probes or changing hardware.
+ */
+struct q1000k_rx_registers {
+	u32 rx_control, pcs_reset, pma_reset, clock_control;
+	u32 cdr_control, rx_frequency, pll_status, tdc_control;
+	u32 rx_analog0, rx_analog1, rx_analog2;
+	u32 rx_sequence_force, rx_sequence_disable;
+};
 struct q1000k_rx_sample {
 	bool controller_los, phy_los, synced;
 	u32 sync_status, frames, lof, fec_total, fec_corrected, fec_uncorrected;
 	u32 irq_calls, poll_calls;
 	u64 sampled_ms;
+	struct q1000k_rx_registers receiver;
 };
 /* Fresh, read-only status/counter sample. No counter latches or clears. */
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample);

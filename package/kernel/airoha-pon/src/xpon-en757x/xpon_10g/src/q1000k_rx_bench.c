@@ -66,11 +66,21 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"controller_los\":%s,\"phy_los\":%s,\"synced\":%s,"
 		"\"sync_status\":%u,\"frames\":%u,\"lof\":%u,"
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
-		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu}\n",
+		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu,"
+		"\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
+		"\"clock_control\":%u,\"cdr_control\":%u,\"rx_frequency\":%u,"
+		"\"pll_status\":%u,\"tdc_control\":%u,\"rx_analog0\":%u,"
+		"\"rx_analog1\":%u,\"rx_analog2\":%u,\"rx_sequence_force\":%u,"
+		"\"rx_sequence_disable\":%u}}\n",
 		s.controller_los ? "true" : "false", s.phy_los ? "true" : "false",
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
-		s.irq_calls, s.poll_calls, (unsigned long long)s.sampled_ms);
+		s.irq_calls, s.poll_calls, (unsigned long long)s.sampled_ms,
+		s.receiver.rx_control, s.receiver.pcs_reset, s.receiver.pma_reset,
+		s.receiver.clock_control, s.receiver.cdr_control, s.receiver.rx_frequency,
+		s.receiver.pll_status, s.receiver.tdc_control, s.receiver.rx_analog0,
+		s.receiver.rx_analog1, s.receiver.rx_analog2, s.receiver.rx_sequence_force,
+		s.receiver.rx_sequence_disable);
 }
 static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
 module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);
