@@ -788,3 +788,14 @@ Direct modeled hardware injection fixes that test; no device was involved.
 The full OMCI core UML suite also passes at
 `/tmp/q1000k-omci-core-uml.y9bPZ1`. Build/image inspection and new hardware
 acceptance are still pending here.
+
+
+The initial combined image at `c08aec4bd1` builds and passes 107 host tests
+and FIT/rootfs inspection. It is superseded for device use: final review found
+that module parameter attributes can be read during initialization, when
+native attachment alone does not guarantee the optical WAN selector/clocks.
+Vendor r71 moves the verified active-PHY sample before the MAC mask read.
+Its fault-injection test proves that unconfigured or failed PHY status causes
+no MAC register access. This does not change the PHY/core implementations
+covered by the saved UML evidence. A final image is built from the follow-up
+checkpoint before requesting a user RAM boot.

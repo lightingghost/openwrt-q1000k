@@ -49,13 +49,17 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		return ret;
 	if (!q1000k_transport_running())
 		return -EAGAIN;
+	/* Module parameter attributes can be read while init is in progress.
+	 * Attachment alone does not establish the optical clocks/WAN selector.
+	 * The PHY sample requires successful configuration and active RX first.
+	 */
+	ret = q1000k_phy_rx_sample(&s);
+	if (ret)
+		return ret;
 	mask = get_xpon_data(0x5040);
 	ret = an7581_xpon_status();
 	if (ret || mask)
 		return ret ?: -EIO;
-	ret = q1000k_phy_rx_sample(&s);
-	if (ret)
-		return ret;
 	return scnprintf(buffer, PAGE_SIZE,
 		"{\"rx_bench\":true,\"registration_enabled\":false,"
 		"\"tx_inhibited\":true,\"tx_enabled\":false,\"mac_irq_mask\":0,"
