@@ -1534,3 +1534,31 @@ with the extracted reference routine, inject every update/readback/health
 failure, verify untouched fields and mode/budget guards, and exercise report
 rejection. Kernel concurrency and full image validation are recorded separately
 when completed. No hardware was accessed during this implementation.
+
+### Validated PLL experiment image
+
+Checkpoint `6fb4b2bae07da7385c986e78b7d4864de2f17634` builds successfully with
+vendor r76, controller r7 and helper r10. All 138 PON host tests pass, including
+the packaged helper, mode/report consistency and source-derived fault tests.
+FIT/rootfs inspection verifies the new module parameter and schema, nine
+unloadable modules, disabled NAND, immutable TX inhibit, management address
+192.168.255.1 and panic timeout policy. Source-matched PHY UML testing passes
+50 normal and 50 RX lifecycle cycles plus concurrent shutdown/quiesce for
+both recovery modes, with no kernel failure diagnostics. This is PHY-only UML
+evidence; no new OMCI-core UML run is claimed.
+
+Artifact directory in the parent workspace:
+`build-artifacts/q1000k-xgspon/bench-6fb4b2bae0/`.
+Image: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`.
+Size: 7,602,176 bytes. SHA256:
+`362f51f26ae42aeb9fa03771ec59f90b9ea979464324895443ecc366af27abe4`.
+The directory contains build/host logs, inspection JSON, pinned selection,
+14 runtime hashes, and `uml-phy-source-verification.json` with saved UML logs.
+Both normal configs and all protected branch refs are unchanged. The user's
+untracked README is preserved. No device command or firmware flash occurred.
+
+After user RAM boot through second-stage http-uboot, verify this exact image
+and run the existing connected matrix with `--restore-pll`; use 30 baseline
+samples and the default 90-sample continuation. The previous image does not
+contain this experiment. Successful local validation does not predict whether
+PLL restoration will establish downstream sync or advancing frames.

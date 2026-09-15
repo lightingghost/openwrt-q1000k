@@ -1,5 +1,37 @@
 # Q1000K XGS-PON implementation checkpoint
 
+## Current bench — 2026-09-15
+
+Source `6fb4b2bae07da7385c986e78b7d4864de2f17634` is ready for a new user RAM
+boot through second-stage http-uboot. The artifact is in the parent workspace
+at `build-artifacts/q1000k-xgspon/bench-6fb4b2bae0/`, with FIT SHA256
+`362f51f26ae42aeb9fa03771ec59f90b9ea979464324895443ecc366af27abe4`.
+It is 7,602,176 bytes, uses 192.168.255.1, disables NAND and retains immutable
+optical TX inhibit. Never flash it. Vendor r76/controller r7/bench r10 are
+included. Full build, 138 host tests, FIT/rootfs inspection, and the separate
+PHY UML lifecycle/concurrency tests pass with matched source evidence.
+
+The prior `13b833a711` connected matrix observed light in all 120 samples but
+no downstream synchronization or frames, including after one PMA recovery.
+The new image retains observation and that recovery, and adds optional
+`--restore-pll` after recovery plus four read-only clock-control diagnostics.
+Use the saved matrix with `--restore-pll` after verifying the new RAM boot.
+Its default 30-sample baseline and 90-sample continuation share one image and
+retain at most one recovery attempt. Stable baseline frames select observation
+only. This new clock experiment has not been run on hardware.
+
+No evidence establishes a TX/RX mapping swap; correct RX setup remains
+unproved. Calibrated Q1000K RX power is still unavailable. The user's AT&T
+values are consistent with RX -17.0 dBm and TX +3.6 dBm, but those are gateway
+readings, not Q1000K measurements. Optical TX, registration and subscriber
+traffic remain untested. See [the bench report](XGSPON-BENCH.q1000k.md) and
+[saved test commands](../../../scripts/q1000k/README.md) for evidence and limits.
+
+## Earlier integration and hardware checkpoints
+
+The dated versions and boot instructions below are historical; use the current
+bench above for the next RAM boot.
+
 2026-09-14, branch `q1000k-xgspon`, based on `q1000k-dev` at
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
