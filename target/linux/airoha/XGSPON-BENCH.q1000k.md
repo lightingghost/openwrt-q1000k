@@ -1037,3 +1037,33 @@ preparation. Confirm the incoming fiber is firmly seated before invoking
 `receive --fiber-connected` with a fresh capture directory. The private input
 archive and saved runner are ready; no new image or module substitution is
 needed to repeat the previous observation.
+
+### Connected retest: light detected, synchronization absent — 2026-09-15
+
+After the user confirmed the bench up at `192.168.255.1` and fiber connected,
+the unchanged `d84282fc86` image completed another thirty-sample receive-only
+test. Capture:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-d84282fc86-receive-connected-20260915-01/`.
+
+Both controller and PHY LOS were **false in every sample**, unlike the first
+connected attempt. The user's loose-connector report explains that earlier
+LOS result; current receiver initialization detects light without a firmware
+or loader change. However, `synced=false`, `sync_status=0`, frame count zero
+and FEC/LOF counters zero persisted throughout. RX polling advanced 0 to 20;
+RX IRQ count remained zero. The helper correctly failed its final downstream
+stability requirement. Optical reception of valid frames is not yet verified.
+
+All samples retained TX disabled/inhibited, registration disabled, zero MAC
+interrupt mask, O1 with ONU/OMCC IDs 65535, 322 MIB objects, no protocol or
+service error, and zero OMCI traffic. Red LED brightness stayed zero; green
+sampled both blink phases (14 on, 16 off). Physical connected-fiber LED
+confirmation is still pending. Serial output contains no kernel failure
+diagnostic. Total elapsed setup/observation/cleanup was 52.557 seconds.
+
+Postflight and owned-input cleanup passed: every PON module released,
+controller off, `ponraw` down, private staged files removed and management
+available. No flash, reboot, optical TX, registration or subscriber traffic
+was performed. The next software investigation should focus on the AN7581
+RX synchronization path and its receive-only startup/poll handling with LOS
+clear, rather than treating the controller address discrepancy as the cause
+of missing light. No unproven routing or analog change was tested.
