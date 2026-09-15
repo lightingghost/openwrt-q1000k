@@ -192,7 +192,7 @@ def inspect(image, revision):
     assert b'30|90|180' in read('usr/sbin/q1000k-pon-bench')
     assert b'limit=$samples' in read('usr/sbin/q1000k-pon-bench')
     mac = next(name for name in records if name.endswith('/xpon_10g.ko'))
-    for field in (b'"receiver_version":4', b'"gain_restore_enabled":', b'"rx_frontend_gain":', b'"rx_power_valid":', b'"rx_power_nw":', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
+    for field in (b'"receiver_version":5', b'"pcs_counters":', b'"rx_clock_divider":', b'"gain_restore_enabled":', b'"rx_frontend_gain":', b'"rx_power_valid":', b'"rx_power_nw":', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
         assert field in read(mac)
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:

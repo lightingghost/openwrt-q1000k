@@ -387,6 +387,20 @@ static void rx_snapshot_faults(void)
         EN7581_XPON_ANA_RG_PXP_TXPLL_TCL_KBAND_VREF,
         EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN,
         EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl,
+        EN7581_XGPON_PHY_SFP_STA,
+        EN7581_XGPON_PHY_SFP_VLD_LEVEL,
+        EN7581_XGPON_PHY_XG_PHY_STA,
+        EN7581_XGPON_PHY_DBG_CTRL,
+        EN7581_XGPON_PHY_XG_PON_SERDES_CTR,
+        EN7581_XPON_ANA_RG_PXP_RX_PHYCK_DIV,
+        EN7581_XPON_ANA_RG_PXP_RX_BUSBIT_SEL,
+        EN7581_XPON_ANA_RG_PXP_RX_MPXSEL,
+        EN7581_XPON_ANA_RG_PXP_CDR_LPF_RATIO,
+        EN7581_XPON_PMA_RG_XPON_RX_RESERVED_1,
+        EN7581_XPON_PMA_rg_force_da_pxp_aeq_speed,
+        EN7581_XPON_PMA_XPON_SETTING_0,
+        EN7581_XPON_ANA_RG_PXP_RX_FE_EQ_HZEN,
+        EN7581_XPON_ANA_RG_PXP_RX_FE_VCM_GEN_PWDB,
     };
     struct q1000k_rx_sample sample, saved;
     const struct q1000k_rx_registers expected = {
@@ -409,6 +423,20 @@ static void rx_snapshot_faults(void)
         .pll_measure=0x11a,
         .pll_kband=0x11b,
         .pll_outputs=0x11c, .rx_frontend_gain=0x11d,
+        .sfp_status=0x11e,
+        .sfp_polarity=0x11f,
+        .digital_status=0x120,
+        .pcs_debug_control=0x121,
+        .serdes_control=0x122,
+        .rx_clock_divider=0x123,
+        .rx_bus_width=0x124,
+        .rx_input_control=0x125,
+        .rx_cdr_ratio=0x126,
+        .rx_rate_control=0x127,
+        .rx_osr_control=0x128,
+        .signal_control=0x129,
+        .rx_equalizer=0x12a,
+        .rx_frontend_power=0x12b,
 
     };
     unsigned int n, count, before;

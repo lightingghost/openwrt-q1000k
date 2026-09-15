@@ -776,6 +776,32 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		{ EN7581_XPON_ANA_RG_PXP_TXPLL_TCL_KBAND_VREF, &result.receiver.pll_kband },
 		{ EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN, &result.receiver.pll_outputs },
 		{ EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl, &result.receiver.rx_frontend_gain },
+		{ EN7581_XGPON_PHY_SFP_STA, &result.receiver.sfp_status },
+		{ EN7581_XGPON_PHY_SFP_VLD_LEVEL, &result.receiver.sfp_polarity },
+		{ EN7581_XGPON_PHY_XG_PHY_STA, &result.receiver.digital_status },
+		{ EN7581_XGPON_PHY_DBG_CTRL, &result.receiver.pcs_debug_control },
+		{ EN7581_XGPON_PHY_XG_PON_SERDES_CTR, &result.receiver.serdes_control },
+		{ EN7581_XPON_ANA_RG_PXP_RX_PHYCK_DIV, &result.receiver.rx_clock_divider },
+		{ EN7581_XPON_ANA_RG_PXP_RX_BUSBIT_SEL, &result.receiver.rx_bus_width },
+		{ EN7581_XPON_ANA_RG_PXP_RX_MPXSEL, &result.receiver.rx_input_control },
+		{ EN7581_XPON_ANA_RG_PXP_CDR_LPF_RATIO, &result.receiver.rx_cdr_ratio },
+		{ EN7581_XPON_PMA_RG_XPON_RX_RESERVED_1, &result.receiver.rx_rate_control },
+		{ EN7581_XPON_PMA_rg_force_da_pxp_aeq_speed, &result.receiver.rx_osr_control },
+		{ EN7581_XPON_PMA_XPON_SETTING_0, &result.receiver.signal_control },
+		{ EN7581_XPON_ANA_RG_PXP_RX_FE_EQ_HZEN, &result.receiver.rx_equalizer },
+		{ EN7581_XPON_ANA_RG_PXP_RX_FE_VCM_GEN_PWDB, &result.receiver.rx_frontend_power },
+	};
+	struct {
+		u32 reg;
+		u32 *value;
+	} counters[] = {
+		{ EN7581_XGPON_PHY_DBG_RX_CW_START_CNT, &result.pcs_counters.cw_start },
+		{ EN7581_XGPON_PHY_DBG_RX_CW_END_CNT, &result.pcs_counters.cw_end },
+		{ EN7581_XGPON_PHY_DBG_RX_SOF2MAC_CNT, &result.pcs_counters.sof_to_mac },
+		{ EN7581_XGPON_PHY_DBG_RX_EOF2MAC_CNT, &result.pcs_counters.eof_to_mac },
+		{ EN7581_XGPON_PHY_DBG_PSYNC_MISMATCH_CNT, &result.pcs_counters.psync_mismatch },
+		{ EN7581_XGPON_PHY_DBG_SFC_HEC_ERR_CNT, &result.pcs_counters.sfc_hec_error },
+		{ EN7581_XGPON_PHY_DBG_PON_ID_HEC_ERR_CNT, &result.pcs_counters.pon_id_hec_error },
 	};
 	u32 sfp, irq_mask;
 	bool inhibited, tx;
@@ -832,6 +858,15 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_FEC_UNCORRECTED_CW_CNT, &result.fec_uncorrected);
 	if (ret)
 		return ret;
+	/* Ordinary PCS counters, also listed by the reference PHY register dump.
+	 * Never read FIFO/debug-probe ports or write the counter-clear controls.
+	 * Unlike configuration words, all-ones is a legitimate counter value.
+	 */
+	for (i = 0; i < ARRAY_SIZE(counters); i++) {
+		ret = an7581_pon_phy_read(counters[i].reg, counters[i].value);
+		if (ret)
+			return ret;
+	}
 	result.irq_calls = qphy_rx_irqs;
 	result.poll_calls = qphy_rx_polls;
 	result.reacquire_enabled = qphy_rx_reacquire;

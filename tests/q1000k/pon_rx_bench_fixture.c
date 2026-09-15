@@ -89,7 +89,7 @@ int main(void) {
     assert(qrx_status_get(out,NULL)==-EIO && samples==4 && mac_reads==2);
     sample_error=0; assert(qrx_status_get(out,NULL)>0 && samples==5 && mac_reads==3);
     assert(strstr(out,"\"pll_restore_enabled\":true"));
-    assert(strstr(out,"\"receiver_version\":4"));
+    assert(strstr(out,"\"receiver_version\":5"));
     assert(strstr(out,"\"frames\":1234") && strstr(out,"\"sampled_ms\":123456789012"));
     assert(strstr(out,"\"registration_enabled\":false") && strstr(out,"\"tx_enabled\":false"));
     assert(strstr(out,"\"reacquire_enabled\":true,\"reacquire_attempts\":1"));
@@ -107,7 +107,7 @@ int main(void) {
                       "\"pll_power\":21,"
                       "\"pll_filter\":22,"
                       "\"pll_pcw1\":23,"
-                      "\"pll_pcw2\":24,\"pll_force\":25,\"pll_measure\":26,\"pll_kband\":27,\"pll_outputs\":28,\"rx_frontend_gain\":29}}\n"));
+                      "\"pll_pcw2\":24,\"pll_force\":25,\"pll_measure\":26,\"pll_kband\":27,\"pll_outputs\":28,\"rx_frontend_gain\":29,\"sfp_status\":0,\"sfp_polarity\":0,\"digital_status\":0,\"pcs_debug_control\":0,\"serdes_control\":0,\"rx_clock_divider\":0,\"rx_bus_width\":0,\"rx_input_control\":0,\"rx_cdr_ratio\":0,\"rx_rate_control\":0,\"rx_osr_control\":0,\"signal_control\":0,\"rx_equalizer\":0,\"rx_frontend_power\":0},\"pcs_counters\":{\"cw_start\":0,\"cw_end\":0,\"sof_to_mac\":0,\"eof_to_mac\":0,\"psync_mismatch\":0,\"sfc_hec_error\":0,\"pon_id_hec_error\":0}}\n"));
     assert(strstr(out,"\"rx_power_valid\":false,\"rx_power_nw\":null"));
     rx_restore_gain=true; assert(!q1000k_rx_bench_prepare() && phy_restore_gain);
     power_valid=true; assert(qrx_status_get(out,NULL)>0);

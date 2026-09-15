@@ -86,7 +86,9 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
 		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu,"
 		"\"reacquire_enabled\":%s,\"reacquire_attempts\":%u,"
-		"\"pll_restore_enabled\":%s,\"gain_restore_enabled\":%s,\"rx_power_valid\":%s,\"rx_power_nw\":%s,\"receiver_version\":4,\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
+		"\"pll_restore_enabled\":%s,\"gain_restore_enabled\":%s,"
+		"\"rx_power_valid\":%s,\"rx_power_nw\":%s,\"receiver_version\":5,"
+		"\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
 		"\"clock_control\":%u,\"cdr_control\":%u,\"rx_frequency\":%u,"
 		"\"pll_status\":%u,\"tdc_control\":%u,\"rx_analog0\":%u,"
 		"\"rx_analog1\":%u,\"rx_analog2\":%u,\"rx_sequence_force\":%u,"
@@ -96,7 +98,12 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"rx_oscal_control\":%u,\"rx_reset0\":%u,"
 		"\"rx_reset1\":%u,\"pll_power\":%u,"
 		"\"pll_filter\":%u,\"pll_pcw1\":%u,"
-		"\"pll_pcw2\":%u,\"pll_force\":%u,\"pll_measure\":%u,\"pll_kband\":%u,\"pll_outputs\":%u,\"rx_frontend_gain\":%u}}\n",
+		"\"pll_pcw2\":%u,\"pll_force\":%u,\"pll_measure\":%u,\"pll_kband\":%u,\"pll_outputs\":%u,\"rx_frontend_gain\":%u,"
+		"\"sfp_status\":%u,\"sfp_polarity\":%u,\"digital_status\":%u,\"pcs_debug_control\":%u,\"serdes_control\":%u,"
+		"\"rx_clock_divider\":%u,\"rx_bus_width\":%u,\"rx_input_control\":%u,\"rx_cdr_ratio\":%u,\"rx_rate_control\":%u,"
+		"\"rx_osr_control\":%u,\"signal_control\":%u,\"rx_equalizer\":%u,\"rx_frontend_power\":%u},"
+		"\"pcs_counters\":{\"cw_start\":%u,\"cw_end\":%u,\"sof_to_mac\":%u,\"eof_to_mac\":%u,\"psync_mismatch\":%u,"
+		"\"sfc_hec_error\":%u,\"pon_id_hec_error\":%u}}\n",
 		s.controller_los ? "true" : "false", s.phy_los ? "true" : "false",
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
@@ -116,7 +123,28 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		s.receiver.rx_reset1, s.receiver.pll_power,
 		s.receiver.pll_filter, s.receiver.pll_pcw1,
 		s.receiver.pll_pcw2, s.receiver.pll_force, s.receiver.pll_measure,
-		s.receiver.pll_kband, s.receiver.pll_outputs, s.receiver.rx_frontend_gain);
+		s.receiver.pll_kband, s.receiver.pll_outputs, s.receiver.rx_frontend_gain,
+		s.receiver.sfp_status,
+		s.receiver.sfp_polarity,
+		s.receiver.digital_status,
+		s.receiver.pcs_debug_control,
+		s.receiver.serdes_control,
+		s.receiver.rx_clock_divider,
+		s.receiver.rx_bus_width,
+		s.receiver.rx_input_control,
+		s.receiver.rx_cdr_ratio,
+		s.receiver.rx_rate_control,
+		s.receiver.rx_osr_control,
+		s.receiver.signal_control,
+		s.receiver.rx_equalizer,
+		s.receiver.rx_frontend_power,
+		s.pcs_counters.cw_start,
+		s.pcs_counters.cw_end,
+		s.pcs_counters.sof_to_mac,
+		s.pcs_counters.eof_to_mac,
+		s.pcs_counters.psync_mismatch,
+		s.pcs_counters.sfc_hec_error,
+		s.pcs_counters.pon_id_hec_error);
 }
 static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
 module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);

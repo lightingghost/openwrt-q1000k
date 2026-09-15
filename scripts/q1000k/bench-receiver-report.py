@@ -24,6 +24,8 @@ EXTENDED_PHY_WORDS = ('rx_sequence_force0', 'rx_sequence_disable0',
                       'rx_reset0', 'rx_reset1', 'pll_power', 'pll_filter',
                       'pll_pcw1', 'pll_pcw2')
 PLL_PHY_WORDS = ('pll_force', 'pll_measure', 'pll_kband', 'pll_outputs')
+PATH_PHY_WORDS = ('sfp_status', 'sfp_polarity', 'digital_status', 'pcs_debug_control', 'serdes_control', 'rx_clock_divider', 'rx_bus_width', 'rx_input_control', 'rx_cdr_ratio', 'rx_rate_control', 'rx_osr_control', 'signal_control', 'rx_equalizer', 'rx_frontend_power')
+PCS_COUNTERS = ('cw_start', 'cw_end', 'sof_to_mac', 'eof_to_mac', 'psync_mismatch', 'sfc_hec_error', 'pon_id_hec_error')
 COUNTERS = ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
             'fec_uncorrected', 'irq_calls', 'poll_calls')
 
@@ -58,11 +60,18 @@ def summarize(capture):
     if len(rx) != count or len(controller) != count + 1:
         raise ValueError(f'Expected {count} RX and {count + 1} controller snapshots')
     versions = {x.get('receiver_version', 1) for x in rx}
-    if versions not in ({1}, {2}, {3}, {4}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
+    if versions not in ({1}, {2}, {3}, {4}, {5}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
         raise ValueError('Inconsistent receiver diagnostic version')
     names = PHY_WORDS + (EXTENDED_PHY_WORDS if versions != {1} else ())
-    names += PLL_PHY_WORDS if versions in ({3}, {4}) else ()
-    names += ('rx_frontend_gain',) if versions == {4} else ()
+    names += PLL_PHY_WORDS if versions in ({3}, {4}, {5}) else ()
+    names += ('rx_frontend_gain',) if versions in ({4}, {5}) else ()
+    names += PATH_PHY_WORDS if versions == {5} else ()
+    if versions == {5}:
+        for row in rx:
+            for key in PCS_COUNTERS:
+                value = row.get('pcs_counters', {}).get(key)
+                if type(value) is not int or not 0 <= value <= 0xffffffff:
+                    raise ValueError('Invalid PCS counter: ' + key)
     last = -1
     last_attempts = 0
     restore_gain = record.get('restore_gain', False)
@@ -116,6 +125,10 @@ def summarize(capture):
         'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
         'pll_restore_requested': restore_pll, 'gain_restore_requested': restore_gain,
         'optical': _report.optical_summary(rx),
+        'pcs_counters': {key: {'first': rx[0]['pcs_counters'][key],
+                              'last': rx[-1]['pcs_counters'][key],
+                              'delta_mod32': (rx[-1]['pcs_counters'][key] - rx[0]['pcs_counters'][key]) & 0xffffffff}
+                         for key in PCS_COUNTERS} if versions == {5} else None,
         'phy_words_before_reacquire': words([x['receiver'] for x in rx
                                             if x.get('reacquire_attempts', 0) == 0], names),
         'phy_words_after_reacquire': words([x['receiver'] for x in rx

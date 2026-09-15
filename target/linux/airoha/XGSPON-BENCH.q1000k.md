@@ -1662,3 +1662,17 @@ any further mode from the first comparison's evidence, without a rebuild.
 No device was accessed while preparing these changes. NAND stays disabled,
 management stays 192.168.255.1, optical TX stays inhibited, and flashing remains
 prohibited. Local build/concurrency results will be recorded after completion.
+
+### Expanded hypothesis coverage in the same delivered bench
+
+The user requested tests for the other light-present/no-frame explanations
+before delivery. The r77 build was gracefully stopped and both normal configs
+restored. Vendor r78/helper r12 extend the same image to schema 5: 43 control
+words and seven additional PCS counters. No extra experimental write was added.
+See [the nine hypotheses and test matrix](XGSPON-RX-HYPOTHESES.q1000k.md).
+`bench-hypotheses.py` evaluates saved captures, and `bench-matrix.py` records its
+report automatically for schema 5. Existing images/schemas remain reportable.
+The expanded UML fixture's expected callback totals were updated for the added
+power-concurrency test and two gain teardown cases; the first local UML run
+stopped at the old count assertion, not a hardware or lock failure. A fresh
+source-matched run is required before delivery.

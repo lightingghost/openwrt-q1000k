@@ -273,3 +273,10 @@ attempt occurred. Schema 4 captures 29 PHY words, including `rx_frontend_gain`.
 
 The full build wrapper now also runs status-backend and LuCI view tests and
 stores their logs beside the existing PON test and image-inspection evidence.
+
+Vendor r78/helper r12 extend this to receiver schema 5, with 43 control/status
+words and seven earlier PCS counters. `bench-hypotheses.py CAPTURE` evaluates
+these saved observations without device access; a schema-5 matrix saves
+`hypotheses.json` automatically for each stage. See
+`target/linux/airoha/XGSPON-RX-HYPOTHESES.q1000k.md` for the nine hypotheses,
+discriminating outcomes, physical controls and limits of the available tests.

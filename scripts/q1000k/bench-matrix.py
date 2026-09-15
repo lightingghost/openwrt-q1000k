@@ -23,6 +23,7 @@ def module(name):
 RUN = module('bench-run')
 REPORT = module('bench-report')
 RECEIVER = module('bench-receiver-report')
+HYPOTHESES = module('bench-hypotheses')
 
 
 def followup(baseline):
@@ -56,7 +57,10 @@ def stage(args, name, samples, reacquire):
     # capture, no kernel faults, safe session and successful input teardown.
     report = REPORT.summarize(capture, allow_downstream_failure=True)
     diagnostics = RECEIVER.summarize(capture)
-    for filename, data in (('observations.json', report), ('receiver-report.json', diagnostics)):
+    reports = [('observations.json', report), ('receiver-report.json', diagnostics)]
+    if diagnostics['receiver_version'] == 5:
+        reports.append(('hypotheses.json', HYPOTHESES.evaluate(diagnostics)))
+    for filename, data in reports:
         (capture / filename).write_text(json.dumps(data, indent=2) + '\n')
     return report
 

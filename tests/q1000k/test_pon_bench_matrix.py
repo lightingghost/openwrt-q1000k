@@ -82,11 +82,12 @@ class DiagnosticTests(unittest.TestCase):
         names = MATRIX.RECEIVER.PHY_WORDS + (MATRIX.RECEIVER.EXTENDED_PHY_WORDS if version >= 2 else ())
         names += MATRIX.RECEIVER.PLL_PHY_WORDS if version >= 3 else ()
         names += ('rx_frontend_gain',) if version >= 4 else ()
+        names += MATRIX.RECEIVER.PATH_PHY_WORDS if version >= 5 else ()
         controller = dict(receiver_status=True, **{key: 0 for key in MATRIX.RECEIVER.CONTROLLER_WORDS})
         rx=dict(rx_bench=True, tx_inhibited=True, tx_enabled=False, registration_enabled=False,
                 mac_irq_mask=0, sync_status=0, controller_los=False, phy_los=False, synced=False,
                 gain_restore_enabled=False, rx_power_valid=True, rx_power_nw=19900,
-                pll_restore_enabled=False, receiver_version=version, receiver={key: 0 for key in names},
+                pll_restore_enabled=False, receiver_version=version, pcs_counters={key: 0 for key in MATRIX.RECEIVER.PCS_COUNTERS}, receiver={key: 0 for key in names},
                 **{key: 0 for key in MATRIX.RECEIVER.COUNTERS})
         rows=[controller]
         for n in range(count):
@@ -96,14 +97,14 @@ class DiagnosticTests(unittest.TestCase):
         return rows
 
     def test_versioned_diagnostics_and_extended_windows(self):
-        for count, version in ((30, 1), (90, 2), (180, 2), (90, 3), (90, 4)):
+        for count, version in ((30, 1), (90, 2), (180, 2), (90, 3), (90, 4), (90, 5)):
             with tempfile.TemporaryDirectory() as directory:
                 path=Path(directory)
                 self.fixture(path, count, version)
                 report=MATRIX.RECEIVER.summarize(path)
                 self.assertEqual(report['rx_samples'], count)
                 self.assertEqual(report['bench_result'], 'failed')
-                self.assertEqual(len(report['phy_words']), {1: 13, 2: 24, 3: 28, 4: 29}[version])
+                self.assertEqual(len(report['phy_words']), {1: 13, 2: 24, 3: 28, 4: 29, 5: 43}[version])
 
     def test_pll_mode_and_four_new_words_are_required_for_version_three(self):
         for problem in ('none', 'missing-flag', 'wrong-flag', 'missing-word', 'all-ones'):
@@ -142,6 +143,23 @@ class DiagnosticTests(unittest.TestCase):
                     with self.assertRaises(ValueError): MATRIX.RECEIVER.summarize(path)
         self.assertIsNone(MATRIX.REPORT.optical_summary([
             dict(rx_power_valid=False,rx_power_nw=None,receiver_version=4)])['rx_power_dbm'])
+
+    def test_path_counters_and_hypothesis_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory); rows=self.fixture(path, version=5)
+            rows[-1]['pcs_counters']=dict(rows[-1]['pcs_counters'], psync_mismatch=12, cw_start=0xffffffff)
+            (path/'attempt.log').write_text('\n'.join(map(json.dumps, rows)))
+            report=MATRIX.RECEIVER.summarize(path)
+            self.assertEqual(report['pcs_counters']['cw_start']['delta_mod32'], 0xffffffff)
+            result=MATRIX.HYPOTHESES.evaluate(report)
+            self.assertEqual(len(result['hypotheses']), 9)
+            self.assertFalse(result['optical_service_verified'])
+            byid={x['id']: x for x in result['hypotheses']}
+            self.assertTrue(byid['measurement-boundary']['observation']['codeword_activity'])
+            self.assertTrue(byid['pcs-framing']['observation']['framing_error_activity'])
+            rows[-1]['pcs_counters']['cw_start']=-1
+            (path/'attempt.log').write_text('\n'.join(map(json.dumps, rows)))
+            with self.assertRaises(ValueError): MATRIX.RECEIVER.summarize(path)
 
     def test_partial_extended_diagnostic_is_rejected(self):
         for problem in ('missing-word', 'bad-word', 'mixed-version', 'missing-sample'):

@@ -57,6 +57,29 @@ struct q1000k_rx_registers {
 	u32 pll_power, pll_filter, pll_pcw1, pll_pcw2;
 	u32 pll_force, pll_measure, pll_kband, pll_outputs;
 	u32 rx_frontend_gain;
+	u32 sfp_status;
+	u32 sfp_polarity;
+	u32 digital_status;
+	u32 pcs_debug_control;
+	u32 serdes_control;
+	u32 rx_clock_divider;
+	u32 rx_bus_width;
+	u32 rx_input_control;
+	u32 rx_cdr_ratio;
+	u32 rx_rate_control;
+	u32 rx_osr_control;
+	u32 signal_control;
+	u32 rx_equalizer;
+	u32 rx_frontend_power;
+};
+struct q1000k_pcs_counters {
+	u32 cw_start;
+	u32 cw_end;
+	u32 sof_to_mac;
+	u32 eof_to_mac;
+	u32 psync_mismatch;
+	u32 sfc_hec_error;
+	u32 pon_id_hec_error;
 };
 struct q1000k_rx_sample {
 	bool controller_los, phy_los, synced;
@@ -69,6 +92,7 @@ struct q1000k_rx_sample {
 	u32 reacquire_attempts;
 	u64 sampled_ms;
 	struct q1000k_rx_registers receiver;
+	struct q1000k_pcs_counters pcs_counters;
 };
 /* Fresh, read-only status/counter sample. No counter latches or clears. */
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample);

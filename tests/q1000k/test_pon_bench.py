@@ -68,7 +68,7 @@ if action=='cat':
         params=json.loads((root/'module-params').read_text())
         retry=params.get('rx_reacquire')=='1'
         data=dict(rx_bench=True, registration_enabled=False, tx_inhibited=True,tx_enabled=False,
-                  gain_restore_enabled=params.get('rx_restore_gain')=='1', receiver_version=4, rx_power_valid=True, rx_power_nw=19900,
+                  gain_restore_enabled=params.get('rx_restore_gain')=='1', receiver_version=5, rx_power_valid=True, rx_power_nw=19900,
                   pll_restore_enabled=params.get('rx_restore_pll')=='1', reacquire_enabled=retry, reacquire_attempts=1 if retry and n>=15 else 0,
                   mac_irq_mask=0, controller_los=not lit,phy_los=not lit,synced=lit,sync_status=0,
                   frames=n if lit else 0,lof=0,fec_total=n if lit else 0,fec_corrected=0,

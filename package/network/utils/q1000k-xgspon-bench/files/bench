@@ -104,7 +104,7 @@ rx_status() {
 	json_get_type type gain_restore_enabled; json_get_var value gain_restore_enabled
 	[ "$type" = boolean ] && [ "$value" = "$restore_gain" ] || return 1
 	json_get_type type receiver_version; json_get_var value receiver_version
-	[ "$type" = int ] && [ "$value" = 4 ] || return 1
+	[ "$type" = int ] && [ "$value" = 5 ] || return 1
 	json_get_type type rx_power_valid; json_get_var value rx_power_valid
 	[ "$type" = boolean ] || return 1
 	if [ "$value" = 1 ]; then
