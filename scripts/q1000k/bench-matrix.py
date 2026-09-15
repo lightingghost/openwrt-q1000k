@@ -46,6 +46,8 @@ def stage(args, name, samples, reacquire):
                '--serial-log', str(args.serial_log)]
     if reacquire:
         command.append('--reacquire-once')
+        if args.restore_pll:
+            command.append('--restore-pll')
     print(f'Starting {name}: {samples} samples, single recovery={reacquire}', flush=True)
     RUN.main(command)
     # No retry based on exit code alone. Independently require the complete
@@ -60,7 +62,7 @@ def stage(args, name, samples, reacquire):
 def execute(args):
     args.output.mkdir(mode=0o700)
     record = dict(schema_version=1, status='running', optical_service_verified=False,
-                  artifact=str(args.artifact), started=time.time(), stages=[])
+                  artifact=str(args.artifact), restore_pll=args.restore_pll, started=time.time(), stages=[])
     path = args.output / 'matrix.json'
     def save():
         path.write_text(json.dumps(record, indent=2) + '\n')
@@ -91,6 +93,8 @@ def main():
     parser.add_argument('--fiber-connected', action='store_true', required=True)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
     parser.add_argument('--extended-samples', type=int, choices=(90, 180), default=90)
+    parser.add_argument('--restore-pll', action='store_true',
+                        help='Add PLL restoration to recovery only; baseline stays unchanged')
     parser.add_argument('--dry-run', action='store_true', help='Describe the matrix without SSH or writes')
     args = parser.parse_args()
     for name in ('artifact', 'output', 'inputs', 'serial_log'):
@@ -99,7 +103,7 @@ def main():
         print(json.dumps(dict(artifact=str(args.artifact), host=RUN.HOST,
                               baseline_samples=30, extended_samples=args.extended_samples,
                               followup='Observe longer if stable; otherwise one recovery if light stays present',
-                              maximum_reacquisitions=1, optical_tx=False, flash=False), indent=2))
+                              maximum_reacquisitions=1, restore_pll=args.restore_pll, optical_tx=False, flash=False), indent=2))
         return 0
     return execute(args)
 

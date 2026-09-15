@@ -180,11 +180,15 @@ def main(argv=None):
     fiber.add_argument('--fiber-connected', action='store_true', help='Only for the explicit receive-only test')
     parser.add_argument('--reacquire-once', action='store_true',
                         help='Connected receive only: opt into one bounded PMA out/in recovery')
+    parser.add_argument('--restore-pll', action='store_true',
+                        help='Restore PHY PLL clocks after the single connected RX recovery')
     parser.add_argument('--samples', type=int, choices=(30, 90, 180),
                         help='Receive observations at one-second intervals (default: 30)')
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args(argv)
+    if args.restore_pll and not args.reacquire_once:
+        parser.error('--restore-pll requires --reacquire-once')
     if args.samples is not None and args.action != 'receive':
         parser.error('--samples is only for receive')
     if args.reacquire_once and (args.action != 'receive' or not args.fiber_connected):
@@ -223,12 +227,15 @@ def execute(args):
     start = serial.seek(0, 2)
     fiber_flag = '--fiber-connected' if args.fiber_connected else '--fiber-disconnected'
     recovery_flag = ' --reacquire-once' if args.reacquire_once else ''
+    if args.restore_pll:
+        recovery_flag += ' --restore-pll'
     sample_flag = f' --samples {args.samples}' if args.samples is not None else ''
     run = dict(schema_version=1, action=args.action, host=HOST, revision=revision,
                fiber='connected' if args.fiber_connected else 'disconnected' if args.fiber_disconnected else 'unspecified',
                artifact=str(artifact), output=str(output), serial_log=str(args.serial_log.resolve()),
                serial_start=start, started=time.time(), status='running')
     run['reacquire_once'] = args.reacquire_once
+    run['restore_pll'] = args.restore_pll
     if args.action == 'receive':
         run['samples'] = args.samples or 30
     (output / 'checkpoint.json').write_text(json.dumps(run, indent=2) + '\n')

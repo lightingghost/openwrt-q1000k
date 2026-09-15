@@ -136,8 +136,9 @@ static int handle_event(char *p)
 static int handle_poll(char *p) { polls++; return handle_event(p); }
 static int handle_irq(char *p) { irqs++; return handle_event(p); }
 static unsigned int reacquisitions;
-int q1000k_phy_rx_reacquire(void)
+int q1000k_phy_rx_reacquire(bool restore_pll)
 {
+    check(restore_pll == qphy_rx_restore_pll);
     check(controller_inhibit && !controller.tx && qphy_rx_attempts==1);
     reacquisitions++;
     return handle_event(NULL);
@@ -217,12 +218,12 @@ static void control_during_callback(void)
     check(wait_for_completion_timeout(&exit_done,5*HZ) && controller.tx);
     kthread_stop(task); q1000k_phy_exit();
 }
-static void stop_during_reacquire(bool quiesce)
+static void stop_during_reacquire(bool quiesce, bool restore_pll)
 {
     struct task_struct *task;
     unsigned int n, previous=reacquisitions;
     qphy_dead=false; qphy_fault=0; controller_los=false;
-    check(!q1000k_phy_init() && !q1000k_phy_set_rx_bench(true,true));
+    check(!q1000k_phy_init() && !q1000k_phy_set_rx_bench(true, true, restore_pll));
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
     registers[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
     for(n=0;n<9;n++) { q1000k_phy_poll(); flush_work(&qphy_poll_job); }
@@ -271,7 +272,7 @@ static int __init phy_test_init(void)
     control_during_callback();
     check(polls==53 && irqs==2);
     qphy_dead=false; qphy_fault=0; controller_inhibit=true;
-    check(!q1000k_phy_init()); check(!q1000k_phy_set_rx_bench(true, false));
+    check(!q1000k_phy_init()); check(!q1000k_phy_set_rx_bench(true, false, false));
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
     for(n=0;n<50;n++) {
         struct q1000k_rx_sample sample;
@@ -285,18 +286,22 @@ static int __init phy_test_init(void)
         reinit_completion(&irq_returned);
         fake_irq_task=kthread_run(irq_task,NULL,"q1000k-rx-irq"); check(!IS_ERR(fake_irq_task));
         check(wait_for_completion_timeout(&irq_returned,5*HZ));
+        registers[(EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN&0x1ffff)/4]=0x300+n;
         check(!q1000k_phy_rx_sample(&sample) && sample.controller_los && !sample.synced);
+        check(sample.receiver.pll_outputs==0x300+n && !sample.pll_restore_enabled);
         check(sample.receiver.rx_frequency==n && sample.receiver.rx_control==0x12340000+n);
         check(sample.receiver.rx_lock_force==0x100+n && sample.receiver.pll_pcw2==0x200+n);
-        check(!controller.tx && q1000k_phy_set_rx_bench(false, false)==-EBUSY);
+        check(!controller.tx && q1000k_phy_set_rx_bench(false, false, false)==-EBUSY);
         check(!q1000k_phy_stop() && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
     }
     check(polls==53 && irqs==2 && qphy_rx_polls==50 && qphy_rx_irqs==50);
     q1000k_phy_exit();
     check(!controller.held && !gpPhyPriv);
-    stop_during_reacquire(false);
-    stop_during_reacquire(true);
-    check(reacquisitions==2 && !controller.held);
+    stop_during_reacquire(false, false);
+    stop_during_reacquire(false, true);
+    stop_during_reacquire(true, false);
+    stop_during_reacquire(true, true);
+    check(reacquisitions==4 && !controller.held);
     pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 normal + 50 RX-only cycles, RCU guards, concurrent poll and IRQ teardown\n");
     return 0;
 }

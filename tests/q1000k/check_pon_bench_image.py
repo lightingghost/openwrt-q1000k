@@ -172,6 +172,7 @@ def inspect(image, revision):
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])
+            assert b'parmtype=rx_restore_pll:bool' in read(matches[0])
             assert 'q1000k_pon_fix_vlans' in symbols
             for param in ('vendor_id_hex', 'hardware_version_hex', 'software0_hex', 'software1_hex',
                           'logical_onu_id_hex', 'logical_password_hex', 'sync_circuit_pack',
@@ -180,11 +181,12 @@ def inspect(image, revision):
         if name == 'phy_10g':
             assert 'q1000k_phy_rx_reacquire' in symbols
     assert b'reacquire=0' in read('usr/sbin/q1000k-pon-bench')
+    assert b'--restore-pll' in read('usr/sbin/q1000k-pon-bench')
     assert b'--reacquire-once' in read('usr/sbin/q1000k-pon-bench')
     assert b'30|90|180' in read('usr/sbin/q1000k-pon-bench')
     assert b'limit=$samples' in read('usr/sbin/q1000k-pon-bench')
     mac = next(name for name in records if name.endswith('/xpon_10g.ko'))
-    for field in (b'"receiver_version":2', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
+    for field in (b'"receiver_version":3', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
         assert field in read(mac)
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:

@@ -11,7 +11,11 @@ class PhyPmaTests(unittest.TestCase):
     def test_signal_absent_present_and_every_phase_failure(self):
         source, regs = production_source(PHY / 'src/q1000k_phy_pma.c')
         fixture = Path(__file__).with_name('pon_phy_pma_fixture.c').read_text()
-        run_c(fixture.replace('/* REGISTERS */', regs).replace('/* PRODUCTION */', source))
+        reference = extract((PHY / 'src/en7581_pma.c').read_text().replace(
+            'void TXPLL_on(void)', 'int TXPLL_on(void)'), 'TXPLL_on')
+        reference = reference.replace('int TXPLL_on(void)', 'void TXPLL_on(void)')
+        run_c(fixture.replace('/* REGISTERS */', regs).replace('/* REFERENCE */', reference)
+              .replace('/* PRODUCTION */', source), flags=['-Wno-sign-compare'])
 
     def test_prepared_caller_propagates_analog_errors(self):
         source = (BSP.parent / 'xpon-en757x/xpon_phy_10g/src/en7581.c').read_text(encoding='latin1')

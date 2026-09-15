@@ -226,3 +226,31 @@ stages and produces a compact comparison, including the first observed
 recovery sample, post-recovery observation time and changed PHY words. It
 uses saved logs only and preserves each failed result. This can be rerun
 without a new image, another hardware experiment or subscriber credentials.
+
+### Optional PLL restoration in the same image
+
+Vendor r76 / helper r10 add `--restore-pll` to the connected receive test.
+It requires `--reacquire-once`; the default recovery is unchanged. After the
+checked PMA out/in recovery, it performs the thirteen PHY clock-control updates
+in the imported `TXPLL_on()` routine, with a controller/provider check before
+each update and readback of each modified bit. It preserves the reference
+6 and 500 microsecond delays. The original one-attempt budget still applies.
+
+The OEM reconnect path includes this PLL routine, but also differs in digital
+reset bits and TDC timing. This experiment isolates PLL restoration after the
+existing recovery; it does not reproduce the complete OEM reset sequence or
+claim a working receiver. The optical controller's immutable TX inhibit stays
+asserted, and no registration is enabled.
+
+The same image supports observation, existing recovery, and recovery with PLL
+restoration. Add `--restore-pll` to `bench-matrix.py` to select the last option
+for its recovery stage. The baseline never restores PLLs; a stable baseline
+still selects observation only. No additional matrix stage or automatic retry
+is introduced. Use `--dry-run` to review the selection without device access.
+
+Every RX sample now has `pll_restore_enabled`, `receiver_version=3`, and 28
+PHY words. Four new words cover `pll_force` (0x1fa8b854), `pll_measure`
+(0x1fa8a04c), `pll_kband` (0x1fa8a094), and `pll_outputs` (0x1fa8a060).
+Reports check the requested mode against every sample and retain compatibility
+with saved versions 1 and 2. These raw controls are not measured clock
+frequencies, calibrated RX power, or proof of PLL lock.

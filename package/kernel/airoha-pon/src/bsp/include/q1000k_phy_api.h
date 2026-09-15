@@ -38,9 +38,11 @@ int q1000k_phy_needs_configure(void);
  * IRQ/poll callbacks observe RX without invoking vendor registration events.
  */
 /* Opt-in reacquisition: one attempt per module lifetime, after ten consecutive
- * polling observations of light without sync. Never enables registration/TX.
+ * polling observations of light without sync. Optional PLL restoration requires
+ * reacquisition and stays under the same single-attempt budget. Neither enables
+ * registration or optical TX.
  */
-int q1000k_phy_set_rx_bench(bool enabled, bool reacquire);
+int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll);
 /* Raw receiver control/status words, not measured frequencies or proof of
  * firmware execution. Read without selecting probes or changing hardware.
  */
@@ -52,10 +54,12 @@ struct q1000k_rx_registers {
 	u32 rx_sequence_force0, rx_sequence_disable0, rx_lock_force, rx_lock_disable;
 	u32 rx_oscal_control, rx_reset0, rx_reset1;
 	u32 pll_power, pll_filter, pll_pcw1, pll_pcw2;
+	u32 pll_force, pll_measure, pll_kband, pll_outputs;
 };
 struct q1000k_rx_sample {
 	bool controller_los, phy_los, synced;
 	bool reacquire_enabled;
+	bool pll_restore_enabled;
 	u32 sync_status, frames, lof, fec_total, fec_corrected, fec_uncorrected;
 	u32 irq_calls, poll_calls;
 	u32 reacquire_attempts;
@@ -85,7 +89,7 @@ int q1000k_phy_callback_context(void);
 int q1000k_phy_top_reset(void);
 int q1000k_phy_pma_reset(void);
 int q1000k_phy_pma_init(void);
-int q1000k_phy_rx_reacquire(void);
+int q1000k_phy_rx_reacquire(bool restore_pll);
 int q1000k_phy_controller_check(void);
 int q1000k_phy_board_profile(void);
 int q1000k_phy_trans_power(u32 operation);

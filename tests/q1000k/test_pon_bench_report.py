@@ -121,6 +121,26 @@ class ReportTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         REPORT.summarize(self.capture)
 
+    def test_pll_restoration_request_must_match_each_sample(self):
+        for problem in ('none', 'missing', 'unexpected', 'without-recovery', 'wrong-type'):
+            with self.subTest(problem=problem):
+                record, controller, omci, samples = self.fixture(fiber='connected')
+                record.update(restore_pll=problem != 'unexpected',
+                              reacquire_once=problem != 'without-recovery')
+                for n, item in enumerate(samples):
+                    item.update(pll_restore_enabled=True, reacquire_enabled=True,
+                                reacquire_attempts=int(n >= 20))
+                if problem == 'missing':
+                    del samples[-1]['pll_restore_enabled']
+                elif problem == 'wrong-type':
+                    samples[-1]['pll_restore_enabled'] = 1
+                self.save(record, controller, omci, samples)
+                if problem == 'none':
+                    self.assertTrue(REPORT.summarize(self.capture)['receive']['pll_restore_requested'])
+                else:
+                    with self.assertRaises(ValueError):
+                        REPORT.summarize(self.capture)
+
     def test_extended_observation_requires_all_requested_samples(self):
         for count in (90, 180):
             fixture = self.fixture(fiber='connected', count=count)

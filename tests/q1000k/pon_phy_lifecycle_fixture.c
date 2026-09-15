@@ -187,12 +187,12 @@ static int an7581_pon_wan_set(u32 mode)
 }
 /* PRODUCTION */
 static int reacquire_calls, reacquire_error;
-static bool reacquire_bad_tx;
-int q1000k_phy_rx_reacquire(void)
+static bool reacquire_bad_tx, reacquire_restore_pll;
+int q1000k_phy_rx_reacquire(bool restore_pll)
 {
     assert(!q1000k_phy_callback_context() && controller_inhibit && !controller.tx);
     assert(qphy_rx_attempts==1 && qphy_active && !controller_los);
-    reacquire_calls++;
+    reacquire_calls++; reacquire_restore_pll=restore_pll;
     if(reacquire_bad_tx) controller.tx=true;
     return reacquire_error;
 }
@@ -344,7 +344,7 @@ static void prepare_wan(void)
 static void rx_snapshot_start(void)
 {
     reset(); controller_inhibit=true; controller_los=false;
-    assert(!q1000k_phy_init() && !q1000k_phy_set_rx_bench(true, false));
+    assert(!q1000k_phy_init() && !q1000k_phy_set_rx_bench(true, false, false));
     assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
 }
 
@@ -369,6 +369,10 @@ static void rx_snapshot_faults(void)
         EN7581_XPON_PMA_SS_LCPLL_TDC_FLT_3,
         EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_1,
         EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_2,
+        EN7581_XPON_PMA_rg_force_da_pxp_txpll_ckout_en,
+        EN7581_XPON_ANA_RG_PXP_JCPLL_FREQ_MEAS_EN,
+        EN7581_XPON_ANA_RG_PXP_TXPLL_TCL_KBAND_VREF,
+        EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN,
     };
     struct q1000k_rx_sample sample, saved;
     const struct q1000k_rx_registers expected = {
@@ -387,6 +391,11 @@ static void rx_snapshot_faults(void)
         .pll_filter=0x116,
         .pll_pcw1=0x117,
         .pll_pcw2=0x118,
+        .pll_force=0x119,
+        .pll_measure=0x11a,
+        .pll_kband=0x11b,
+        .pll_outputs=0x11c,
+
     };
     unsigned int n, count, before;
 
@@ -421,10 +430,10 @@ static void rx_reacquire_start(void)
 {
     reset(); controller_inhibit=true; controller_los=false;
     assert(!q1000k_phy_init());
-    assert(q1000k_phy_set_rx_bench(false,true)==-EINVAL);
-    assert(!q1000k_phy_set_rx_bench(true,true));
+    assert(q1000k_phy_set_rx_bench(false, true, false)==-EINVAL);
+    assert(!q1000k_phy_set_rx_bench(true, true, false));
     assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
-    assert(q1000k_phy_set_rx_bench(true,false)==-EBUSY);
+    assert(q1000k_phy_set_rx_bench(true, false, false)==-EBUSY);
 }
 static void rx_reacquire_tests(void)
 {
@@ -460,6 +469,16 @@ static void rx_reacquire_tests(void)
     assert(!q1000k_phy_stop() && !q1000k_phy_start());
     for(n=0;n<100;n++) qphy_poll_work(&qphy_poll_job);
     assert(reacquire_calls==1 && !polls && !isrs);
+    /* Both modes use the same single-attempt lifetime budget. */
+    reset(); controller_inhibit=true; controller_los=false;
+    assert(!q1000k_phy_init());
+    assert(q1000k_phy_set_rx_bench(true,false,true)==-EINVAL);
+    assert(!q1000k_phy_set_rx_bench(true,true,true));
+    assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
+    assert(q1000k_phy_set_rx_bench(true,true,false)==-EBUSY);
+    for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
+    assert(reacquire_calls==1 && reacquire_restore_pll && !controller.tx);
+    assert(!q1000k_phy_rx_sample(&sample) && sample.pll_restore_enabled);
     rx_reacquire_start(); reacquire_error=-ETIMEDOUT;
     for(n=0;n<10;n++) qphy_poll_work(&qphy_poll_job);
     assert(reacquire_calls==1 && qphy_fault==-ETIMEDOUT && !qphy_active && !controller.tx);
@@ -477,15 +496,15 @@ static void rx_bench_tests(void)
 {
     struct q1000k_rx_sample sample, saved;
     reset(); assert(!q1000k_phy_init()); controller_inhibit=false;
-    assert(!q1000k_phy_set_rx_bench(false, false));
-    assert(q1000k_phy_set_rx_bench(true, false)==-EACCES && !qphy_rx_bench);
+    assert(!q1000k_phy_set_rx_bench(false, false, false));
+    assert(q1000k_phy_set_rx_bench(true, false, false)==-EACCES && !qphy_rx_bench);
     controller_inhibit=true; controller.tx=true;
-    assert(q1000k_phy_set_rx_bench(true, false)==-EACCES && !qphy_rx_bench);
-    controller.tx=false; assert(!q1000k_phy_set_rx_bench(true, false));
+    assert(q1000k_phy_set_rx_bench(true, false, false)==-EACCES && !qphy_rx_bench);
+    controller.tx=false; assert(!q1000k_phy_set_rx_bench(true, false, false));
     assert(q1000k_phy_rx_sample(&sample)==-EAGAIN);
     assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
-    assert(q1000k_phy_set_rx_bench(false, false)==-EBUSY);
-    assert(!q1000k_phy_set_rx_bench(true, false));
+    assert(q1000k_phy_set_rx_bench(false, false, false)==-EBUSY);
+    assert(!q1000k_phy_set_rx_bench(true, false, false));
     assert(!q1000k_phy_start());
     regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
     controller_los=true;
@@ -504,7 +523,7 @@ static void rx_bench_tests(void)
     saved=sample; fail_read=reads+4;
     assert(q1000k_phy_rx_sample(&sample)==-EIO && !memcmp(&sample,&saved,sizeof(sample)));
     assert(qphy_fault==-EIO && !qphy_active && !controller.tx);
-    reset(); assert(!q1000k_phy_init()); assert(!q1000k_phy_set_rx_bench(true, false));
+    reset(); assert(!q1000k_phy_init()); assert(!q1000k_phy_set_rx_bench(true, false, false));
     assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG)); assert(!q1000k_phy_start());
     assert(q1000k_phy_set_tx(true)==-EACCES && !controller.tx && !qphy_active);
     reset(); controller_inhibit=false; controller_los=true;

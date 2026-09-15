@@ -39,6 +39,9 @@ def summarize(capture):
     record = json.loads((capture / 'matrix.json').read_text())
     if record.get('schema_version') != 1 or record.get('status') != 'completed' or len(record.get('stages', [])) != 2:
         raise ValueError('A completed two-stage matrix is required')
+    restore_pll = record.get('restore_pll', False)
+    if type(restore_pll) is not bool:
+        raise ValueError('Invalid matrix PLL restoration request')
     baseline = MATRIX.REPORT.summarize(capture / 'baseline', allow_downstream_failure=True)
     name, reacquire = MATRIX.followup(baseline)
     runs = []
@@ -49,7 +52,8 @@ def summarize(capture):
         count = report['observations']
         if ((count != 30 if i == 0 else count not in (90, 180)) or
                 report['boot_revision'] != baseline['boot_revision'] or
-                report['receive']['reacquire_requested'] is not (reacquire if i else False)):
+                report['receive']['reacquire_requested'] is not (reacquire if i else False) or
+                report['receive']['pll_restore_requested'] is not (restore_pll and reacquire if i else False)):
             raise ValueError('Stage does not match the baseline/continuation plan')
         objects = [json.loads(line) for line in (path / 'attempt.log').read_text().splitlines()
                    if line.startswith('{')]
@@ -57,6 +61,7 @@ def summarize(capture):
         runs.append(dict(stage=stage, bench_result=report['bench_result'], samples=count,
                          downstream_stable=report['receive']['downstream_stable'],
                          reacquire_attempts=diagnostic['reacquire_attempts'],
+                         pll_restore_requested=diagnostic['pll_restore_requested'],
                          rx_states=diagnostic['rx_states'], counters=diagnostic['counters'],
                          transition=transition(rows), controller_words=diagnostic['controller_words'],
                          cleanup=report['cleanup'], elapsed_seconds=report['elapsed_seconds']))

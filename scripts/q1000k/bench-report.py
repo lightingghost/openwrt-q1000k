@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 
-def receive_summary(samples, fiber, reacquire=False, require_stability=True):
+def receive_summary(samples, fiber, reacquire=False, require_stability=True, restore_pll=False):
     last_sample, last_poll, last_frames, stable = -1, 0, None, 0
     last_attempts = 0
     for item in samples:
@@ -26,6 +26,9 @@ def receive_summary(samples, fiber, reacquire=False, require_stability=True):
         if (item['mac_irq_mask'] or item['sampled_ms'] <= last_sample or
                 item['poll_calls'] < last_poll):
             raise ValueError('Receive IRQ mask or sample freshness failed')
+        if restore_pll or 'pll_restore_enabled' in item or item.get('receiver_version', 1) >= 3:
+            if item.get('pll_restore_enabled') is not restore_pll:
+                raise ValueError('PLL restoration guard failed')
         if reacquire or 'reacquire_enabled' in item or 'reacquire_attempts' in item:
             attempts = item.get('reacquire_attempts')
             if (item.get('reacquire_enabled') is not reacquire or
@@ -55,6 +58,7 @@ def receive_summary(samples, fiber, reacquire=False, require_stability=True):
         'phy_los': sorted({x['phy_los'] for x in samples}),
         'synced': sorted({x['synced'] for x in samples}),
         'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
+        'pll_restore_requested': restore_pll,
     }
 
 
@@ -81,7 +85,10 @@ def summarize(capture, allow_downstream_failure=False):
                 'Q1000K bench: Downstream LOS/sync/frame stability was not established.'] or
                 not record.get('error', '').startswith('SSH failed (1);')):
             raise ValueError('Capture failure is not limited to downstream stability')
+    restore_pll = record.get('restore_pll', False)
     reacquire = record.get('reacquire_once', False)
+    if type(restore_pll) is not bool or (restore_pll and not reacquire):
+        raise ValueError('Invalid PLL restoration request')
     if type(reacquire) is not bool or (reacquire and (action != 'receive' or fiber != 'connected')):
         raise ValueError('Invalid receive reacquisition request')
     if action not in ('stack', 'receive') or fiber not in ('connected', 'disconnected'):
@@ -138,7 +145,7 @@ def summarize(capture, allow_downstream_failure=False):
                  r'(?:shutdown|reconfigure|activation) failed|'
                  r'FE write .*expected', serial):
         raise ValueError(f'{capture}: kernel failure diagnostic in serial capture')
-    rx = receive_summary(receive, fiber, reacquire, not failed_downstream) if action == 'receive' else None
+    rx = receive_summary(receive, fiber, reacquire, not failed_downstream, restore_pll) if action == 'receive' else None
     if failed_downstream and rx['downstream_stable']:
         raise ValueError('Downstream failure disagrees with the captured observations')
     return {

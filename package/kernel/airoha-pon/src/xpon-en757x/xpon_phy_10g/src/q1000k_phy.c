@@ -33,6 +33,7 @@ static struct device *qphy_irq_dev;
 static int qphy_irq = -1;
 static bool qphy_rx_bench;
 static bool qphy_rx_reacquire;
+static bool qphy_rx_restore_pll;
 static u32 qphy_rx_attempts, qphy_rx_no_sync;
 static u32 qphy_rx_irqs, qphy_rx_polls;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
@@ -201,7 +202,7 @@ static void qphy_poll_work(struct work_struct *work)
 				 * dispatches registration events, or resets the shared SCU.
 				 */
 				qphy_rx_attempts++;
-				ret = q1000k_phy_rx_reacquire();
+				ret = q1000k_phy_rx_reacquire(qphy_rx_restore_pll);
 				if (!ret && READ_ONCE(qphy_active))
 					ret = qphy_rx_sample(&sample);
 			}
@@ -660,21 +661,22 @@ int q1000k_phy_get_tx(bool *enabled)
 }
 EXPORT_SYMBOL(q1000k_phy_get_tx);
 
-int q1000k_phy_set_rx_bench(bool enabled, bool reacquire)
+int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll)
 {
 	bool inhibited, tx;
 	int ret = qphy_context();
 
 	if (ret)
 		return ret;
-	if (reacquire && !enabled)
+	if ((reacquire && !enabled) || (restore_pll && !reacquire))
 		return -EINVAL;
 	if (READ_ONCE(qphy_owner) == current)
 		return -EDEADLK;
 	mutex_lock(&qphy_control);
 	qphy_callback_lock();
 	ret = qphy_ready();
-	if (ret || (enabled == qphy_rx_bench && reacquire == qphy_rx_reacquire))
+	if (ret || (enabled == qphy_rx_bench && reacquire == qphy_rx_reacquire &&
+		    restore_pll == qphy_rx_restore_pll))
 		goto out;
 	if (qphy_active || qphy_irq_dev || gpPhyPriv->phy_init_done) {
 		ret = -EBUSY;
@@ -697,6 +699,7 @@ int q1000k_phy_set_rx_bench(bool enabled, bool reacquire)
 	}
 	qphy_rx_bench = enabled;
 	qphy_rx_reacquire = reacquire;
+	qphy_rx_restore_pll = restore_pll;
 out:
 	qphy_callback_unlock();
 	mutex_unlock(&qphy_control);
@@ -738,6 +741,10 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		{ EN7581_XPON_PMA_SS_LCPLL_TDC_FLT_3, &result.receiver.pll_filter },
 		{ EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_1, &result.receiver.pll_pcw1 },
 		{ EN7581_XPON_PMA_SS_LCPLL_TDC_PCW_2, &result.receiver.pll_pcw2 },
+		{ EN7581_XPON_PMA_rg_force_da_pxp_txpll_ckout_en, &result.receiver.pll_force },
+		{ EN7581_XPON_ANA_RG_PXP_JCPLL_FREQ_MEAS_EN, &result.receiver.pll_measure },
+		{ EN7581_XPON_ANA_RG_PXP_TXPLL_TCL_KBAND_VREF, &result.receiver.pll_kband },
+		{ EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN, &result.receiver.pll_outputs },
 	};
 	u32 sfp, irq_mask;
 	bool inhibited, tx;
@@ -793,6 +800,7 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	result.irq_calls = qphy_rx_irqs;
 	result.poll_calls = qphy_rx_polls;
 	result.reacquire_enabled = qphy_rx_reacquire;
+	result.pll_restore_enabled = qphy_rx_restore_pll;
 	result.reacquire_attempts = qphy_rx_attempts;
 	result.sampled_ms = ktime_to_ms(ktime_get_boottime());
 	*sample = result;
@@ -1062,6 +1070,7 @@ int q1000k_phy_init(void)
 		return -ENOMEM;
 	qphy_rx_bench = false;
 	qphy_rx_reacquire = false;
+	qphy_rx_restore_pll = false;
 	qphy_rx_attempts = qphy_rx_no_sync = 0;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;

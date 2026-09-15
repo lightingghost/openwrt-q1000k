@@ -3,6 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <errno.h>
+#include <string.h>
+#define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 typedef uint32_t u32;
 #define TRUE 1
 #define FALSE 0
@@ -16,13 +19,35 @@ static struct {
     struct { struct { int txPowerEnFlag; } flags; } phyCfg;
 } phy, *gpPhyPriv=&phy;
 static bool recovering;
+static u32 registers[0x8000];
+static struct { u32 reg, end, start, value; } trace[13], expected_trace[13];
+static int updates, fail_update, fail_readback, bad_readback, pll_reads;
+static int delays[2], delay_count;
 static int context_error, health_calls, fail_health, fault, phase, fail_phase;
 static int los_value, read_error, reads, sleeps, fail_sleep;
+static int an7581_pon_phy_update(u32 reg,u32 end,u32 start,u32 value) {
+    assert(recovering && phase==2 && !fault && updates<13 && end==start);
+    trace[updates].reg=reg; trace[updates].end=end;
+    trace[updates].start=start; trace[updates].value=value;
+    if(++updates==fail_update) return -EIO;
+    registers[(reg&0x1ffff)/4]=(registers[(reg&0x1ffff)/4]&~BIT(start))|(value<<start);
+    return 0;
+}
+#define IO_SPHYA_REG_BITS(reg,end,start,val) an7581_pon_phy_update(reg,end,start,val)
+
+
 static int q1000k_phy_callback_context(void) { return context_error; }
 static int health(void) { return ++health_calls==fail_health ? -ETIMEDOUT : fault; }
 static int an7581_pon_phy_status(void) { return health(); }
 static int q1000k_phy_controller_check(void) { return health(); }
 static int an7581_pon_phy_read(u32 reg,u32 *value) {
+    if(recovering) {
+        assert(!context_error && phase==2 && updates && !fault);
+        if(++pll_reads==fail_readback) return -ETIMEDOUT;
+        *value=registers[(reg&0x1ffff)/4];
+        if(pll_reads==bad_readback) *value ^= BIT(trace[updates-1].start);
+        return 0;
+    }
     assert(!context_error && phase==1 && reg==EN7581_XGPON_PHY_SFP_STA);
     reads++; if(read_error) return read_error;
     *value=los_value<0 ? ~0U : los_value ? EN7581_XGPON_PHY_SFP_RX_LOS_ST : 0;
@@ -53,6 +78,12 @@ static void usleep_range(unsigned int low,unsigned int high) {
 static void msleep(unsigned int ms) {
     assert(!los_value && ms==350 && phase==2); sleep_step();
 }
+static void udelay(unsigned int us) {
+    assert(recovering && phase==2 && !fault && delay_count<2);
+    assert((us==6 && updates==3) || (us==500 && updates==13));
+    delays[delay_count++]=us;
+}
+/* REFERENCE */
 /* PRODUCTION */
 static void reset(int los)
 {
@@ -60,36 +91,64 @@ static void reset(int los)
     recovering=false; phy.trans_tx_status=phy.phyCfg.flags.txPowerEnFlag=0;
     context_error=health_calls=fail_health=fault=phase=fail_phase=0;
     read_error=reads=sleeps=fail_sleep=0; los_value=los;
+    updates=fail_update=fail_readback=bad_readback=pll_reads=delay_count=0;
+    memset(registers,0xa5,sizeof(registers));
+    memset(trace,0,sizeof(trace));
 }
 static void reset_reacquire(void) {
     reset(0); recovering=true; phy.pma_init_done=1; phy.first_plugin_flag=0;
 }
 static void reacquire_tests(void) {
-    reset_reacquire(); assert(!q1000k_phy_rx_reacquire());
+    reset_reacquire(); assert(!q1000k_phy_rx_reacquire(false));
     int checks=health_calls;
-    assert(phase==2 && !reads && !sleeps);
+    assert(phase==2 && !reads && !sleeps && !updates && !delay_count);
     for(int i=1;i<=checks;i++) {
         reset_reacquire(); fail_health=i;
-        assert(q1000k_phy_rx_reacquire()==-ETIMEDOUT && health_calls==i);
+        assert(q1000k_phy_rx_reacquire(false)==-ETIMEDOUT && health_calls==i);
     }
     for(int i=1;i<=2;i++) {
         reset_reacquire(); fail_phase=i;
-        assert(q1000k_phy_rx_reacquire()==-EIO && phase==i);
+        assert(q1000k_phy_rx_reacquire(false)==-EIO && phase==i);
     }
     reset_reacquire(); context_error=-EPERM;
-    assert(q1000k_phy_rx_reacquire()==-EPERM && !health_calls && !phase);
+    assert(q1000k_phy_rx_reacquire(false)==-EPERM && !health_calls && !phase);
     reset_reacquire(); phy.first_plugin_flag=1;
-    assert(q1000k_phy_rx_reacquire()==-EAGAIN && !health_calls && !phase);
+    assert(q1000k_phy_rx_reacquire(false)==-EAGAIN && !health_calls && !phase);
     reset_reacquire(); phy.pma_init_done=0;
-    assert(q1000k_phy_rx_reacquire()==-EAGAIN && !health_calls && !phase);
+    assert(q1000k_phy_rx_reacquire(false)==-EAGAIN && !health_calls && !phase);
     reset_reacquire(); phy.trans_tx_status=1;
-    assert(q1000k_phy_rx_reacquire()==-EACCES && !health_calls && !phase);
+    assert(q1000k_phy_rx_reacquire(false)==-EACCES && !health_calls && !phase);
     reset_reacquire(); phy.phyCfg.flags.txPowerEnFlag=1;
-    assert(q1000k_phy_rx_reacquire()==-EACCES && !health_calls && !phase);
+    assert(q1000k_phy_rx_reacquire(false)==-EACCES && !health_calls && !phase);
+}
+static void pll_tests(void) {
+    reset_reacquire(); phase=2; TXPLL_on();
+    assert(updates==13 && delay_count==2 && delays[0]==6 && delays[1]==500);
+    memcpy(expected_trace,trace,sizeof(trace));
+    u32 expected_regs[0x8000]; memcpy(expected_regs,registers,sizeof(registers));
+    reset_reacquire(); assert(!q1000k_phy_rx_reacquire(true));
+    assert(phase==2 && updates==13 && pll_reads==13 && !reads && !sleeps);
+    assert(delay_count==2 && delays[0]==6 && delays[1]==500);
+    assert(!memcmp(trace,expected_trace,sizeof(trace)));
+    assert(!memcmp(registers,expected_regs,sizeof(registers)));
+    int checks=health_calls;
+    for(int i=1;i<=checks;i++) {
+        reset_reacquire(); fail_health=i;
+        assert(q1000k_phy_rx_reacquire(true)==-ETIMEDOUT && health_calls==i);
+    }
+    for(int i=1;i<=13;i++) {
+        reset_reacquire(); fail_update=i;
+        assert(q1000k_phy_rx_reacquire(true)==-EIO && updates==i && pll_reads==i-1);
+        reset_reacquire(); fail_readback=i;
+        assert(q1000k_phy_rx_reacquire(true)==-ETIMEDOUT && updates==i && pll_reads==i);
+        reset_reacquire(); bad_readback=i;
+        assert(q1000k_phy_rx_reacquire(true)==-EIO && updates==i && pll_reads==i);
+    }
 }
 int main(void)
 {
     reacquire_tests();
+    pll_tests();
     for(int los=0;los<2;los++) {
         reset(los); assert(!q1000k_phy_pma_init());
         assert(phy.pma_init_done==!los && phy.first_plugin_flag==los && reads==1);

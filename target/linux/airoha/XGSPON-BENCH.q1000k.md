@@ -1489,3 +1489,48 @@ The bench remains idle on the tested image; this checkpoint changes only
 host-side reporting and notes, so no replacement image was built. The two
 new transition-report tests and revalidation of the actual completed matrix
 passed; the image retains its previously recorded 131-test validation.
+
+## Optional PLL restoration and TX/RX audit (2026-09-15)
+
+The previous connected matrix saw light on both LOS inputs throughout all
+120 samples, but no downstream sync or frames. It does not establish correct
+receiver setup. The controller's TX-disable mapping remains 0x51:0x03e0 bit 9,
+separate from the PHY RX LOS, sync and frame registers. The two EN7573 selectors
+choose GPON versus XGS-PON controllers; they are not separate TX and RX devices.
+No evidence in the register mapping establishes a TX/RX swap, and optical TX
+operation has not been tested because these benches inhibit transmission.
+
+The user reports their AT&T gateway shows TX range 0..49, current 36, and RX
+range -279..-100, current -170. These are consistent with tenths of dBm: TX
++3.6 dBm and RX -17.0 dBm, with displayed ranges 0..+4.9 and -27.9..-10.0 dBm.
+The units remain an inference from the reported values, not a retrieved gateway
+specification. The gateway's reading is not a Q1000K measurement. Calibrated
+Q1000K optical power remains unavailable; do not convert the captured APD or
+receiver controls to dBm or publish an unvalidated zero as optical power.
+
+Vendor r76 / helper r10 add opt-in `--restore-pll`, requiring connected RX and
+`--reacquire-once`. The same image retains the old recovery and observation
+paths. The optional routine applies the thirteen bit updates from public
+`TXPLL_on()` after the existing checked PMA recovery; each has provider/controller
+checks and masked readback, and the 6/500 us delays match the reference. It
+neither calls the full startup calibration nor changes SCU or laser controls.
+The poll owner retains the ten-consecutive-light/no-sync threshold, one-attempt
+budget and callback shutdown protection. Failure contains callbacks and TX.
+
+OEM `XPON_DIG_reset` at 0x275f8 touches SW_RST_SET bits 11..0, while the imported
+hold/release sequence touches bits 6..0. The upper five meanings are not
+established. OEM TDC-on also waits 5000 us rather than the public 500 us plus
+CDR toggles. These differences remain deliberately unimported. The new PLL
+experiment executes after the existing complete recovery, whereas OEM invokes
+its PLL routine before final PCS release; this is a bounded comparison, not
+an implementation of the whole OEM sequence. No bootloader fault is established.
+
+Receiver schema 3 adds four ordinary control reads (PLL force, measurement,
+Kband and outputs) to the existing 24 words. Request/sample mode mismatches
+fail helper/report validation. The matrix can opt into PLL restoration for
+its one recovery stage; baseline and stable-signal observation remain unchanged.
+Focused host tests compare the native write trace and final register contents
+with the extracted reference routine, inject every update/readback/health
+failure, verify untouched fields and mode/budget guards, and exercise report
+rejection. Kernel concurrency and full image validation are recorded separately
+when completed. No hardware was accessed during this implementation.

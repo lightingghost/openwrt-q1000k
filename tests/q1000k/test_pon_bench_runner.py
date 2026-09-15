@@ -84,6 +84,14 @@ class RunnerTests(unittest.TestCase):
                               '--samples', samples, '--fiber-disconnected'])
                 ssh.assert_not_called()
 
+    def test_pll_restoration_cannot_reach_unacknowledged_recovery(self):
+        for extra in ([], ['--fiber-connected'], ['--fiber-disconnected', '--reacquire-once']):
+            with patch.object(RUN, 'ssh') as ssh, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    RUN.main(['receive', '--artifact', '/missing', '--output', '/missing',
+                              '--restore-pll'] + extra)
+                ssh.assert_not_called()
+
     def test_competing_runner_cannot_acquire_device_lock(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(RUN, 'REPO', Path(directory)):
             (Path(directory) / 'tmp').mkdir()

@@ -15,6 +15,10 @@ static bool rx_reacquire;
 module_param(rx_reacquire, bool, 0400);
 MODULE_PARM_DESC(rx_reacquire, "RX bench only: one PMA reacquisition attempt after ten light/no-sync polls");
 
+static bool rx_restore_pll;
+module_param(rx_restore_pll, bool, 0400);
+MODULE_PARM_DESC(rx_restore_pll, "RX bench only: restore PHY PLL clocks after the single recovery");
+
 bool q1000k_rx_bench_enabled(void)
 {
 	return rx_bench;
@@ -25,7 +29,7 @@ int q1000k_rx_bench_prepare(void)
 	struct device_node *root;
 	bool bench;
 
-	if (rx_reacquire && !rx_bench)
+	if ((rx_reacquire && !rx_bench) || (rx_restore_pll && !rx_reacquire))
 		return -EINVAL;
 	if (rx_bench) {
 		root = of_find_node_by_path("/");
@@ -38,7 +42,7 @@ int q1000k_rx_bench_prepare(void)
 	/* The PHY independently verifies the controller's cached probe-time
 	 * inhibit, lease and live TX-off state before accepting this mode.
 	 */
-	return q1000k_phy_set_rx_bench(rx_bench, rx_reacquire);
+	return q1000k_phy_set_rx_bench(rx_bench, rx_reacquire, rx_restore_pll);
 }
 
 static int qrx_status_get(char *buffer, const struct kernel_param *kp)
@@ -73,7 +77,7 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
 		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu,"
 		"\"reacquire_enabled\":%s,\"reacquire_attempts\":%u,"
-		"\"receiver_version\":2,\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
+		"\"pll_restore_enabled\":%s,\"receiver_version\":3,\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
 		"\"clock_control\":%u,\"cdr_control\":%u,\"rx_frequency\":%u,"
 		"\"pll_status\":%u,\"tdc_control\":%u,\"rx_analog0\":%u,"
 		"\"rx_analog1\":%u,\"rx_analog2\":%u,\"rx_sequence_force\":%u,"
@@ -83,12 +87,13 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"rx_oscal_control\":%u,\"rx_reset0\":%u,"
 		"\"rx_reset1\":%u,\"pll_power\":%u,"
 		"\"pll_filter\":%u,\"pll_pcw1\":%u,"
-		"\"pll_pcw2\":%u}}\n",
+		"\"pll_pcw2\":%u,\"pll_force\":%u,\"pll_measure\":%u,\"pll_kband\":%u,\"pll_outputs\":%u}}\n",
 		s.controller_los ? "true" : "false", s.phy_los ? "true" : "false",
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
 		s.irq_calls, s.poll_calls, (unsigned long long)s.sampled_ms,
 		s.reacquire_enabled ? "true" : "false", s.reacquire_attempts,
+		s.pll_restore_enabled ? "true" : "false",
 		s.receiver.rx_control, s.receiver.pcs_reset, s.receiver.pma_reset,
 		s.receiver.clock_control, s.receiver.cdr_control, s.receiver.rx_frequency,
 		s.receiver.pll_status, s.receiver.tdc_control, s.receiver.rx_analog0,
@@ -99,7 +104,8 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		s.receiver.rx_oscal_control, s.receiver.rx_reset0,
 		s.receiver.rx_reset1, s.receiver.pll_power,
 		s.receiver.pll_filter, s.receiver.pll_pcw1,
-		s.receiver.pll_pcw2);
+		s.receiver.pll_pcw2, s.receiver.pll_force, s.receiver.pll_measure,
+		s.receiver.pll_kband, s.receiver.pll_outputs);
 }
 static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
 module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);

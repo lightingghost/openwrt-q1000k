@@ -18,6 +18,7 @@ EXTENDED_PHY_WORDS = ('rx_sequence_force0', 'rx_sequence_disable0',
                       'rx_lock_force', 'rx_lock_disable', 'rx_oscal_control',
                       'rx_reset0', 'rx_reset1', 'pll_power', 'pll_filter',
                       'pll_pcw1', 'pll_pcw2')
+PLL_PHY_WORDS = ('pll_force', 'pll_measure', 'pll_kband', 'pll_outputs')
 COUNTERS = ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
             'fec_uncorrected', 'irq_calls', 'poll_calls')
 
@@ -52,12 +53,16 @@ def summarize(capture):
     if len(rx) != count or len(controller) != count + 1:
         raise ValueError(f'Expected {count} RX and {count + 1} controller snapshots')
     versions = {x.get('receiver_version', 1) for x in rx}
-    if versions not in ({1}, {2}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
+    if versions not in ({1}, {2}, {3}) or any(type(x.get('receiver_version', 1)) is not int for x in rx):
         raise ValueError('Inconsistent receiver diagnostic version')
-    names = PHY_WORDS + (EXTENDED_PHY_WORDS if versions == {2} else ())
+    names = PHY_WORDS + (EXTENDED_PHY_WORDS if versions != {1} else ())
+    names += PLL_PHY_WORDS if versions == {3} else ()
     last = -1
     last_attempts = 0
+    restore_pll = record.get('restore_pll', False)
     reacquire = record.get('reacquire_once', False)
+    if type(restore_pll) is not bool or (restore_pll and not reacquire):
+        raise ValueError('Invalid PLL restoration request')
     if type(reacquire) is not bool or (reacquire and record['fiber'] != 'connected'):
         raise ValueError('Invalid receive reacquisition request')
     for item in rx:
@@ -76,6 +81,9 @@ def summarize(capture):
         if item['sampled_ms'] <= last:
             raise ValueError('Stale receive sample')
         last = item['sampled_ms']
+        if restore_pll or 'pll_restore_enabled' in item or item.get('receiver_version', 1) >= 3:
+            if item.get('pll_restore_enabled') is not restore_pll:
+                raise ValueError('PLL restoration guard failed')
         if reacquire or 'reacquire_enabled' in item or 'reacquire_attempts' in item:
             attempts = item.get('reacquire_attempts')
             if (item.get('reacquire_enabled') is not reacquire or type(attempts) is not int or
@@ -94,6 +102,7 @@ def summarize(capture):
         'mac_irq_mask': 0,
         'receiver_version': next(iter(versions)),
         'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
+        'pll_restore_requested': restore_pll,
         'phy_words_before_reacquire': words([x['receiver'] for x in rx
                                             if x.get('reacquire_attempts', 0) == 0], names),
         'phy_words_after_reacquire': words([x['receiver'] for x in rx

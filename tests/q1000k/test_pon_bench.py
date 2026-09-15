@@ -68,7 +68,7 @@ if action=='cat':
         params=json.loads((root/'module-params').read_text())
         retry=params.get('rx_reacquire')=='1'
         data=dict(rx_bench=True, registration_enabled=False, tx_inhibited=True,tx_enabled=False,
-                  reacquire_enabled=retry, reacquire_attempts=1 if retry and n>=15 else 0,
+                  pll_restore_enabled=params.get('rx_restore_pll')=='1', reacquire_enabled=retry, reacquire_attempts=1 if retry and n>=15 else 0,
                   mac_irq_mask=0, controller_los=not lit,phy_los=not lit,synced=lit,sync_status=0,
                   frames=n if lit else 0,lof=0,fec_total=n if lit else 0,fec_corrected=0,
                   fec_uncorrected=0,irq_calls=0,poll_calls=n,sampled_ms=n*1000)
@@ -118,12 +118,14 @@ else: raise AssertionError(action)
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
 
-    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None):
+    def run_bench(self, mode='stack', success=True, acknowledged=True, fiber='disconnected', reacquire=False, samples=None, restore_pll=False):
         args = [mode]
         if mode != 'status':
             args += [str(self.calibration)]
             if acknowledged:
                 args += ['--fiber-' + fiber]
+            if restore_pll:
+                args += ['--restore-pll']
             if reacquire:
                 args += ['--reacquire-once']
             if samples is not None:
@@ -178,7 +180,7 @@ else: raise AssertionError(action)
         calls = self.calls()
         loads = [c for c in calls if c[0] in ('modprobe', 'insmod')]
         self.assertEqual([c[1] for c in loads], MODULES)
-        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'rx_bench=0', 'rx_reacquire=0', 'wan_mac=02:00:00:00:00:01',
+        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'rx_bench=0', 'rx_reacquire=0', 'rx_restore_pll=0', 'wan_mac=02:00:00:00:00:01',
                                    'pon_serial=TEST00000001', 'pon_reg_id=' + '0' * 72,
                                    'pon_lower=ponraw'])
         self.assertEqual([c[1] for c in calls if c[0] == 'rmmod'], MODULES[::-1])
@@ -224,6 +226,18 @@ else: raise AssertionError(action)
         observations=[json.loads(x) for x in result.stdout.splitlines() if x.startswith('{')]
         rx=[x for x in observations if x.get('rx_bench')]
         self.assertEqual([rx[0]['reacquire_attempts'],rx[-1]['reacquire_attempts']],[0,1])
+
+    def test_pll_restoration_requires_recovery_before_mutation(self):
+        self.run_bench('receive', fiber='connected', restore_pll=True, success=False)
+        self.assertEqual(self.calls(), [])
+
+    def test_pll_restoration_is_forwarded_and_observed(self):
+        self.env['BENCH_FIBER']='connected'
+        self.env['BENCH_STATUS']=json.dumps({'los': False})
+        result=self.run_bench('receive', fiber='connected', reacquire=True, restore_pll=True)
+        self.assertIn('rx_restore_pll=1', [c for c in self.calls() if c[0]=='insmod'][-1])
+        rx=[json.loads(x) for x in result.stdout.splitlines() if x.startswith('{') and '"rx_bench"' in x]
+        self.assertTrue(all(x['pll_restore_enabled'] for x in rx))
 
     def test_reacquire_rejects_repeated_attempts_and_cleans_up(self):
         self.env['BENCH_FIBER']='connected'

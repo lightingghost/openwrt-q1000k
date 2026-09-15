@@ -6,6 +6,7 @@
 export LC_ALL=C
 umask 077
 reacquire=0
+restore_pll=0
 samples=30
 
 fail() { echo "Q1000K bench: $*" >&2; exit 1; }
@@ -97,6 +98,8 @@ rx_status() {
 	done
 	json_get_type type reacquire_enabled; json_get_var value reacquire_enabled
 	[ "$type" = boolean ] && [ "$value" = "$reacquire" ] || return 1
+	json_get_type type pll_restore_enabled; json_get_var value pll_restore_enabled
+	[ "$type" = boolean ] && [ "$value" = "$restore_pll" ] || return 1
 	json_get_type type reacquire_attempts; json_get_var attempts reacquire_attempts
 	[ "$type" = int ] && [ "$attempts" -ge "$last_attempts" ] &&
 		[ "$attempts" -le "$reacquire" ] || return 1
@@ -178,7 +181,7 @@ case "$1" in
 			fail 'Usage: q1000k-pon-bench controller|stack /tmp/CALIBRATION --fiber-disconnected'
 		mode=$1; calibration=$2; fiber=disconnected ;;
 	receive)
-		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once] [--samples 30|90|180]'
+		[ "$#" -ge 3 ] || fail 'Usage: q1000k-pon-bench receive /tmp/CALIBRATION --fiber-connected|--fiber-disconnected [--reacquire-once [--restore-pll]] [--samples 30|90|180]'
 		case "$3" in
 			--fiber-connected) fiber=connected ;;
 			--fiber-disconnected) fiber=disconnected ;;
@@ -193,13 +196,17 @@ case "$1" in
 					[ "$fiber" = connected ] && [ "$reacquire" = 0 ] ||
 						fail 'A single receive reacquisition requires connected fiber and no duplicate option.'
 					reacquire=1; shift ;;
+				--restore-pll)
+					[ "$restore_pll" = 0 ] || fail 'Specify PLL restoration once.'
+					restore_pll=1; shift ;;
 				--samples)
 					[ "$#" -ge 2 ] && [ "$samples_set" = 0 ] || fail 'Specify samples once.'
 					case "$2" in 30|90|180) samples=$2 ;; *) fail 'Samples must be 30, 90 or 180.' ;; esac
 					samples_set=1; shift 2 ;;
 				*) fail 'Unknown receive option.' ;;
 			esac
-		done ;;
+		done
+		[ "$restore_pll" = 0 ] || [ "$reacquire" = 1 ] || fail 'PLL restoration requires --reacquire-once.' ;;
 	*) fail 'Commands: status, controller, stack, receive' ;;
 esac
 
@@ -248,14 +255,14 @@ if [ "$mode" != controller ]; then
 	# These values are never installed in subscriber UCI configuration.
 	rx_bench=0
 	[ "$mode" != receive ] || rx_bench=1
-	load_module xpon_10g rx_bench="$rx_bench" rx_reacquire="$reacquire" wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
+	load_module xpon_10g rx_bench="$rx_bench" rx_reacquire="$reacquire" rx_restore_pll="$restore_pll" wan_mac=02:00:00:00:00:01 pon_serial=TEST00000001 \
 		pon_reg_id=000000000000000000000000000000000000000000000000000000000000000000000000 \
 		pon_lower=ponraw $identity_params
 fi
 count=0; limit=5
 last_sample=-1; last_frames=-1; last_poll=0; last_attempts=0; stable=0
 [ "$mode" != receive ] || limit=$samples
-printf 'bench_window mode=%s samples=%s reacquire=%s\n' "$mode" "$limit" "$reacquire"
+printf 'bench_window mode=%s samples=%s reacquire=%s restore_pll=%s\n' "$mode" "$limit" "$reacquire" "$restore_pll"
 while [ "$count" -lt "$limit" ]; do
 	controller_status initialized || fail 'TX, LOS or controller health check failed.'
 	cat "$controller/receiver_status" || fail 'Controller receiver snapshot unavailable.'
