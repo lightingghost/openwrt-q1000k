@@ -2077,3 +2077,43 @@ claim of downstream synchronization or XGS-PON service. PR #24577 was reviewed
 again at its unchanged head; the remaining priorities are electrical receive
 output/route, actual clock/data quality and documented OEM initialization
 differences. The prior 13 negative trials are not repeated by default.
+
+
+## Complete receiver acquisition image — 2026-09-15
+
+Implemented and built source checkpoint `3e73559f54c3fcbd8e51d09fa40bc8779d8623ec`
+on `q1000k-xgspon`. This supersedes the passive-only collection plan with one
+image containing all supported electrical reception, clock recovery,
+calibration-release and OEM initialization experiments. Hardware results are
+pending; no device was booted, flashed or optically tested during this build.
+
+Plan: [RX acquisition](XGSPON-RX-ACQUISITION.q1000k.md). Evidence:
+[OEM clock audit](XGSPON-OEM-CLOCK-AUDIT.q1000k.md) and
+[OEM controller audit](XGSPON-OEM-CONTROLLER-AUDIT.q1000k.md).
+
+- Artifact directory: `build-artifacts/q1000k-xgspon/bench-3e73559f54-acquisition`
+  under the parent Q1000K workspace.
+- Kit: `build-artifacts/q1000k-xgspon/q1000k-rx-acquisition-3e73559f54.tar.gz`.
+- Firmware: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`,
+  7,602,176 bytes, SHA-256
+  `ac42b702974d60d0e26ece22beca2f6db25e4c8ac018aeb796b97ff4fb9fe932`.
+- Standalone collector: `q1000k-rx-collect.py`, SHA-256
+  `1a2586fb9dd00f30fc757be7f399cd51724c57606f2c60c776cfa23f57d75003`.
+- Default collection: 34 connected cases plus fresh dark-checker and passive
+  reconnect controls; 3,300 samples, about 60–90 minutes with setup/operator time.
+- New experiments require diagnostic schema3 before device access. Historical
+  schema1/2 captures remain readable; all 15 earlier captures/1,260 samples were
+  revalidated without new device access.
+- Validation passed: 205 PON host tests, 13 status tests, UI checks, exact image
+  inspection, source-matched PHY UML (50 normal +50 RX-only cycles and all probe
+  stop/concurrency cases), and standalone dry-run outside the source tree.
+- Normal `.config` and `.config.old` were restored; `main`, `q1000k-dev` and
+  `q1000k-support` refs remained unchanged. Private inputs remain outside the kit.
+
+OEM audit correction: the earlier `oem-order` probe retained public direct CDR
+force selectors. The new OEM clock trial releases those selectors and follows
+the actual documented stock ordering. RX bench poll/IRQ handlers only observe
+and acknowledge LOS; they do not execute vendor insertion/power-save handlers.
+The fresh dark checker therefore arms after illuminated initialization without
+that handler confound. Unknown stock reset bits11–7 and controller0x110[8]
+remain excluded because their receive-only semantics are not established.
