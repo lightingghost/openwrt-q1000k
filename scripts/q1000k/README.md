@@ -293,3 +293,29 @@ configuration and protected branch references must still match the build record.
 It never contacts the device or rebuilds the image. Other failures require the
 normal build workflow. The inspector compares LuCI with the actual `jsmin`
 packaging result, since the image contains compressed JavaScript.
+
+### Consolidated suite and physical-control reports
+
+`bench-suite.py` runs the 13-case receiver suite with normal cleanup between
+cases; see `target/linux/airoha/XGSPON-RX-SUITE.q1000k.md` for the bounded probes
+and external controls. Completion records collection, not optical service.
+
+`bench-suite-progress.py CAPTURE` reads a running suite or single capture from
+host files. It reports sample count, latest LOS/power and checker setup state,
+without contacting the device. Use it to coordinate physical changes promptly
+within a bounded observation window. Partial JSON is reported and ignored;
+progress output is never acceptance validation.
+
+`bench-suite-summary.py SUITE` independently validates every saved case and
+summarizes the observations. `any_pcs_or_frame_counter_nonzero` excludes IRQ
+and PRBS-checker activity. Partial summaries require `--partial`.
+
+`bench-control-report.py CAPTURE --write` validates a completed single receive
+capture, including an intentionally mixed-LOS physical control, and saves
+`control-report.json`, `observations.json`, `receiver-report.json`,
+`probe-report.json` and `hypotheses.json`. It permits only the existing isolated
+downstream-stability failure; all TX, teardown and diagnostic checks still
+apply. Phases preserve each consecutive LOS/attempt interval, so a reconnect
+cannot be merged into the earlier light phase. Latched checker values are
+retained without being presented as continuous activity or BER. These three
+report/progress tools never access the device.

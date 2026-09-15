@@ -60,7 +60,7 @@ def summarize(directory,partial=False):
     return dict(schema_version=1,suite=str(directory),status=suite['status'],device_access=False,
         cases_validated=len(rows),samples=count,optical_service_verified=False,
         sync_seen=any(True in r['synced_values'] for r in rows),
-        any_receive_counter_nonzero=any(any(v for key,values in r['counter_values'].items() if key!='irq_calls' for v in values)
+        any_pcs_or_frame_counter_nonzero=any(any(v for key,values in r['counter_values'].items() if key!='irq_calls' for v in values)
                                        or any(v for values in r['pcs_counter_values'].values() for v in values) for r in rows),
         rx_power_nw=dict(min=min(powers),max=max(powers),last=powers[-1]) if powers else None,
         results=rows,limits=['Software trials test specific settings and sequences, not every combination.',
