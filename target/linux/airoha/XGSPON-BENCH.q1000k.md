@@ -839,7 +839,7 @@ The synthetic identity remains unassigned and no optical TX is requested.
 
 ## Identity-capable receive bench
 
-The next image includes vendor r72, core r15 (Generic Netlink v16), OMCI CLI
+The identity-capable image includes vendor r72, core r15 (Generic Netlink v16), OMCI CLI
 r2, diagnostics r6, supervisor r4, bench helper r6 and LuCI r5. All identity
 controls from the 8311 PON page are exposed in LuCI and `q1000k-omci config`.
 The [CLI contract](../../../package/network/utils/q1000k-omci-tools/README.md)
@@ -888,3 +888,31 @@ This is a receive-only connected-fiber test. O5 registration, PLOAM/OMCI TX,
 AT&T authentication, encrypted traffic and DHCP require a later explicitly
 authorized test with a different transmit policy. This image cannot enable
 optical TX through CLI or LuCI settings. No flashing is part of the sequence.
+
+### Verified identity image — 2026-09-14
+
+Image source checkpoint: `d84282fc8618aeebaeeef233c33a690c09dc1c6d`.
+Artifact directory:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-d84282fc86/`.
+
+- FIT: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`
+- Size: 7,602,176 bytes.
+- SHA256: `56c9131d879b242f1d20d5ba20f414225638dc92836982e25c1ecfc057d406b3`.
+- Native build, 110 PON host tests, 13 diagnostics tests and FIT/DT/rootfs
+  inspection pass. `identity-inspection.json` additionally verifies the
+  embedded CLI helper, supervisor and common library against source, all LuCI
+  fields, the identity file's 0600 mode and the MAC's new module parameters.
+- `uml-core/` records the passing real-kernel cold identity, independent
+  software/bank fields, logical credential GET/reset/redaction and single-PPTP
+  model checks. `uml-phy/` retains the unchanged, previously tested PHY;
+  `uml-source-verification.json` confirms exact production-source equivalence
+  for both UML runs. There is no claim of a new physical-device test here.
+- `runtime-sha256sums` records the fourteen required runtime files;
+  `checkpoint.json` records restored normal configs and unchanged protected
+  branches. The unrelated user README remains unchanged.
+
+A read-only SSH check observed the device still running source `30ea573aa3`
+(kernel 6.18.44). Only kernel/build/board identity was read. The new FIT has
+not been booted or flashed. Physical LED illumination, dark receive and
+connected receive acceptance require the user's next RAM boot. No TX,
+registration or DHCP test was performed.

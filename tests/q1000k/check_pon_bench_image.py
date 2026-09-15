@@ -136,8 +136,18 @@ def inspect(image, revision):
         ('package/network/utils/q1000k-xgspon-bench/files/defaults', 'etc/uci-defaults/99-q1000k-xgspon-bench'),
         ('package/network/utils/q1000k-xgspon-bench/files/bench', 'usr/sbin/q1000k-pon-bench'),
         ('package/network/utils/q1000k-xgspon-bench/files/sysctl.conf', 'etc/sysctl.d/99-q1000k-xgspon-bench.conf'),
-        ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config', 'etc/config/q1000k-xgspon')):
+        ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config', 'etc/config/q1000k-xgspon'),
+        ('package/network/utils/q1000k-xgspon/files/common.sh', 'lib/q1000k-xgspon/common.sh'),
+        ('package/network/utils/q1000k-xgspon/files/omci-config', 'usr/libexec/q1000k-omci-config'),
+        ('package/network/utils/q1000k-xgspon-service/files/run', 'usr/libexec/q1000k-xgspon-run')):
         assert read(dest) == (repo / source).read_bytes(), dest
+    assert stat.S_IMODE(records['etc/config/q1000k-xgspon'][0]) == 0o600
+    settings = read('www/luci-static/resources/view/econet-xpon/settings.js')
+    for field in ('serial', 'vendor_id', 'equipment_id', 'hardware_version',
+                  'sync_circuit_pack', 'software_version_a', 'software_version_b',
+                  'active', 'committed', 'registration_id', 'logical_onu_id',
+                  'logical_password', 'mib_profile', 'fix_vlans'):
+        assert field.encode() in settings, ('missing LuCI identity field', field)
     # U-Boot may replace bootargs; userspace also overrides kernel.panic.
     # Evaluate the shipped sysctl files in the same order as init.d/sysctl.
     panic = None
@@ -160,6 +170,12 @@ def inspect(image, revision):
         # Every bench module owns initialization, including the hook lists.
         # A library with neither callback can unload but is not initialized.
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
+        if name == 'xpon_10g':
+            assert 'q1000k_pon_fix_vlans' in symbols
+            for param in ('vendor_id_hex', 'hardware_version_hex', 'software0_hex', 'software1_hex',
+                          'logical_onu_id_hex', 'logical_password_hex', 'sync_circuit_pack',
+                          'active_bank', 'committed_bank', 'fix_vlans'):
+                assert ('parmtype=pon_' + param + ':').encode() in read(matches[0]), param
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:
         if name.startswith(('etc/modules.d/', 'etc/modules-boot.d/')):
@@ -173,7 +189,7 @@ def inspect(image, revision):
                 unloadable_pon_modules=list(modules),
                 nand_disabled=True, tx_inhibited=True, management_ip='192.168.255.1',
                 configured_panic_timeout=panic, runtime_panic_readback_required=True,
-                rootfs_checks='passed', device_access=False)
+                rootfs_checks='passed', identity_configuration_checks='passed', device_access=False)
 
 
 if __name__ == '__main__':
