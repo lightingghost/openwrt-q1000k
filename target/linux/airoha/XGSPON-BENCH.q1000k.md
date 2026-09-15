@@ -1676,3 +1676,48 @@ The expanded UML fixture's expected callback totals were updated for the added
 power-concurrency test and two gain teardown cases; the first local UML run
 stopped at the old count assertion, not a hardware or lock failure. A fresh
 source-matched run is required before delivery.
+
+### Consolidated RX bench validated — 2026-09-15
+
+Image source is `7e9c0edc1d3eff3d36a1ccf5ab2ac28ed4de36d0` on
+`q1000k-xgspon`. The final artifact is in the parent workspace at
+`build-artifacts/q1000k-xgspon/bench-7e9c0edc1d/`:
+
+`openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`
+
+- Size: 7,602,176 bytes.
+- SHA-256: `b8151308f75502ad21955d3e426e8d9791183eae8d646056b2076e45824fa97f`.
+- Kernel 6.18.44, vendor r78, controller r8, bench helper r12, OMCI tools r3,
+  status backend r7, LuCI r6.
+- Full PON host suite: 142 tests passed. Status backend: 13 passed. LuCI
+  production-view fixtures passed, including valid/missing/malformed power and
+  clearing stale readings after failed refresh.
+- Source-matched PHY UML: 50 normal plus 50 RX-only cycles, callback/power
+  serialization, concurrent polling, RCU/IRQ teardown, and stop/quiesce during
+  plain, PLL, gain and gain+PLL recovery. No kernel diagnostics. Hardware MMIO
+  recovery is mocked in UML; the production PMA sequence and failure handling
+  have separate host fixtures. This does not claim a new OMCI core UML run.
+- Exact FIT, embedded initramfs, DT, module lifecycle and packaged CLI/LuCI
+  inspection passed. NAND is disabled, TX inhibit is immutable, LAN is
+  192.168.255.1, and no private controller firmware/calibration is embedded.
+
+The first final inspection incorrectly compared the source JavaScript byte for
+byte with LuCI's minified package. Validation-only commit `0a73e77e79` corrects
+that check using the build's `jsmin` tool. `bench-revalidate.py` verified the
+saved artifact/test hashes, unchanged production and original test sources,
+normal configs and protected refs, reran inspection, and matched all fourteen
+exported runtime files against the exact embedded image. The original failed
+checkpoint and inspector output remain beside the successful evidence; the FIT
+was not rebuilt or modified. Two revalidation guard tests also passed.
+
+PHY UML evidence and generated-source verification are attached under
+`uml-phy/` and `uml-phy-source-verification.json`. The run source is
+`/tmp/q1000k-pon-phy-uml.UjL3ow/`. Normal builder state, both normal OpenWrt
+configs, protected refs and the user's untracked README remain unchanged.
+
+Hardware validation is pending a new user-controlled RAM boot through
+second-stage http-uboot. Start with preflight, then the connected 30+90 sample
+gain matrix described in `XGSPON-RX-HYPOTHESES.q1000k.md`. No new hardware RX
+power measurement, successful sync, O5 or subscriber service is claimed.
+No SSH, optical transmission, flash, remote reboot or bootloader change was
+performed while preparing this image.

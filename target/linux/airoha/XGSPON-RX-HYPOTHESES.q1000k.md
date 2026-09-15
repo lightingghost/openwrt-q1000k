@@ -65,3 +65,13 @@ The RX sampler and reports are source-tested for missing fields, failed reads,
 full-width counter values, malformed power, mode mismatches and cleanup failure.
 Kernel concurrency tests cover callback serialization and stop/quiesce during
 all four recovery combinations. Hardware outcomes remain pending the new boot.
+
+The delivered image is the validated `bench-7e9c0edc1d` artifact in
+`build-artifacts/q1000k-xgspon/` in the parent workspace. Build, source-matched
+UML and exact-image verification evidence is recorded in
+`XGSPON-BENCH.q1000k.md`. The 30+90 sample run is the first comparison, not a
+claim that every hypothesis can be conclusively resolved in two windows.
+In particular, the clock/control audit also checks whether TX-disable handling
+leaves a shared RX clock or frontend gate disabled; TX inhibit stays asserted
+throughout this investigation. Proving electrical polarity or modulation
+quality may require board/scope evidence beyond this RAM bench.
