@@ -529,10 +529,43 @@ from the known unconfigured USXGMII mode, acquire the verified optical
 controller, confirm TX off and select XGS-PON through the masked SCU helper.
 Existing XGS-PON mode is unchanged; unknown modes, an active/configured PHY,
 invalid context, controller failure and failed mode writes are rejected.
-The physical stop/drain checks still follow and are not bypassed. Hardware
-validation of this transition is pending.
+The physical stop/drain checks still follow and are not bypassed.
 The host suite passes 97 tests; the real Linux UML PHY suite also passes
 50 lifecycle cycles with RCU/context checks and concurrent poll/IRQ teardown
 (`/tmp/q1000k-pon-phy-uml.EhJprl/`). That is simulated hardware, not optical
 acceptance. The native kernel is unchanged, so the saved runner can verify and
 stage the matching PHY/MAC/provider modules together for a RAM-only retry.
+
+The r67 image (`cff7bf6b24db8392c542b92061751509ceeac824`) builds and passes
+inspection, hash `df3b8c3e5630a99b0f807102871356b279e1b7e523ca57aff34e99826091117a`.
+The matching-module retry in `bench-cff7bf6b24/stack-r67-01/` confirms writable
+stop controls: MPI RX request reads back `0x10000` but completion times out.
+Containment reads `0x0101c101`: both MBI completions, neither MPI completion.
+No FE retirement has begun. All modules unload, original hashes are restored,
+private inputs removed, and LAN/SSH stay healthy. The WAN mode remains XGS-PON
+in RAM; no persistent settings or firmware were written.
+
+The new `resources` runner action uses only the hook, SCU and MAC resource
+providers. Their probe maps/reads state without changing clocks or resets;
+no controller/PHY/MAC startup or private inputs are involved. Its capture in
+`bench-cff7bf6b24/resources-r67-01/` reads `wan=0xa local-reset=0x1` with the
+same stop word. This rules out a held local MAC reset as the immediate cause.
+Module cleanup/restoration pass. The host test checks reverse-order cleanup
+on normal exit and failed intermediate loads.
+
+## r68 cold PHY preparation
+
+The imported vendor `gpon_init()` configures the PHY before waiting for MPI
+stops. The native adaptation had placed all PHY preparation after that wait,
+which cannot complete without the cold PHY's clocks. Vendor r68 separates
+initial preparation from active-port retirement. After CPU/DMA pause and WAN
+selection, an unconfigured PHY first gets a checked MPI RX stop request and
+an acknowledged MBI RX stop. PHY configuration then verifies controller TX
+off, initializes the PHY, and leaves IRQ/polling inactive. The existing full
+MPI/FE/FIFO/RX drain must still pass before MAC reset or service-table/ID
+replacement. An already configured PHY follows the existing retirement path.
+
+The request-only API is restricted to holding MPI RX; it cannot release a
+stop or claim completion. Tests distinguish request readback from stop ACK,
+inject failures at each preparation boundary, and preserve all 39 retirement
+failure cases and containment checks. Hardware validation is pending.

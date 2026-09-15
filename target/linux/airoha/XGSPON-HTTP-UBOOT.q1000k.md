@@ -41,6 +41,18 @@ calibration, optical activation, MAC/PHY reset sequencing and OMCI remain
 Linux responsibilities. A bootloader change alone would mask this missing
 cold-start handling.
 
+**r67 hardware result:** after the guarded Linux transition, stop requests
+read back correctly. The failure moves from inaccessible controls (`-EIO`)
+to missing MPI completion (`-ETIMEDOUT`). A separate resource-only probe
+reads `scu-reset=0 wan=0x0a local-reset=0x1 stops=0x0101c101`.
+Thus the local MAC reset is already released when its bank is accessible;
+the earlier zero read in USXGMII mode is not evidence that the bootloader
+held this reset. No early MAC reset release is warranted. MBI completions
+are present, MPI completions are absent. The remaining cold PHY clock/setup
+ordering is a Linux integration issue, not a demonstrated bootloader fault.
+Captures are `bench-cff7bf6b24/stack-r67-01/` and
+`bench-cff7bf6b24/resources-r67-01/` under the artifact root above.
+
 **Validation for a future bootloader change:** RAM-load a candidate using the
 existing two-stage chain, exercise HTTP/TFTP and both copper LAN ports, then
 boot a NAND-disabled, TX-inhibited Linux bench. Compare WAN/XSI/reset state

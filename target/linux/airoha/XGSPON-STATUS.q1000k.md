@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r64 and OMCI core r13 implement the native packet path,
+ demonstrated.** Vendor r68 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -12,53 +12,41 @@ SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
 Combined class 84/171 filtering is implemented. Advanced service paths and
 hardware acceptance remain incomplete.
 
-**Never flash firmware.** Read-only checks passed on the new RAM bench at
-192.168.0.1. The user then authorized a controller-only test with disconnected
-fiber; it stopped at an AN7581 GPIO ownership conflict before detection and
-cleaned up. The pinmux fix builds in replacement image `0e4acc9d70`; all 88
-PON/WAN/bench tests and offline image inspection pass. The user RAM-booted it
-and the controller retry passed: both paths detected as 0x1388, XGS firmware
-and calibration readback verified, MCU enabled, TX disabled and LOS asserted
-through all five observation samples. Cleanup released the controller module
-and I2C reservation; LAN remained healthy. The user then authorized the stack
-test. Its first attempt exposed ignored module parameters and a missing SCU
-unload handler, now fixed locally in vendor r62/bench r2/supervisor r3. The
-user RAM-booted the updated 192.168.255.1 image `de0b571776`. Its stack retry
-passes controller initialization and fully unloads all PON modules, but MAC
-startup returns EBUSY. Vendor r63 defers the premature WAN frame-limit change
-to the existing drained cold transaction and adds startup-stage diagnostics.
-The matching-module retry passes the WAN failure and registers OMCI, then
-panics in `ecnt_register_hook` before PHY cold-start: the framework's list
-initializer was never connected to module load. Vendor r64 adds init/exit
-callbacks and tests the actual module entry point. All 90 host tests pass;
-the replacement RAM image `f885e80846` builds and passes inspection. It
-contains both fixes. The user RAM-booted it at 192.168.255.1. The r64
-retry passes hook registration and reaches OMCI cold-start without a panic,
-then reports `initialization failed at cold-start: -5` and physical shutdown
-`-5`. Controller firmware/calibration and TX-inhibited LOS checks pass. All
-nine PON modules unload, ponraw returns down, staged inputs are removed, and
-LAN/SSH remain healthy. This proves module cleanup, not physical retirement.
+**Never flash firmware.** The current bench runs `f885e80846` from RAM at
+192.168.255.1, with NAND disabled, fiber disconnected and immutable TX inhibit.
+The authorized controller test passes both 0x1388 IDs, verified firmware and
+calibration, MCU startup, LOS and TX-disable checks. The stack now passes
+module parameters, hook initialization and OMCI registration without a panic.
 
-The bootloader replaces the DT command line and OpenWrt's default sysctl sets
-`kernel.panic=3`. The runner set and read back zero in RAM before the test.
-Bench package r4 adds a late sysctl override and refuses mutating tests with a
-nonzero timeout; image inspection now evaluates the shipped sysctl order.
-Reusable build/capture scripts and checkpoint manifests live under
-`scripts/q1000k/`. Full stack startup and physical drain remain unverified.
-No agent reboot or firmware flash occurred.
-See [the bench report](XGSPON-BENCH.q1000k.md).
-The older controller bring-up tests below used a different kernel: both
-EN7573 paths detected, OEM MD32 firmware
-and calibration read back correctly, and TX-disable remained asserted. Those
-historical RAM tests do not verify the current MAC/PHY/OMCI integration.
+Vendor r67's matching-module retry (`cff7bf6b24`) fixes the bootloader's
+USXGMII WAN handoff after native CPU/DMA pause and verified controller TX off.
+MAC stop controls become writable. Startup now times out on MPI stop completion
+before any FE retirement; both MBI completion bits do respond. A resource-only
+probe confirms WAN `0x0a`, deasserted SCU reset and released local MAC reset
+`0x1`. No early MAC reset release is justified. Cleanup unloads all nine PON
+modules, restores original RAM modules, removes private inputs and leaves
+ponraw down with LAN/SSH healthy. This proves cleanup, not physical drain.
 
-The current local evidence is 90 passing PON/WAN/bench host tests, including
-WAN setup with the real UCI parser, the complete OMCI
-core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
-package builds. Earlier checkpoints contain the native drain, protocol,
-cryptography and PHY concurrency results. Hardware cold boot, OLT registration,
-optical traffic and recovery remain acceptance gates. PON board nodes remain
-disabled and the experimental packages remain optional/BROKEN.
+Vendor r68 prepares an initially unconfigured PHY after latching MPI RX stop
+and acknowledging MBI RX stop. Controller TX remains off and PHY IRQ/polling
+are not started there. Active-port retirement retains its ordering, and every
+physical drain check still precedes MAC reset or service-table replacement.
+The software passes 98 host tests; r68 build/runtime validation is pending.
+See [the bench report](XGSPON-BENCH.q1000k.md) and
+[http-uboot findings](XGSPON-HTTP-UBOOT.q1000k.md).
+
+The bootloader replaces DT boot arguments and OpenWrt defaults to a three-second
+panic reboot. The runner sets/readbacks zero in RAM; bench package r4 supplies
+a late sysctl override and requires the live value before a mutating test.
+Build, run, resource-probe and checkpoint scripts live in `scripts/q1000k/`.
+No agent reboot, optical TX activation or firmware flash occurred.
+
+Current evidence includes the 98 host tests, the complete OMCI core tests in
+UML, real Linux skb VLAN tests and AN7581 package/image builds. The r67 image
+and inspection pass; its UML PHY suite passes 50 lifecycle cycles. Hardware
+cold startup, complete physical drain, OLT registration, optical traffic and
+recovery remain acceptance gates. PON board nodes remain disabled in normal
+images and experimental packages remain optional/BROKEN.
 
 See [integration details](XGSPON-INTEGRATION.q1000k.md),
 [VLAN contract](XGSPON-VLAN.q1000k.md) and [AT&T research](XGSPON-ATT.q1000k.md).

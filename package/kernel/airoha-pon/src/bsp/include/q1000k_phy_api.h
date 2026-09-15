@@ -29,6 +29,10 @@ int q1000k_phy_configure(u32 mode);
  * An already selected XGS-PON path is unchanged; unknown/active modes fail.
  */
 int q1000k_phy_prepare_wan(void);
+/* Lifecycle owner, before drain: 1 if cold/unconfigured, 0 if configured,
+ * negative on invalid context/state. Does not change hardware.
+ */
+int q1000k_phy_needs_configure(void);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);
 /* Lifecycle owner: wait for callbacks; rejects invocation by a callback. */

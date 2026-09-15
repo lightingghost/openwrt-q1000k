@@ -23,6 +23,10 @@ void set_xpon_data(u32 reg, u32 value);
  * A stop acknowledgment alone does not establish a drained optical pipeline.
  */
 int an7581_xpon_mac_stop(u32 controls, bool hold);
+/* Cold initialization only: latch MPI RX stop and verify the control bit.
+ * Does not wait for completion and never proves ingress or FIFO retirement.
+ */
+int an7581_xpon_mac_request_rx_stop(void);
 int an7581_xpon_mac_wait_tx_empty(void);
 
 /* Process context only. Caller must quiesce MAC callbacks and the physical

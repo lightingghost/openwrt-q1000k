@@ -39,7 +39,7 @@ static struct an7581_xpon *xpon;
 #define AN7581_XPON_STOP_SUPPORTED 0x01010101U
 #define AN7581_XPON_STOP_POLLS 3000
 
-int an7581_xpon_mac_stop(u32 controls, bool hold)
+static int an7581_xpon_stop(u32 controls, bool hold, bool wait)
 {
 	unsigned long flags;
 	u32 value, desired, done = 0;
@@ -90,7 +90,7 @@ int an7581_xpon_mac_stop(u32 controls, bool hold)
 			ret = -EIO;
 			break;
 		}
-		if (!hold || (value & done) == done) {
+		if (!wait || !hold || (value & done) == done) {
 			ret = xpon->mac_fault ? -EIO : 0;
 			goto out;
 		}
@@ -104,7 +104,21 @@ out:
 	write_unlock_irqrestore(&xpon_lock, flags);
 	return ret;
 }
+
+int an7581_xpon_mac_stop(u32 controls, bool hold)
+{
+	return an7581_xpon_stop(controls, hold, true);
+}
 EXPORT_SYMBOL(an7581_xpon_mac_stop);
+
+int an7581_xpon_mac_request_rx_stop(void)
+{
+	/* Cold PHY clocks may be off. Latch ingress stop before bringing them
+	 * up, but never represent this readback as completed physical drain.
+	 */
+	return an7581_xpon_stop(AN7581_XPON_MPI_RX_STOP, true, false);
+}
+EXPORT_SYMBOL(an7581_xpon_mac_request_rx_stop);
 
 int an7581_xpon_mac_wait_tx_empty(void)
 {

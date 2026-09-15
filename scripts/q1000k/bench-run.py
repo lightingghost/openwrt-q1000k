@@ -135,9 +135,32 @@ def ssh(script, log, payload=None, timeout=120):
         raise RuntimeError(f'SSH failed ({result.returncode}); see {log}')
 
 
+def resource_probe():
+    """Load only providers whose probe reads/maps resources without reset writes."""
+    return '''printf '0\\n' > /proc/sys/kernel/panic
+test "$(cat /proc/sys/kernel/panic)" = 0
+owned=''
+cleanup() {
+    result=$?
+    trap - EXIT
+    for module in $owned; do
+        rmmod "$module" || exit 1
+    done
+    exit "$result"
+}
+trap cleanup EXIT
+for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_xpon; do
+    insmod /lib/modules/$(uname -r)/$module.ko
+    test -d /sys/module/$module
+    owned="$module $owned"
+done
+dmesg
+'''
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['status', 'controller', 'stack'])
+    parser.add_argument('action', choices=['status', 'resources', 'controller', 'stack'])
     parser.add_argument('--artifact', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path, help='New private capture directory')
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
@@ -146,7 +169,9 @@ def main():
     parser.add_argument('--modules-from', type=Path, help='Verified newer artifact; temporarily replace only PHY/MAC/provider modules in RAM')
     parser.add_argument('--registers', action='store_true', help='Read only the fixed SCU/MAC configuration register list during status')
     args = parser.parse_args()
-    if args.action != 'status' and (not args.fiber_disconnected or args.inputs is None):
+    if args.action != 'status' and not args.fiber_disconnected:
+        parser.error('RAM module tests require --fiber-disconnected')
+    if args.action in ('controller', 'stack') and args.inputs is None:
         parser.error('Tests require --fiber-disconnected and --inputs; status is read-only')
     if args.registers and args.action != 'status':
         parser.error('--registers is only for a read-only status capture')
@@ -155,12 +180,12 @@ def main():
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('Invalid artifact revision')
     sums = runtime_manifest(artifact / 'runtime-sha256sums')
-    if args.action != 'status':
+    if args.action in ('controller', 'stack'):
         validate_inputs(args.inputs)
     update = None
     if args.modules_from:
-        if args.action != 'stack':
-            parser.error('--modules-from is only for an explicitly requested stack retry')
+        if args.action not in ('resources', 'stack'):
+            parser.error('--modules-from is only for a resources or stack test')
         update = module_update(artifact, args.modules_from.resolve(), sums)
     output = args.output.resolve()
     remote = '/tmp/q1000k-bench-' + output.name
@@ -216,7 +241,9 @@ tar -xf - -C {module_dir}/new
             base = guards(revision, active_sums)
             run.update(module_source_revision=after, module_artifact=str(args.modules_from.resolve()),
                        module_backup=module_dir, updated_modules=list(updates))
-        if args.action != 'status':
+        if args.action == 'resources':
+            ssh(base + idle_guards() + resource_probe(), output / 'resources.log')
+        if args.action in ('controller', 'stack'):
             # All writes below are to verified RAM mounts or the runtime sysctl.
             stage = base + idle_guards() + f'''umask 077
  test ! -e {remote}

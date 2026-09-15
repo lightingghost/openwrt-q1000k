@@ -41,6 +41,10 @@ static int q1000k_transport_drain_rx(void);
 static int q1000k_phy_quiesce(void);
 static int q1000k_phy_prepare_wan(void);
 static int wan_prepare_fail;
+#define PHY_XGSPON_CONFIG 10
+static int q1000k_phy_needs_configure(void) { return 0; }
+static int q1000k_phy_configure(u32 mode) { (void)mode; assert(0); return -EINVAL; }
+static int an7581_xpon_mac_request_rx_stop(void) { assert(0); return -EINVAL; }
 static void an7581_xpon_invalidate(void);
 static int an7581_xpon_reset(void);
 static int q1000k_transport_get_port_config(struct airoha_pon_port_config *config);

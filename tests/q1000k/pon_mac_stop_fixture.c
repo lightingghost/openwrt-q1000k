@@ -57,6 +57,7 @@ int main(void)
     u32 controls[]={1U,1U<<8,1U<<16,1U<<24};
     unsigned int subset,b;
     reset(); xpon=NULL;
+    assert(an7581_xpon_mac_request_rx_stop()==-ENODEV);
     assert(an7581_xpon_mac_stop(1,true)==-ENODEV);
     assert(an7581_xpon_mac_wait_tx_empty()==-ENODEV && !reads && !writes);
     reset();
@@ -64,6 +65,17 @@ int main(void)
     for(b=0;b<32;b++) if(!((1U<<b)&0x01010101))
         assert(an7581_xpon_mac_stop(1U<<b,true)==-EINVAL);
     assert(!reads && !writes);
+    /* Cold request succeeds without clocks/ack, but cannot hide a later
+     * drain timeout or a dropped control write. No status bits are replayed.
+     */
+    reset(); stop=0xc000;
+    assert(!an7581_xpon_mac_request_rx_stop() && !ticks && !provider.mac_fault);
+    assert(last_write==(1U<<16) && !(stop&(1U<<30)));
+    assert(an7581_xpon_mac_stop(1U<<16,true)==-ETIMEDOUT && provider.mac_fault);
+    reset(); ignore_write=true;
+    assert(an7581_xpon_mac_request_rx_stop()==-EIO && provider.mac_fault);
+    reset(); provider.resetting=true;
+    assert(an7581_xpon_mac_request_rx_stop()==-EBUSY && !writes);
     for(subset=1;subset<16;subset++) {
         u32 mask=0,done=0;
         reset();

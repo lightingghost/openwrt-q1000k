@@ -37,7 +37,7 @@ below remain the full acceptance plan; they are not all complete.
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
 
-Current local evidence: 90 PON/WAN/bench host tests, the complete OMCI core UML
+Current local evidence: 98 PON/WAN/bench host tests, the complete OMCI core UML
 suite and matching AN7581 package builds. The builder's eight tests and real
 Kconfig resolution retain every experimental package. A full cached build at
 `cb0853acbc5b5ef178f7419b9926a6722f58df9f` produces both Q1000K UBI images;
@@ -46,37 +46,18 @@ packaged modules/userspace defaults. It has not been booted or flashed. See
 [build preparation](XGSPON-BUILD.q1000k.md) and the
 [current checkpoint](XGSPON-STATUS.q1000k.md) for validation limits.
 
-A separate [RAM bench](XGSPON-BENCH.q1000k.md) now builds at source
-`109361469940476fc06bf68303b47514718bcb5e`. It disables NAND, inhibits
-controller TX, enables the vendor PHY/MAC resources and fixes the native
-GDM2 internal transport dependency. Those images use 192.168.0.1; the user's
-updated default for new bench images is 192.168.255.1 for LAN and failsafe.
-LAN DHCP/RA and automatic PON startup are disabled. Its FIT/initramfs content
-inspection passes. The user has RAM-booted this image; read-only SSH confirms
-RAM root, absent MTD/UBI devices, native ponraw registration and disabled
-PON modules/service. The audited bench status preflight passes. The authorized
-controller-only test stopped at GPIO pin ownership before detection; the
-AN7581 pinmux fix builds in replacement image `0e4acc9d70` and passes offline
-inspection. The user RAM-booted it and the controller retry passed: both
-paths detected, firmware/calibration verified, TX disabled, LOS asserted and
-cleanup complete. The subsequently authorized stack test exposed ignored
-module parameters and a missing SCU unload handler. Replacement image
-`cddd1983fa` builds and passes inspection with both fixes. The user then
-RAM-booted the 192.168.255.1 revision `de0b571776`: controller initialization
-and complete module cleanup pass, but MAC startup returns EBUSY. Vendor r63
-moves the premature frame-limit change to the existing drained cold
-transaction, with 90 passing host tests. The matching-module retry registers OMCI, then panics in the uninitialized
-hook framework before PHY cold-start. Vendor r64 adds the missing module
-init/exit callbacks and exercises them in the host lifecycle test. All 90
-host tests pass. The replacement RAM image `f885e80846` builds and passes inspection with
-both fixes. The user RAM-booted it and the r64 test now reaches OMCI
-cold-start without a panic, then fails with `-EIO`. All modules and staged
-inputs are cleaned up and LAN/SSH remain healthy; physical retirement is
-still unproven. The running panic timeout was three despite the DT setting:
-bootloader arguments and the default userspace sysctl override it. The runner
-set it to zero in RAM before testing; bench r4 makes this a packaged sysctl
-override and a test precondition. See the bench report for captured evidence.
-192.168.1.1 is now the user's working router, not a Q1000K SSH target.
+The current [RAM bench](XGSPON-BENCH.q1000k.md) runs `f885e80846` at
+192.168.255.1. NAND is disabled, TX is inhibited, DHCP/RA and PON autostart are
+off. Authorized disconnected-fiber tests pass controller detection, verified
+firmware/calibration, TX-disable/LOS checks, hook and OMCI registration, and
+complete module/input cleanup. Vendor r67 fixes the USXGMII WAN handoff and
+makes MAC stop controls writable. MPI completion still times out before FE
+retirement; a resource-only probe confirms that local MAC reset is released.
+Vendor r68 adds cold PHY preparation behind checked ingress stop boundaries;
+its host tests pass and hardware validation is pending. Full physical drain
+and integrated startup are not yet demonstrated. See the
+[bootloader note](XGSPON-HTTP-UBOOT.q1000k.md) for handoff findings.
+192.168.1.1 belongs to the working router and is never a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original
 acceptance requirements. Their historical lists of unfinished software work

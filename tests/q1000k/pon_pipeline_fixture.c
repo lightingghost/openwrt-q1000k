@@ -32,10 +32,19 @@ static int q1000k_transport_drain_rx(void);
 static int q1000k_phy_quiesce(void);
 static int q1000k_phy_prepare_wan(void);
 static int wan_prepare_fail;
+static int cold, cold_calls, cold_fail;
+#define PHY_XGSPON_CONFIG 10
+static int q1000k_phy_needs_configure(void);
+static int q1000k_phy_configure(u32 mode);
+static int an7581_xpon_mac_request_rx_stop(void);
 static void an7581_xpon_invalidate(void);
 /* PRODUCTION */
 static int step(void) { assert(held && !atomic_context); return ++calls==fail ? -ETIMEDOUT : 0; }
 static int containment(void) { assert(held && q1000k_pipeline.error==-ETIMEDOUT); return ++containment_calls==contain_fail ? -ENODEV : 0; }
+static int cold_step(void) { assert(held && calls==1 && !q1000k_pipeline.retired); return ++cold_calls==cold_fail ? -ETIMEDOUT : 0; }
+static int q1000k_phy_needs_configure(void) { return cold ? cold_step() ?: 1 : 0; }
+static int an7581_xpon_mac_request_rx_stop(void) { assert(cold && cold_calls==1); return cold_step(); }
+static int q1000k_phy_configure(u32 mode) { assert(mode==PHY_XGSPON_CONFIG && cold_calls==3); return cold_step(); }
 static int q1000k_phy_prepare_wan(void)
 {
     assert(held && calls==1 && q1000k_pipeline.stage==Q1000K_PIPELINE_CPU_PAUSED);
@@ -56,6 +65,7 @@ static int an7581_xpon_mac_stop(u32 mask,bool hold)
 {
     assert(hold);
     if(q1000k_pipeline.error) { assert(mask==Q1000K_MAC_ALL_STOPS); return containment(); }
+    if(cold && cold_calls==2) { assert(mask==AN7581_XPON_MBI_RX_STOP); return cold_step(); }
     switch(calls) {
     case 1: assert(mask==AN7581_XPON_MPI_RX_STOP); break;
     case 34: assert(mask==AN7581_XPON_MBI_TX_STOP); break;
@@ -80,7 +90,7 @@ static void an7581_xpon_invalidate(void) { assert(containment_calls==34); poison
 static void reset(void)
 {
     memset(&q1000k_pipeline,0,sizeof(q1000k_pipeline));
-    calls=poison=containment_calls=0;
+    calls=poison=containment_calls=cold_calls=0;
 }
 int main(void)
 {
@@ -90,6 +100,15 @@ int main(void)
     assert(q1000k_pipeline_shutdown()==-ETIMEDOUT && calls==1 && poison==1);
     assert(q1000k_pipeline.stage==Q1000K_PIPELINE_CPU_PAUSED && !q1000k_pipeline.retired);
     reset(); wan_prepare_fail=0;
+    cold=1;
+    for(cold_fail=0;cold_fail<=4;cold_fail++) {
+        reset();
+        assert(q1000k_pipeline_shutdown()==(cold_fail ? -ETIMEDOUT : 0));
+        assert(cold_calls==(cold_fail ?: 4));
+        if(cold_fail) assert(calls==1 && poison==1 && !q1000k_pipeline.retired);
+        else assert(calls==39 && !poison && q1000k_pipeline.retired==~0U);
+    }
+    cold=0; cold_fail=0; reset();
     assert(!q1000k_pipeline_shutdown() && calls==39);
     q1000k_pipeline_status(&status);
     assert(status.stage==Q1000K_PIPELINE_PHY_STOPPED && status.retired==~0U);

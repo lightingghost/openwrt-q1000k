@@ -49,6 +49,13 @@ whose module cleanup succeeds. Any ambiguous staging/cleanup failure retains
 evidence for inspection instead of forcing recovery. A kernel change requires
 a user RAM boot of the new image.
 
+`resources --fiber-disconnected` captures the provider's configuration/reset
+diagnostic without starting the controller, PHY or MAC. It sets the RAM panic
+timeout to zero, loads only hook/SCU/MAC resource providers, then unloads its
+modules in reverse order. These providers map and read resources without
+changing hardware clocks or resets. Private inputs are not used. It accepts
+`--modules-from` under the same matching-kernel/dependency guards as `stack`.
+
 `status --registers` reads a fixed list of seven configuration/reset words
 only when `/dev/mem` is available. It never writes a value or reads interrupt
 status/FIFO registers. Current RAM images omit `/dev/mem`, so this check stops

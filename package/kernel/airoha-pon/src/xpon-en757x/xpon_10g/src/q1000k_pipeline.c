@@ -7,6 +7,7 @@
 #include <linux/sched.h>
 #include <an7581_xpon.h>
 #include <q1000k_phy_api.h>
+#include <ecnt_hook/ecnt_hook_pon_phy.h>
 #include "common/q1000k_transport.h"
 #include "common/q1000k_pipeline.h"
 
@@ -61,6 +62,26 @@ int q1000k_pipeline_shutdown(void)
 	ret = q1000k_phy_prepare_wan();
 	if (ret)
 		goto fail;
+	ret = q1000k_phy_needs_configure();
+	if (ret < 0)
+		goto fail;
+	if (ret) {
+		/* The reference cold startup configures PHY clocks before waiting
+		 * for MPI acknowledgment. Close both RX boundaries first: MPI
+		 * request readback plus acknowledged MBI RX stop. Native admission
+		 * is already closed; configure verifies controller TX off and does
+		 * not start IRQ/polling. Never reset MAC/FE or replace IDs here.
+		 */
+		ret = an7581_xpon_mac_request_rx_stop();
+		if (!ret)
+			ret = an7581_xpon_mac_stop(AN7581_XPON_MBI_RX_STOP, true);
+		if (!ret)
+			ret = q1000k_phy_configure(PHY_XGSPON_CONFIG);
+		if (ret) {
+			pr_err("q1000k: cold PHY preparation failed: %d\n", ret);
+			goto fail;
+		}
+	}
 	ret = an7581_xpon_mac_stop(AN7581_XPON_MPI_RX_STOP, true);
 	if (ret)
 		goto fail;
@@ -89,7 +110,8 @@ int q1000k_pipeline_shutdown(void)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_RX_DRAINED;
 	/* PHY polling/IRQ callbacks drain before real controller TX is disabled.
-	 * No reset or ID reuse precedes this boundary.
+	 * No MAC/FE reset or ID reuse precedes this boundary. An unconfigured
+	 * PHY's initial clock/reset preparation above is needed to reach it.
 	 */
 	ret = q1000k_phy_quiesce();
 	if (ret)

@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -64,6 +66,35 @@ class RunnerTests(unittest.TestCase):
     def test_default_command_cannot_contact_working_router(self):
         self.assertEqual(RUN.SSH[-1], 'root@192.168.255.1')
         self.assertNotIn('192.168.1.1', ' '.join(RUN.SSH))
+
+    def test_resource_probe_unwinds_only_owned_modules(self):
+        for failure in ('none', 'airoha_ecnt_scu', 'airoha_ecnt_xpon'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                script = RUN.resource_probe().replace('/proc/sys/kernel/panic', str(root / 'panic'))
+                script = script.replace('/sys/module/', str(root) + '/')
+                # Emulate module sysfs and errors; every command is local.
+                prelude = '''set -eu
+insmod() {
+    module=${1##*/}; module=${module%.ko}
+    test "$module" != "$FAILURE" || return 1
+    mkdir "$FIXTURE/$module"
+    echo "load $module" >> "$FIXTURE/events"
+}
+rmmod() {
+    rmdir "$FIXTURE/$1"
+    echo "unload $1" >> "$FIXTURE/events"
+}
+dmesg() { :; }
+'''
+                result = subprocess.run(['sh', '-c', prelude + script],
+                                        env=dict(os.environ, FIXTURE=directory, FAILURE=failure))
+                self.assertEqual(result.returncode, 0 if failure == 'none' else 1)
+                events = (root / 'events').read_text().splitlines()
+                loaded = [x[5:] for x in events if x.startswith('load ')]
+                unloaded = [x[7:] for x in events if x.startswith('unload ')]
+                self.assertEqual(unloaded, list(reversed(loaded)))
+                self.assertFalse(any(p.is_dir() for p in root.iterdir()))
 
 class ModuleRetryTests(unittest.TestCase):
     def test_module_retry_checks_kernel_sources_dependencies_and_payloads(self):

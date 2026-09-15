@@ -199,6 +199,7 @@ static int event(char *p)
         assert(q1000k_phy_quiesce()==-EDEADLK);
         assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EDEADLK);
         assert(q1000k_phy_prepare_wan()==-EDEADLK);
+        assert(q1000k_phy_needs_configure()==-EDEADLK);
         assert(q1000k_phy_call(&call)==-EDEADLK);
     }
     return 0;
@@ -224,6 +225,7 @@ static void initialized(void)
 {
     reset(); assert(!q1000k_phy_init()); assert(!writes && !allocated_irq);
     assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
+    assert(!q1000k_phy_needs_configure());
     assert(gpPhyPriv->phy_init_done && !qphy_active && !allocated_irq);
     reads=writes=0;
 }
@@ -292,6 +294,7 @@ static void prepare_wan(void)
 {
     reset(); assert(!q1000k_phy_init()); wan=0x12;
     controller_error=-ENODEV;
+    assert(q1000k_phy_needs_configure()==1);
     assert(q1000k_phy_prepare_wan()==-ENODEV && !wan_writes && wan==0x12);
     controller_error=0; controller.tx=true;
     assert(q1000k_phy_prepare_wan()==-EBUSY && !wan_writes);
@@ -378,6 +381,7 @@ int main(void)
         assert(q1000k_phy_quiesce()==-EWOULDBLOCK);
         assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EWOULDBLOCK);
         assert(q1000k_phy_prepare_wan()==-EWOULDBLOCK);
+        assert(q1000k_phy_needs_configure()==-EWOULDBLOCK);
         assert(q1000k_phy_call(&data)==-EWOULDBLOCK);
     }
     atomic_context=irq_context=preempt_rcu=0;
@@ -421,6 +425,9 @@ int main(void)
     }
     initialized(); mode_error=-EIO; gpPhyPriv->phy_init_done=0;
     assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EIO && qphy_fault);
+    initialized(); controller.tx=true; mode_calls=0;
+    assert(q1000k_phy_configure(PHY_XGSPON_CONFIG)==-EBUSY && !mode_calls && !controller.tx);
+    assert(q1000k_phy_needs_configure()==-EBUSY);
     for(n=1;n<=7;n++) {
         initialized(); fail_write=n;
         assert(q1000k_phy_start()==-EIO && !allocated_irq && !qphy_active);

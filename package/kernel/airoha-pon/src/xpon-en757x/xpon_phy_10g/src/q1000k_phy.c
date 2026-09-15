@@ -294,8 +294,28 @@ out:
 }
 EXPORT_SYMBOL(q1000k_phy_prepare_wan);
 
+int q1000k_phy_needs_configure(void)
+{
+	int ret = qphy_context();
+
+	if (ret)
+		return ret;
+	if (READ_ONCE(qphy_owner) == current)
+		return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (!ret)
+		ret = !gpPhyPriv->phy_init_done;
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_needs_configure);
+
 int q1000k_phy_configure(u32 mode)
 {
+	bool enabled;
 	int ret = qphy_context();
 
 	if (ret)
@@ -331,6 +351,10 @@ int q1000k_phy_configure(u32 mode)
 		qphy_controller = controller;
 	}
 	ret = q1000k_phy_controller_check();
+	if (!ret)
+		ret = q1000k_pon_get_tx(qphy_controller, &enabled);
+	if (!ret && enabled)
+		ret = -EBUSY;
 	if (!ret)
 		ret = an7581_pon_phy_prepare_pins();
 	if (!ret)
