@@ -32,6 +32,8 @@ static int qphy_fault;
 static struct device *qphy_irq_dev;
 static int qphy_irq = -1;
 static bool qphy_rx_bench;
+static bool qphy_rx_reacquire;
+static u32 qphy_rx_attempts, qphy_rx_no_sync;
 static u32 qphy_rx_irqs, qphy_rx_polls;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
 	EN7581_XGPON_PHY_RX_LOF_INT_EN | EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN | \
@@ -190,6 +192,25 @@ static void qphy_poll_work(struct work_struct *work)
 	if (!ret && qphy_rx_bench) {
 		qphy_rx_polls++;
 		ret = qphy_rx_sample(&sample);
+		if (!ret && qphy_rx_reacquire && !qphy_rx_attempts && READ_ONCE(qphy_active)) {
+			if (sample.controller_los || sample.phy_los || sample.synced) {
+				qphy_rx_no_sync = 0;
+			} else if (++qphy_rx_no_sync == 10) {
+				/* Consume the budget before touching hardware. The bounded
+				 * PMA out/in path never enters the vendor polling handler,
+				 * dispatches registration events, or resets the shared SCU.
+				 */
+				qphy_rx_attempts++;
+				ret = q1000k_phy_rx_reacquire();
+				if (!ret && READ_ONCE(qphy_active))
+					ret = qphy_rx_sample(&sample);
+			}
+		}
+		/* Quiesce may withdraw active while this callback owns the lock.
+		 * It waits for us before releasing the controller and IRQ resources.
+		 */
+		if (ret == -EAGAIN && !READ_ONCE(qphy_active))
+			ret = 0;
 	} else if (!ret) {
 		ret = ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
 	}
@@ -458,6 +479,7 @@ int q1000k_phy_start(void)
 	gpPhyPriv->is_phy_start = TRUE;
 	gpPhyPriv->phy_status = PHY_LINK_STATUS_UNKNOWN;
 	/* The IRQ thread may run as soon as the mask is enabled. */
+	qphy_rx_no_sync = 0;
 	WRITE_ONCE(qphy_active, true);
 	ret = qphy_reg_write(EN7581_XGPON_PHY_XG_PON_INT_EN,
 		(qphy_rx_bench ? QPHY_RX_BENCH_IRQS :
@@ -638,19 +660,21 @@ int q1000k_phy_get_tx(bool *enabled)
 }
 EXPORT_SYMBOL(q1000k_phy_get_tx);
 
-int q1000k_phy_set_rx_bench(bool enabled)
+int q1000k_phy_set_rx_bench(bool enabled, bool reacquire)
 {
 	bool inhibited, tx;
 	int ret = qphy_context();
 
 	if (ret)
 		return ret;
+	if (reacquire && !enabled)
+		return -EINVAL;
 	if (READ_ONCE(qphy_owner) == current)
 		return -EDEADLK;
 	mutex_lock(&qphy_control);
 	qphy_callback_lock();
 	ret = qphy_ready();
-	if (ret || enabled == qphy_rx_bench)
+	if (ret || (enabled == qphy_rx_bench && reacquire == qphy_rx_reacquire))
 		goto out;
 	if (qphy_active || qphy_irq_dev || gpPhyPriv->phy_init_done) {
 		ret = -EBUSY;
@@ -672,6 +696,7 @@ int q1000k_phy_set_rx_bench(bool enabled)
 			goto out;
 	}
 	qphy_rx_bench = enabled;
+	qphy_rx_reacquire = reacquire;
 out:
 	qphy_callback_unlock();
 	mutex_unlock(&qphy_control);
@@ -756,6 +781,8 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		return ret;
 	result.irq_calls = qphy_rx_irqs;
 	result.poll_calls = qphy_rx_polls;
+	result.reacquire_enabled = qphy_rx_reacquire;
+	result.reacquire_attempts = qphy_rx_attempts;
 	result.sampled_ms = ktime_to_ms(ktime_get_boottime());
 	*sample = result;
 	return 0;
@@ -1023,6 +1050,8 @@ int q1000k_phy_init(void)
 	if (!gpPhyPriv)
 		return -ENOMEM;
 	qphy_rx_bench = false;
+	qphy_rx_reacquire = false;
+	qphy_rx_attempts = qphy_rx_no_sync = 0;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;
 	gpPhyPriv->wan_sel = SCU_WAN_CONF_REG_WAN_SEL_XGSPON;

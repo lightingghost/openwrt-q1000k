@@ -37,7 +37,10 @@ int q1000k_phy_needs_configure(void);
  * the controller's immutable TX inhibit; an existing mode is idempotent.
  * IRQ/poll callbacks observe RX without invoking vendor registration events.
  */
-int q1000k_phy_set_rx_bench(bool enabled);
+/* Opt-in reacquisition: one attempt per module lifetime, after ten consecutive
+ * polling observations of light without sync. Never enables registration/TX.
+ */
+int q1000k_phy_set_rx_bench(bool enabled, bool reacquire);
 /* Raw receiver control/status words, not measured frequencies or proof of
  * firmware execution. Read without selecting probes or changing hardware.
  */
@@ -49,8 +52,10 @@ struct q1000k_rx_registers {
 };
 struct q1000k_rx_sample {
 	bool controller_los, phy_los, synced;
+	bool reacquire_enabled;
 	u32 sync_status, frames, lof, fec_total, fec_corrected, fec_uncorrected;
 	u32 irq_calls, poll_calls;
+	u32 reacquire_attempts;
 	u64 sampled_ms;
 	struct q1000k_rx_registers receiver;
 };
@@ -77,6 +82,7 @@ int q1000k_phy_callback_context(void);
 int q1000k_phy_top_reset(void);
 int q1000k_phy_pma_reset(void);
 int q1000k_phy_pma_init(void);
+int q1000k_phy_rx_reacquire(void);
 int q1000k_phy_controller_check(void);
 int q1000k_phy_board_profile(void);
 int q1000k_phy_trans_power(u32 operation);

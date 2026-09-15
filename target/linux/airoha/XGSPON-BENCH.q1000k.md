@@ -1236,3 +1236,38 @@ The OEM binaries were only read/disassembled, never executed. Its polling
 handler includes a no-LOS/no-ready PMA reacquisition path. Preparing an opt-in,
 single bounded attempt of that path is the next experiment; no such retry
 was run on this device during this capture.
+
+### Opt-in single receive reacquisition prepared — 2026-09-15
+
+The observed thirty-sample light/no-sync state is the trigger condition used
+by the reference polling handler's PMA recovery. Vendor r74 / helper r8 now
+offer a bounded experiment with `receive --fiber-connected --reacquire-once`.
+The unchanged default only observes. After ten consecutive no-sync polls with
+both LOS sources clear, the callback consumes its one-attempt lifetime budget,
+performs the reference `PLUG_OUT` followed by the existing checked PMA reset
+(`PLUG_IN`), then samples the guards again. Neither public status reads nor
+IRQ callbacks advance the retry streak. LOS or sync breaks the streak;
+stop/start resets the streak but never replenishes the attempt budget.
+
+The private PMA helper requires XGS mode, completed initial calibration,
+`first_plugin_flag=false`, TX intent disabled and healthy provider/controller
+checks before and after each phase. It cannot enter `FIRST_PLUG_IN` full
+calibration. The existing PMA reset suppresses optical TX during the reset and
+restores only the previously disabled intent. There is no call to the full
+vendor polling handler, registration event dispatch, optical SCU reset or
+shared copper SerDes code. Errors contain callbacks and keep TX off; shutdown
+waits for an in-flight callback before releasing its resources.
+
+The helper and host runner reject the new flag except for connected receive
+tests. JSON records requested mode and zero/one attempts; the thirty-sample
+acceptance test still requires final synchronization and advancing frames.
+Host tests cover the single-attempt limit, no status/IRQ-triggered retries,
+LOS/sync/stopping interruptions, pre/post TX violations, failed PMA phases,
+explicit argument forwarding and repeated-attempt rejection. The new UML
+run `/tmp/q1000k-pon-phy-uml.Aw4Fup/` passes fifty normal plus fifty RX-only
+cycles and both exit/quiesce races during reacquisition. The actual analog
+hardware behavior remains untested; this experiment is not a claimed fix.
+
+The running device is left idle on `e26854f308` after successful cleanup.
+These source changes have not been installed on it. A new matching RAM FIT
+must be built/inspected and booted by the user before this optional experiment.

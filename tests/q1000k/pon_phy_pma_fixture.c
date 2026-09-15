@@ -6,11 +6,16 @@
 typedef uint32_t u32;
 #define TRUE 1
 #define FALSE 0
+#define PHY_DISABLE 0
 #define SCU_WAN_CONF_REG_WAN_SEL_XGSPON 10
 #define FIRST_PLUG_IN 1
 #define PLUG_OUT 3
 /* REGISTERS */
-static struct { int wan_sel, pma_init_done, first_plugin_flag; } phy, *gpPhyPriv=&phy;
+static struct {
+    int wan_sel, pma_init_done, first_plugin_flag, trans_tx_status;
+    struct { struct { int txPowerEnFlag; } flags; } phyCfg;
+} phy, *gpPhyPriv=&phy;
+static bool recovering;
 static int context_error, health_calls, fail_health, fault, phase, fail_phase;
 static int los_value, read_error, reads, sleeps, fail_sleep;
 static int q1000k_phy_callback_context(void) { return context_error; }
@@ -24,13 +29,19 @@ static int an7581_pon_phy_read(u32 reg,u32 *value) {
     return 0;
 }
 static void phase_step(void) {
-    assert(!context_error && !fault && !phy.pma_init_done);
+    assert(!context_error && !fault && !!phy.pma_init_done==recovering);
     if(++phase==fail_phase) fault=-EIO;
 }
 static void xpon_init(int mode) { assert(mode==10 && !phase); phase_step(); }
 static void fiber_plug_reset(int op,int mode) {
-    assert(mode==10 && ((op==FIRST_PLUG_IN && phase==1) || (op==PLUG_OUT && phase==2 && sleeps==1)));
+    assert(mode==10);
+    if(recovering) assert(op==PLUG_OUT && !phase && !phy.first_plugin_flag);
+    else assert((op==FIRST_PLUG_IN && phase==1) || (op==PLUG_OUT && phase==2 && sleeps==1));
     phase_step();
+}
+static int q1000k_phy_pma_reset(void) {
+    assert(recovering && phase==1 && !phy.trans_tx_status && !phy.phyCfg.flags.txPowerEnFlag);
+    phase_step(); return fault;
 }
 static void sleep_step(void) {
     assert(!context_error && !fault && !phy.pma_init_done);
@@ -46,11 +57,39 @@ static void msleep(unsigned int ms) {
 static void reset(int los)
 {
     gpPhyPriv=&phy; phy.wan_sel=10; phy.pma_init_done=0; phy.first_plugin_flag=1;
+    recovering=false; phy.trans_tx_status=phy.phyCfg.flags.txPowerEnFlag=0;
     context_error=health_calls=fail_health=fault=phase=fail_phase=0;
     read_error=reads=sleeps=fail_sleep=0; los_value=los;
 }
+static void reset_reacquire(void) {
+    reset(0); recovering=true; phy.pma_init_done=1; phy.first_plugin_flag=0;
+}
+static void reacquire_tests(void) {
+    reset_reacquire(); assert(!q1000k_phy_rx_reacquire());
+    int checks=health_calls;
+    assert(phase==2 && !reads && !sleeps);
+    for(int i=1;i<=checks;i++) {
+        reset_reacquire(); fail_health=i;
+        assert(q1000k_phy_rx_reacquire()==-ETIMEDOUT && health_calls==i);
+    }
+    for(int i=1;i<=2;i++) {
+        reset_reacquire(); fail_phase=i;
+        assert(q1000k_phy_rx_reacquire()==-EIO && phase==i);
+    }
+    reset_reacquire(); context_error=-EPERM;
+    assert(q1000k_phy_rx_reacquire()==-EPERM && !health_calls && !phase);
+    reset_reacquire(); phy.first_plugin_flag=1;
+    assert(q1000k_phy_rx_reacquire()==-EAGAIN && !health_calls && !phase);
+    reset_reacquire(); phy.pma_init_done=0;
+    assert(q1000k_phy_rx_reacquire()==-EAGAIN && !health_calls && !phase);
+    reset_reacquire(); phy.trans_tx_status=1;
+    assert(q1000k_phy_rx_reacquire()==-EACCES && !health_calls && !phase);
+    reset_reacquire(); phy.phyCfg.flags.txPowerEnFlag=1;
+    assert(q1000k_phy_rx_reacquire()==-EACCES && !health_calls && !phase);
+}
 int main(void)
 {
+    reacquire_tests();
     for(int los=0;los<2;los++) {
         reset(los); assert(!q1000k_phy_pma_init());
         assert(phy.pma_init_done==!los && phy.first_plugin_flag==los && reads==1);

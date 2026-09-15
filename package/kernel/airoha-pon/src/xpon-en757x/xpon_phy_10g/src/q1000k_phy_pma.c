@@ -15,6 +15,33 @@ static int qpma_ready(void)
 	return ret ?: q1000k_phy_controller_check();
 }
 
+/* RX bench callback owner only, after a fresh inhibited/TX-off RX sample.
+ * Reuse the reference no-LOS/no-ready out/in sequence without its repeated
+ * polling, registration dispatch, or SCU reset escalation. Initial calibration
+ * must already have completed, so PMA reset can only take PLUG_IN here.
+ */
+int q1000k_phy_rx_reacquire(void)
+{
+	int ret = q1000k_phy_callback_context();
+
+	if (ret)
+		return ret;
+	if (!gpPhyPriv || gpPhyPriv->wan_sel != SCU_WAN_CONF_REG_WAN_SEL_XGSPON)
+		return -EINVAL;
+	if (!gpPhyPriv->pma_init_done || gpPhyPriv->first_plugin_flag)
+		return -EAGAIN;
+	if (gpPhyPriv->trans_tx_status != PHY_DISABLE || gpPhyPriv->phyCfg.flags.txPowerEnFlag)
+		return -EACCES;
+	ret = qpma_ready();
+	if (ret)
+		return ret;
+	fiber_plug_reset(PLUG_OUT, gpPhyPriv->wan_sel);
+	ret = qpma_ready();
+	if (!ret)
+		ret = q1000k_phy_pma_reset();
+	return ret ?: qpma_ready();
+}
+
 int q1000k_phy_pma_init(void)
 {
 	u32 status;

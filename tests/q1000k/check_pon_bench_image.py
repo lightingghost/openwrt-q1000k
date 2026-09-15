@@ -171,11 +171,16 @@ def inspect(image, revision):
         # A library with neither callback can unload but is not initialized.
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
         if name == 'xpon_10g':
+            assert b'parmtype=rx_reacquire:bool' in read(matches[0])
             assert 'q1000k_pon_fix_vlans' in symbols
             for param in ('vendor_id_hex', 'hardware_version_hex', 'software0_hex', 'software1_hex',
                           'logical_onu_id_hex', 'logical_password_hex', 'sync_circuit_pack',
                           'active_bank', 'committed_bank', 'fix_vlans'):
                 assert ('parmtype=pon_' + param + ':').encode() in read(matches[0]), param
+        if name == 'phy_10g':
+            assert 'q1000k_phy_rx_reacquire' in symbols
+    assert b'reacquire=0' in read('usr/sbin/q1000k-pon-bench')
+    assert b'--reacquire-once' in read('usr/sbin/q1000k-pon-bench')
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:
         if name.startswith(('etc/modules.d/', 'etc/modules-boot.d/')):

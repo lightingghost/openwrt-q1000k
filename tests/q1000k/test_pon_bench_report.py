@@ -97,6 +97,28 @@ class ReportTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         REPORT.summarize(self.capture)
 
+    def test_reacquire_request_and_single_attempt_must_match(self):
+        for problem in ('none', 'missing', 'repeat', 'unexpected', 'early', 'rollback'):
+            with self.subTest(problem=problem):
+                record, controller, omci, samples = self.fixture(fiber='connected')
+                record['reacquire_once'] = problem != 'unexpected'
+                for n, item in enumerate(samples):
+                    item.update(reacquire_enabled=True, reacquire_attempts=int(n >= 20))
+                if problem == 'missing':
+                    del samples[0]['reacquire_enabled']
+                elif problem == 'repeat':
+                    samples[-1]['reacquire_attempts'] = 2
+                elif problem == 'early':
+                    samples[1]['reacquire_attempts'] = 1
+                elif problem == 'rollback':
+                    samples[-1]['reacquire_attempts'] = 0
+                self.save(record, controller, omci, samples)
+                if problem == 'none':
+                    self.assertEqual(REPORT.summarize(self.capture)['receive']['reacquire_attempts'], 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        REPORT.summarize(self.capture)
+
     def test_refuses_missing_evidence_and_kernel_or_cleanup_failures(self):
         for problem in ('missing-sample', 'missing-leds', 'serial-error', 'cleanup', 'omci-assigned'):
             with self.subTest(problem=problem):

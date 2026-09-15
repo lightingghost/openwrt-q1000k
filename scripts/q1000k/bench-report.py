@@ -6,8 +6,9 @@ import re
 from pathlib import Path
 
 
-def receive_summary(samples, fiber):
+def receive_summary(samples, fiber, reacquire=False):
     last_sample, last_poll, last_frames, stable = -1, 0, None, 0
+    last_attempts = 0
     for item in samples:
         for key, expected in {
             'rx_bench': True, 'tx_inhibited': True,
@@ -25,6 +26,13 @@ def receive_summary(samples, fiber):
         if (item['mac_irq_mask'] or item['sampled_ms'] <= last_sample or
                 item['poll_calls'] < last_poll):
             raise ValueError('Receive IRQ mask or sample freshness failed')
+        if reacquire or 'reacquire_enabled' in item or 'reacquire_attempts' in item:
+            attempts = item.get('reacquire_attempts')
+            if (item.get('reacquire_enabled') is not reacquire or
+                    type(attempts) is not int or not last_attempts <= attempts <= int(reacquire) or
+                    (attempts and item['poll_calls'] < 10)):
+                raise ValueError('Receive reacquisition guard failed')
+            last_attempts = attempts
         lit = not item['controller_los'] and not item['phy_los'] and item['synced']
         if fiber == 'disconnected':
             if not item['controller_los'] or not item['phy_los'] or item['synced']:
@@ -42,6 +50,7 @@ def receive_summary(samples, fiber):
         'controller_los': sorted({x['controller_los'] for x in samples}),
         'phy_los': sorted({x['phy_los'] for x in samples}),
         'synced': sorted({x['synced'] for x in samples}),
+        'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
     }
 
 
@@ -55,6 +64,9 @@ def summarize(capture):
         if record.get(field) != expected:
             raise ValueError(f'{capture}: {field} is not {expected!r}')
     action, fiber = record.get('action'), record.get('fiber')
+    reacquire = record.get('reacquire_once', False)
+    if type(reacquire) is not bool or (reacquire and (action != 'receive' or fiber != 'connected')):
+        raise ValueError('Invalid receive reacquisition request')
     if action not in ('stack', 'receive') or fiber not in ('connected', 'disconnected'):
         raise ValueError('Unknown bench action/fiber state')
     if action == 'stack' and fiber != 'disconnected':
@@ -117,7 +129,7 @@ def summarize(capture):
         'elapsed_seconds': round(record['finished'] - record['started'], 3),
         'fiber_led_brightness': {key: sorted(set(values)) for key, values in leds.items()},
         'physical_led_requires_user_observation': True,
-        'receive': receive_summary(receive, fiber) if action == 'receive' else None,
+        'receive': receive_summary(receive, fiber, reacquire) if action == 'receive' else None,
     }
 
 

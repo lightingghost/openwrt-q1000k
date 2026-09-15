@@ -45,6 +45,10 @@ def summarize(capture):
     if len(rx) != 30 or len(controller) != 31:
         raise ValueError('Expected thirty RX and thirty-one controller snapshots')
     last = -1
+    last_attempts = 0
+    reacquire = record.get('reacquire_once', False)
+    if type(reacquire) is not bool or (reacquire and record['fiber'] != 'connected'):
+        raise ValueError('Invalid receive reacquisition request')
     for item in rx:
         for key, value in {'tx_inhibited': True, 'tx_enabled': False,
                            'registration_enabled': False}.items():
@@ -61,6 +65,13 @@ def summarize(capture):
         if item['sampled_ms'] <= last:
             raise ValueError('Stale receive sample')
         last = item['sampled_ms']
+        if reacquire or 'reacquire_enabled' in item or 'reacquire_attempts' in item:
+            attempts = item.get('reacquire_attempts')
+            if (item.get('reacquire_enabled') is not reacquire or type(attempts) is not int or
+                    not last_attempts <= attempts <= int(reacquire) or
+                    (attempts and item['poll_calls'] < 10)):
+                raise ValueError('Receive reacquisition guard failed')
+            last_attempts = attempts
     return {
         'schema_version': 1, 'capture': str(capture), 'revision': record['revision'],
         'bench_result': record['status'], 'bench_error': record.get('error'),
@@ -70,6 +81,11 @@ def summarize(capture):
         'rx_samples': len(rx), 'controller_samples': len(controller),
         'tx_inhibited': True, 'tx_enabled': False, 'registration_enabled': False,
         'mac_irq_mask': 0,
+        'reacquire_requested': reacquire, 'reacquire_attempts': last_attempts,
+        'phy_words_before_reacquire': words([x['receiver'] for x in rx
+                                            if x.get('reacquire_attempts', 0) == 0], PHY_WORDS),
+        'phy_words_after_reacquire': words([x['receiver'] for x in rx
+                                           if x.get('reacquire_attempts', 0) == 1], PHY_WORDS),
         'rx_states': {k: sorted({x[k] for x in rx}) for k in
                       ('controller_los', 'phy_los', 'synced', 'sync_status')},
         'counters': {k: {'first': rx[0][k], 'last': rx[-1][k]} for k in COUNTERS},

@@ -150,3 +150,24 @@ saves the two OEM PON controller/PHY modules, initialization script, disassembly
 and input hashes for offline comparison. It reads only the fixed file list,
 creates a private output directory, never executes the extracted OEM code,
 and never contacts a device.
+
+Vendor r74 / helper r8 add an explicit `--reacquire-once` option to connected
+`receive` tests. The default is unchanged observation-only mode. With this
+option, after ten consecutive PHY polls with both LOS sources clear and no
+sync, the callback permits **one** reference PMA `PLUG_OUT`/`PLUG_IN` recovery
+per module lifetime. It requires completed initial calibration and TX-off
+intent. It does not rerun calibration, reset the SCU, enable TX, or enter the
+vendor registration handler. Stopping/starting the PHY cannot replenish the
+attempt budget. Snapshot JSON records `reacquire_enabled` and
+`reacquire_attempts`; the reports retain separate pre/post receiver words.
+
+After RAM booting a matching new image, opt in explicitly:
+
+```sh
+python3 scripts/q1000k/bench-run.py receive --artifact /absolute/path/to/new-bench --output /new/capture --inputs /tmp/PRIVATE-INPUTS.tar --fiber-connected --reacquire-once
+```
+
+The helper still observes thirty samples and requires final sync plus advancing
+frames. Reacquisition does not relax acceptance, TX/registration guards, or
+reverse cleanup. The flag is rejected for status, controller, stack, resources
+and disconnected-fiber tests before any device mutation.

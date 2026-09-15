@@ -11,6 +11,9 @@
 static bool rx_bench;
 module_param(rx_bench, bool, 0400);
 MODULE_PARM_DESC(rx_bench, "Receive-only Q1000K RAM bench; requires immutable TX inhibit");
+static bool rx_reacquire;
+module_param(rx_reacquire, bool, 0400);
+MODULE_PARM_DESC(rx_reacquire, "RX bench only: one PMA reacquisition attempt after ten light/no-sync polls");
 
 bool q1000k_rx_bench_enabled(void)
 {
@@ -22,6 +25,8 @@ int q1000k_rx_bench_prepare(void)
 	struct device_node *root;
 	bool bench;
 
+	if (rx_reacquire && !rx_bench)
+		return -EINVAL;
 	if (rx_bench) {
 		root = of_find_node_by_path("/");
 		bench = of_machine_is_compatible("quantum,q1000k") &&
@@ -33,7 +38,7 @@ int q1000k_rx_bench_prepare(void)
 	/* The PHY independently verifies the controller's cached probe-time
 	 * inhibit, lease and live TX-off state before accepting this mode.
 	 */
-	return q1000k_phy_set_rx_bench(rx_bench);
+	return q1000k_phy_set_rx_bench(rx_bench, rx_reacquire);
 }
 
 static int qrx_status_get(char *buffer, const struct kernel_param *kp)
@@ -67,6 +72,7 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"sync_status\":%u,\"frames\":%u,\"lof\":%u,"
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
 		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu,"
+		"\"reacquire_enabled\":%s,\"reacquire_attempts\":%u,"
 		"\"receiver\":{\"rx_control\":%u,\"pcs_reset\":%u,\"pma_reset\":%u,"
 		"\"clock_control\":%u,\"cdr_control\":%u,\"rx_frequency\":%u,"
 		"\"pll_status\":%u,\"tdc_control\":%u,\"rx_analog0\":%u,"
@@ -76,6 +82,7 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
 		s.irq_calls, s.poll_calls, (unsigned long long)s.sampled_ms,
+		s.reacquire_enabled ? "true" : "false", s.reacquire_attempts,
 		s.receiver.rx_control, s.receiver.pcs_reset, s.receiver.pma_reset,
 		s.receiver.clock_control, s.receiver.cdr_control, s.receiver.rx_frequency,
 		s.receiver.pll_status, s.receiver.tdc_control, s.receiver.rx_analog0,

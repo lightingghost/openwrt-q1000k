@@ -135,6 +135,13 @@ static int handle_event(char *p)
 }
 static int handle_poll(char *p) { polls++; return handle_event(p); }
 static int handle_irq(char *p) { irqs++; return handle_event(p); }
+static unsigned int reacquisitions;
+int q1000k_phy_rx_reacquire(void)
+{
+    check(controller_inhibit && !controller.tx && qphy_rx_attempts==1);
+    reacquisitions++;
+    return handle_event(NULL);
+}
 static int irq_task(void *unused)
 {
     check(fake_irq_fn(75,&fake_dev)==IRQ_HANDLED);
@@ -210,6 +217,29 @@ static void control_during_callback(void)
     check(wait_for_completion_timeout(&exit_done,5*HZ) && controller.tx);
     kthread_stop(task); q1000k_phy_exit();
 }
+static void stop_during_reacquire(bool quiesce)
+{
+    struct task_struct *task;
+    unsigned int n, previous=reacquisitions;
+    qphy_dead=false; qphy_fault=0; controller_los=false;
+    check(!q1000k_phy_init() && !q1000k_phy_set_rx_bench(true,true));
+    check(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
+    registers[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+    for(n=0;n<9;n++) { q1000k_phy_poll(); flush_work(&qphy_poll_job); }
+    check(reacquisitions==previous);
+    reinit_completion(&event_entered); reinit_completion(&event_release); reinit_completion(&exit_done);
+    WRITE_ONCE(hold_event,true); q1000k_phy_poll();
+    check(wait_for_completion_timeout(&event_entered,5*HZ));
+    task=kthread_run(exit_task,(void *)(unsigned long)quiesce,"qphy-rx-exit"); check(!IS_ERR(task));
+    for(n=0;n<500 && READ_ONCE(qphy_active);n++) msleep(1);
+    check(!qphy_active && gpPhyPriv && !completion_done(&exit_done));
+    WRITE_ONCE(hold_event,false); complete(&event_release);
+    check(wait_for_completion_timeout(&exit_done,5*HZ)); kthread_stop(task);
+    check(reacquisitions==previous+1 && !controller.tx && !qphy_fault);
+    if(quiesce) q1000k_phy_exit();
+    check(!gpPhyPriv && !fake_irq_owned && !work_busy(&qphy_poll_job));
+    controller_los=true;
+}
 static int __init phy_test_init(void)
 {
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET};
@@ -241,7 +271,7 @@ static int __init phy_test_init(void)
     control_during_callback();
     check(polls==53 && irqs==2);
     qphy_dead=false; qphy_fault=0; controller_inhibit=true;
-    check(!q1000k_phy_init()); check(!q1000k_phy_set_rx_bench(true));
+    check(!q1000k_phy_init()); check(!q1000k_phy_set_rx_bench(true, false));
     check(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
     for(n=0;n<50;n++) {
         struct q1000k_rx_sample sample;
@@ -255,12 +285,15 @@ static int __init phy_test_init(void)
         check(wait_for_completion_timeout(&irq_returned,5*HZ));
         check(!q1000k_phy_rx_sample(&sample) && sample.controller_los && !sample.synced);
         check(sample.receiver.rx_frequency==n && sample.receiver.rx_control==0x12340000+n);
-        check(!controller.tx && q1000k_phy_set_rx_bench(false)==-EBUSY);
+        check(!controller.tx && q1000k_phy_set_rx_bench(false, false)==-EBUSY);
         check(!q1000k_phy_stop() && !fake_irq_owned && !timer_pending(&gpPhyPriv->event_poll_timer));
     }
     check(polls==53 && irqs==2 && qphy_rx_polls==50 && qphy_rx_irqs==50);
     q1000k_phy_exit();
     check(!controller.held && !gpPhyPriv);
+    stop_during_reacquire(false);
+    stop_during_reacquire(true);
+    check(reacquisitions==2 && !controller.held);
     pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 normal + 50 RX-only cycles, RCU guards, concurrent poll and IRQ teardown\n");
     return 0;
 }
