@@ -36,6 +36,8 @@ class BenchTests(unittest.TestCase):
         self.controller = self.root / 'sys/bus/i2c/drivers/q1000k-pon-control/0-0051'
         self.controller.mkdir(parents=True)
         (self.controller / 'status').touch()
+        self.write(str(self.controller.relative_to(self.root)) + '/receiver_status',
+                   '{"schema_version":1,"receiver_status":true}\n')
         (self.controller / 'operation').touch()
         for suffix, (data, _) in backend.firmware.items():
             self.write('lib/firmware/airoha/q1000k/A60993.elf.' + suffix, data.decode())
@@ -150,6 +152,12 @@ else: raise AssertionError(action)
         self.assertEqual(self.calls(), [['modprobe', MODULES[0]], ['rmmod', MODULES[0]]])
         self.assertEqual((self.controller / 'calibration').read_bytes(), self.calibration.read_bytes())
         self.assertFalse((self.root / 'var/run/q1000k-pon-bench.lock').exists())
+
+    def test_receiver_read_failure_stops_before_phy_and_cleans_controller(self):
+        (self.controller / 'receiver_status').unlink()
+        self.run_bench(success=False)
+        self.assertEqual(self.calls(), [['modprobe', MODULES[0]], ['rmmod', MODULES[0]]])
+        self.assertEqual((self.controller / 'operation').read_text(), 'off\n')
 
     def test_panic_reboot_blocks_mutations_but_allows_status(self):
         self.write('proc/sys/kernel/panic', '3\n')

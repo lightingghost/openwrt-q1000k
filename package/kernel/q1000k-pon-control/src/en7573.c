@@ -46,6 +46,37 @@ int en7573_sample_state(struct en7573_io *io, struct en7573_state *state)
 	return 0;
 }
 
+int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample)
+{
+	/* OEM QKX001-06.00.44.00 uses A0 for MD32 control; the public loader
+	 * uses A2. Observe both without changing either access path. The other
+	 * registers are ordinary control/status words read by the OEM debug
+	 * routines. No PM/DM data port, address selector, alarm clear, or FIFO.
+	 */
+	static const u16 registers[] = { 0x3018, 0x3018, 0x15c, 0x160,
+					0x80, 0x43c, 0x488 };
+	u32 values[7];
+	u8 data[4];
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < 7; i++) {
+		ret = io->read(io->ctx, i ? EN7573_CONTROL : EN7573_MEMORY,
+			       registers[i], data, sizeof(data));
+		if (ret)
+			return ret;
+		values[i] = get_le32(data);
+		if (values[i] == ~0U)
+			return -EIO;
+	}
+	*sample = (struct en7573_receiver) {
+		.mcu_a0 = values[0], .mcu_a2 = values[1], .apd = values[2],
+		.ocp = values[3], .firmware = values[4], .los_control = values[5],
+		.system_status = values[6],
+	};
+	return 0;
+}
+
 static int write_control(struct en7573_io *io, u16 reg, u32 value)
 {
 	u8 data[] = { value, value >> 8, value >> 16, value >> 24 };

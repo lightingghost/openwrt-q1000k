@@ -966,7 +966,7 @@ fiber-connected confirmation.
 After the user confirmed fiber connected, the same immutable image completed
 all thirty observations but **failed downstream acceptance**: controller LOS
 and PHY LOS stayed true, sync false, frames/FEC/LOF zero throughout. Polling
-advanced 0 to 20, timestamps advanced 1675998 to 1707196 ms, O1/ONU-ID and
+advanced 0 to 20, timestamps advanced 1675983 to 1707196 ms, O1/ONU-ID and
 OMCC-ID 65535 remained unchanged, and all TX/registration/IRQ guards held.
 All LED samples were red=1/green=0. No kernel failure diagnostics occurred;
 postflight and owned-input cleanup passed, management remained available,
@@ -985,3 +985,24 @@ access MD32 control/address at 0x51, data at 0x50. Whether these addresses alias
 on this part has not been established. MCU-enable readback alone does not
 prove firmware execution. Do not change routing or APD analog values based
 only on LOS; first add serialized, read-only receiver/control observations.
+
+### Paused checkpoint: receiver diagnostics prepared, not built
+
+The user requested a pause after the first connected-fiber capture. Controller
+r7 and bench helper r7 source now add a serialized, read-only `receiver_status`
+snapshot before PHY startup and at every observation: both MD32 enable address
+views, APD/OCP controls, firmware status word and LOS/system controls. No
+loader routing, analog setting, TX policy or registration behavior changes.
+The portable controller tests pass, including all 15,388 loader I2C failure
+points and new receiver read/error/partial-publication checks. `git diff
+--check` passes. The updated shell bench fixture, full target build and image
+inspection have **not** run; no r7 image exists and no r7 code was installed
+on the device. Resume with these local checks before preparing a new RAM FIT.
+
+The device was left after successful reverse cleanup of the failed connected
+receive observation: all PON modules unloaded, controller powered off,
+`ponraw` down, private staged inputs removed and management available. The
+last user-confirmed fiber state is connected. Red LOS indication and off
+after teardown were visually confirmed for the disconnected test; connected
+LED observation and confirmation of the exact incoming-fiber path remain
+unanswered. No additional test is scheduled or running. Nothing was flashed.

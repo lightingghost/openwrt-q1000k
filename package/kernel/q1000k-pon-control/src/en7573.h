@@ -41,6 +41,12 @@ struct en7573_state {
 	int tx_disabled;
 };
 
+/* Opaque read-only startup observations, not firmware-health assertions. */
+struct en7573_receiver {
+	u32 mcu_a0, mcu_a2, apd, ocp, firmware, los_control, system_status;
+};
+int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample);
+
 int en7573_identify(struct en7573_io *io, u16 *id);
 int en7573_read_control(struct en7573_io *io, u16 reg, u32 *value);
 int en7573_sample_state(struct en7573_io *io, struct en7573_state *state);

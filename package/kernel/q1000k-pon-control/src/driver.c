@@ -486,6 +486,31 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 }
 static DEVICE_ATTR_RO(status);
 
+static ssize_t receiver_status_show(struct device *dev,
+				   struct device_attribute *attr, char *buffer)
+{
+	struct q1000k_pon *pon = dev_get_drvdata(dev);
+	struct en7573_receiver sample;
+	ssize_t ret;
+
+	mutex_lock(&pon->lock);
+	ret = pon_check_locked(pon);
+	if (!ret)
+		ret = en7573_sample_receiver(&pon->io, &sample);
+	if (!ret)
+		ret = sysfs_emit(buffer,
+			"{\"schema_version\":1,\"receiver_status\":true,"
+			"\"sampled_ms\":%llu,\"mcu_a0\":%u,\"mcu_a2\":%u,"
+			"\"apd_control\":%u,\"ocp_control\":%u,\"firmware_status\":%u,"
+			"\"los_control\":%u,\"system_status\":%u}\n",
+			ktime_get_boottime_ns() / 1000000, sample.mcu_a0, sample.mcu_a2,
+			sample.apd, sample.ocp, sample.firmware, sample.los_control,
+			sample.system_status);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+static DEVICE_ATTR_RO(receiver_status);
+
 static ssize_t calibration_write(struct file *file, struct kobject *kobj,
 				 const struct bin_attribute *attr, char *buffer,
 				 loff_t offset, size_t count)
@@ -510,7 +535,8 @@ static ssize_t calibration_write(struct file *file, struct kobject *kobj,
 static BIN_ATTR_WO(calibration, 513);
 
 static struct attribute *pon_attributes[] = {
-	&dev_attr_operation.attr, &dev_attr_status.attr, NULL,
+	&dev_attr_operation.attr, &dev_attr_status.attr,
+	&dev_attr_receiver_status.attr, NULL,
 };
 static const struct bin_attribute *const pon_bin_attributes[] = {
 	&bin_attr_calibration, NULL,

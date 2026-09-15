@@ -132,6 +132,49 @@ static void test_tx_control(void)
     assert(en7573_sample_state(&io,&state)==-EIO && state.tx_disabled==-1);
 }
 
+struct receiver_model { unsigned int calls, fail_at, erased_at; };
+
+static int receiver_read(void *ctx, u8 dev, u16 reg, u8 *data, size_t len)
+{
+	struct receiver_model *m = ctx;
+	const u16 expected[] = { 0x3018, 0x3018, 0x15c, 0x160, 0x80, 0x43c, 0x488 };
+	unsigned int i = m->calls++;
+	u32 value = 0x10203040 + i;
+
+	assert(i < 7 && reg == expected[i] && dev == (i ? 0x51 : 0x50) && len == 4);
+	if (m->calls == m->fail_at)
+		return -EREMOTEIO;
+	if (m->calls == m->erased_at)
+		value = ~0U;
+	for (i = 0; i < 4; i++)
+		data[i] = value >> (i * 8);
+	return 0;
+}
+
+static void test_receiver_read_only(void)
+{
+	struct receiver_model m = {0};
+	/* Any register write or delay would call a NULL function pointer. */
+	struct en7573_io io = { .ctx = &m, .read = receiver_read };
+	struct en7573_receiver sample, before;
+	unsigned int fail;
+
+	assert(!en7573_sample_receiver(&io, &sample) && m.calls == 7);
+	assert(sample.mcu_a0 == 0x10203040 && sample.mcu_a2 == 0x10203041);
+	assert(sample.apd == 0x10203042 && sample.ocp == 0x10203043);
+	assert(sample.firmware == 0x10203044 && sample.los_control == 0x10203045);
+	assert(sample.system_status == 0x10203046);
+	before = sample;
+	for (fail = 1; fail <= 7; fail++) {
+		m = (struct receiver_model) { .fail_at = fail };
+		assert(en7573_sample_receiver(&io, &sample) == -EREMOTEIO && m.calls == fail);
+		assert(!memcmp(&sample, &before, sizeof(sample)));
+		m = (struct receiver_model) { .erased_at = fail };
+		assert(en7573_sample_receiver(&io, &sample) == -EIO && m.calls == fail);
+		assert(!memcmp(&sample, &before, sizeof(sample)));
+	}
+}
+
 int main(void)
 {
 	struct model m = {0};
@@ -174,6 +217,7 @@ int main(void)
 	assert(m.calls == 0);
 	test_read_only_state();
 	test_tx_control();
+	test_receiver_read_only();
 	printf("EN7573 loader: layout, addressing, readback and %u I2C failure points passed\n", calls);
 	puts("EN7573 status: read-only samples and read failures passed");
 	return 0;

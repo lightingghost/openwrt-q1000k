@@ -214,6 +214,7 @@ controller_status off || fail 'Detection did not return to TX-off state.'
 cat "$calibration" > "$controller/calibration" || fail 'Calibration staging failed.'
 printf 'initialize\n' > "$controller/operation" || fail 'Controller initialization failed.'
 controller_status initialized || fail 'Controller health, fiber state or TX inhibit check failed.'
+cat "$controller/receiver_status" || fail 'Controller receiver snapshot unavailable.'
 if [ "$mode" != controller ]; then
 	ip link set dev ponraw up || fail 'Cannot open the native DMA endpoint.'
 	lower_owned=1
@@ -233,6 +234,7 @@ last_sample=-1; last_frames=-1; last_poll=0; stable=0
 [ "$mode" != receive ] || limit=30
 while [ "$count" -lt "$limit" ]; do
 	controller_status initialized || fail 'TX, LOS or controller health check failed.'
+	cat "$controller/receiver_status" || fail 'Controller receiver snapshot unavailable.'
 	if [ "$mode" != controller ]; then
 		cat /proc/xgpon/status || fail 'MAC status unavailable.'
 		grep -qx 'protocol_error=0' /proc/xgpon/status || fail 'MAC reported a protocol fault.'

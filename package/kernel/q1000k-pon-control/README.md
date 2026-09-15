@@ -37,8 +37,10 @@ module parameter or sysfs switch to override it. Status reports the cached
 policy as `tx_inhibited`. A kernel consumer requesting TX enable receives
 `-EPERM`, no TX-enable register write is issued, and the normal fault path
 powers both controllers off. Disabling TX remains available. This is a
-software restriction on this driver, not an independent optical interlock;
-bench tests still require physically disconnected fiber.
+software restriction on this driver, not an independent optical interlock.
+Normal controller/stack bench tests require disconnected fiber; the explicit
+receive-only bench additionally suppresses registration and MAC interrupts
+and permits a user-confirmed connected-fiber observation.
 
 ## Sysfs interface (development ABI, version 1)
 
@@ -60,6 +62,18 @@ Discover the single `*-0051` child under
   request `off` to shut down; polling is not a protection mechanism.
   `stage` identifies the
   operation stage; it does not imply optical service readiness.
+- `receiver_status` reads seven fixed, non-destructive register words after
+  successful XGS initialization, under the same controller mutex as all other
+  operations. It does not power, reset, select, write, clear alarms or access
+  PM/DM memory data ports. Failed reads return an errno without publishing a
+  partial sample. Its JSON includes `sampled_ms` and opaque unsigned words:
+  `mcu_a0` (0x50:0x3018), `mcu_a2` (0x51:0x3018), `apd_control` (0x15c),
+  `ocp_control` (0x160), `firmware_status` (0x80), `los_control` (0x43c) and
+  `system_status` (0x488); the last five use 0x51. These observations are not
+  firmware-health assertions. The OEM binary uses 0x50 for MD32 control while
+  the public reference uses 0x51; this diagnostic does not assume aliasing or
+  change the existing loader. No identity, calibration or credential bytes
+  are returned. The bench captures startup and each subsequent observation.
 - `calibration` accepts one offset-zero write of exactly 513 bytes. The
   factory reader provides this unit's record. The first 512 bytes must not
   be entirely zero or erased. The full record is retained privately in
@@ -78,8 +92,11 @@ Discover the single `*-0051` child under
   Repeated initialization/detection while initialized returns `EBUSY`;
   use `off` first. Removal and system shutdown power both paths off.
 
-Control and memory-address registers use I2C `0x51`. Only the PM/DM data
-ports use `0x50`. Register pointers are big endian; data words are little
+The current loader uses I2C `0x51` for control and memory-address registers,
+following the pinned public source, and `0x50` for PM/DM data ports. OEM
+QKX001-06.00.44.00 instead uses `0x50` throughout the MD32 window; receiver
+diagnostics compare both enable readbacks before any routing change.
+Register pointers are big endian; data words are little
 endian. Bulk writes auto-increment; readback explicitly sets every address.
 Short transfers and readback mismatches fail immediately. TX-disable is
 register `0x3e0` bit 9, and MCU enable is `0x3018` bit 0.
