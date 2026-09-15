@@ -98,3 +98,14 @@ runs. The link indicator is red on LOS, blinking green during acquisition and
 steady green when registered. It turns off when the stack releases it.
 Software blinking can be sampled in either phase, so class brightness alone
 is not visual confirmation. The separate GPIO24 activity LED remains unused.
+
+
+`bench-record-uml.py` verifies and saves already completed local PHY/core UML
+runs beside a completed image artifact. It checks source equivalence, including
+the two OMCI fixture overlays, passing guest logs and the selected revision.
+Existing evidence must match exactly; it is never overwritten with different
+contents. It has no device access. For example:
+
+```sh
+python3 scripts/q1000k/bench-record-uml.py --artifact /absolute/path/to/bench-artifact --phy-run /tmp/q1000k-pon-phy-uml.RUN --core-run /tmp/q1000k-omci-core-uml.RUN
+```

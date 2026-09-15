@@ -799,3 +799,40 @@ Its fault-injection test proves that unconfigured or failed PHY status causes
 no MAC register access. This does not change the PHY/core implementations
 covered by the saved UML evidence. A final image is built from the follow-up
 checkpoint before requesting a user RAM boot.
+
+
+## Final receive-only RAM image ready (2026-09-14)
+
+Source checkpoint `fbd26fb10a74f6e503a1397458950e2357c12c58` builds with vendor
+r71, core r14, controller r6 and bench helper r5. All 107 host tests pass against
+the actual prepared build sources. FIT/kernel/DT hashes and embedded rootfs
+inspection pass, including the named fiber LED references to GPIO22 and GPIO30,
+TX inhibit, disabled NAND with no partitions, 192.168.255.1, disabled DHCP/PON
+services and the late zero panic timeout. The runtime timeout is still read
+back by the runner before tests. Normal `.config` and `.config.old` hashes and
+all protected branch refs are unchanged; the user's untracked README remains
+untouched. No device writes or flash operations were performed for this update.
+
+Artifact directory:
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-fbd26fb10a/`
+
+- FIT: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`
+- Size: 7,602,176 bytes
+- SHA256: `e443bf73e5afa7864e623f5b7036b41b985dbff7226585495888cdefa2006930`
+- `checkpoint.json`, `inspection.json`, `host-tests.log`, `runtime-sha256sums`
+  and `sha256sums` record the complete build and inspected runtime payloads.
+- `uml-phy/`, `uml-core/` and `uml-source-verification.json` retain the passing
+  Linux UML evidence and confirm the production source matches. The saved
+  `scripts/q1000k/bench-record-uml.py` verifies/reuses these captures, including
+  reconstructing the two intentionally instrumented OMCI files. Its invocation
+  against this artifact succeeds and preserves existing evidence byte-for-byte.
+
+Next device sequence: user RAM boot from second-stage http-uboot with fiber
+still disconnected; read-only preflight; normal stack test to check the LED
+observer and teardown; 30-second `receive --fiber-disconnected` test; only then
+user-confirmed connection and `receive --fiber-connected`. The fiber indicator
+is expected red while the disconnected stack runs and off after release.
+GPIO class readings cannot establish physical illumination; user visual
+confirmation remains required. The bench intentionally leaves the stack
+unloaded at boot, so it has no live optical status to display until testing.
+The synthetic identity remains unassigned and no optical TX is requested.

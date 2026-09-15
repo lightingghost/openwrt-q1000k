@@ -21,10 +21,22 @@ It verifies immutable TX inhibit, keeps registration and MAC IRQs stopped,
 suppresses vendor PHY callbacks, and checks 30 seconds of fresh LOS/sync/frame
 and FEC snapshots while ONU/OMCC remain unassigned. RX-only PHY tests pass
 50 Linux UML cycles in addition to 50 normal cycles; the full OMCI core UML
-suite and host lifecycle/bench guards pass. A new image build and user RAM
-boot are required before hardware validation. See the new section in
+suite and host lifecycle/bench guards pass. The final `fbd26fb10a` image builds and passes all 107 host tests and
+FIT/rootfs inspection. A user RAM boot is required before hardware validation. See the new section in
 [the bench report](XGSPON-BENCH.q1000k.md) and saved commands in
 [`scripts/q1000k/README.md`](../../../scripts/q1000k/README.md).
+
+**Ready for user RAM boot (not flashing):**
+`build-artifacts/q1000k-xgspon/bench-fbd26fb10a/` in the parent workspace contains
+`openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`,
+7,602,176 bytes, SHA256
+`e443bf73e5afa7864e623f5b7036b41b985dbff7226585495888cdefa2006930`.
+Vendor r71/core r14/controller r6/bench r5 are included. Use second-stage
+http-uboot RAM loading with fiber disconnected, then verify normal stack and
+30-second RX-only dark startup/cleanup and observe the red fiber indicator.
+Only after that should a user-confirmed fiber connection be used for the
+receive-only optical run. Registration/TX testing remains a separate gate.
+The last read-only device check still identified the older `30ea573aa3` image.
 
 **Local integration is progressing; working optical service has not been
  demonstrated.** Vendor r68 and OMCI core r13 implement the native packet path,
