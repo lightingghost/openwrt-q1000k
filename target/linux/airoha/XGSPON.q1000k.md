@@ -59,8 +59,9 @@ AN7581 pinmux fix builds in replacement image `0e4acc9d70` and passes offline
 inspection. The user RAM-booted it and the controller retry passed: both
 paths detected, firmware/calibration verified, TX disabled, LOS asserted and
 cleanup complete. The subsequently authorized stack test exposed ignored
-module parameters and a missing SCU unload handler. Both are fixed locally;
-the retained old SCU requires another RAM boot before retrying. See the bench
+module parameters and a missing SCU unload handler. Replacement image
+`cddd1983fa` builds and passes inspection with both fixes; the retained old SCU
+requires another RAM boot before retrying. See the bench
 report for the failures, successful controller retry and cleanup evidence.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 

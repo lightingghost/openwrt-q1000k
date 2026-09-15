@@ -296,3 +296,32 @@ Vendor release 62, bench release 2 and supervisor release 3 contain the fixes.
 The raw attempt and containment logs are retained under this image's
 `stack-test/` artifact directory. This attempt did not exercise full stack
 startup or its physical MAC/PHY shutdown/drain path.
+
+## Replacement image for stack retry — 2026-09-14
+
+Source `cddd1983fa2ae8031da3802c43356102d18fdb96` completes the full cached
+bench build with vendor r62, bench r2 and supervisor r3. All 89 host tests
+pass. The SCU lifecycle fixture also passes against the prepared vendor
+sources, and the compiled SCU module contains both init/exit callbacks and
+the kernel's exit metadata. Patch 051 passes checkpatch without warnings.
+The earlier permanent SCU binary is rejected by the new inspection guard.
+
+The replacement `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`
+is 7,602,176 bytes; SHA-256:
+`266c76cb76abd655384dcd9384b02f31fa178ef26238d952933774b746350196`.
+Its artifact directory is
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-cddd1983fa`.
+It contains the image, manifest, build and test logs, resolved config,
+inspection results and checksums.
+
+Inspection verifies both FIT hashes, the embedded source revision, all 1,154
+initramfs entries and unloadability of all nine PON modules. NAND/PCS stay
+disabled, partitions/rootdisk are absent, TX is inhibited, LAN/failsafe use
+192.168.0.1, and DHCP/RA plus automatic PON startup are disabled. The normal
+development config, protected branches, normal builder and user-owned README
+were preserved. Unrelated vendor build warnings remain.
+
+This replacement has not been booted. The retained old SCU cannot be replaced
+by a normal module unload, so the next action is a user RAM boot of this FIT,
+followed by read-only preflight and the already-authorized stack retry. No
+forced unload, reboot or firmware flash was performed during this work.

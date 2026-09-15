@@ -24,7 +24,9 @@ and I2C reservation; LAN remained healthy. The user then authorized the stack
 test. Its first attempt exposed ignored module parameters and a missing SCU
 unload handler, now fixed locally in vendor r62/bench r2/supervisor r3. The
 controller is off/unloaded and ponraw down; the old SCU remains loaded until
-another user RAM boot. Full stack startup and physical drain remain untested.
+another user RAM boot. Replacement image `cddd1983fa` builds and passes
+inspection, including unloadability of all nine PON modules. Full stack
+startup and physical drain remain untested.
 No firmware was flashed.
 See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
