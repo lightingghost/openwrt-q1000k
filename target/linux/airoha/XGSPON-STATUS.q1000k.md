@@ -3,6 +3,18 @@
 2026-09-14, branch `q1000k-xgspon`, based on `q1000k-dev` at
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
+LED integration update: the Q1000K OEM DTS identifies GPIO22 (active high)
+as `pon_lnk_green` and GPIO30 (active high) as `pon_lnk_red`. The MAC now
+references those existing LED class devices. A cancellable process-context
+observer samples PHY LOS each second and reports optical state independently
+of the fixed CPU link: red for absent/unavailable signal, blinking green in
+discovery/registration, steady green when operational. Stack unload turns the
+indicator off and releases acquired LED references. GPIO24 is the OEM activity
+LED and is not used to pretend that optical traffic exists. LED decision,
+blink-to-steady, reference/unwind and backend observer tests pass; visual
+hardware confirmation awaits the next RAM image. Vendor r69/core r14 contain
+this fix. The previous hardware results below remain for r68/core r13.
+
 **Local integration is progressing; working optical service has not been
  demonstrated.** Vendor r68 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst

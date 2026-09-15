@@ -33,6 +33,7 @@ struct xpon_device {
 	struct led_classdev *pon_led;
 	struct led_classdev *los_led;
 	struct led_classdev *fiber_led;
+	unsigned int owned_leds;
 
 	void *omci;
 	void *oam;
@@ -47,6 +48,7 @@ void xpon_sysfs_unregister(struct xpon_device *xpon);
 void xpon_sysfs_notify(struct xpon_device *xpon, unsigned long changed);
 
 int xpon_leds_register(struct xpon_device *xpon);
+void xpon_leds_unregister(struct xpon_device *xpon);
 void xpon_leds_update(struct xpon_device *xpon,
 		      const struct xpon_state *state);
 

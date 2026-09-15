@@ -8,6 +8,7 @@
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <net/xpon.h>
 #include <net/xpon/omci.h>
 #include "common/xpon_global.h"
@@ -46,6 +47,7 @@ struct qomci_backend {
 	struct xpon_device *xpon;
 	struct omci_device *omci;
 	struct crypto_lskcipher *cipher, *ecb_cipher;
+	struct delayed_work optical_work;
 	spinlock_t auth_lock;
 	struct q1000k_mac_keys keys;
 	struct q1000k_key_state data;
@@ -916,6 +918,25 @@ int q1000k_omci_cold_start(void)
 	return ret;
 }
 
+/* Optical state is independent of the fixed 10G CPU link. Observe it in
+ * process context, including when registration is intentionally held off.
+ * Cleanup cancels this producer before unregistering its xPON consumer.
+ */
+static void qomci_optical_work(struct work_struct *work)
+{
+	struct qomci_backend *b = container_of(to_delayed_work(work),
+					     struct qomci_backend, optical_work);
+	struct xpon_phy_api_data_s query = {
+		.api_type = XPON_PHY_API_TYPE_GET,
+		.cmd_id = PON_GET_PHY_LOS_STATUS,
+	};
+	int los = q1000k_phy_call(&query);
+
+	/* Failed or not-yet-configured PHY must never display a good link. */
+	xpon_device_report_optical(b->xpon, los == 0, los != 0);
+	schedule_delayed_work(&b->optical_work, msecs_to_jiffies(1000));
+}
+
 int q1000k_omci_backend_init(struct net_device *dev)
 {
 	struct qomci_backend *b;
@@ -930,6 +951,7 @@ int q1000k_omci_backend_init(struct net_device *dev)
 	if (!b)
 		return -ENOMEM;
 	spin_lock_init(&b->auth_lock);
+	INIT_DELAYED_WORK(&b->optical_work, qomci_optical_work);
 	b->onu = b->request.onu = 0xffff;
 	ret = q1000k_pon_get_serial(b->serial, 8);
 	if (!ret)
@@ -961,6 +983,7 @@ int q1000k_omci_backend_init(struct net_device *dev)
 	if (ret)
 		goto omci;
 	rcu_assign_pointer(qomci_current, b);
+	schedule_delayed_work(&b->optical_work, 0);
 	return 0;
 omci:
 	omci_device_unregister(b->omci);
@@ -981,6 +1004,7 @@ void q1000k_omci_backend_cleanup(void)
 
 	if (!b)
 		return;
+	cancel_delayed_work_sync(&b->optical_work);
 	qomci_close(b);
 	RCU_INIT_POINTER(qomci_current, NULL);
 	synchronize_rcu();

@@ -77,14 +77,15 @@
 			gpios = <&en7581_pinctrl 24 GPIO_ACTIVE_LOW>;
 		};
 
-		led-5 {
+		/* OEM pon_lnk_green / pon_lnk_red: the fiber state indicator. */
+		led_pon_green: led-5 {
 			color = <LED_COLOR_ID_GREEN>;
 			function = LED_FUNCTION_WAN;
 			function-enumerator = <1>;
 			gpios = <&en7581_pinctrl 22 GPIO_ACTIVE_HIGH>;
 		};
 
-		led-6 {
+		led_pon_red: led-6 {
 			color = <LED_COLOR_ID_RED>;
 			function = LED_FUNCTION_WAN;
 			gpios = <&en7581_pinctrl 30 GPIO_ACTIVE_HIGH>;
@@ -283,6 +284,8 @@
 		interrupt-names = "mac", "dying-gasp";
 		resets = <&scuclk EN7581_XPON_MAC_RST>;
 		reset-names = "mac";
+		leds = <&led_pon_green>, <&led_pon_red>;
+		led-names = "pon", "los";
 		/* Coordinated startup requires an explicitly enabled experiment. */
 		status = "disabled";
 	};

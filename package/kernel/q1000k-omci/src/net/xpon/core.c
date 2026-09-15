@@ -103,6 +103,7 @@ xpon_device_register(struct device *parent,
 
 	ret = xpon_sysfs_register(xpon);
 	if (ret) {
+		xpon_leds_unregister(xpon);
 		kfree(xpon);
 		return ERR_PTR(ret);
 	}
@@ -126,6 +127,7 @@ void xpon_device_unregister(struct xpon_device *xpon)
 	list_del_init(&xpon->list);
 	mutex_unlock(&xpon_devices_lock);
 	cancel_work_sync(&xpon->notify_work);
+	xpon_leds_unregister(xpon);
 	xpon_sysfs_unregister(xpon);
 	kfree(xpon);
 }

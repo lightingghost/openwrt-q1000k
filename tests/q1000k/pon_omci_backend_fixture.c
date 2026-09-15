@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 typedef uint8_t u8;
@@ -43,6 +44,7 @@ typedef int32_t s32;
 #define OMCI_FEC_STATUS_UP 2
 #define XPON_PHY_API_TYPE_GET 0
 #define PON_GET_PHY_TX_FEC_STATUS 99
+#define PON_GET_PHY_LOS_STATUS 100
 struct xpon_phy_api_data_s { int api_type, cmd_id; };
 #define TRAFFIC_DOWN 0
 #define UPAES_MODE_NONE 0
@@ -108,6 +110,14 @@ static u16 hardware_onu;
 static u64 native_epoch,native_last;
 static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
 static void *kzalloc(size_t n,int flags) { return calloc(1,n); }
+struct work_struct { int unused; };
+struct delayed_work { struct work_struct work; bool pending; void (*fn)(struct work_struct *); };
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define to_delayed_work(w) container_of(w,struct delayed_work,work)
+#define INIT_DELAYED_WORK(w,f) do { (w)->fn=f; } while(0)
+#define msecs_to_jiffies(n) (n)
+static void schedule_delayed_work(struct delayed_work *w,unsigned int n) { assert(n==0||n==1000); w->pending=true; }
+static void cancel_delayed_work_sync(struct delayed_work *w) { w->pending=false; }
 static void kfree_sensitive(void *p) { free(p); }
 static void synchronize_rcu(void) {}
 typedef int spinlock_t;
@@ -156,6 +166,8 @@ static struct device *get_xpon_dev(void) { static struct device dev; return &dev
 static struct xpon_device *xpon_device_register(struct device *d,const struct xpon_device_desc *desc) { return calloc(1,sizeof(struct xpon_device)); }
 static void xpon_device_unregister(struct xpon_device *x) { free(x); }
 static void xpon_device_report_registration(struct xpon_device *x,int state) { assert(!owned); }
+static int reported_los=-1;
+static void xpon_device_report_optical(struct xpon_device *x,bool signal,bool los) { assert(!owned && signal!=los); reported_los=los; }
 static void xpon_device_report_carrier(struct xpon_device *x,bool up) { assert(!owned); }
 static struct omci_device *omci_device_register(struct xpon_device *x,u32 caps,const struct omci_device_ops *ops,void *priv) {
     struct omci_device *o=calloc(1,sizeof(*o)); o->ops=ops; o->priv=priv; identity_was_set=false; return o;
@@ -222,8 +234,9 @@ static int q1000k_gwan_refresh_checked(int (*install)(void *),int (*ready)(void 
 }
 static void xmcs_report_event(int type,int event,u8 state) { assert(owned && type==1 && event==2 && (state==1||state==7)); }
 static int q1000k_phy_set_tx(bool enable) { assert(owned); int ret=step(); if(!ret) optical_tx=enable; return ret; }
-static int phy_fec_value, phy_fec_calls;
+static int phy_fec_value, phy_fec_calls, phy_los_value=1;
 int q1000k_phy_call(struct xpon_phy_api_data_s *q) {
+    if(q->cmd_id==PON_GET_PHY_LOS_STATUS) { assert(!owned); return phy_los_value; }
     assert(owned && q->api_type==XPON_PHY_API_TYPE_GET && q->cmd_id==PON_GET_PHY_TX_FEC_STATUS);
     phy_fec_calls++; return phy_fec_value;
 }
@@ -324,6 +337,11 @@ static void operational(void)
 int main(void)
 {
     startup(); assert(q1000k_omci_assign(17)==-EPERM);
+    assert(qomci_current->optical_work.pending);
+    qomci_optical_work(&qomci_current->optical_work.work); assert(reported_los==1);
+    phy_los_value=0; qomci_optical_work(&qomci_current->optical_work.work); assert(reported_los==0);
+    phy_los_value=-EIO; qomci_optical_work(&qomci_current->optical_work.work); assert(reported_los==1);
+    phy_los_value=1;
     struct omci_telemetry telemetry, saved_telemetry;
     memset(&telemetry,0xa5,sizeof(telemetry)); saved_telemetry=telemetry;
     assert(qomci_ops.get_telemetry(qomci_current->omci,&telemetry)==-ENODATA && !phy_fec_calls);
