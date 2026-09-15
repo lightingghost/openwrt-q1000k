@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#define pr_err_ratelimited(...) do { if (0) fprintf(stderr, __VA_ARGS__); } while (0)
 typedef uint8_t u8;
 typedef uint32_t u32;
 #define U32_MAX UINT32_MAX
@@ -60,7 +62,7 @@ static u32 airoha_fe_rr(struct airoha_eth *e,u32 reg)
 static void airoha_fe_wr(struct airoha_eth *e,u32 reg,u32 value)
 {
     check(); assert(e==&eth && reg!=0x151c && reg!=0x1570); writes++;
-    if(writes!=ignore_at) *fe_reg(reg)=value;
+    if(writes!=ignore_at) *fe_reg(reg)=reg==0x1528 ? value & 0xffff : value;
 }
 static u32 airoha_qdma_rr(struct airoha_qdma *q,u32 reg)
 {
@@ -92,7 +94,7 @@ static void usleep_range(unsigned int low,unsigned int high)
 static void reset(unsigned int channel)
 {
     memset(&eth,0,sizeof(eth)); memset(&pon,0,sizeof(pon));
-    eth.tx=U32_MAX; eth.rx=0xabcdefab; eth.forward=0x56789abc;
+    eth.tx=U32_MAX; eth.rx=0xefab; eth.forward=0x56789abc;
     eth.command=BIT(17)|BIT(26); eth.busy=0xf000;
     memset(&eth.qdma[0],0xa5,sizeof(eth.qdma[0]));
     memset(eth.qdma[1].closed,255,sizeof(eth.qdma[1].closed));
@@ -120,7 +122,7 @@ int main(void)
         assert(ticks==4 && writes==10 && !pon.control_fault);
         assert(pon.fe_retired==BIT(c));
         assert(eth.tx==(U32_MAX&~BIT(c)) && pon.tx_enabled==eth.tx);
-        assert(eth.rx==(0xabcdefab&~BIT(c)) && eth.forward==(0x56789abc&~BIT(c)));
+        assert(eth.rx==(0xefab&~BIT(c)) && eth.forward==(0x56789abc&~BIT(c)));
         assert(eth.command==(BIT(17)|BIT(26)) && (pon.retiring&BIT(c)));
         for(unsigned int i=0;i<8;i++) assert(eth.qdma[1].closed[i]==U32_MAX);
         finished();

@@ -569,3 +569,31 @@ The request-only API is restricted to holding MPI RX; it cannot release a
 stop or claim completion. Tests distinguish request readback from stop ACK,
 inject failures at each preparation boundary, and preserve all 39 retirement
 failure cases and containment checks. Hardware validation is pending.
+
+The r68 build at `cebd6ffe4b3fae514213c9708d1676e55e82162e` passes all 98 host
+tests, image inspection and the real Linux UML PHY lifecycle test. Image hash:
+`8d7fde82b173f19c427b36e02102ea82614754ffd3e7bf98e9602a5f94bb32ef`.
+The matching-module run in `bench-cebd6ffe4b/stack-r68-01/` completes PHY
+configuration with `Final phy_tx_enable mode=0`. MPI ingress stop now
+acknowledges, and FE channels 0–15 retire (`retired=0xffff`). Channel 16 fails
+with `-EIO`, leaving stage 2 (ingress stopped). All modules unload, original
+RAM files are restored, private inputs are removed, and LAN/SSH remain healthy.
+This is partial physical retirement, not completed drain or optical service.
+
+## Native RX enable width correction
+
+The existing native FE initializer writes TX `0xffffffff` and RX `0xffff`.
+The retirement adaptation incorrectly requires `BIT(channel)` to read back
+from both registers for all 32 TX channels. The failure at channel 16 is
+consistent with this unsupported RX bit. Patch `9999l` masks temporary RX
+enables to 16 bits, preserving all 32 TX retirements and exact readback checks.
+It adds failing-register/expected/actual diagnostics for the next bench run.
+RX activation also uses the hardware's 16-bit receive word after all table,
+generation, DMA and ownership checks; the upstream T-CONT bitmap remains the
+separate TX eligibility check. Upper TX channels are never aliased to a lower
+RX bit. Fixtures now emulate the RX width and cover TX channel 31 activation.
+
+This is native kernel code. It cannot be tested by replacing the three vendor
+modules on f885e80846. Build and inspect a complete replacement bench, then
+have the user RAM-load it from the second-stage http-uboot. The old bench is
+left idle; no flash, reboot, force-unload or optical activation is authorized.

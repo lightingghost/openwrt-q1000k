@@ -1,5 +1,14 @@
 # Q1000K physical retirement evidence
 
+Current hardware update (2026-09-14): the disconnected-fiber r68 RAM test
+completes PHY configuration, MPI RX stop and FE retirement for channels 0–15.
+Channel 16 fails before complete FIFO/RX drain. The native adaptation treated
+the 16-bit GDM RX enable register as a 32-bit TX bitmap; patch `9999l` corrects
+that width and adds failed-write diagnostics. Fixtures now model the narrower
+RX register, retain all 32 TX retirement tests, and check upper TX namespace
+activation separately from RX hardware enables. A new kernel RAM boot is
+required to validate the fix. See [the bench record](XGSPON-BENCH.q1000k.md).
+
 This records static inspection of the cached QKX001-06.00.44.00 firmware.
 The binaries were extracted locally, disassembled, and never executed.
 No SSH, register reads, controller probes, resets, or firmware writes were

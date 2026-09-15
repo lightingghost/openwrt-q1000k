@@ -113,7 +113,7 @@ static void airoha_fe_wr(struct airoha_eth *eth,u32 reg,u32 value) {
     case 0x1514: eth->fe_len=value; break;
     case 0x1520: eth->fe_release=value; break;
     case 0x1524: eth->fe_tx=value; break;
-    case 0x1528: eth->fe_rx=value; break;
+    case 0x1528: eth->fe_rx=value & 0xffff; break;
     default: WARN_ON(1);
     }
 }
@@ -183,7 +183,7 @@ print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:GDM[1-4]_BASE|REG_GDM_(?:LEN_CFG|TXCHN_EN|LPBK_CFG)|LPBK_EN_MASK|GDM_SHORT_LEN_MASK|GDM_LONG_LEN_MASK)', line)))
 print(re.search(r'#define CDM_BASE\(_n\).*?(?=\n(?:#|\n))', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
-    r'#define (?:CDM[12]_BASE|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_|RETIRE_STS)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
+    r'#define (?:CDM[12]_BASE|GDM_RXCHN_EN_MASK|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_|RETIRE_STS)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
 print('static int rx_drain_calls;\nstatic int airoha_qdma_pon_drain_rx(struct airoha_qdma *q) { ASSERT_RTNL(); rx_drain_calls++; return 0; }')
 source = (eth / 'airoha_pon.c').read_text()
 print(re.sub(r'^#include[^\n]*\n', '', source, flags=re.M))
@@ -380,6 +380,7 @@ static int __init pon_transport_test_init(void)
         }
         CHECK(!airoha_pon_set_tx_channel(pon,31,true));
         CHECK(!airoha_pon_activate_rx(pon,BIT(31)));
+        CHECK(eth.fe_rx==0xffff && pon->tx_enabled==BIT(31));
         CHECK(!airoha_pon_resume(pon));
         CHECK(!airoha_pon_set_queue_close(pon,31,0));
         /* A packet authorized before the physical drain cannot enter the

@@ -31,7 +31,13 @@ Vendor r68 prepares an initially unconfigured PHY after latching MPI RX stop
 and acknowledging MBI RX stop. Controller TX remains off and PHY IRQ/polling
 are not started there. Active-port retirement retains its ordering, and every
 physical drain check still precedes MAC reset or service-table replacement.
-The software passes 98 host tests; r68 build/runtime validation is pending.
+The r68 image and 98 host tests pass. Its RAM retry completes PHY preparation,
+MPI RX stop and FE channels 0–15, then fails at channel 16. Cleanup and original
+module restoration pass with LAN healthy. The native initializer uses 32 TX
+bits but only 16 RX bits; patch `9999l` corrects retirement's RX width and
+separates RX activation from the upstream T-CONT bitmap. It adds failing-write
+diagnostics. This kernel change requires a new user RAM boot; the current
+bench is idle. Full physical retirement and integrated startup remain pending.
 See [the bench report](XGSPON-BENCH.q1000k.md) and
 [http-uboot findings](XGSPON-HTTP-UBOOT.q1000k.md).
 

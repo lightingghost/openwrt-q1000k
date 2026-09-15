@@ -1,0 +1,71 @@
+Subject: [PATCH] net: airoha: respect the GDM2 RX enable width during PON drain
+
+The disconnected-fiber bench retires TX channels 0-15, then fails at 16.
+The existing native FE initializer enables 32 TX and 16 RX channels. Do not
+require nonexistent RX bits to latch when retiring upper TX channels, or
+use an upstream T-CONT bitmap as the downstream RX enable word.
+
+Keep exact write readback checks and log failures with register context.
+All physical retirement and namespace ownership checks remain required.
+
+---
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -808,8 +808,15 @@
+  */
+ static int airoha_pon_fe_write_checked(struct airoha_eth *eth, u32 reg, u32 value)
+ {
++	u32 actual;
++
+ 	airoha_fe_wr(eth, reg, value);
+-	return airoha_fe_rr(eth, reg) == value ? 0 : -EIO;
++	actual = airoha_fe_rr(eth, reg);
++	if (actual == value)
++		return 0;
++	pr_err_ratelimited("airoha-pon: FE write %#x expected %#x read %#x\n",
++			   reg, value, actual);
++	return -EIO;
+ }
+ 
+ int airoha_pon_retire_fe(struct airoha_pon *pon, u8 channel)
+@@ -884,8 +891,13 @@
+ 				REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), BIT(channel));
+ 	if (ret)
+ 		goto restore;
++	/* GDM2 has 32 TX channels but only 16 RX enables. For an upper TX
++	 * channel, keep all RX disabled; never alias it to a lower RX channel.
++	 * The upstream FE initializer likewise uses TX=0xffffffff/RX=0xffff.
++	 */
+ 	ret = airoha_pon_fe_write_checked(eth,
+-				REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), BIT(channel));
++				REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX),
++				BIT(channel) & GDM_RXCHN_EN_MASK);
+ 	if (ret)
+ 		goto restore;
+ 	mask = 0xffU << ((channel & 3) * 8);
+@@ -1165,8 +1177,14 @@
+ 		ret = -EIO;
+ 		goto fault;
+ 	}
++	/* The TX T-CONT bitmap above authorizes this namespace activation; it
++	 * is not the GDM RX bitmap. Open the 16 hardware RX paths only after
++	 * GEM/OMCI tables, generations and RX DMA are ready. Unknown services
++	 * remain excluded by those tables and the owner's receive callback.
++	 */
+ 	ret = airoha_pon_fe_write_checked(eth,
+-					REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), channels);
++					REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX),
++					GDM_RXCHN_EN_MASK);
+ 	if (ret)
+ 		goto fault;
+ 	pon->rx_drained = false;
+--- a/drivers/net/ethernet/airoha/airoha_regs.h
++++ b/drivers/net/ethernet/airoha/airoha_regs.h
+@@ -178,6 +178,7 @@
+ 
+ #define REG_GDM_TXCHN_EN(_n)		(GDM_BASE(_n) + 0x24)
+ #define REG_GDM_RXCHN_EN(_n)		(GDM_BASE(_n) + 0x28)
++#define GDM_RXCHN_EN_MASK		GENMASK(15, 0)
+ 
+ #define REG_FE_CPORT_CFG		(GDM1_BASE + 0x40)
+ #define FE_CPORT_PAD			BIT(26)

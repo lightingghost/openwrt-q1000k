@@ -75,6 +75,12 @@ command is improved. Hardware watchdog behavior is a separate question.
 
 ## Keep the bootloader's scope narrow
 
+The subsequent r68 test reaches FE retirement and fails at TX channel 16.
+The native Linux FE initializer and local http-uboot both use a 16-bit RX
+enable word (`0xffff`), distinct from the 32-bit TX word. The PON retirement
+adaptation incorrectly demanded that upper RX bits latch. This belongs in
+Linux; it is not a reason to change http-uboot's RX bitmap or optical setup.
+
 No evidence currently justifies having http-uboot initialize the optical
 controller, read/apply optical calibration, train the PHY, register an ONU,
 or enable laser transmission. Its role in these tests is RAM loading and a

@@ -17,6 +17,7 @@ typedef uint64_t u64;
 #define REG_QUEUE_CLOSE_CFG(n) (0xa0+((n)/4)*4)
 #define REG_GDM_TXCHN_EN(n) 0
 #define REG_GDM_RXCHN_EN(n) 1
+#define GDM_RXCHN_EN_MASK 0xffff
 #define REG_CDM_HWFWD_CHN(n) 2
 #define rcu_access_pointer(p) (p)
 #define atomic_read_acquire(p) (*(p))
@@ -71,7 +72,7 @@ static int airoha_pon_fe_write_checked(struct airoha_eth *e,unsigned int reg,u32
 {
     check(); assert(e==&eth && reg==1);
     if(++writes==fail_write) return -EIO;
-    e->fe[reg]=value; return 0;
+    e->fe[reg]=value & 0xffff; return e->fe[reg]==value ? 0 : -EIO;
 }
 /* PRODUCTION */
 static void reset(void)
@@ -104,7 +105,10 @@ int main(void)
     pon.tx_enabled=0x81;
     assert(!airoha_pon_activate_rx(&pon,0x81));
     assert(!pon.rx_closed && !pon.rx_drained && !pon.epoch_ready && pon.paused);
-    assert(eth.fe[1]==0x81 && eth.qdma[1].global==0xa5a50065 && writes==2); finish();
+    assert(eth.fe[1]==0xffff && eth.qdma[1].global==0xa5a50065 && writes==2); finish();
+    reset(); assert(!airoha_pon_reset_epoch(&pon)); pon.tx_enabled=1U<<31;
+    assert(!airoha_pon_activate_rx(&pon,1U<<31));
+    assert(eth.fe[1]==0xffff && pon.tx_enabled==(1U<<31)); finish();
     for(int i=0;i<32;i++) {
         reset(); pon.fe_retired&=~(1U<<i);
         assert(airoha_pon_reset_epoch(&pon)==-EBUSY && pon.generation==50 && !writes); finish();
