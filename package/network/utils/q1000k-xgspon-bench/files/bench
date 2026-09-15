@@ -17,7 +17,7 @@ preflight() {
 	for entry in /sys/class/mtd/mtd* /sys/class/ubi/ubi*; do
 		[ ! -e "$entry" ] || fail 'Persistent NAND/UBI is visible.'
 	done
-	[ "$(uci -q get network.lan.ipaddr)" = 192.168.0.1 ] || fail 'Unexpected management address.'
+	[ "$(uci -q get network.lan.ipaddr)" = 192.168.255.1 ] || fail 'Unexpected management address.'
 	[ "$(uci -q get dhcp.lan.ignore)" = 1 ] || fail 'LAN DHCP server must be disabled.'
 	[ "$(uci -q get q1000k-xgspon.service.enabled)" = 0 ] || fail 'Normal PON service must stay disabled.'
 }

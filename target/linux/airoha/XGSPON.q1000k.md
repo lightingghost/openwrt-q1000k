@@ -49,7 +49,8 @@ packaged modules/userspace defaults. It has not been booted or flashed. See
 A separate [RAM bench](XGSPON-BENCH.q1000k.md) now builds at source
 `109361469940476fc06bf68303b47514718bcb5e`. It disables NAND, inhibits
 controller TX, enables the vendor PHY/MAC resources and fixes the native
-GDM2 internal transport dependency. Normal LAN and failsafe use 192.168.0.1;
+GDM2 internal transport dependency. Those images use 192.168.0.1; the user's
+updated default for new bench images is 192.168.255.1 for LAN and failsafe.
 LAN DHCP/RA and automatic PON startup are disabled. Its FIT/initramfs content
 inspection passes. The user has RAM-booted this image; read-only SSH confirms
 RAM root, absent MTD/UBI devices, native ponraw registration and disabled

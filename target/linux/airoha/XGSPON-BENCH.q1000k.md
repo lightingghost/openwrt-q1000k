@@ -15,11 +15,15 @@ optical carrier. The controller caches `quantum,tx-inhibit` at probe and
 rejects all consumer TX-enable requests with power-off containment.
 
 The explicit builder `--profile bench` selects this target and
-`192.168.0.1/24`, including preinit/failsafe. LAN DHCP, DHCPv6 and RA servers
+`192.168.255.1/24`, including preinit/failsafe. LAN DHCP, DHCPv6 and RA servers
 are disabled, both copper ports remain LAN, and the normal PON service is
-disabled. Connect a dedicated host at e.g. `192.168.0.2/24`, with no gateway
+disabled. Connect a dedicated host at e.g. `192.168.255.2/24`, with no gateway
 on that link. **192.168.1.1 belongs to the user's working router and must
 not be used for Q1000K SSH.** No default WAN or OLT identity is inferred.
+
+The user changed the requested default from 192.168.0.1 to **192.168.255.1**
+after the stack-test checkpoint. New images use the new subnet; the older
+images and runtime logs below retain their original 192.168.0.1 address.
 
 ## Staged device tests
 
@@ -51,7 +55,7 @@ and are not a RAM-boot transport.
    read the working router at 192.168.1.1. Do not replace calibration with
    synthetic data or a record from another unit.
 2. User RAM-boots the checked bench FIT. Collect serial boot output. Verify
-   the running image revision, RAM root, absent MTD/UBI, address 192.168.0.1,
+   the running image revision, RAM root, absent MTD/UBI, address 192.168.255.1,
    disabled DHCP and unloaded PON modules. `q1000k-pon-bench status` performs
    only reads and rejects a persistent root, visible NAND or wrong subnet.
 3. After explicit runtime approval, stage the unit's calibration under

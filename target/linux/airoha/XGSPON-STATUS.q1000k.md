@@ -28,6 +28,8 @@ another user RAM boot. Replacement image `cddd1983fa` builds and passes
 inspection, including unloadability of all nine PON modules. Full stack
 startup and physical drain remain untested.
 No firmware was flashed.
+The user has since requested 192.168.255.1 as the default for new bench
+images; historical runtime records at 192.168.0.1 remain unchanged.
 See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
 EN7573 paths detected, OEM MD32 firmware
