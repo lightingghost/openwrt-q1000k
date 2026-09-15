@@ -52,7 +52,13 @@ def summarize(capture):
             pcs_counters={k:sorted({r['pcs_counters'][k] for r in samples}) for k in samples[0]['pcs_counters']},
             diagnostics={k:sorted({r[k] for r in diags}) for k in (
                 'attempts', 'writes', 'checker_control', 'checker_event', 'checker_errors',
-                'rx_meter_result', 'jcpll_500m_result', 'bist_lane_control', 'data_route_control')},
+                'rx_meter_result', 'jcpll_500m_result', 'bist_lane_control', 'data_route_control',
+                'tdc_ncpo', 'fifo_clock_status') if k in diags[0]},
+            passive_clock_words={k:dict(first=diags[0][k], last=diags[-1][k],
+                minimum=min(r[k] for r in diags), maximum=max(r[k] for r in diags),
+                distinct_values=len({r[k] for r in diags}))
+                for k in ('tdc_ncpo', 'fifo_clock_status') if k in diags[0]},
+            analog_fields=SUITE.RECEIVER.analog_fields([r['receiver'] for r in samples]),
             sfp_status=sorted({r['receiver']['sfp_status'] for r in samples})))
     report = dict(schema_version=1, capture=str(capture), device_access=False,
                   capture_validated=True, optical_service_verified=False,
@@ -60,6 +66,8 @@ def summarize(capture):
                   limits=['Phases follow sampled LOS and attempt state, not exact physical transition time.',
                           'Checker completion/errors may be latched; unchanged values do not prove live data.',
                           'Reconnection is demonstrated only if a light phase follows a dark phase in this capture.',
+                          'NCPO is a raw tracking word; passive FIFO status may be stale without a latch write.',
+                          'Passive DAC/offset codes may be stale without a latch; FIFO nibbles do not prove data continuity or clock lock.',
                           'An upper frequency count in its target window is not calibrated rate or recovered-clock proof.'])
     return report, observed, receiver
 

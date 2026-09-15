@@ -20,6 +20,18 @@ SPEC.loader.exec_module(RUN)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_diagnostic_schema_follows_artifact_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact=Path(directory)
+            helper=artifact/'runtime/usr/sbin/q1000k-pon-bench'
+            helper.parent.mkdir(parents=True)
+            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2)):
+                helper.write_text(text)
+                self.assertEqual(RUN.diagnostics_version(artifact),expected)
+            for text in ('RX_DIAGNOSTICS_VERSION=3\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
+                helper.write_text(text)
+                with self.assertRaises(ValueError): RUN.diagnostics_version(artifact)
+
     def test_connected_flag_cannot_reach_other_actions(self):
         for action in ('status', 'resources', 'controller', 'stack'):
             args=['bench-run', action, '--artifact', '/missing', '--output', '/missing', '--fiber-connected']

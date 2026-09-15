@@ -60,14 +60,14 @@ class SuiteTests(unittest.TestCase):
 
 
 class ProbeReportTests(unittest.TestCase):
-    def fixture(self,path):
-        (path/'checkpoint.json').write_text(json.dumps(dict(diagnostics_version=1,probe='checker',
+    def fixture(self,path,version=2):
+        (path/'checkpoint.json').write_text(json.dumps(dict(diagnostics_version=version,probe='checker',
             reacquire_once=True,restore_gain=False,restore_pll=False,samples=30)))
         rows=[]
         for i in range(30):
             attempts=int(i>=15)
             rows.append(dict(rx_bench=True,reacquire_attempts=attempts,sampled_ms=i*1000))
-            rows.append(dict.fromkeys(PROBE.FIELDS,0) | dict(diagnostics_version=1,probe=10,
+            rows.append(dict.fromkeys(PROBE.FIELDS_BY_VERSION[version],0) | dict(diagnostics_version=version,probe=10,
                 attempts=attempts,writes=attempts*2,sampled_ms=i*1000+1,checker_control=5 | attempts*65536,
                 checker_errors=i,rx_meter_lock_target=0xa4ff_a436,rx_meter_result=0xa49a_0303))
         (path/'serial.log').write_text('q1000k: RX probe fields restored\n')
@@ -87,6 +87,39 @@ class ProbeReportTests(unittest.TestCase):
             self.assertEqual(result['checker_error_phases']['after']['delta_mod32'],14)
             self.assertTrue(result['restoration_confirmed'])
             self.assertEqual(result['rx_meter_upper16_within_configured_window'],[True])
+            self.assertEqual(result['diagnostics_version'],2)
+
+    def test_legacy_diagnostics_remain_readable_without_inventing_new_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory); self.fixture(path,version=1)
+            result=PROBE.summarize(path)
+            self.assertEqual(result['diagnostics_version'],1)
+            self.assertNotIn('tdc_ncpo',result['raw_words'])
+            self.assertIsNone(result['passive_clock_words'])
+
+    def test_passive_words_keep_full_width_and_are_not_lock_assertions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory); rows=self.fixture(path)
+            for row in rows:
+                if 'diagnostics_version' in row:
+                    row['tdc_ncpo']=0xffffffff if row['attempts'] else 7
+                    row['fifo_clock_status']=0xf1234567
+            self.write(path,rows)
+            result=PROBE.summarize(path)
+            self.assertEqual(result['passive_clock_words']['tdc_ncpo']['maximum'],0xffffffff)
+            self.assertEqual(result['passive_clock_words']['tdc_ncpo']['distinct_values'],2)
+            self.assertEqual(result['passive_clock_words']['fifo_clock_status']['distinct_values'],1)
+
+    def test_new_field_and_version_mismatches_are_rejected(self):
+        for fault in ('missing','schema','overflow','bool'):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as directory:
+                path=Path(directory); rows=self.fixture(path)
+                if fault=='missing': del rows[1]['tdc_ncpo']
+                elif fault=='schema': rows[1]['diagnostics_version']=1
+                elif fault=='overflow': rows[1]['fifo_clock_status']=0x100000000
+                else: rows[1]['tdc_ncpo']=False
+                self.write(path,rows)
+                with self.assertRaises(ValueError): PROBE.summarize(path)
 
     def test_counter_restart_is_not_counted_as_activity(self):
         with tempfile.TemporaryDirectory() as directory:

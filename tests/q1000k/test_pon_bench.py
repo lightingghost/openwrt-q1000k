@@ -80,8 +80,9 @@ if action=='cat':
         params=json.loads((root/'module-params').read_text())
         mode=int(params.get('rx_probe',0))
         attempts=int(params.get('rx_reacquire')=='1' and n>=15)
-        data=dict(diagnostics_version=1,probe=mode,attempts=attempts,writes=attempts if mode else 0,
-                  sampled_ms=n*1000,checker_control=5,data_route_control=0,bist_lane_control=0)
+        data=dict(diagnostics_version=2,probe=mode,attempts=attempts,writes=attempts if mode else 0,
+                  sampled_ms=n*1000,checker_control=5,data_route_control=0,bist_lane_control=0,
+                  tdc_ncpo=0,fifo_clock_status=0)
         data.update(json.loads(os.environ.get('BENCH_DIAGNOSTICS','{}')))
         print(json.dumps(data))
     else:

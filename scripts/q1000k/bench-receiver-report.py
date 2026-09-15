@@ -30,6 +30,28 @@ COUNTERS = ('sampled_ms', 'frames', 'lof', 'fec_total', 'fec_corrected',
             'fec_uncorrected', 'irq_calls', 'poll_calls')
 
 
+def analog_fields(rows):
+    """Decode only public AN7581 masks; these are not data/lock acceptance.
+
+    en7581_pma.c XPON_readout_EO supplies DAC/offset masks; en7581_reg.h
+    ADD_RO_RX2ANA_3 supplies FIFO full/empty nibbles and PI calibration.
+    No eye scan, latch, selector or clear is executed by this decoder.
+    """
+    fields = {
+        'dac_eye': ('rx_analog0', 0, 0x7f),
+        'dac_d0': ('rx_analog0', 8, 0x7f),
+        'dac_d1': ('rx_analog0', 16, 0x7f),
+        'dac_e0': ('rx_analog0', 24, 0x7f),
+        'dac_e1': ('rx_analog1', 0, 0x7f),
+        'frontend_offset': ('rx_analog1', 8, 0x3f),
+        'fifo_full_count_raw': ('rx_analog2', 16, 0x0f),
+        'fifo_empty_count_raw': ('rx_analog2', 8, 0x0f),
+        'pi_calibration_raw': ('rx_analog2', 0, 0x7f),
+    }
+    return {name: sorted({(r[word] >> shift) & mask for r in rows})
+            for name, (word, shift, mask) in fields.items()}
+
+
 def words(rows, names):
     for row in rows:
         for name in names:
@@ -137,6 +159,11 @@ def summarize(capture):
                       ('controller_los', 'phy_los', 'synced', 'sync_status')},
         'counters': {k: {'first': rx[0][k], 'last': rx[-1][k]} for k in COUNTERS},
         'phy_words': words([x['receiver'] for x in rx], names),
+        'analog_fields': analog_fields([x['receiver'] for x in rx]),
+        'analog_limits': ['DAC/offset codes are passive calibration snapshots and may be stale without the reference latch operation.',
+                          'No eye scan or latch was performed; these codes are not a measured eye opening.',
+                          'FIFO nibbles may latch, wrap or saturate; changes are not counted as received frames.',
+                          'No independent clock/data validity follows from these decoded fields.'],
         'controller_words': words(controller, CONTROLLER_WORDS),
         'elapsed_seconds': round(record['finished'] - record['started'], 3),
     }

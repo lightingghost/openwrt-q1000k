@@ -127,6 +127,17 @@ Q1000K_RUNTIME_SUMS
 '''
 
 
+def diagnostics_version(artifact):
+    """The exact artifact helper declares its schema; older helpers used v1."""
+    helper = (artifact / 'runtime/usr/sbin/q1000k-pon-bench').read_text()
+    versions = re.findall(r'^RX_DIAGNOSTICS_VERSION=(\d+)$', helper, re.M)
+    if not versions:
+        return 1
+    if len(versions) != 1 or versions[0] not in ('1', '2'):
+        raise ValueError('Unsupported artifact receiver diagnostics schema')
+    return int(versions[0])
+
+
 def idle_guards():
     return f'''for module in {' '.join(MODULES)}; do
     test ! -d /sys/module/$module
@@ -251,7 +262,7 @@ def execute(args):
     run['restore_pll'] = args.restore_pll
     run['restore_gain'] = args.restore_gain
     if args.action == 'receive':
-        run['diagnostics_version'] = 1
+        run['diagnostics_version'] = diagnostics_version(artifact)
         run['probe'] = getattr(args, 'probe', None)
     if args.action == 'receive':
         run['samples'] = args.samples or 30

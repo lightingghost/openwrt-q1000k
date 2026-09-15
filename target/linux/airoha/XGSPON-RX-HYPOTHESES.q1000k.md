@@ -1,5 +1,11 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
+**Next bench:** [remaining hypotheses and collection plan](XGSPON-RX-NEXT.q1000k.md)
+rechecks PR #24577, adds passive NCPO/FIFO telemetry, and provides a standalone
+collector for a complete live dark/reconnect control. It does not repeat the
+13 known-negative trials by default. The historical evidence below remains
+the hardware baseline; the new image has not yet been exercised on the unit.
+
 Prepared 2026-09-15. This is a diagnostic plan, not a claim of optical service.
 The 90-sample PLL trial kept both LOS indications clear, but HUNT stayed zero,
 frames/LOF/FEC/IRQs stayed zero, and one recovery did not change that. In the

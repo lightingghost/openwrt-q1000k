@@ -10,12 +10,16 @@ PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-lo
           'tdc-delay', 'pll-order', 'oem-order', 'checker')
 HEADER = Path(__file__).resolve().parents[2] / 'package/kernel/airoha-pon/src/bsp/include/q1000k_rx_diag.h'
 FIELDS = tuple(re.findall(r'X\((\w+),', HEADER.read_text()))
+V2_FIELDS = ('tdc_ncpo', 'fifo_clock_status')
+FIELDS_BY_VERSION = {1: tuple(k for k in FIELDS if k not in V2_FIELDS), 2: FIELDS}
 
 
 def summarize(capture):
     record = json.loads((capture/'checkpoint.json').read_text())
-    if record.get('diagnostics_version') != 1:
-        raise ValueError('Capture requires diagnostics schema 1')
+    version = record.get('diagnostics_version')
+    if type(version) is not int or version not in FIELDS_BY_VERSION:
+        raise ValueError('Capture requires diagnostics schema 1 or 2')
+    fields = FIELDS_BY_VERSION[version]
     probe = record.get('probe')
     if probe is not None and probe not in PROBES:
         raise ValueError('Unknown probe in checkpoint')
@@ -38,12 +42,12 @@ def summarize(capture):
         raise ValueError('Incomplete probe diagnostic capture')
     previous_ms, attempts, writes = -1, 0, 0
     for row, sample in zip(rows,rx):
-        expected = set(FIELDS) | {'diagnostics_version','probe','attempts','writes','sampled_ms'}
+        expected = set(fields) | {'diagnostics_version','probe','attempts','writes','sampled_ms'}
         if row.keys() != expected or any(type(v) is not int or v<0 for v in row.values()):
             raise ValueError('Invalid diagnostic fields/types')
-        if any(row[k]>0xffffffff for k in FIELDS):
+        if any(row[k]>0xffffffff for k in fields):
             raise ValueError('Diagnostic register overflows u32')
-        if row['diagnostics_version']!=1 or row['probe']!=mode:
+        if row['diagnostics_version']!=version or row['probe']!=mode:
             raise ValueError('Diagnostic mode/schema mismatch')
         if not previous_ms < row['sampled_ms'] or not 0 <= row['sampled_ms']-sample['sampled_ms'] <= 1500:
             raise ValueError('Stale/unpaired diagnostics')
@@ -60,7 +64,7 @@ def summarize(capture):
     if mode and attempts and serial.count('q1000k: RX probe fields restored')!=1:
         raise ValueError('Probe field restoration was not confirmed exactly once')
     def words(items):
-        return {key:[f'0x{x:08x}' for x in sorted({row[key] for row in items})] for key in FIELDS}
+        return {key:[f'0x{x:08x}' for x in sorted({row[key] for row in items})] for key in fields}
     def counter_delta(items):
         return dict(samples=len(items), first=items[0]['checker_errors'] if items else None,
                     last=items[-1]['checker_errors'] if items else None,
@@ -71,7 +75,7 @@ def summarize(capture):
     for row in rows:
         target=row['rx_meter_lock_target']; result=row['rx_meter_result']>>16
         meter.append((target & 0xffff) <= result <= (target>>16))
-    return dict(schema_version=1, capture=str(capture), probe=probe, attempts=attempts,
+    return dict(schema_version=1, diagnostics_version=version, capture=str(capture), probe=probe, attempts=attempts,
                 checked_writes=writes, samples=len(rows), restoration_confirmed=bool(mode and attempts),
                 raw_words=words(rows), before=words([r for r in rows if not r['attempts']]),
                 after=words([r for r in rows if r['attempts']]),
@@ -80,7 +84,12 @@ def summarize(capture):
                 checker_error_delta_mod32=None if attempts else counter_delta(rows)['delta_mod32'],
                 checker_error_phases=dict(before=counter_delta(before),after=counter_delta(after)),
                 counter_delta_crosses_intervention=False,
+                passive_clock_words={k: dict(first=rows[0][k], last=rows[-1][k],
+                    minimum=min(r[k] for r in rows), maximum=max(r[k] for r in rows),
+                    distinct_values=len({r[k] for r in rows})) for k in V2_FIELDS} if version == 2 else None,
                 limits=['Frequency words are not a calibrated baud-rate measurement or CDR-lock proof.',
+                        'NCPO is a raw tracking word, not a lock flag or a calibrated frequency.',
+                        'FIFO clock status is passive and may be stale without a latch; no latch/clear was written.',
                         'Normal XGS-PON is not PRBS: checker errors are not an optical BER measurement.',
                         'No counter delta is computed across recovery/checker restart, which may reset the counter.',
                         'Power/LOS cannot prove wavelength, modulation quality, differential wiring or absolute calibration.'])

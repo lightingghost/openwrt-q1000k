@@ -1,5 +1,13 @@
 # PR #24577 reuse review for Q1000K
 
+2026-09-15 RX follow-up: the live head remains
+`d7569c5e26551084e7643b0e83ecda9c31f49f11`, open and unmerged. The
+[remaining-hypothesis plan](XGSPON-RX-NEXT.q1000k.md) records the renewed
+source review and its hardware limits. EN7571 optical bring-up, high-speed RX
+initialization and CDR acquisition are separate in the reference driver;
+responsive LOS alone does not validate the electrical receive path. No EN7528
+register sequence or laser default was imported for the next Q1000K bench.
+
 Reviewed 2026-09-12 for the [Q1000K XGS-PON plan](XGSPON.q1000k.md).
 Source: [OpenWrt PR #24577](https://github.com/openwrt/openwrt/pull/24577),
 `AKoo7/openwrt:econet-xpon-gpon`, head

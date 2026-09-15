@@ -12,7 +12,7 @@ CONTROL = matrix.MATRIX.module('bench-control-report')
 
 
 class ControlTests(unittest.TestCase):
-    def fixture(self, path):
+    def fixture(self, path, version=2):
         matrix.DiagnosticTests().fixture(path, version=5)
         diagnostic_rows = [json.loads(line) for line in (path/'attempt.log').read_text().splitlines()]
         receiver = [r for r in diagnostic_rows if 'rx_bench' in r]
@@ -21,7 +21,7 @@ class ControlTests(unittest.TestCase):
         helper.capture = path
         record, controller, omci, samples = helper.fixture(fiber='connected')
         record.update(status='failed', error='SSH failed (1); see attempt.log',
-                      diagnostics_version=1, probe='checker', reacquire_once=True)
+                      diagnostics_version=version, probe='checker', reacquire_once=True)
         for n, row in enumerate(samples):
             row.update(receiver[n])
             row.update(reacquire_enabled=True, reacquire_attempts=int(n>=20),
@@ -37,12 +37,15 @@ class ControlTests(unittest.TestCase):
             if 'rx_bench' not in row:
                 continue
             attempts = row['reacquire_attempts']
-            diag = dict.fromkeys(suite.PROBE.FIELDS, 0)
-            diag.update(diagnostics_version=1, probe=10, attempts=attempts,
+            diag = dict.fromkeys(suite.PROBE.FIELDS_BY_VERSION[version], 0)
+            diag.update(diagnostics_version=version, probe=10, attempts=attempts,
                         writes=2*attempts, sampled_ms=row['sampled_ms']+1,
                         checker_control=5+65536*attempts,
                         checker_event=65793 if attempts else 256,
                         checker_errors=65529 if attempts else 0)
+            if version == 2:
+                diag.update(tdc_ncpo=200 if row['controller_los'] else 100,
+                            fifo_clock_status=123)
             lines.extend([json.dumps(diag), json.dumps(controller_words)])
         lines.append('Q1000K bench: Downstream LOS/sync/frame stability was not established.')
         (path/'attempt.log').write_text('\n'.join(lines)+'\n')
@@ -60,6 +63,20 @@ class ControlTests(unittest.TestCase):
             self.assertEqual([p['diagnostics']['checker_errors'] for p in phases], [[0], [65529], [65529], [65529]])
             self.assertFalse(report['optical_service_verified'])
             self.assertEqual(report['cleanup'], 'passed')
+            self.assertEqual([p['passive_clock_words']['tdc_ncpo']['minimum'] for p in phases], [100,100,200,100])
+
+    def test_legacy_capture_keeps_new_words_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory); self.fixture(path,version=1)
+            report,_,_=CONTROL.summarize(path)
+            self.assertTrue(all(p['passive_clock_words']=={} for p in report['phases']))
+
+    def test_public_analog_masks_do_not_mix_reserved_bits(self):
+        words=dict(rx_analog0=0x81828384,rx_analog1=0xffffc182,rx_analog2=0xfffefdff)
+        result=CONTROL.SUITE.RECEIVER.analog_fields([words])
+        self.assertEqual(result,dict(dac_eye=[4],dac_d0=[3],dac_d1=[2],dac_e0=[1],
+            dac_e1=[2],frontend_offset=[1],fifo_full_count_raw=[14],
+            fifo_empty_count_raw=[13],pi_calibration_raw=[127]))
 
     def test_physical_control_does_not_relax_capture_or_tx_guards(self):
         for fault in ('cleanup', 'tx', 'short', 'restore'):

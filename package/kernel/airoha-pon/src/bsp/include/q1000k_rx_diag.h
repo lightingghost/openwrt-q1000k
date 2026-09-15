@@ -36,5 +36,9 @@
 	X(rx_impedance, EN7581_XPON_ANA_RG_PXP_RX_SIGDET_NOVTH) \
 	X(rx_revision, EN7581_XPON_ANA_RG_PXP_RX_REV_0) \
 	X(rx_equalizer_force, EN7581_XPON_ANA_RG_PXP_AEQ_CFORCE) \
-	X(rx_oscal_window, EN7581_XPON_ANA_RG_PXP_RX_OSCAL_WATCH_WNDW)
+	X(rx_oscal_window, EN7581_XPON_ANA_RG_PXP_RX_OSCAL_WATCH_WNDW) \
+	/* NCPO is read by the public XGPON poller without a latch write. */ \
+	X(tdc_ncpo, EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4) \
+	/* Passive snapshot only: no RX_DEBUG_0 latch/clear toggle. */ \
+	X(fifo_clock_status, EN7581_XPON_PMA_FIFO_CK_STATUS)
 #endif

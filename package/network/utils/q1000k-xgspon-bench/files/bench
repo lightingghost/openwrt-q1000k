@@ -4,6 +4,7 @@
 # may be visible. No service or boot hook calls this program.
 . /lib/q1000k-xgspon/common.sh
 export LC_ALL=C
+RX_DIAGNOSTICS_VERSION=2
 umask 077
 reacquire=0
 restore_pll=0
@@ -149,11 +150,11 @@ rx_status() {
 rx_diagnostics() {
 	local data field type value sampled_ms attempts writes checker route lane
 	data=$(cat /sys/module/xpon_10g/parameters/rx_bench_diagnostics) && json_load "$data" || return 1
-	for field in diagnostics_version probe attempts writes sampled_ms checker_control data_route_control bist_lane_control; do
+	for field in diagnostics_version probe attempts writes sampled_ms checker_control data_route_control bist_lane_control tdc_ncpo fifo_clock_status; do
 		json_get_type type "$field"; json_get_var value "$field"
 		[ "$type" = int ] && [ "$value" -ge 0 ] || return 1
 	done
-	json_get_var value diagnostics_version; [ "$value" = 1 ] || return 1
+	json_get_var value diagnostics_version; [ "$value" = "$RX_DIAGNOSTICS_VERSION" ] || return 1
 	json_get_var value probe; [ "$value" = "$probe" ] || return 1
 	json_get_var sampled_ms sampled_ms
 	[ "$sampled_ms" -ge "$last_sample" ] && [ "$((sampled_ms - last_sample))" -le 1500 ] || return 1

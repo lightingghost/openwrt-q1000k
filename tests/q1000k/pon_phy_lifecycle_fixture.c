@@ -575,11 +575,19 @@ static void rx_probe_tests(void)
         assert(q1000k_phy_set_rx_probe(0)==-EBUSY);
         for(int i=0;i<20;i++) qphy_poll_work(&qphy_poll_job);
         assert(reacquire_calls==1 && !qphy_fault);
+        regs[(EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4&0x1ffff)/4]=0xfedcba98;
+        regs[(EN7581_XPON_PMA_FIFO_CK_STATUS&0x1ffff)/4]=0x12345678;
+        unsigned int previous_writes=writes;
         assert(!q1000k_phy_rx_diagnostics(&d) && d.probe==mode && d.attempts==1);
+        assert(d.tdc_ncpo==0xfedcba98 && d.fifo_clock_status==0x12345678 && writes==previous_writes);
         assert(!q1000k_phy_set_rx_probe(mode));
         assert(q1000k_phy_rx_diagnostics(NULL)==-EINVAL);
         memset(&d,0xa5,sizeof(d)); sentinel=d;
-        fail_read=reads+1;
+        /* Late failures in either newly added read must not publish the
+         * preceding successful fields as a complete snapshot. */
+#define DIAG_COUNT(name, reg) + 1
+        fail_read=reads+(0 Q1000K_RX_DIAG_FIELDS(DIAG_COUNT))-(mode%2);
+#undef DIAG_COUNT
         assert(q1000k_phy_rx_diagnostics(&d)==-EIO && !memcmp(&d,&sentinel,sizeof(d)));
         assert(!qphy_active && !controller.tx);
         fail_read=0;

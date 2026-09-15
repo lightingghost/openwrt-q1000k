@@ -339,8 +339,11 @@ static int __init phy_test_init(void)
         check(!q1000k_phy_rx_sample(&sample) && sample.controller_los && !sample.synced);
         check(sample.pcs_counters.psync_mismatch==n+10 && sample.pcs_counters.cw_start==~0U);
         struct q1000k_rx_diagnostics diagnostic;
+        registers[(EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4&0x1ffff)/4]=0x400+n;
+        registers[(EN7581_XPON_PMA_FIFO_CK_STATUS&0x1ffff)/4]=0x500+n;
         check(!q1000k_phy_rx_diagnostics(&diagnostic) && diagnostic.probe==0);
         check(diagnostic.rx_meter_result==n);
+        check(diagnostic.tdc_ncpo==0x400+n && diagnostic.fifo_clock_status==0x500+n);
         check(sample.rx_power_valid && sample.rx_power_nw==19900);
         check(sample.receiver.pll_outputs==0x300+n && !sample.pll_restore_enabled);
         check(sample.receiver.rx_frequency==n && sample.receiver.rx_control==0x12340000+n);
