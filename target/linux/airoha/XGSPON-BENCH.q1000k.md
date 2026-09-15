@@ -11,6 +11,11 @@ live disconnect / reconnected-baseline controls completed on one RAM boot
 loaded-pipeline drain and long-duration acceptance
 remain pending. See the chronological hardware and build records below.
 
+The next built image is `7aaebf0999`, with passive NCPO/FIFO observations and
+a standalone guided collector. Its build and software checks pass; hardware
+execution is pending. See [the next test plan](XGSPON-RX-NEXT.q1000k.md) and
+the delivery record at the end of this document.
+
 The bench DT disables the NAND controller and NAND chip, removes partition
 definitions and the persistent rootdisk reference, and uses console-only
 boot arguments. It enables native GDM2 (`ponraw`) and the manually loaded
@@ -2027,3 +2032,48 @@ settings must not be repeated as if untested. Wavelength, absolute power
 calibration and differential polarity remain external measurements. Nothing
 here implicates http-uboot or justifies changing its behavior, removing TX
 inhibit, or changing OMCI identity/VLANs to address the pre-sync failure.
+
+## Passive receive evidence and standalone collector — image 7aaebf0999
+
+Source `7aaebf0999360a52147f20c07361449705370b75` on `q1000k-xgspon`
+builds vendor r80/helper r14. The final artifact directory is:
+
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-7aaebf0999-build2/`
+
+The 7,602,176-byte initramfs FIT has SHA-256
+`3e0ab996f3a3102fb3411b6eb3230f317a17664d024d9282c926e997f65d22ed`.
+Exact FIT hashes, DT, initramfs and 14 runtime hashes pass inspection: NAND
+disabled, immutable TX inhibit, management `192.168.255.1`, no PON autoload
+or embedded private controller/calibration inputs. Normal configurations and
+protected main/dev/support refs were restored/unchanged.
+
+Validation passed: 186 PON host tests, 13 status tests, UI checks, and the
+source-matched Linux PHY test with 50 normal plus 50 RX-only lifecycle cycles
+and concurrent callback teardown. Evidence is saved under `uml-phy/` and
+`uml-phy-source-verification.json`. No new OMCI-core UML run is claimed.
+An initial sandboxed build failed because fakeroot could not open its local
+socket; its failed checkpoint and restored-configuration evidence are retained
+separately under `bench-7aaebf0999/`. The successful build is `-build2`.
+
+The delivered `q1000k-rx-collect.py` is a single host-side Python script with
+embedded, hash-pinned runtime metadata and report readers. Its SHA-256 is
+`7a69707952a8df891f14375b0cb1df8562e1e7fcee16aaa72ece704001c06b79`.
+A dry-run outside the repository passed with diagnostic schema 2. It runs a
+30-sample connected baseline followed by a guided 180-sample live
+connected/dark/reconnected capture, requiring physical confirmations and
+15 consecutive observed samples per phase. It supports direct read-only
+115200-baud serial capture or an existing active log, checks cleanup before
+continuing, and returns one evidence archive excluding private inputs.
+The 15 collector and nine serial PTY tests are included in the host test count.
+
+The same unit's input archive was reconstructed from the original local NAND
+backup and OEM SquashFS, matching all three previously recorded input hashes.
+It remains separate under `private-inputs-20260915/q1000k-inputs.tar` with
+private permissions. The delivery `README.md` gives the exact command and
+`TEST-PLAN.md` separates software observations from pending external tests.
+
+No device was accessed or booted during this work. The new image is not a
+claim of downstream synchronization or XGS-PON service. PR #24577 was reviewed
+again at its unchanged head; the remaining priorities are electrical receive
+output/route, actual clock/data quality and documented OEM initialization
+differences. The prior 13 negative trials are not repeated by default.
