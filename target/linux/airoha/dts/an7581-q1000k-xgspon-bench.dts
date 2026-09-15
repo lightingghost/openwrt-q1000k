@@ -7,7 +7,8 @@
 
 	chosen {
 		/delete-property/ rootdisk;
-		bootargs = "console=ttyS0,115200 earlycon";
+		/* Retain a panic for serial diagnosis instead of requesting reboot. */
+		bootargs = "console=ttyS0,115200 earlycon panic=0";
 	};
 };
 

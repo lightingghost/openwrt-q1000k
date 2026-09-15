@@ -418,3 +418,17 @@ and reload. All 90 host tests pass. FIT inspection now requires both init
 and exit callbacks for every PON module, rejecting the earlier hook binary.
 A replacement RAM bench image is being prepared for a user boot and the
 already-authorized stack retry. Hardware validation remains pending.
+
+The complete cached image build at `4cefe6cd42` passes offline inspection;
+all nine embedded PON modules now define init/exit callbacks. The compiled
+hook module also has the kernel's `.init`/`.exit` metadata. Its updated
+lifecycle fixture and checkpatch pass. The earlier image is rejected by the
+stricter hook lifecycle check. The existing unrelated feed/Kconfig diagnostics
+remain in the build log; resolved package selection and final build pass.
+
+The final bench additionally sets `panic=0` in its DT boot arguments, and FIT
+inspection checks this. Linux's explicit panic reboot is disabled so a fatal
+test does not request a normal boot after three seconds. This does not alter
+other reset sources, including a hardware watchdog. Read-only preflight on
+the next user RAM boot must check `/proc/sys/kernel/panic` is zero. No running
+device configuration was changed for this adjustment.

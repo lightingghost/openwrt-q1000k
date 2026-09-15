@@ -75,7 +75,7 @@ def inspect(image, revision):
     assert b'quantum,q1000k-ubi' in dt['/']['compatible'].split(b'\0')
     assert 'quantum,xgspon-bench' in dt['/']
     assert 'rootdisk' not in dt['/chosen']
-    assert dt['/chosen']['bootargs'] == b'console=ttyS0,115200 earlycon\0'
+    assert dt['/chosen']['bootargs'] == b'console=ttyS0,115200 earlycon panic=0\0'
     nand = '/soc/spi@1fa10000'
     assert dt[nand]['status'] == b'disabled\0'
     assert dt[nand + '/nand@0']['status'] == b'disabled\0'
@@ -156,6 +156,7 @@ def inspect(image, revision):
                 kernel_uncompressed_bytes=len(expanded), initramfs_entries=len(records),
                 unloadable_pon_modules=list(modules),
                 nand_disabled=True, tx_inhibited=True, management_ip='192.168.255.1',
+                kernel_panic_reboot_disabled=True,
                 rootfs_checks='passed', device_access=False)
 
 
