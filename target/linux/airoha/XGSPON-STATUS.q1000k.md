@@ -4,7 +4,7 @@
 `c526db0e25fa159ca79b60125741afd4e08440c9`.
 
 **Local integration is progressing; working optical service has not been
- demonstrated.** Vendor r63 and OMCI core r13 implement the native packet path,
+ demonstrated.** Vendor r64 and OMCI core r13 implement the native packet path,
 physical drain and namespace replacement, checked cold startup/reset, burst
 profiles and ranging, authenticated PLOAM/OMCI, baseline unicast provisioning,
 SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
@@ -27,8 +27,14 @@ user RAM-booted the updated 192.168.255.1 image `de0b571776`. Its stack retry
 passes controller initialization and fully unloads all PON modules, but MAC
 startup returns EBUSY. Vendor r63 defers the premature WAN frame-limit change
 to the existing drained cold transaction and adds startup-stage diagnostics.
-All 90 host tests pass; matching-module RAM validation is next. Full stack
-startup and physical drain remain unverified. No firmware was flashed.
+The matching-module retry passes the WAN failure and registers OMCI, then
+panics in `ecnt_register_hook` before PHY cold-start: the framework's list
+initializer was never connected to module load. Vendor r64 adds init/exit
+callbacks and tests the actual module entry point. All 90 host tests pass;
+a replacement RAM image is being prepared. The kernel announced automatic
+reboot after the panic; current device state and cleanup are unverified.
+No agent reboot or firmware flash occurred. Full stack startup and physical
+drain remain unverified.
 See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
 EN7573 paths detected, OEM MD32 firmware

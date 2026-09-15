@@ -141,9 +141,9 @@ def inspect(image, revision):
         assert len(matches) == 1, name
         assert read(matches[0]).startswith(b'\x7fELF')
         symbols = elf_defined_symbols(read(matches[0]))
-        # Linux permits a library module with no init callback to unload.
-        # An init callback without an exit callback makes a module permanent.
-        assert 'init_module' not in symbols or 'cleanup_module' in symbols, (name, 'module cannot unload')
+        # Every bench module owns initialization, including the hook lists.
+        # A library with neither callback can unload but is not initialized.
+        assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:
         if name.startswith(('etc/modules.d/', 'etc/modules-boot.d/')):

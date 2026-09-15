@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise production hook writers against concurrent host RCU readers."""
+from pathlib import Path
 import re
 import unittest
 from test_pon_hooks import BSP
@@ -29,6 +30,11 @@ class PonHookLifecycleTests(unittest.TestCase):
             'set_ecnt_hookfn_execute_or_not', 'get_ecnt_hookfn', 'show_all_ecnt_hookfn',
             'ecnt_register_hook', 'ecnt_unregister_hook', 'ecnt_ops_unregister',
             'ecnt_unregister_hooks', 'ecnt_register_hooks', 'ecnt_hook_init'])
+        # Exercise the module entry point: manually calling the core helper
+        # masked the missing module_init in the original port.
+        metadata = (Path(__file__).resolve().parents[2] /
+                    'package/kernel/airoha-pon/src/bsp/module/ecnt_hook_meta.c').read_text()
+        production += re.sub(r'^#include[^\n]*\n', '', metadata, flags=re.M)
         run_c(r'''
 #include <assert.h>
 #include <errno.h>
@@ -36,9 +42,16 @@ class PonHookLifecycleTests(unittest.TestCase):
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <stdatomic.h>
 #include <sched.h>
 #define __IMEM
+#define __init
+#define __exit
+#define MODULE_DESCRIPTION(...)
+#define MODULE_LICENSE(...)
+#define module_init(fn) static int (*module_load)(void)=fn
+#define module_exit(fn) static void (*module_unload)(void)=fn
 #define U32_MAX UINT32_MAX
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define ECNT_MAX_SUBTYPE 8
@@ -155,7 +168,12 @@ static void *duplicate_registration(void *p) {
 int main(void) {
     struct ecnt_data data={0};
     struct ecnt_hook_ops zero={0},bad={.hookfn=callback,.maintype=UINT32_MAX};
-    ecnt_hook_init();
+    assert(!module_load());
+    for(unsigned int i=0;i<ECNT_NUM_MAINTYPE;i++)
+        for(unsigned int j=0;j<ECNT_MAX_SUBTYPE;j++) {
+            assert(ecnt_hooks[i][j].next==&ecnt_hooks[i][j]);
+            assert(ecnt_hooks[i][j].prev==&ecnt_hooks[i][j]);
+        }
     ecnt_unregister_hook(NULL); ecnt_unregister_hook(&zero); ecnt_unregister_hook(&bad);
     assert(ecnt_register_hook(NULL)==-1 && ecnt_register_hook(&zero)==-1 && ecnt_register_hook(&bad)==-1);
     assert(!ecnt_ops_unregister(UINT32_MAX,0,1) && !ecnt_ops_unregister(0,UINT32_MAX,1));
@@ -186,6 +204,12 @@ int main(void) {
         ecnt_unregister_hook(&node);
     }
     hook_id=U32_MAX; assert(ecnt_register_hook(&node)==-1 && !node.list.next);
+    module_unload();
+    /* Reload allocates fresh zeroed static storage before module init. */
+    memset(ecnt_hooks,0,sizeof(ecnt_hooks)); hook_id=0;
+    assert(!module_load());
+    assert(!ecnt_register_hook(&node));
+    ecnt_unregister_hook(&node); module_unload();
     return 0;
 }
 ''', flags=['-pthread', '-Wno-sign-compare'])

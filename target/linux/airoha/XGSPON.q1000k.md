@@ -65,8 +65,12 @@ module parameters and a missing SCU unload handler. Replacement image
 RAM-booted the 192.168.255.1 revision `de0b571776`: controller initialization
 and complete module cleanup pass, but MAC startup returns EBUSY. Vendor r63
 moves the premature frame-limit change to the existing drained cold
-transaction, with 90 passing host tests. Matching-module RAM validation is
-next. See the bench report for runtime evidence and validation limits.
+transaction, with 90 passing host tests. The matching-module retry registers OMCI, then panics in the uninitialized
+hook framework before PHY cold-start. Vendor r64 adds the missing module
+init/exit callbacks and exercises them in the host lifecycle test. All 90
+host tests pass. A replacement RAM image is being prepared; the kernel's
+automatic reboot leaves current device state unverified. See the bench report
+for runtime evidence and validation limits.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original

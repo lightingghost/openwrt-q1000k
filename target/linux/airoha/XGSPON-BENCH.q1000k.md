@@ -385,3 +385,36 @@ artifact `bench-de0b571776/stack-test/` retains the attempt and cleanup logs.
 Runtime validation of the fix remains next. Unlike the prior permanent-SCU
 failure, complete cleanup allows a matching replacement module in RAM without
 another boot. Full PHY/MAC/OMCI startup and physical drain remain unverified.
+
+## Hook-framework panic and fix — 2026-09-14
+
+The MAC module from `bc4fced17a` builds for the booted 6.18.44 kernel. Its five
+vendor dependencies match the image byte-for-byte. With every PON module
+unloaded, the verified replacement was staged only in RAM, retaining the
+original module there. The existing authorized stack test was retried.
+
+Controller initialization passes again, with TX disabled/inhibited and LOS
+asserted. The serial trace confirms startup passes the former WAN failure
+and registers both xPON and OMCI devices. It then panics in
+`ecnt_register_hook+0xbc/0x138`, before PHY cold-start. The faulting address is
+0x38 with x1 zero; matching disassembly shows `ldr w2,[x1,#56]`, the priority
+read through an uninitialized hook-list entry. The framework contains an
+`ecnt_hook_init()` function but had no module entry point calling it.
+
+The kernel announces its own automatic reboot after the fatal exception.
+No agent reboot, flash or forced unload occurred. Cleanup did not complete;
+post-reboot state is unknown. The original SSH client eventually exits 255.
+The trace and partial SSH capture are retained under
+`bench-de0b571776/stack-test/retry-bc4fced17a/`. Do not retry the old hook
+framework. No PHY cold-start or physical drain was reached by this attempt.
+
+Vendor r64 connects the framework initialization to module load and supplies
+an exit callback. Consumers pin the framework through exported symbols and
+unregister/drain their callbacks before releasing it; the framework itself
+owns only static storage. The lifecycle fixture now invokes the production
+module init/exit instead of calling the core initialization helper manually.
+It checks every list head, registration, concurrent RCU removal, node reuse
+and reload. All 90 host tests pass. FIT inspection now requires both init
+and exit callbacks for every PON module, rejecting the earlier hook binary.
+A replacement RAM bench image is being prepared for a user boot and the
+already-authorized stack retry. Hardware validation remains pending.
