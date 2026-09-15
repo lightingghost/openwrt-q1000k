@@ -31,7 +31,7 @@ below remain the full acceptance plan; they are not all complete.
 | --- | --- | --- |
 | 1. Hardware and dependencies | OEM inventory, controller mapping, firmware/calibration format and native resource ownership are documented. | Electrical calibration, cold-start timing and current production DT behavior require hardware evidence. |
 | 2. Imports and build | Vendor and LuCI imports retain provenance; native adaptations and the generic OMCI core build without unresolved symbols. Full experimental initramfs/sysupgrade builds and offline FIT/rootfs inspection pass. | Hardware acceptance and any release/publication remain separate. |
-| 3. Factory data and controller | Read-only extraction, exact controller selection and checked firmware/calibration loading are implemented; historical controller-only bench tests are recorded. | Current stack cold boot and rollback are untested on hardware. |
+| 3. Factory data and controller | Current RAM bench detects both EN7573 paths, verifies XGS firmware/calibration readback, samples MCU/TX/LOS and cleans up successfully. | Sustained analog/firmware health and integrated stack cold boot/rollback are untested on hardware. |
 | 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Physical FIFO/DMA retirement, optical burst/ranging timing and copper regression checks need hardware. Advanced rate shaping/policing remains unsupported. |
 | 5. OMCI and subscriber | Generic core, authenticated PLOAM/OMCI, unicast data keys, supported VLAN/bridge/GEM provisioning and identity parameters are implemented. | The subscriber's actual identity and OLT service MIB are unknown; registration, encryption and DHCP are unproven. Advanced/multicast service modes remain unsupported. |
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
@@ -56,8 +56,10 @@ RAM root, absent MTD/UBI devices, native ponraw registration and disabled
 PON modules/service. The audited bench status preflight passes. The authorized
 controller-only test stopped at GPIO pin ownership before detection; the
 AN7581 pinmux fix builds in replacement image `0e4acc9d70` and passes offline
-inspection. It requires another user RAM boot. Stack testing remains
-separately gated. See the bench report for the failure and cleanup evidence.
+inspection. The user RAM-booted it and the controller retry passed: both
+paths detected, firmware/calibration verified, TX disabled, LOS asserted and
+cleanup complete. Stack testing remains separately gated. See the bench report
+for the failure, successful retry and cleanup evidence.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original

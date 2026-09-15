@@ -2,8 +2,9 @@
 
 This is a separate `quantum_q1000k-xgspon-bench` image target on
 `q1000k-xgspon`. It produces an initramfs FIT, no sysupgrade or bootloader
-artifact. The normal Q1000K UBI target remains unchanged. RAM boot and
-read-only preflight have passed; optical hardware acceptance remains pending.
+artifact. The normal Q1000K UBI target remains unchanged. RAM boot,
+read-only preflight and the controller-only test have passed; PHY/MAC/OMCI
+and optical service acceptance remain pending.
 
 The bench DT disables the NAND controller and NAND chip, removes partition
 definitions and the persistent rootdisk reference, and uses console-only
@@ -205,7 +206,48 @@ rootdisk absent, controller TX inhibited, LAN/failsafe at 192.168.0.1, and
 DHCP/RA plus automatic PON startup disabled. The ordinary development config,
 protected branches, normal builder and user-owned README were preserved.
 
-This replacement has not been booted. The next action is another user RAM
-boot through second-stage `http-uboot-q1000k`, then read-only preflight and
+At the build checkpoint this replacement had not been booted. The next action
+was another user RAM boot through second-stage `http-uboot-q1000k`, then read-only preflight and
 the already authorized controller retry with fiber disconnected. No new
 device test or flash operation was performed while building the fix.
+
+## Controller retry passed — 2026-09-14
+
+The user RAM-booted the replacement and supplied SSH at 192.168.0.1. The
+running revision is `0e4acc9d70880ed4c3520c956822945ffaf165ea`, with Linux
+6.18.44, RAM root, absent MTD/UBI devices and the expected helper/module hashes.
+Preflight passes; DHCP/RA and PON service remain disabled and `ponraw` is down.
+The prior controller-only permission and disconnected-fiber confirmation
+apply to this retry. Unit calibration and verified OEM PM/DM files were
+restaged only in RAM.
+
+The controller now binds successfully. Both selected EN7573 paths report
+family ID `0x1388` (5000); detection returns to off mode. XGS initialization
+completes firmware/calibration readback and starts the MD32 with TX disabled.
+The immediate initialized status and all five subsequent one-second samples
+report `md32_enabled`, `firmware_verified`, `calibration_supplied`,
+`tx_disabled`, `tx_inhibited` and `los` true, with `last_error=0`.
+Initialized status reads sample MCU/TX registers and the LOS GPIO. The
+`checked_uptime` field is the prior selection/ID check time, not each sample
+time. This is a bounded controller smoke test, not an independent optical
+measurement or sustained firmware/analog-health test.
+
+The helper exits zero after power-off and unload. Read-only postchecks confirm
+no PON modules, released I2C memory reservation at 0x50, unbound controller
+at 0x51, removed bench lock and `ponraw` still down (flags 0x1002). LAN SSH
+remains available at 192.168.0.1 and lan1 has carrier at 1000 Mbps. Preflight
+still passes. The post-test kernel log exactly matches the pre-test baseline;
+there are no new probe errors or other kernel messages.
+
+The artifact's `controller-test/` directory contains a report, structured
+status and private raw logs. No PHY/MAC/OMCI module was loaded and no firmware
+was flashed. Calibration and OEM firmware remain in the RAM filesystem.
+
+The next prepared action is the existing `stack` helper on this same image,
+using `/tmp/q1000k-controller-test-0e4acc9d70/xgspon-calibration.bin`. It repeats
+controller initialization, opens `ponraw`, loads BSP/PHY/MAC/OMCI with synthetic
+bench identity, observes five samples, then unloads in reverse and closes
+`ponraw`. This changes PHY/MAC/DMA state beyond the controller-only permission
+and requires separate approval. No new image is needed for that test. Loaded
+drain, optical registration, traffic/QoS and long-duration health remain
+separate acceptance gates.

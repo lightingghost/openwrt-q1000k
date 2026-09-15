@@ -16,16 +16,20 @@ hardware acceptance remain incomplete.
 192.168.0.1. The user then authorized a controller-only test with disconnected
 fiber; it stopped at an AN7581 GPIO ownership conflict before detection and
 cleaned up. The pinmux fix builds in replacement image `0e4acc9d70`; all 88
-PON/WAN/bench tests and offline image inspection pass. It requires a new RAM
-boot; PHY/MAC/OMCI testing remains separately gated.
+PON/WAN/bench tests and offline image inspection pass. The user RAM-booted it
+and the controller retry passed: both paths detected as 0x1388, XGS firmware
+and calibration readback verified, MCU enabled, TX disabled and LOS asserted
+through all five observation samples. Cleanup released the controller module
+and I2C reservation; LAN remained healthy. PHY/MAC/OMCI testing remains
+separately gated. No firmware was flashed.
 See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
 EN7573 paths detected, OEM MD32 firmware
 and calibration read back correctly, and TX-disable remained asserted. Those
 historical RAM tests do not verify the current MAC/PHY/OMCI integration.
 
-The current local evidence is 75 passing PON host tests plus five WAN setup
-tests using the real UCI parser, the complete OMCI
+The current local evidence is 88 passing PON/WAN/bench host tests, including
+WAN setup with the real UCI parser, the complete OMCI
 core tests in UML, real Linux skb VLAN tests, and matching AN7581 core/vendor
 package builds. Earlier checkpoints contain the native drain, protocol,
 cryptography and PHY concurrency results. Hardware cold boot, OLT registration,
