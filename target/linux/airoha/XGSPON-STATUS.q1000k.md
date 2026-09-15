@@ -12,33 +12,33 @@ SP/WRR scheduling and class 171 tag transformations. The optional supervisor,
 Combined class 84/171 filtering is implemented. Advanced service paths and
 hardware acceptance remain incomplete.
 
-**Never flash firmware.** The user RAM-booted `d928eb20b6` at
-192.168.255.1 with NAND disabled, fiber disconnected and immutable TX inhibit.
-The exact revision and all 13 runtime file hashes pass preflight. Both EN7573
-controllers, verified firmware/calibration, MCU startup and TX-disable/LOS
-checks pass. The live panic timeout is zero.
+**The disconnected-fiber RAM stack test now passes. Never flash firmware.**
+The user RAM-booted `30ea573aa3` at 192.168.255.1 with NAND disabled and
+immutable TX inhibit. The exact revision and all 13 runtime file hashes pass
+preflight; the live panic timeout is zero. Both EN7573 paths detect as 0x1388,
+and verified firmware/calibration, MCU startup, TX-off and LOS checks pass.
 
-The authorized stack test now completes cold PHY preparation, all 32 FE
-channel retirements, MAC stop acknowledgments, alignment-FIFO and native RX
-DMA drain, PHY quiesce and MAC reset. This validates native RX-width patch
-`9999l` on the disconnected-fiber bench. Table clearing then fails at stage 8
-with `-ESHUTDOWN`: its QoS snapshot is rejected by the native retiring-channel
-guard before namespace replacement. Containment succeeds. All nine modules
-unload, private RAM inputs are removed, ponraw is down and LAN/SSH stay healthy.
-This establishes a drained idle pipeline; integrated startup and optical
-service remain unproven.
+Two complete startup/observation/shutdown cycles pass. The first handles the
+bootloader's WAN `0x12` handoff; the second starts after successful teardown
+with WAN already `0x0a`. Both complete all 32 FE retirements, checked
+MAC/FIFO/RX DMA drain, PHY quiesce, MAC reset, scheduler snapshot, table clear,
+epoch replacement and cold namespace installation. PHY/MAC activation is
+receive-only. Native patches `9999l` and `9999m` are now exercised on hardware.
+The CLI reports state O1, an enabled OMCI agent with 334 initial MIB objects,
+zero protocol/service errors, no assigned ONU/OMCC and no optical packets.
+Each run samples controller/MAC/OMCI status five times before shutdown.
 
-Patch `9999m` permits scheduler reads only with CPU admission paused, all FE
-channels retired, RX fully drained, no TX channels enabled and no DMA pending.
-RTNL pins this state for the indirect command. Writes remain blocked until
-retirement ends at epoch replacement. Regression coverage checks all 32
-snapshots, each missing drain condition, fault propagation and blocked writes;
-the real Linux UML transport lifecycle includes this ordering and passes.
-Replacement image `30ea573aa3` builds, passes all 98 host tests and FIT/rootfs
-inspection, and includes the exact native code tested in UML. Its checksum,
-artifacts and normal-config restoration are recorded in the bench report.
-Another user RAM boot is needed before the authorized stack test can progress.
-See [the bench report](XGSPON-BENCH.q1000k.md) and
+Both runs unload all nine PON modules, remove the verified private RAM inputs
+and leave ponraw down with LAN/SSH healthy. No kernel failure diagnostics
+appear in either serial interval. This proves bounded idle lifecycle and
+reattachment; optical registration, OLT provisioning, loaded drain, traffic,
+long-duration health and recovery remain untested.
+
+The image also passes 98 host tests, 100 Linux UML transport cycles and
+FIT/rootfs inspection. Its checksum, captures and aggregate `stack-results.json`
+are recorded in [the bench report](XGSPON-BENCH.q1000k.md). The saved
+`bench-report.py` validates and summarizes captures without device access.
+No further bootloader defect is indicated by these passing cycles; see
 [http-uboot findings](XGSPON-HTTP-UBOOT.q1000k.md).
 
 The bootloader replaces DT boot arguments and OpenWrt defaults to a three-second
@@ -47,11 +47,11 @@ a late sysctl override and requires the live value before a mutating test.
 Build, run, resource-probe and checkpoint scripts live in `scripts/q1000k/`.
 No agent reboot, optical TX activation or firmware flash occurred.
 
-Current evidence includes the 98 host tests, the complete OMCI core tests in
-UML, real Linux skb VLAN tests and AN7581 package/image builds. The r67 image
-and inspection pass; its UML PHY suite passes 50 lifecycle cycles. Integrated hardware
-cold startup, loaded-pipeline drain, OLT registration, optical traffic and
-recovery remain acceptance gates. PON board nodes remain disabled in normal
+Current evidence includes the 98 host tests, complete OMCI core tests in UML,
+real Linux skb VLAN tests, 50 PHY UML lifecycle cycles and AN7581 package/image
+builds. Disconnected-fiber cold startup and warm reattachment pass on hardware.
+Loaded-pipeline drain, OLT registration, optical traffic and recovery remain
+acceptance gates. PON board nodes remain disabled in normal
 images and experimental packages remain optional/BROKEN.
 
 See [integration details](XGSPON-INTEGRATION.q1000k.md),

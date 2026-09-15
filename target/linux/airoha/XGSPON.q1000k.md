@@ -31,11 +31,11 @@ below remain the full acceptance plan; they are not all complete.
 | --- | --- | --- |
 | 1. Hardware and dependencies | OEM inventory, controller mapping, firmware/calibration format and native resource ownership are documented. | Electrical calibration, cold-start timing and current production DT behavior require hardware evidence. |
 | 2. Imports and build | Vendor and LuCI imports retain provenance; native adaptations and the generic OMCI core build without unresolved symbols. Full experimental initramfs/sysupgrade builds and offline FIT/rootfs inspection pass. | Hardware acceptance and any release/publication remain separate. |
-| 3. Factory data and controller | Current RAM bench detects both EN7573 paths, verifies XGS firmware/calibration readback, samples MCU/TX/LOS and cleans up successfully. | Sustained analog/firmware health and integrated stack cold boot/rollback are untested on hardware. |
-| 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Idle FIFO/DMA retirement passes on the disconnected-fiber bench; loaded retirement, optical burst/ranging timing and copper regression checks still need hardware. Advanced rate shaping/policing remains unsupported. |
+| 3. Factory data and controller | Current RAM bench detects both EN7573 paths, verifies XGS firmware/calibration readback, samples MCU/TX/LOS and cleans up successfully. | Integrated receive-only cold startup and warm reattachment pass; sustained analog/firmware health and failure recovery need further evidence. |
+| 4. Native MAC/PHY/FE/QDMA | Packet ownership, physical retirement/namespace replacement, SP/WRR, GEM/T-CONT transactions, cold startup, analog phase checks and fault containment have host/UML coverage. | Idle FIFO/DMA retirement, cold scheduler snapshot/replay and namespace replacement pass on hardware; loaded retirement, optical timing, traffic QoS and copper regression checks remain. Advanced rate shaping/policing remains unsupported. |
 | 5. OMCI and subscriber | Generic core, authenticated PLOAM/OMCI, unicast data keys, supported VLAN/bridge/GEM provisioning and identity parameters are implemented. | The subscriber's actual identity and OLT service MIB are unknown; registration, encryption and DHCP are unproven. Advanced/multicast service modes remain unsupported. |
-| 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
-| 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
+| 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | RAM image boot and the live OMCI status command pass. Browser QA and actual netifd/firewall traffic require separate validation. |
+| 7. Bench and recovery | Fault injection/UML cover software behavior; two disconnected-fiber hardware startup/shutdown cycles pass. | Optical registration, traffic, loaded drain, long-duration health and fault recovery remain; firmware flashing is forbidden. |
 
 Current local evidence: 98 PON/WAN/bench host tests, the complete OMCI core UML
 suite and matching AN7581 package builds. The builder's eight tests and real
@@ -46,20 +46,19 @@ packaged modules/userspace defaults. It has not been booted or flashed. See
 [build preparation](XGSPON-BUILD.q1000k.md) and the
 [current checkpoint](XGSPON-STATUS.q1000k.md) for validation limits.
 
-The current [RAM bench](XGSPON-BENCH.q1000k.md) runs `d928eb20b6` at
+The current [RAM bench](XGSPON-BENCH.q1000k.md) runs `30ea573aa3` at
 192.168.255.1. NAND is disabled, TX is inhibited, DHCP/RA and PON autostart are
-off. Authorized disconnected-fiber testing now completes controller startup,
-cold PHY preparation, all 32 FE retirements, MAC/FIFO/RX DMA drain, PHY quiesce
-and MAC reset. Table clearing then fails with `-ESHUTDOWN`: the native QoS
-guard rejects the required snapshot while channels are marked retiring.
-Containment and module/input cleanup pass; LAN/SSH remain healthy.
-Patch `9999m` allows only verified fully drained scheduler reads while keeping
-writes blocked until epoch replacement. Host regression and real Linux UML
-lifecycle checks cover that ordering. Replacement `30ea573aa3` passes all 98 host tests, 100 UML transport cycles
-and image inspection; another user RAM boot is required for this kernel fix. Integrated startup, loaded-pipeline drain and optical service
-remain acceptance gates. See the [bootloader note](XGSPON-HTTP-UBOOT.q1000k.md)
-for handoff findings. 192.168.1.1 belongs to the working router and is never a
-Q1000K SSH target.
+off. Two authorized disconnected-fiber stack cycles pass: the initial WAN
+handoff and a reattachment after successful teardown. Controller startup,
+cold PHY preparation, all 32 FE retirements, MAC/FIFO/RX DMA drain, scheduler
+snapshot/table replacement and receive-only MAC activation complete. Five
+observations per cycle show O1, LOS, TX off, zero protocol/service errors and
+334 initial OMCI MIB objects through `q1000k-omci`. All modules and private
+inputs are cleaned up; LAN/SSH stay healthy. No further image is required
+for this completed bounded bench check. Optical registration, provisioning,
+loaded drain and traffic remain acceptance gates. See the
+[bootloader note](XGSPON-HTTP-UBOOT.q1000k.md) for handoff findings.
+192.168.1.1 belongs to the working router and is never a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original
 acceptance requirements. Their historical lists of unfinished software work

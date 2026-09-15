@@ -48,5 +48,8 @@ remain rejected. No queue, service record or epoch is reopened by a snapshot.
 The host fixture exercises all 32 channels and every missing drain condition.
 The native Linux UML sequence now performs the actual pause/FE retire/RX
 drain/snapshot/reset-epoch/QoS replay ordering; it previously tested QoS and
-retirement separately. Hardware validation of this fix requires a new kernel
-RAM boot. This is a Linux lifecycle correction, not an http-uboot issue.
+retirement separately. Hardware validation now passes on `30ea573aa3` in two disconnected-fiber
+startup/shutdown cycles. All 32 schedulers are read; the unprovisioned cold
+namespace replays channel zero. Loaded SP/WRR behavior on subscriber channels
+remains unverified. This is a Linux lifecycle correction, not an http-uboot
+issue.

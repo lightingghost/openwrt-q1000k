@@ -1,9 +1,15 @@
 # Q1000K optical PHY integration
 
-All evidence below comes from local source inspection and disassembly of the
-cached QKX001-06.00.44.00 firmware. Neither the kernel nor extracted OEM
-modules were executed. The Q1000K was not accessed for these changes.
+Current hardware update (2026-09-14): the `30ea573aa3` disconnected-fiber
+RAM bench passes two complete stack startup/shutdown cycles. Cold PHY setup,
+checked MCU/TX-off/LOS status, receive-only startup and teardown pass on the
+first handoff and after reattachment. Optical calibration accuracy, signal
+acquisition, burst timing and sustained operation remain unverified. See
+[the bench record](XGSPON-BENCH.q1000k.md) for captures and exact boundaries.
 
+The historical implementation evidence below comes from local source
+inspection, disassembly and fixtures. Statements about no device access refer
+to those original checkpoints.
 ## IRQ evidence
 
 The decompressed ARM64 kernel has SHA256

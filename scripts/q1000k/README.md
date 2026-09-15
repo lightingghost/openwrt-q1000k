@@ -49,6 +49,13 @@ whose module cleanup succeeds. Any ambiguous staging/cleanup failure retains
 evidence for inspection instead of forcing recovery. A kernel change requires
 a user RAM boot of the new image.
 
+`bench-report.py /path/to/stack-01 /path/to/stack-02` summarizes completed
+captures without contacting the device. It requires successful postflight and
+input cleanup, all five O1/OMCI observations, fresh controller TX-off/LOS
+samples, and no failure diagnostics in the captured serial interval. Redirect
+its JSON output beside the captures to retain the aggregate result. It does
+not report optical service or traffic validation from disconnected-fiber runs.
+
 `resources --fiber-disconnected` captures the provider's configuration/reset
 diagnostic without starting the controller, PHY or MAC. It sets the RAM panic
 timeout to zero, loads only hook/SCU/MAC resource providers, then unloads its

@@ -1,15 +1,14 @@
 # Q1000K physical retirement evidence
 
-Current hardware update (2026-09-14): the user RAM-booted `d928eb20b6`.
-The disconnected-fiber r68 stack test completes PHY configuration, all 32 FE
-retirements, checked MAC/FIFO/RX DMA drain, PHY quiesce and MAC reset. This
-validates patch `9999l`'s 16-bit RX handling independently of the 32 TX channels.
-The subsequent table-clear callback fails with `-ESHUTDOWN` because the QoS
-snapshot guard rejects the retired channels. Patch `9999m` permits that read
-only with full native drain proven and preserves the write/epoch guards.
-Containment, module/input cleanup and management connectivity pass. Loaded
-pipeline retirement and optical service remain untested. Another RAM boot is
-needed for the native QoS fix; see [the bench record](XGSPON-BENCH.q1000k.md).
+Current hardware update (2026-09-14): two complete disconnected-fiber stack
+cycles pass on `30ea573aa3`, including reattachment after successful teardown.
+All 32 FE channels, checked MAC/FIFO/RX DMA drain, PHY quiesce, MAC reset,
+scheduler snapshot, namespace replacement and receive-only activation now
+complete. Patches `9999l` (RX width) and `9999m` (drained QoS read) are exercised
+on hardware. Shutdown, module/input cleanup and management connectivity pass
+for both cycles, with no kernel failure diagnostics. This is bounded idle
+physical-drain evidence; an occupied pipeline and optical traffic remain
+untested. See [the bench record](XGSPON-BENCH.q1000k.md).
 
 This records static inspection of the cached QKX001-06.00.44.00 firmware.
 The binaries were extracted locally, disassembled, and never executed.

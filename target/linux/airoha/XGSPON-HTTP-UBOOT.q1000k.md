@@ -93,3 +93,11 @@ all 32 FE channels and the idle MAC/FIFO/RX DMA drain complete. Its next
 failure is a Linux QoS admission guard rejecting a scheduler snapshot after
 retirement, before epoch replacement. Patch `9999m` addresses that lifecycle
 ordering; no additional bootloader change is indicated by this failure.
+
+With both native corrections present, `30ea573aa3` passes the complete
+receive-only disconnected-fiber stack test twice. The first run starts from
+WAN `0x12`; after successful shutdown, the second starts from WAN `0x0a`,
+local reset `0x1`, stops `0xc101c101`. Both reach O1 and shut down cleanly.
+The Linux handoff now handles both states. This adds no new bootloader fault
+and does not validate a bootloader change; the suggested copper-only selector
+audit above remains a separate follow-up.
