@@ -87,3 +87,9 @@ or enable laser transmission. Its role in these tests is RAM loading and a
 predictable peripheral handoff. Any further bootloader issues found during
 bring-up should be appended here with observed state, source location,
 proposed ownership and a separate validation plan.
+
+The subsequent `d928eb20b6` RAM run validates the Linux RX-width correction:
+all 32 FE channels and the idle MAC/FIFO/RX DMA drain complete. Its next
+failure is a Linux QoS admission guard rejecting a scheduler snapshot after
+retirement, before epoch replacement. Patch `9999m` addresses that lifecycle
+ordering; no additional bootloader change is indicated by this failure.

@@ -55,8 +55,8 @@ guard rejects the required snapshot while channels are marked retiring.
 Containment and module/input cleanup pass; LAN/SSH remain healthy.
 Patch `9999m` allows only verified fully drained scheduler reads while keeping
 writes blocked until epoch replacement. Host regression and real Linux UML
-lifecycle checks cover that ordering. Another user RAM boot is required for
-this kernel fix. Integrated startup, loaded-pipeline drain and optical service
+lifecycle checks cover that ordering. Replacement `30ea573aa3` passes all 98 host tests, 100 UML transport cycles
+and image inspection; another user RAM boot is required for this kernel fix. Integrated startup, loaded-pipeline drain and optical service
 remain acceptance gates. See the [bootloader note](XGSPON-HTTP-UBOOT.q1000k.md)
 for handoff findings. 192.168.1.1 belongs to the working router and is never a
 Q1000K SSH target.

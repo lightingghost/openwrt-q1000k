@@ -34,8 +34,10 @@ RTNL pins this state for the indirect command. Writes remain blocked until
 retirement ends at epoch replacement. Regression coverage checks all 32
 snapshots, each missing drain condition, fault propagation and blocked writes;
 the real Linux UML transport lifecycle includes this ordering and passes.
-This native kernel change requires a replacement image and another user RAM
-boot before the authorized stack test can progress.
+Replacement image `30ea573aa3` builds, passes all 98 host tests and FIT/rootfs
+inspection, and includes the exact native code tested in UML. Its checksum,
+artifacts and normal-config restoration are recorded in the bench report.
+Another user RAM boot is needed before the authorized stack test can progress.
 See [the bench report](XGSPON-BENCH.q1000k.md) and
 [http-uboot findings](XGSPON-HTTP-UBOOT.q1000k.md).
 

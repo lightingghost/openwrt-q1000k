@@ -3,8 +3,10 @@
 This is a separate `quantum_q1000k-xgspon-bench` image target on
 `q1000k-xgspon`. It produces an initramfs FIT, no sysupgrade or bootloader
 artifact. The normal Q1000K UBI target remains unchanged. RAM boot,
-read-only preflight and the controller-only test have passed; PHY/MAC/OMCI
-and optical service acceptance remain pending.
+read-only preflight, controller startup and idle physical drain have passed.
+Integrated PHY/MAC/OMCI startup and optical service acceptance remain pending.
+The current device runs `d928eb20b6`; replacement `30ea573aa3` is ready for the
+user's RAM boot to test the drained-QoS snapshot fix (latest record below).
 
 The bench DT disables the NAND controller and NAND chip, removes partition
 definitions and the persistent rootdisk reference, and uses console-only
@@ -654,3 +656,31 @@ and writes, then verifies replay after reset. It passes 100 lifecycle cycles
 without kernel diagnostics in `/tmp/q1000k-pon-transport-uml.6dAU5Z/`.
 The kernel must be rebuilt and RAM-booted by the user before retrying the
 stack. Matching vendor-module substitution cannot change this native code.
+
+## Replacement image ready: 30ea573aa3
+
+The saved builder completed `30ea573aa347f7c766406e9baee294091b0180ff` with vendor r68 and native
+patch `9999m`. All 98 host tests pass against the prepared build sources.
+FIT payload hashes and the extracted root filesystem pass inspection.
+The native UML suite passes 100 lifecycle cycles; its generated test source
+matches the prepared driver exactly. Logs and the source digest are saved in
+`uml-transport/` beside the image.
+
+Artifact directory (workspace-relative):
+`build-artifacts/q1000k-xgspon/bench-30ea573aa3/`.
+Image: `openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb`.
+Size: 7,602,176 bytes. SHA-256:
+`aeb6353084dea4d3b0781f21b62e23a5670e6364bcd6fa8fb0424ff94d081880`.
+`checkpoint.json` records absolute paths, source/builder revisions, image hash,
+unchanged protected refs and successful normal-config restoration.
+
+Inspection confirms NAND disabled, immutable TX inhibit, management/failsafe
+192.168.255.1, disabled PON autostart and packaged panic timeout zero. No new
+device writes followed the failed stack test and its successful cleanup.
+The image has not been booted or flashed. RAM-load it through second-stage
+http-uboot with fiber disconnected, then use the saved runner's read-only
+`status` preflight against `bench-30ea573aa3`. Once the revision and runtime
+guards pass, the existing controller/stack authorization covers the next
+bounded test with verified private inputs. Do not substitute vendor modules
+on d928eb20b6: this fix changes the native kernel. Do not use an HTTP recovery
+firmware upload, persistent environment write or flash operation.
