@@ -1067,3 +1067,23 @@ was performed. The next software investigation should focus on the AN7581
 RX synchronization path and its receive-only startup/poll handling with LOS
 clear, rather than treating the controller address discrepancy as the cause
 of missing light. No unproven routing or analog change was tested.
+
+### Connected LED observation confirmed — 2026-09-15
+
+The user missed the first visual observation and explicitly requested another
+run. `bench-d84282fc86-receive-connected-20260915-02/` records the same bounded
+receive-only test on the unchanged image. All thirty samples again detected
+light at both LOS sources but no synchronization or frames. Registration,
+MAC interrupts and optical TX remained disabled; the downstream acceptance
+check failed, while reverse cleanup and private-input removal passed. The
+serial interval contains no kernel failure diagnostic.
+
+The user first reported the indicator off, then corrected the observation:
+**it started blinking green**. This confirms physical green acquisition
+indication. The initial off observation may have occurred during controller
+setup; it does not justify changing the GPIO mapping. No LED/GPIO control
+was altered. The read-only `led-idle.log` subsequently confirms both link
+brightness values zero, all nine PON modules absent and `ponraw` down. Together
+with the earlier disconnected red indication, both link colors now have user
+visual confirmation. Blinking green indicates received light/discovery only;
+it does not establish downstream frame sync, O5 registration or service.
