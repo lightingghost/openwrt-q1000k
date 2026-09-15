@@ -86,7 +86,13 @@ cleanup() {
 load_module() {
 	local module="$1"
 	shift
-	modprobe "$module" "$@" || fail "Cannot load $module."
+	# OpenWrt modprobe does not forward command-line module parameters.
+	# Parameterized modules come last, after their explicit dependencies.
+	if [ "$#" -gt 0 ]; then
+		insmod "$module" "$@" || fail "Cannot load $module."
+	else
+		modprobe "$module" || fail "Cannot load $module."
+	fi
 	owned_modules="$module $owned_modules"
 }
 

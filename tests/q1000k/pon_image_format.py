@@ -3,6 +3,37 @@
 import struct
 
 
+def elf_defined_symbols(data):
+    """Read symbols from a little-endian AArch64 relocatable kernel module."""
+    assert len(data) >= 64 and data[:6] == b'\x7fELF\x02\x01'
+    assert struct.unpack_from('<HH', data, 16) == (1, 183)
+    offset = struct.unpack_from('<Q', data, 40)[0]
+    stride, count = struct.unpack_from('<HH', data, 58)
+    assert stride == 64 and count and offset + count * stride <= len(data)
+    sections = [struct.unpack_from('<IIQQQQIIQQ', data, offset + i * stride)
+                for i in range(count)]
+    symbols = set()
+    found = False
+    for section in sections:
+        if section[1] != 2:  # SHT_SYMTAB
+            continue
+        found = True
+        start, size, link, entry_size = section[4], section[5], section[6], section[9]
+        assert entry_size == 24 and size % entry_size == 0 and start + size <= len(data)
+        assert link < count and sections[link][1] == 3  # SHT_STRTAB
+        strings = sections[link]
+        assert strings[4] + strings[5] <= len(data)
+        names = data[strings[4]:strings[4] + strings[5]]
+        for entry in range(start, start + size, entry_size):
+            name = struct.unpack_from('<I', data, entry)[0]
+            index = struct.unpack_from('<H', data, entry + 6)[0]
+            assert name < len(names)
+            if index:  # SHN_UNDEF is zero.
+                symbols.add(names[name:names.index(0, name)].decode('ascii'))
+    assert found
+    return symbols
+
+
 def u32(data, offset=0):
     return struct.unpack_from('>I', data, offset)[0]
 

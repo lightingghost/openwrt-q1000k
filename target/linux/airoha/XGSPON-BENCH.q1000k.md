@@ -26,7 +26,9 @@ not be used for Q1000K SSH.** No default WAN or OLT identity is inferred.
 The user has RAM-booted the bench, provided SSH at 192.168.0.1, confirmed
 disconnected fiber and explicitly authorized the controller-only test. This
 permits RAM staging, controller module/GPIO/I2C operations and cleanup.
-PHY/MAC/OMCI activation still requires separate authorization. Keep the
+The user subsequently approved the prepared PHY/MAC/OMCI startup and
+shutdown/drain test as well. That approval includes fixing and retrying this
+RAM bench test, but does not cover optical activation or flashing. Keep the
 fiber physically disconnected. Firmware flashing remains forbidden. Do not use
 HTTP recovery upload, sysupgrade, MTD writes, UBI formatting or `saveenv`.
 The RAM transfer/boot commands depend on the bootloader actually running;
@@ -251,3 +253,46 @@ bench identity, observes five samples, then unloads in reverse and closes
 and requires separate approval. No new image is needed for that test. Loaded
 drain, optical registration, traffic/QoS and long-duration health remain
 separate acceptance gates.
+
+## First authorized stack test — 2026-09-14
+
+On the same `0e4acc9d70` RAM boot, preflight and all 13 helper/library/module/CLI
+hashes matched the inspected image. Staged calibration and OEM firmware
+hashes matched. Controller initialization passed again with TX disabled and
+LOS asserted. `ponraw` opened its native internal 10G link and the dependency
+modules loaded, but `xpon_10g` failed before the observation loop.
+
+The prepared OpenWrt ubox `main_modprobe()` accepts module names but never
+forwards trailing command-line parameters. Consequently the launcher's
+identity/lower arguments did not reach `xpon_10g`; its identity initializer
+rejects missing parameters before MAC/PHY startup. Both the bench and optional
+supervisor now use `insmod` for parameterized modules after loading their
+explicit dependencies. The supervisor continues to suppress loader output
+that could contain subscriber credentials. The fixture loaders now model
+ubox's parameter behavior and check the complete argument sequence.
+
+Cleanup unloaded the MAC/PHY/OMCI dependencies until SCU, then stopped as
+designed: `airoha_ecnt_scu` reported zero references but `[permanent]` because
+it had an init function and no exit function. Patch 051 adds an AN7581-only
+exit that clears cached aliases to syscon-owned regmaps. This adapter owns
+no IRQ, mapping, clock, reset or asynchronous work; its consumers pin the
+module through exported symbols. Exit does not write hardware or destroy
+the shared regmaps. The other SoCs' legacy lifecycle is unchanged.
+
+After verifying all MAC/PHY/OMCI consumers were absent and the remaining
+controller/hook had zero references, the authorized cleanup powered off and
+unloaded the controller and hook, then closed `ponraw`. Controller off status
+reported no error; `ponraw` is down (0x1002), LAN remains at 192.168.0.1 with
+1G carrier, and preflight passes. Only the old SCU module remains; it was not
+forced out. A user RAM reboot is required to replace it. No firmware was
+flashed, and no optical registration or traffic was attempted.
+
+The new SCU lifecycle regression covers successful initialization, all lookup
+and read failures, unload, and reload while preserving syscon-owned data.
+Offline image inspection now rejects any PON module with an init function
+but no exit function. The old SCU binary is rejected; the other eight PON
+modules pass, including the hook library with neither init nor exit.
+Vendor release 62, bench release 2 and supervisor release 3 contain the fixes.
+The raw attempt and containment logs are retained under this image's
+`stack-test/` artifact directory. This attempt did not exercise full stack
+startup or its physical MAC/PHY shutdown/drain path.

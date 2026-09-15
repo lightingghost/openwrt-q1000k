@@ -1,0 +1,30 @@
+Subject: [PATCH] AN7581: make the borrowed SCU syscon adapter unloadable
+
+The AN7581 SCU adapter only caches syscon regmaps and reads the SRAM size.
+It owns no IRQ, mapping, clock, reset or asynchronous work. Its exported
+symbol consumers pin the module while loaded, but the missing exit handler
+made it permanent even after all consumers had unloaded.
+
+Provide an AN7581-only exit handler that drops the cached aliases. The
+syscon providers retain ownership of their regmaps; do not release or write
+them. Keep the other SoCs' legacy resource lifecycle unchanged.
+
+--- a/bsp/core/ecnt_scu.c
++++ b/bsp/core/ecnt_scu.c
+@@ -1298,6 +1298,16 @@ static int ECNT_SCU_DRV_PROBE(void)
+ 	/* Keep clock/reset ownership and the PBus timeout IRQ with their drivers. */
+ 	return 0;
+ }
++
++static void __exit an7581_scu_exit(void)
++{
++	/* Exported-symbol users pin this module. These maps belong to syscon. */
++	an7581_np_scu = NULL;
++	an7581_chip_scu = NULL;
++	l2c_sram_size = 0;
++}
++module_exit(an7581_scu_exit);
++
+ #else
+ static void pbus_timeout_init(void)
+ {

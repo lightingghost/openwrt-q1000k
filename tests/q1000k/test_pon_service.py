@@ -63,7 +63,11 @@ with (root / 'calls').open('a') as log:
     log.write(json.dumps([action] + args) + '\\n')
 if os.environ.get('FAIL') == action + ':' + args[0]:
     sys.exit(1)
-if action == 'modprobe':
+if action in ('modprobe', 'insmod'):
+    if args[0] == 'xpon_10g':
+        # Model ubox: only insmod forwards command-line parameters.
+        params = dict(arg.split('=', 1) for arg in args[1:]) if action == 'insmod' else {}
+        if not {'wan_mac', 'pon_serial', 'pon_reg_id', 'pon_lower'} <= params.keys(): sys.exit(1)
     (root / 'sys/module' / args[0]).mkdir(parents=True)
     if args[0] == 'xpon_10g':
         (root / 'sys/class/net/pon').mkdir(parents=True)
@@ -76,7 +80,7 @@ elif action == 'initialize':
 else:
     raise AssertionError(action)
 '''
-        for name in ('modprobe', 'rmmod', 'initialize', 'omci'):
+        for name in ('modprobe', 'insmod', 'rmmod', 'initialize', 'omci'):
             self.write(name, '#!' + sys.executable + '\n' + fake).chmod(0o755)
         self.write('sleep', '#!/bin/sh\nexec /bin/sleep 0.05\n').chmod(0o755)
         source = (REPO / 'package/network/utils/q1000k-xgspon-service/files/run').read_text()
@@ -86,6 +90,7 @@ else:
         source = source.replace('/usr/sbin/q1000k-xgspon', str(self.root / 'initialize'))
         source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
         source = source.replace('modprobe "$module"', '"' + str(self.root / 'modprobe') + '" "$module"')
+        source = source.replace('insmod "$module"', '"' + str(self.root / 'insmod') + '" "$module"')
         source = source.replace('rmmod "$module"', '"' + str(self.root / 'rmmod') + '" "$module"')
         source = source.replace('while sleep 5', 'while "' + str(self.root / 'sleep') + '" 5')
         self.script = self.write('supervisor', source)
@@ -171,9 +176,10 @@ else:
         out, err = p.communicate(timeout=5)
         self.assertEqual(p.returncode, 0, err)
         calls = self.calls()
-        loads = [c for c in calls if c[0] == 'modprobe']
+        loads = [c for c in calls if c[0] in ('modprobe', 'insmod')]
         self.assertEqual([c[1] for c in loads], MODULES)
         self.assertEqual(calls[1], ['initialize', 'initialize'])
+        self.assertEqual(loads[-1][0], 'insmod')
         self.assertEqual(loads[-1][2:], ['wan_mac=00:11:22:33:44:55', 'pon_serial=TEST01234567',
                                         'pon_reg_id=' + self.env['TEST_REG'], 'pon_lower=eth2'])
         self.assertEqual([c[1] for c in calls if c[0] == 'rmmod'], list(reversed(MODULES)))
@@ -189,7 +195,7 @@ else:
         p.terminate()
         out, err = p.communicate(timeout=5)
         self.assertEqual(p.returncode, 0, err)
-        args = [c for c in self.calls() if c[:2] == ['modprobe', 'xpon_10g']][0]
+        args = [c for c in self.calls() if c[:2] == ['insmod', 'xpon_10g']][0]
         self.assertEqual(args[-2:], ['pon_equipment_id_hex=' + equipment.encode().hex(),
                                     'pon_omci_version_hex=' + version.encode().hex()])
         self.assertNotIn(equipment, out + err)
@@ -198,7 +204,7 @@ else:
     def test_every_load_and_initialize_failure_releases_only_owned_modules(self):
         for i, name in enumerate(MODULES):
             with self.subTest(name=name):
-                self.env['FAIL'] = 'modprobe:' + name
+                self.env['FAIL'] = ('insmod:' if name == 'xpon_10g' else 'modprobe:') + name
                 self.failed()
                 self.assertEqual([c[1] for c in self.calls() if c[0] == 'rmmod'],
                                  list(reversed(MODULES[:i])))

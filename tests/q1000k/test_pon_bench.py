@@ -64,7 +64,11 @@ if action=='cat':
 if action=='sleep': sys.exit(0)
 with (root/'calls').open('a') as output: output.write(json.dumps([action]+args)+'\\n')
 if os.environ.get('BENCH_FAIL')==action+':'+args[0]: sys.exit(1)
-if action=='modprobe':
+if action in ('modprobe','insmod'):
+    if args[0]=='xpon_10g':
+        # Model ubox: only insmod forwards command-line parameters.
+        params=dict(arg.split('=',1) for arg in args[1:]) if action=='insmod' else {}
+        if not {'wan_mac','pon_serial','pon_reg_id','pon_lower'} <= params.keys(): sys.exit(1)
     (root/'sys/module'/args[0]).mkdir(parents=True)
     if args[0]=='xpon_10g':
         (root/'proc/xgpon').mkdir(parents=True)
@@ -78,7 +82,7 @@ elif action=='omci':
     print('{"schema_version":1,"service_error":0}')
 else: raise AssertionError(action)
 '''
-        for name in ('modprobe', 'rmmod', 'ip', 'cat', 'sleep', 'omci'):
+        for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep', 'omci'):
             self.write(name, '#!' + sys.executable + '\n' + fake).chmod(0o755)
         source = (PACKAGE / 'files/bench').read_text()
         # All target paths and every hardware-changing executable are replaced
@@ -87,7 +91,7 @@ else: raise AssertionError(action)
                         lambda m: str(self.root) + '/' + m[1] + '/', source)
         source = source.replace('/lib/q1000k-xgspon/common.sh', str(backend.common))
         source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
-        for name in ('modprobe', 'rmmod', 'ip', 'cat', 'sleep'):
+        for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep'):
             source = re.sub(r'(?<![A-Za-z0-9_/-])' + name + r'(?= )',
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
@@ -133,7 +137,11 @@ else: raise AssertionError(action)
     def test_full_stack_cycle_and_reverse_cleanup(self):
         self.run_bench()
         calls = self.calls()
-        self.assertEqual([c[1] for c in calls if c[0] == 'modprobe'], MODULES)
+        loads = [c for c in calls if c[0] in ('modprobe', 'insmod')]
+        self.assertEqual([c[1] for c in loads], MODULES)
+        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'wan_mac=02:00:00:00:00:01',
+                                   'pon_serial=TEST00000001', 'pon_reg_id=' + '0' * 72,
+                                   'pon_lower=ponraw'])
         self.assertEqual([c[1] for c in calls if c[0] == 'rmmod'], MODULES[::-1])
         self.assertEqual(calls[-1], ['ip', 'link', 'set', 'dev', 'ponraw', 'down'])
         self.assertEqual(len([c for c in calls if c[0] == 'omci']), 5)

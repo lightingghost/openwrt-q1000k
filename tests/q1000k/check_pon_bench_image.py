@@ -11,7 +11,7 @@ import re
 import stat
 import struct
 import zlib
-from pon_image_format import fdt, u32
+from pon_image_format import elf_defined_symbols, fdt, u32
 
 
 def cpio(data, start):
@@ -140,6 +140,10 @@ def inspect(image, revision):
         matches = [p for p in records if p.startswith('lib/modules/') and p.endswith('/' + name + '.ko')]
         assert len(matches) == 1, name
         assert read(matches[0]).startswith(b'\x7fELF')
+        symbols = elf_defined_symbols(read(matches[0]))
+        # Linux permits a library module with no init callback to unload.
+        # An init callback without an exit callback makes a module permanent.
+        assert 'init_module' not in symbols or 'cleanup_module' in symbols, (name, 'module cannot unload')
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:
         if name.startswith(('etc/modules.d/', 'etc/modules-boot.d/')):
@@ -150,6 +154,7 @@ def inspect(image, revision):
     return dict(revision=revision, file=image.name, bytes=len(blob),
                 sha256=hashlib.sha256(blob).hexdigest(), verified_fit_images=checked,
                 kernel_uncompressed_bytes=len(expanded), initramfs_entries=len(records),
+                unloadable_pon_modules=list(modules),
                 nand_disabled=True, tx_inhibited=True, management_ip='192.168.0.1',
                 rootfs_checks='passed', device_access=False)
 

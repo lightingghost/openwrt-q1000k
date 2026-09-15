@@ -61,7 +61,12 @@ load_module() {
 	report || fail 'Cannot record startup state.'
 	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
 	# Do not expose a registration ID through a module loader's error output.
-	modprobe "$module" "$@" >/dev/null 2>&1 || fail "Loading $module failed."
+	# OpenWrt modprobe ignores parameters; dependencies are already loaded.
+	if [ "$#" -gt 0 ]; then
+		insmod "$module" "$@" >/dev/null 2>&1 || fail "Loading $module failed."
+	else
+		modprobe "$module" >/dev/null 2>&1 || fail "Loading $module failed."
+	fi
 	owned_modules="$module $owned_modules"
 }
 

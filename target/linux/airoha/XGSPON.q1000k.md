@@ -37,7 +37,7 @@ below remain the full acceptance plan; they are not all complete.
 | 6. OpenWrt integration | Optional disabled supervisor, read-only RPC/LuCI, `q1000k-omci`, inactive WAN migration and separate pinned builder profile are implemented and locally tested in complete images. | Browser QA, image boot testing and actual netifd/firewall traffic require separate validation. |
 | 7. Bench and recovery | Fault injection and real Linux UML tests cover software lifecycle and packet behavior. | Physical registration, traffic, recovery, cold boot and upgrade tests have not run. |
 
-Current local evidence: 88 PON/WAN/bench host tests, the complete OMCI core UML
+Current local evidence: 89 PON/WAN/bench host tests, the complete OMCI core UML
 suite and matching AN7581 package builds. The builder's eight tests and real
 Kconfig resolution retain every experimental package. A full cached build at
 `cb0853acbc5b5ef178f7419b9926a6722f58df9f` produces both Q1000K UBI images;
@@ -58,8 +58,10 @@ controller-only test stopped at GPIO pin ownership before detection; the
 AN7581 pinmux fix builds in replacement image `0e4acc9d70` and passes offline
 inspection. The user RAM-booted it and the controller retry passed: both
 paths detected, firmware/calibration verified, TX disabled, LOS asserted and
-cleanup complete. Stack testing remains separately gated. See the bench report
-for the failure, successful retry and cleanup evidence.
+cleanup complete. The subsequently authorized stack test exposed ignored
+module parameters and a missing SCU unload handler. Both are fixed locally;
+the retained old SCU requires another RAM boot before retrying. See the bench
+report for the failures, successful controller retry and cleanup evidence.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original
@@ -67,9 +69,9 @@ acceptance requirements. Their historical lists of unfinished software work
 are superseded by this table and the current checkpoint.
 
 **Never flash firmware.** The current permission is read-only access plus
-the explicitly authorized controller-only RAM test with fiber disconnected.
-PHY/MAC/OMCI activation, optical traffic, recovery and upgrade tests below
-remain pending acceptance gates. The [integration audit](XGSPON-INTEGRATION.q1000k.md)
+the explicitly authorized controller and PHY/MAC/OMCI startup/shutdown RAM
+tests with fiber disconnected and TX inhibited. Optical traffic, recovery
+and upgrade tests below remain pending acceptance gates. The [integration audit](XGSPON-INTEGRATION.q1000k.md)
 records the current resource contract, unresolved interfaces and OMCI decision.
 
 The reference is [coolsnowwolf/lede commit f7fd86e](https://github.com/coolsnowwolf/lede/commit/f7fd86eaa58c29fed97da04ab219c74a835a9358).
