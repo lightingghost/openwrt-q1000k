@@ -112,5 +112,34 @@ ONT identity, OMCI profiles, DHCP or VLANs to fix this pre-sync PHY state.
 See [the receive suite](XGSPON-RX-SUITE.q1000k.md) for all 13 cases, ten bounded
 new probes, shared raw diagnostics and physical controls. The suite's coverage
 catalog maps every hypothesis above to on-image observations/experiments and
-identifies the external evidence still needed. None of the new interventions
-has been hardware-tested yet. No additional http-uboot change is indicated.
+identifies the external evidence still needed. All cases have now been run on
+image `4ef30eb4d5`; results are recorded below. No additional http-uboot change
+is indicated.
+
+## Full suite and live physical-control results — 2026-09-15
+
+All 13 cases completed on one RAM boot (1,050 samples), followed by a
+180-sample connected-to-dark checker control and a separate 30-sample
+reconnected baseline. All attempted probes restored their fields and every
+run unloaded normally. TX remained inhibited. Complete evidence paths and the
+per-case table are in `XGSPON-BENCH.q1000k.md`.
+
+| Hypothesis | New evidence | What remains open |
+|---|---|---|
+| 1. Optical power | The connected suite stayed between -18.70 and -18.15 dBm. Dark readings fell to 100 nW; the last reconnected reading was -18.51 dBm. Gross disappearance was absent during the suite. | Absolute calibration, wavelength and modulation quality. The user's earlier gateway -17.0 dBm reading was not simultaneous. |
+| 2. False/stale light | A live disconnect changed both LOS sources, SFP status, power and the PHY IRQ count (0 -> 1). Reconnected startup recovered the light readings. | A stuck light indication or completely dead PHY interrupt path is contradicted by this control. Live reconnection IRQ/latency was not captured. |
+| 3. Gain/equalization | Automatic gain and legal forced-low gain both applied and restored without synchronization, codewords or framing errors. Earlier OEM gain=1 and gain+PLL also failed. | These settings are not sufficient fixes. Unknown equalizer/analog/calibration dependencies remain. |
+| 4. Clock/rate/reset | Public recovery, extended TDC delay, PLL-before-final-release and restricted OEM ordering all failed. The frequency-monitor words changed during live darkness and returned after reconnected startup. | Actual recovered clock/data and the OEM's five unknown reset fields. A frequency upper count inside the configured window is not a lock test; a prior dark start also produced that count. |
+| 5. Path/packing/polarity | RX bit-order toggle did not improve any PCS counter. RX-only checker logic entered comparison/completion, with upstream generator and loopback verified off. | Electrical route/differential polarity and live high-speed data. The checker completed result stayed latched through darkness, so it does not establish input data continuity. |
+| 6. PCS framing | Descrambler toggle and both alternate public FEC encodings had no effect on sync or any of seven codeword/framing/boundary counters. | Those isolated changes are insufficient; combinations or an earlier receive-path failure remain possible. |
+| 7. Counter blind spot | All seven PCS counters remained zero in every case. The PMA checker produced nonzero status/errors, but its result stayed unchanged with no light. | The checker is operational but is not a continuous data-activity meter. Neither its result nor quiet PCS counters locates the electrical failure conclusively. |
+| 8. External technology | No new wavelength or modulation measurement. | The previously identified XGS-PON module keeps a wrong line type lower priority; LOS/power cannot eliminate it. |
+| 9. Firmware/calibration/hardware | Verified controller inputs and health checks passed throughout; optical sensors respond to removal and reconnection. | Analog output quality, board routing, calibration accuracy and end-to-end receive operation. |
+
+No receive synchronization, frame, FEC or PCS error activity was observed in
+any of the 1,260 samples. The receive-only operating restriction still excludes
+registration and subscriber service; it does not explain away absent downstream
+PHY synchronization. Further work should obtain controller-output/SoC-input
+and clock evidence, or identify a documented OEM configuration difference,
+before building another register experiment. None of the results justifies
+unknown reset writes, TX activation or a bootloader modification.

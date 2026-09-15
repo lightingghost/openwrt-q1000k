@@ -5,9 +5,10 @@ This is a separate `quantum_q1000k-xgspon-bench` image target on
 artifact. The normal Q1000K UBI target remains unchanged. RAM boot,
 read-only preflight, controller startup and the complete disconnected-fiber
 PHY/MAC/OMCI startup/shutdown test have passed on earlier benches. The latest
-prepared image is `4ef30eb4d5`, with the consolidated receiver suite described
-in `XGSPON-RX-SUITE.q1000k.md`; its new probes await a user RAM boot and hardware
-execution. Optical service, loaded-pipeline drain and long-duration acceptance
+tested image is `4ef30eb4d5`: all 13 receiver-suite cases and the subsequent
+live disconnect / reconnected-baseline controls completed on one RAM boot
+(1,260 samples). Optical RX synchronization remains absent. Optical service,
+loaded-pipeline drain and long-duration acceptance
 remain pending. See the chronological hardware and build records below.
 
 The bench DT disables the NAND controller and NAND chip, removes partition
@@ -1843,14 +1844,15 @@ resolve; repeating the same recovery modes or longer unchanged observations
 is not the next step.
 
 
-## Consolidated receiver suite: image 4ef30eb4d5 (prepared, not device-tested)
+## Consolidated receiver suite: image 4ef30eb4d5 (build record)
 
 Implementation checkpoint `4ef30eb4d5baba01e654a9965aec6f99cf8b120e` builds all
 ten new RX probes and 32 additional diagnostic words into one image. The host
 suite runs 13 cases: baseline, public recovery, ten probes and baseline repeat.
 Default observation count is 1,050. Every hypothesis has explicit coverage in
 `XGSPON-RX-SUITE.q1000k.md`, including physical tests requiring user participation
-or external measurement. These are pending tests, not new exclusions.
+or external measurement. At preparation these were pending tests; the completed
+hardware results follow.
 
 Artifact directory:
 `/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-4ef30eb4d5/`
@@ -1897,3 +1899,131 @@ Run from the source repository; `--dry-run` prints the plan without device
 access. The runner verifies the exact boot/runtime before loading anything,
 uses only `192.168.255.1`, and requires normal cleanup between cases. Do not
 flash, use an HTTP recovery upload, write boot environment or enable optical TX.
+
+## Full receiver suite and physical controls — 2026-09-15
+
+The user RAM-booted image `4ef30eb4d5` and confirmed firmly connected fiber.
+Read-only preflight verified the exact image/runtime files, RAM root, disabled
+NAND, management at 192.168.255.1, idle stack and immutable TX inhibit. All
+13 planned cases completed on this one boot in 24.45 minutes (1,050 samples).
+`suite.json` records `collection-complete`, with no unrun cases. This denotes
+complete diagnostic collection; every connected case still failed downstream
+sync/frame acceptance.
+
+| Case | Samples | Attempts | Samples after attempt | Checked probe writes | RX power, last dBm |
+|---|---:|---:|---:|---:|---:|
+| baseline | 30 | 0 | 0 | 0 | -18.45 |
+| public-recovery | 90 | 1 | 76 | 0* | -18.45 |
+| bit-order | 90 | 1 | 76 | 1 | -18.51 |
+| descrambler | 90 | 1 | 76 | 1 | -18.48 |
+| fec-oc | 90 | 1 | 76 | 3 | -18.51 |
+| fec-off | 90 | 1 | 76 | 3 | -18.18 |
+| gain-auto | 90 | 1 | 76 | 1 | -18.18 |
+| gain-low | 90 | 1 | 76 | 2 | -18.21 |
+| tdc-delay | 90 | 1 | 76 | 52 | -18.18 |
+| pll-order | 90 | 1 | 76 | 65 | -18.21 |
+| oem-order | 90 | 1 | 76 | 61 | -18.18 |
+| checker | 90 | 1 | 76 | 2 | -18.21 |
+| baseline-repeat | 30 | 0 | 0 | 0 | -18.21 |
+
+The diagnostic write counter covers new probes, not the legacy public
+recovery's writes. Each intervention had a further 85.80–86.07 seconds of
+observations after its first sampled attempt. Every new probe had exactly one
+restored-fields serial marker and passed normal shutdown/input cleanup.
+
+Both LOS sources stayed clear through the whole suite. All power samples were
+available: 13,500–15,300 nW (-18.70 to -18.15 dBm), final 15,100 nW (-18.21 dBm).
+HUNT remained 0, synchronization false, and all frame, LOF, FEC, seven PCS
+boundary/error counters and PHY IRQ counts remained zero. Polling advanced.
+ONT state remained unassigned O1, with no registration, OMCI traffic, protocol
+or service errors. No kernel fault occurred.
+
+Readbacks confirmed the intended isolated changes: RX control 0x30202 ->
+0x10202 for bit order; PCS debug 0x310 -> 0x110, 0x332 or 0x300 for
+descrambler/FEC cases; gain 0x103 -> 0x003 or 0x100 for automatic/low gain.
+Timing probes checked their writes and restored saved fields. These candidates
+were insufficient; they do not exclude all analog settings or combinations.
+
+The RX checker changed control 0x5 -> 0x10005 and produced compare/fail/done
+status 0x10101 and a nonzero error count (65,524 in the suite checker case).
+TX generator, loopback and route bits remained off. This establishes checker
+operation, not correctly decoded optical data: normal XGS traffic is not the
+configured PRBS pattern. The baseline repeat reset checker state to control 5,
+event 0x100 and errors 0. No BER can be inferred from these readings.
+
+### Live disconnection and subsequent reconnection baseline
+
+With the user ready to change the fiber state, one 180-sample checker capture
+was started on the same image. The checker was armed once while light was
+present. After it was active, the user was signaled to disconnect and confirmed
+disconnection. No further probe writes occurred during the physical change.
+
+| Phase | Samples | Both LOS sources | RX power | PHY IRQ calls | Checker |
+|---|---:|---|---|---:|---|
+| Before arm | 1–14 | Clear | 14,000–14,200 nW | 0 | Control 5, errors 0 |
+| Armed, before sampled LOS | 15–141 | Clear | Up to 15,200 nW; last 3,200 nW during removal | 0 | One attempt/two writes; completed with errors 65,529 |
+| Dark | 142–180 | Asserted | 100 nW throughout | 1 | Same control 0x10005, completed result 0x10101/errors 65,529 |
+| Reconnected, separate baseline | 30 | Clear | 14,100–14,200 nW; last -18.51 dBm | 0 after fresh startup | Control 5, errors 0; no probe |
+
+The dark phase spans 43.515 seconds. The power drop in the preceding sample
+and LOS assertion in the next are sampled observations, not a measurement of
+hardware detection latency. SFP status changed 0 -> 1; the live PHY IRQ counter
+changed 0 -> 1. Kernel LED brightness showed red 1/green 0 in darkness; physical
+LED appearance was not independently confirmed during this control.
+
+RX frequency-monitor result changed from 0xa49a0313/0xa49b0313 in light to
+0xa9e30320 and 0xaaf40320–0xaaf80320 in darkness. JCPLL-500M result changed
+from 0x004003f0/0x004103f0 to 0x004203f0/0x004303f0. The separate reconnect
+baseline returned to the original light ranges. These prove that sampled
+monitor values respond to the changed condition, not absolute rate or recovered
+data quality. The previous image's dark-start count was also near 0xa49a;
+an upper count inside the configured window alone is not a lock criterion.
+
+Checker completion/errors stayed latched throughout the dark interval.
+Therefore its nonzero connected result cannot be used as proof of continuous
+input data. PCS counters and sync remained zero/false throughout all phases.
+The bounded capture ended before reconnection was sampled. After the user
+confirmed firm reconnection, the separate 30-sample baseline verified recovered
+LOS/power/monitor values after normal reinitialization. Live reconnection IRQ
+and recovery latency were not measured; do not describe this as a complete
+three-phase capture under an unchanged receiver configuration.
+
+All 15 receive runs on this boot (1,260 samples) passed their TX/registration,
+diagnostic, normal teardown and private-input removal checks. Final state:
+fiber connected, stack unloaded, controller off, ponraw down, management
+reachable. No flash, bootloader change, optical transmission or additional
+image build occurred. Optical sync/service remain unverified.
+
+### Evidence and next investigation
+
+All paths below are beneath the parent workspace's
+`build-artifacts/q1000k-xgspon/`:
+
+- `bench-4ef30eb4d5-preflight-01/`: initial read-only verification.
+- `bench-4ef30eb4d5-connected-suite-01/`: all 13 raw captures, individual reports,
+  `suite.json` and independently revalidated `summary.json`.
+- `bench-4ef30eb4d5-postsuite-01/`: read-only idle verification after the suite.
+- `bench-4ef30eb4d5-checker-live-control-01/`: 180 samples, raw logs and
+  `control-report.json` retaining consecutive light/arm/dark phases.
+- `bench-4ef30eb4d5-checker-reconnected-baseline-01/`: 30 reconnected samples,
+  complete reports and verified final cleanup.
+
+The reporting/progress helpers are saved in `scripts/q1000k/`; they can
+regenerate summaries without device access. Their host-only changes require no
+image rebuild. The physical-control report is tested for separate reconnect
+phases and rejection of missing samples, enabled TX, failed cleanup or missing
+probe restoration.
+
+Host reporting checkpoint `7c9bcbed20` passed all 65 bench helper, runner,
+matrix, suite, validation and report tests (125.778 seconds). All 13 real suite
+captures and both physical-control captures were independently revalidated.
+The normal source configs, user README, protected main/dev/support refs and
+both builder revisions remained unchanged.
+
+The remaining investigation is the EN7573 receive output, electrical route,
+actual receiver clock/data quality and unresolved OEM initialization fields.
+Board/OEM evidence is needed to choose further bounded writes; the tested
+settings must not be repeated as if untested. Wavelength, absolute power
+calibration and differential polarity remain external measurements. Nothing
+here implicates http-uboot or justifies changing its behavior, removing TX
+inhibit, or changing OMCI identity/VLANs to address the pre-sync failure.

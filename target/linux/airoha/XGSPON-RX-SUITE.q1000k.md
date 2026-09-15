@@ -116,3 +116,36 @@ Keep external measurements with timestamps, equipment/method and raw readings
 beside `suite.json`. Any unavailable physical control stays explicitly pending.
 All independently read diagnostics share each case's observation window;
 register experiments remain sequential because they operate on the same PHY.
+
+## Completed execution on image 4ef30eb4d5
+
+All 13 cases completed on 2026-09-15, on one RAM boot. The 1,050 samples never
+showed sync, frames or PCS counter activity. Each selected probe attempted once
+and restored its saved fields; all teardown and TX guards passed. See
+`XGSPON-BENCH.q1000k.md` for the per-case results and capture paths, and
+`XGSPON-RX-HYPOTHESES.q1000k.md` for the remaining limits.
+
+The new checker result justified a static armed-checker physical control with
+the user's participation. This used one completed setup followed by no further
+probe writes during disconnection:
+
+1. Start a connected 180-sample receive capture with
+   `--reacquire-once --probe checker`. Read `bench-suite-progress.py CAPTURE` promptly until attempt 1,
+   writes 2 and checker control 0x10005 are observed.
+2. Signal disconnection and wait for the user's confirmation. Observe at least
+   15–20 dark samples with both LOS sources asserted and unchanged write count.
+3. Signal reconnection while sufficient samples remain and wait for the user's
+   confirmation. Never infer a physical change from elapsed time. If the bounded
+   window ends first, record that limitation and verify reconnection in a fresh
+   baseline only after normal cleanup.
+4. Use `bench-control-report.py CAPTURE --write`, not the all-connected suite's
+   case validator. It preserves consecutive LOS/attempt phases and all normal
+   safety/cleanup requirements.
+
+The actual control captured 141 samples before sampled LOS assertion and 39
+dark samples (43.515 seconds). LOS, RX power, SFP status, PHY IRQ count and
+frequency-monitor words responded. Checker completion/errors stayed latched,
+so they do not establish continuous reception. The timer expired before
+reconnection was sampled; a separate 30-sample baseline verified restored light
+readings and normal checker state after reinitialization. Live reconnection
+IRQ/latency remains unmeasured. No further image build was required.
