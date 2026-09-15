@@ -1006,3 +1006,34 @@ last user-confirmed fiber state is connected. Red LOS indication and off
 after teardown were visually confirmed for the disconnected test; connected
 LED observation and confirmation of the exact incoming-fiber path remain
 unanswered. No additional test is scheduled or running. Nothing was flashed.
+
+### Connected retest preparation — 2026-09-15
+
+The user reported that the fiber was not firmly seated during the previous
+connected test and requested preparation for a retry. That observation means
+the earlier no-light result cannot establish a receiver-initialization fault.
+Repeat the receive-only check on the unchanged `d84282fc86` image before
+changing loader behavior or deploying the pending r7 diagnostic additions.
+The FIT hash still matches
+`56c9131d879b242f1d20d5ba20f414225638dc92836982e25c1ecfc057d406b3`.
+
+The temporary private input archive had disappeared. The saved
+`scripts/q1000k/bench-inputs.py` recreated it at
+`/tmp/q1000k-controller-test-1093614699-inputs.tar`, with mode 0600 and every
+input checked against the runner's known size/hash manifest. No private data
+was read from or copied to the device. `/tmp/serial_output.log` was initially
+absent and then became available with a new serial-capture session. An initial
+read-only SSH connection to `192.168.255.1` was refused; that is not evidence
+that the booted image is ready. The retest requires a successful exact-image
+preflight and confirmation that the incoming fiber is firmly seated.
+
+The serial log subsequently showed a fresh boot. Read-only preflight capture
+`bench-d84282fc86-retest-ready-20260915-02/` passed: the running source is
+exactly `d84282fc8618aeebaeeef233c33a690c09dc1c6d`, all fourteen runtime files
+match, storage/TX/service guards pass and the PON stack is idle. The earlier
+`...-01/` capture retains the connection failure during startup. Preparation
+is complete; no controller/module operation or connected test ran during
+preparation. Confirm the incoming fiber is firmly seated before invoking
+`receive --fiber-connected` with a fresh capture directory. The private input
+archive and saved runner are ready; no new image or module substitution is
+needed to repeat the previous observation.

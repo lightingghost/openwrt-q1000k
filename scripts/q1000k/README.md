@@ -22,7 +22,7 @@ The normal builder and upstream/PR branches are not modified. Local fakeroot
 builds may require the environment's IPC permission.
 
 `bench-run.py status` is read-only. Tests first check the exact boot revision,
-all nine PON modules plus four userspace files, RAM root, absent NAND/UBI,
+all nine PON modules plus five userspace files, RAM root, absent NAND/UBI,
 immutable TX inhibit, disabled services, idle PON modules and endpoint. The
 private input tar must contain this unit's previously verified calibration,
 firmware pair and checksum file; no private input contents are logged. The test
@@ -39,6 +39,19 @@ attempt and serial logs too. Failed attempts are never automatically retried.
 Verified staged inputs are removed only after the modules are confirmed idle.
 Keep capture directories private; serial/kernel output may contain identifiers.
 
+If the temporary private tar has been lost, reconstruct it locally from the
+saved, verified inputs without contacting the device:
+
+```sh
+python3 scripts/q1000k/bench-inputs.py --source /absolute/path/to/private-inputs --output /tmp/PRIVATE-INPUTS.tar
+```
+
+The source directory contains `xgspon-calibration.bin` and the firmware pair
+under `lib/firmware/airoha/q1000k/`. The helper checks the same exact sizes and
+SHA256 hashes as the runner, rejects symlinked input files, creates a new 0600
+archive with a checksum manifest, and validates it using the runner. It never
+overwrites an existing output or prints private contents.
+
 For a diagnosed vendor-only retry on the same bench kernel, add
 `--modules-from /absolute/path/to/new/bench-artifact` to `bench-run.py stack`.
 The new artifact must contain its verified `runtime/` files. Only
@@ -49,10 +62,12 @@ whose module cleanup succeeds. Any ambiguous staging/cleanup failure retains
 evidence for inspection instead of forcing recovery. A kernel change requires
 a user RAM boot of the new image.
 
-`bench-report.py /path/to/stack-01 /path/to/stack-02` summarizes completed
+`bench-report.py /path/to/stack-01 /path/to/rx-connected-01` summarizes completed
 captures without contacting the device. It requires successful postflight and
-input cleanup, all five O1/OMCI observations, fresh controller TX-off/LOS
-samples, and no failure diagnostics in the captured serial interval. Redirect
+input cleanup, all five stack or thirty receive O1/OMCI observations, matching
+controller TX-off/LOS samples, and no failure diagnostics in the captured
+serial interval. Receive reports also verify TX/registration/IRQ guards,
+sample freshness, polling and final downstream stability for connected fiber. Redirect
 its JSON output beside the captures to retain the aggregate result. It does
 not report optical service or traffic validation from disconnected-fiber runs.
 
