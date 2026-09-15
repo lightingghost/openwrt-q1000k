@@ -432,3 +432,27 @@ test does not request a normal boot after three seconds. This does not alter
 other reset sources, including a hardware watchdog. Read-only preflight on
 the next user RAM boot must check `/proc/sys/kernel/panic` is zero. No running
 device configuration was changed for this adjustment.
+
+## Replacement RAM image ready — 2026-09-14
+
+Source `f885e80846740f0a8d600e5c2bb2c6ebf575cc18` builds the complete final
+RAM bench with vendor r64 and `panic=0`. The image is 7,602,176 bytes; SHA-256:
+`c2c0e6e6f6b2e469c745eebada3cf792fbde1d41c7b09c545c9f228122d7125e`.
+Artifacts, manifest, 90-test log, build logs, inspection, runtime binary hashes
+and checksums are in
+`/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-f885e80846`.
+
+Inspection passes both FIT hashes, the exact source revision and all 1,154
+embedded initramfs entries. Every PON module defines init/exit callbacks.
+NAND stays disabled, rootdisk/partitions absent, TX inhibited, normal and
+failsafe LAN at 192.168.255.1/24, and DHCP/RA plus PON autostart disabled.
+The DT includes `panic=0`. The normal development configs, protected source
+branches, normal builder and user-owned README are preserved.
+
+This image has not been booted. The next step requires a user RAM boot through
+the second-stage http-uboot-q1000k serial console at the established safe FIT
+address 0x84000000, with fiber disconnected. Then perform read-only preflight
+at 192.168.255.1 (including panic timeout zero), stage the verified private
+inputs in RAM and retry the already-authorized stack test. No firmware flash
+or additional device operation occurred while building either fix. Full
+PHY/MAC/OMCI startup, physical drain and optical service remain unvalidated.

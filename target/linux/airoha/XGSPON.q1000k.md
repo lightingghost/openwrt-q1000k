@@ -68,8 +68,9 @@ moves the premature frame-limit change to the existing drained cold
 transaction, with 90 passing host tests. The matching-module retry registers OMCI, then panics in the uninitialized
 hook framework before PHY cold-start. Vendor r64 adds the missing module
 init/exit callbacks and exercises them in the host lifecycle test. All 90
-host tests pass. A replacement RAM image is being prepared; the kernel's
-automatic reboot leaves current device state unverified. See the bench report
+host tests pass. The replacement RAM image `f885e80846` builds and passes inspection with
+both fixes and `panic=0`. It needs a user RAM boot before the authorized retry;
+the previous panic left current device state unverified. See the bench report
 for runtime evidence and validation limits.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 

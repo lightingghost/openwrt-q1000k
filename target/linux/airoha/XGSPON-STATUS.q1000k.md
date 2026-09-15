@@ -31,7 +31,9 @@ The matching-module retry passes the WAN failure and registers OMCI, then
 panics in `ecnt_register_hook` before PHY cold-start: the framework's list
 initializer was never connected to module load. Vendor r64 adds init/exit
 callbacks and tests the actual module entry point. All 90 host tests pass;
-a replacement RAM image is being prepared. The kernel announced automatic
+the replacement RAM image `f885e80846` builds and passes inspection. It
+contains both fixes and disables the kernel’s explicit panic reboot. A user
+RAM boot is required before retrying the authorized test. The kernel announced automatic
 reboot after the panic; current device state and cleanup are unverified.
 No agent reboot or firmware flash occurred. Full stack startup and physical
 drain remain unverified.
