@@ -1,0 +1,40 @@
+# Reusable Q1000K RAM bench tools
+
+These tools never flash, reboot, or boot a device. Keep the fiber disconnected
+for controller/stack tests. The management address is fixed at 192.168.255.1;
+192.168.1.1 belongs to the working router.
+
+From the OpenWrt source checkout:
+
+```sh
+python3 scripts/q1000k/bench-build.py --output ../build-artifacts/q1000k-xgspon/bench-CHECKPOINT
+python3 scripts/q1000k/bench-run.py status --artifact ../build-artifacts/q1000k-xgspon/bench-CHECKPOINT --output ../build-artifacts/q1000k-xgspon/bench-CHECKPOINT/preflight-01
+python3 scripts/q1000k/bench-run.py stack --artifact ../build-artifacts/q1000k-xgspon/bench-CHECKPOINT --output ../build-artifacts/q1000k-xgspon/bench-CHECKPOINT/stack-01 --inputs /tmp/PRIVATE-INPUTS.tar --fiber-disconnected
+```
+
+Use a new output directory each time. `bench-build.py` requires an idle,
+configured cache and committed tracked changes on `q1000k-xgspon`. It pins HEAD
+through the separate experimental builder, restores `.config` and `.config.old`
+even on failure, and preserves any pre-existing `files` overlay by refusing it.
+It records the source/builder commits, protected branch refs, configs, build/test
+logs, inspected image hash and runtime file hashes in the artifact directory.
+The normal builder and upstream/PR branches are not modified. Local fakeroot
+builds may require the environment's IPC permission.
+
+`bench-run.py status` is read-only. Tests first check the exact boot revision,
+all nine PON modules plus four userspace files, RAM root, absent NAND/UBI,
+immutable TX inhibit, disabled services, idle PON modules and endpoint. The
+private input tar must contain this unit's previously verified calibration,
+firmware pair and checksum file; no private input contents are logged. The test
+sets `kernel.panic=0` in RAM, verifies readback, and invokes the explicit bench
+helper. This timeout remains zero for diagnosis after a failure. No optical TX
+activation is requested. The helper unloads owned modules in dependency order;
+failed cleanup never triggers force-unload or automatic recovery.
+
+Each run records SSH logs, the new bytes from `/tmp/serial_output.log` (override
+with `--serial-log`), and absolute artifact/capture paths in `checkpoint.json`.
+The source serial log is never truncated. A successful postflight proves module
+cleanup and endpoint state, not successful physical retirement: inspect the
+attempt and serial logs too. Failed attempts are never automatically retried.
+Verified staged inputs are removed only after the modules are confirmed idle.
+Keep capture directories private; serial/kernel output may contain identifiers.

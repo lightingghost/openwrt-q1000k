@@ -130,8 +130,19 @@ def inspect(image, revision):
     for source, dest in (
         ('package/network/utils/q1000k-xgspon-bench/files/defaults', 'etc/uci-defaults/99-q1000k-xgspon-bench'),
         ('package/network/utils/q1000k-xgspon-bench/files/bench', 'usr/sbin/q1000k-pon-bench'),
+        ('package/network/utils/q1000k-xgspon-bench/files/sysctl.conf', 'etc/sysctl.d/99-q1000k-xgspon-bench.conf'),
         ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config', 'etc/config/q1000k-xgspon')):
         assert read(dest) == (repo / source).read_bytes(), dest
+    # U-Boot may replace bootargs; userspace also overrides kernel.panic.
+    # Evaluate the shipped sysctl files in the same order as init.d/sysctl.
+    panic = None
+    configs = sorted(p for p in records if p.startswith('etc/sysctl.d/') and p.endswith('.conf'))
+    for name in configs + ['etc/sysctl.conf']:
+        for line in read(name).decode().splitlines():
+            match = re.fullmatch(r'\s*kernel[./]panic\s*=\s*(-?\d+)\s*(?:#.*)?', line)
+            if match:
+                panic = int(match[1])
+    assert panic == 0, ('userspace panic timeout', panic)
     for name in ('usr/sbin/q1000k-omci', 'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon'):
         assert read(name), name
     modules = ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu', 'airoha_ecnt_pon_phy',
@@ -156,7 +167,7 @@ def inspect(image, revision):
                 kernel_uncompressed_bytes=len(expanded), initramfs_entries=len(records),
                 unloadable_pon_modules=list(modules),
                 nand_disabled=True, tx_inhibited=True, management_ip='192.168.255.1',
-                kernel_panic_reboot_disabled=True,
+                configured_panic_timeout=panic, runtime_panic_readback_required=True,
                 rootfs_checks='passed', device_access=False)
 
 

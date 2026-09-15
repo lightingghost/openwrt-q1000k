@@ -69,9 +69,13 @@ transaction, with 90 passing host tests. The matching-module retry registers OMC
 hook framework before PHY cold-start. Vendor r64 adds the missing module
 init/exit callbacks and exercises them in the host lifecycle test. All 90
 host tests pass. The replacement RAM image `f885e80846` builds and passes inspection with
-both fixes and `panic=0`. It needs a user RAM boot before the authorized retry;
-the previous panic left current device state unverified. See the bench report
-for runtime evidence and validation limits.
+both fixes. The user RAM-booted it and the r64 test now reaches OMCI
+cold-start without a panic, then fails with `-EIO`. All modules and staged
+inputs are cleaned up and LAN/SSH remain healthy; physical retirement is
+still unproven. The running panic timeout was three despite the DT setting:
+bootloader arguments and the default userspace sysctl override it. The runner
+set it to zero in RAM before testing; bench r4 makes this a packaged sysctl
+override and a test precondition. See the bench report for captured evidence.
 192.168.1.1 is now the user's working router, not a Q1000K SSH target.
 
 The numbered plan and older checkpoint paragraphs below retain the original

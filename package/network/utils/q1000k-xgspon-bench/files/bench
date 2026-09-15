@@ -110,6 +110,7 @@ case "$1" in
 esac
 
 preflight
+[ "$(cat /proc/sys/kernel/panic)" = 0 ] || fail 'Disable the RAM bench panic reboot timeout before testing.'
 case "$calibration" in /tmp/*) ;; *) fail 'Stage this unit’s calibration in /tmp.' ;; esac
 [ -f "$calibration" ] && [ ! -L "$calibration" ] &&
 	[ "$(wc -c < "$calibration")" -eq 513 ] || fail 'Calibration must be a regular 513-byte file.'

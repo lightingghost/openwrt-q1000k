@@ -27,6 +27,7 @@ class BenchTests(unittest.TestCase):
         self.write(self.dt + 'soc/spi@1fa10000/status', 'disabled\0')
         self.write('tmp/sysinfo/board_name', 'quantum,q1000k-ubi\n')
         self.write('proc/mounts', 'rootfs / rootfs rw 0 0\n')
+        self.write('proc/sys/kernel/panic', '0\n')
         self.write('sys/class/net/ponraw/flags', '0x1002\n')
         (self.root / 'var/run').mkdir(parents=True)
         self.calibration = self.write('tmp/calibration', 'c' * 513)
@@ -134,6 +135,12 @@ else: raise AssertionError(action)
         self.assertEqual(self.calls(), [['modprobe', MODULES[0]], ['rmmod', MODULES[0]]])
         self.assertEqual((self.controller / 'calibration').read_bytes(), self.calibration.read_bytes())
         self.assertFalse((self.root / 'var/run/q1000k-pon-bench.lock').exists())
+
+    def test_panic_reboot_blocks_mutations_but_allows_status(self):
+        self.write('proc/sys/kernel/panic', '3\n')
+        self.run_bench('status')
+        self.run_bench(success=False)
+        self.assertEqual(self.calls(), [])
 
     def test_full_stack_cycle_and_reverse_cleanup(self):
         self.run_bench()

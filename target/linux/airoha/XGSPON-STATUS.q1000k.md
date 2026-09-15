@@ -32,11 +32,20 @@ panics in `ecnt_register_hook` before PHY cold-start: the framework's list
 initializer was never connected to module load. Vendor r64 adds init/exit
 callbacks and tests the actual module entry point. All 90 host tests pass;
 the replacement RAM image `f885e80846` builds and passes inspection. It
-contains both fixes and disables the kernel’s explicit panic reboot. A user
-RAM boot is required before retrying the authorized test. The kernel announced automatic
-reboot after the panic; current device state and cleanup are unverified.
-No agent reboot or firmware flash occurred. Full stack startup and physical
-drain remain unverified.
+contains both fixes. The user RAM-booted it at 192.168.255.1. The r64
+retry passes hook registration and reaches OMCI cold-start without a panic,
+then reports `initialization failed at cold-start: -5` and physical shutdown
+`-5`. Controller firmware/calibration and TX-inhibited LOS checks pass. All
+nine PON modules unload, ponraw returns down, staged inputs are removed, and
+LAN/SSH remain healthy. This proves module cleanup, not physical retirement.
+
+The bootloader replaces the DT command line and OpenWrt's default sysctl sets
+`kernel.panic=3`. The runner set and read back zero in RAM before the test.
+Bench package r4 adds a late sysctl override and refuses mutating tests with a
+nonzero timeout; image inspection now evaluates the shipped sysctl order.
+Reusable build/capture scripts and checkpoint manifests live under
+`scripts/q1000k/`. Full stack startup and physical drain remain unverified.
+No agent reboot or firmware flash occurred.
 See [the bench report](XGSPON-BENCH.q1000k.md).
 The older controller bring-up tests below used a different kernel: both
 EN7573 paths detected, OEM MD32 firmware

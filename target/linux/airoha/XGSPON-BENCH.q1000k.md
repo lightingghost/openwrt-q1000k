@@ -456,3 +456,32 @@ at 192.168.255.1 (including panic timeout zero), stage the verified private
 inputs in RAM and retry the already-authorized stack test. No firmware flash
 or additional device operation occurred while building either fix. Full
 PHY/MAC/OMCI startup, physical drain and optical service remain unvalidated.
+
+## r64 RAM retry and reusable scripts
+
+The user booted `f885e80846740f0a8d600e5c2bb2c6ebf575cc18` at
+192.168.255.1. The host serial capture is `/tmp/serial_output.log`.
+The saved runner verified all 13 runtime hashes against the artifact manifest,
+RAM root, no NAND/UBI devices, immutable TX inhibit and idle PON modules.
+Its read-only capture is `bench-f885e80846/preflight-saved-script/` under
+`build-artifacts/q1000k-xgspon/`; the stack capture is
+`bench-f885e80846/stack-r64-01/`. Each has a `checkpoint.json` with absolute
+paths, SSH output and the appended serial-log segment.
+
+`/proc/cmdline` was `console=ttyS0,115200 earlycon root=/dev/ram0 rdinit=/init`:
+U-Boot replaced the DT arguments. `/etc/sysctl.d/10-default.conf` also sets
+`kernel.panic=3`. Before testing, the runner changed only the runtime sysctl to
+zero and verified readback. Bench r4 packages a later sysctl override; the
+helper checks the live value before mutations and offline image inspection
+checks the effective shipped sysctl order. The earlier DT-only claim was
+insufficient to establish the runtime setting.
+
+Controller initialization passes: both IDs 0x1388, verified firmware/calibration,
+MCU running, LOS true, TX disabled and inhibited. Hook registration and OMCI
+registration now pass without a panic. At uptime 656 seconds, cold-start fails
+with `-5` and the physical shutdown reports `-5`. All nine modules unload,
+ponraw returns down, the lock and owned RAM inputs are removed, and LAN/SSH
+remain healthy. Physical drain and full PHY/OMCI startup are still unverified.
+No optical activation, firmware flash, force-unload or agent reboot occurred.
+
+See [reusable script instructions](../../../scripts/q1000k/README.md).

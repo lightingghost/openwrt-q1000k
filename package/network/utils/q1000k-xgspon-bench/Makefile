@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon-bench
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=GPL-2.0-only
 include $(INCLUDE_DIR)/package.mk
 
@@ -17,9 +17,10 @@ define Build/Compile
 endef
 
 define Package/q1000k-xgspon-bench/install
-	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/uci-defaults
+	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/uci-defaults $(1)/etc/sysctl.d
 	$(INSTALL_BIN) ./files/bench $(1)/usr/sbin/q1000k-pon-bench
 	$(INSTALL_BIN) ./files/defaults $(1)/etc/uci-defaults/99-q1000k-xgspon-bench
+	$(INSTALL_DATA) ./files/sysctl.conf $(1)/etc/sysctl.d/99-q1000k-xgspon-bench.conf
 endef
 
 $(eval $(call BuildPackage,q1000k-xgspon-bench))
