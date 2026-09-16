@@ -2208,3 +2208,59 @@ Next: user RAM-boots this exact image, then run its 30-sample connected baseline
 Require clean physical shutdown before the missing passive reconnect control.
 If it fails again, preserve the new first-operation diagnostics and stop. The
 previous 34-case connected matrix does not need repetition solely for logging.
+
+
+## Consolidated deep receiver bench — 2026-09-15, aab582744c
+
+User direction: keep shutdown separate and put the electrical reception, clock
+acquisition and missing OEM initialization experiments into one next image.
+The resulting [deep audit and hypothesis mapping](XGSPON-DEEP-RX-AUDIT.q1000k.md)
+adds 21 cases, retaining the previous cases and two physical controls: 57 total.
+
+Main new evidence: the actual NAND OEM and newer update both set optical-controller
+A2 0x110[8] after loading the PON modules; the last baseline had that bit clear.
+The new isolated and combined probes test that step. Other probes run the five
+OEM analog calibration stages at gain 1, compare the exact twelve-bit OEM reset
+with the existing seven-bit recipe, and take fresh finite eye measurements at
+all eight OEM peaking codes. Six additional combinations pair these changes
+with the existing electrical-output profiles. This is a bench experiment,
+not a demonstrated no-frame fix. Shared PLL setup already runs in RX-only mode.
+
+NAND extraction was reproduced read-only. Its MCU firmware and 513-byte DSD
+record exactly match the current bench inputs. OEM kernel configuration supports
+an uncompressed external CPIO/custom-root-shell strategy, but OEM RAM boot and
+root access have not been tested. No OEM code ran, and no device was accessed
+for this build.
+
+Artifacts: `build-artifacts/q1000k-xgspon/bench-aab582744c-deep-rx/`.
+Source revision: `aab582744cc7faedc2adfe01ad51f8219d839d99` on `q1000k-xgspon`.
+Package releases: airoha-pon 83, q1000k-pon-control 11, bench helper 17.
+Receiver diagnostics schema 4; controller receiver schema 3. Historical capture
+schemas remain readable. The collector rejects deep cases on older images.
+
+- Firmware: 7,602,176 bytes; SHA-256
+  `e9c1018880d9077521bcba94eb67be06639036d4de1434e72e0a589bd9a4c17c`.
+- Single collector: `q1000k-rx-collect.py`; SHA-256
+  `55a7889a25fd672ad717b65390281d7856e25ab16bd2365092792c64b7e72a76`.
+- Delivery kit: `q1000k-rx-deep-aab582744c.tar.gz`, 7,738,626 bytes, 28 files;
+  SHA-256 `80ebc88bc80c92866cc4f2d2ad71d697cc3396d8bfaa6812610c02bb7ac4cde5`.
+  No OEM binary/calibration payloads are included.
+
+Passed 212 PON host tests, 13 status tests, UI tests and exact FIT/initramfs
+inspection. Failure injection executes the production receiver probes and
+controller transport code, including partial writes, register restoration and
+TX-disable guards. New source-matched PHY UML run `/tmp/q1000k-pon-phy-uml.7XdxXe`
+passed 50 normal + 50 RX-only cycles and concurrent poll/IRQ teardown.
+Standalone collector dry-runs passed outside the source/artifact directory for
+the full plan and six representative new/physical cases. Kit hashes and archive
+member contents were rechecked. Four of fourteen pinned runtime files changed:
+the bench helper, controller module, PHY module and MAC diagnostics module.
+Normal configs and protected refs were preserved.
+
+Hardware testing is pending. The shutdown diagnostic-only image is superseded
+for this task; its diagnostics are included here. A real shutdown/cleanup fault
+still stops collection rather than being silently accepted. `--case oem-post-init`
+can test the most concrete missing step, with pre-intervention samples, without
+first executing a separate baseline/unload case. The full default plan has
+5,190 seconds of sampling plus overhead; individual cases and 30-sample
+acquisition windows are selectable using this same firmware and collector.
