@@ -185,6 +185,8 @@ PHYSICAL = {'rx-reconnect', 'rx-confirm', 'activation-reconnect', 'rx-dark-start
             'rx-short-outage', 'rx-long-outage'}
 
 def discovery_plan(args):
+    if args.physical_only and args.skip_physical:
+        raise ValueError('--physical-only cannot be combined with --skip-physical')
     rx_only = args.rx_only or args.physical_only or not args.identity
     cases = []
     if not args.physical_only:
@@ -246,6 +248,32 @@ def trace_summary(records):
                 first_reset=next((r for r in events if r['event']==16), None),
                 first_fault=next((r for r in events if r['event']==2), None),
                 generation_changes=sorted({r['generation'] for r in events}))
+
+
+def test_outcomes(case, result, text):
+    """Keep selectable capabilities separate from branches actually observed."""
+    stages = result['stages']; outcome = {}
+    for ident in case.get('ids', []):
+        outcome[ident] = 'not-run'
+        if ident in ('B02','B03'): outcome[ident] = result['status']
+        elif ident in ('A01','A02','A03','D01') and 'activation' in stages:
+            outcome[ident] = stages['activation']
+        elif ident == 'A04':
+            outcome[ident] = 'profile-observed' if result.get('trace',{}).get('milestones',{}).get('profile_verified') else 'no-verified-profile-observed'
+        elif ident == 'D02' and 'provisioning' in stages: outcome[ident] = stages['provisioning']
+        elif ident == 'D03' and any(v.get('samples', 0) for v in result.get('security', {}).values()):
+            outcome[ident] = 'key-and-counter-observations; encrypted-traffic-unproven'
+        elif ident == 'D04' and 'wan' in stages: outcome[ident] = stages['wan']
+        elif ident == 'D05' and result.get('traffic'): outcome[ident] = 'observed; see-per-probe-results'
+        elif ident == 'D06' and 'traffic-soak' in stages: outcome[ident] = stages['traffic-soak']
+        elif ident in ('R00','R09','R10','R11') and 'passive' in stages: outcome[ident] = stages['passive']
+        elif ident == 'R08':
+            outcome[ident] = 'independent-recovery-observed' if result.get('independent_recovery') else stages.get('recovery','not-run')
+    for action, stable in re.findall(r'^recovery_action=([1-7]) phase=observed stable=(\d+)$',text,re.M):
+        ident = 'R0'+action
+        if ident in outcome:
+            outcome[ident] = 'frames-restored-after-sequence' if int(stable)>=5 else 'no-reacquisition'
+    return outcome
 
 
 def case_outcome(result, trace_required=True):
@@ -368,6 +396,7 @@ def capture(pin, case, iperf, directory, redact):
     if dark_start:
         print('Disconnect fiber before initialization, then type DISCONNECTED.', flush=True)
         if input().strip() != 'DISCONNECTED': raise ValueError('Dark initialization needs explicit confirmation')
+        dark_confirmed_at = time.time()
     deadline = time.monotonic() + (1500 if physical else case['samples'] * (8 if case['mode'] == 'activate' else 3) + 180)
     process = subprocess.Popen(SSH + ['sh', '-s'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, bufsize=0)
@@ -418,7 +447,7 @@ def capture(pin, case, iperf, directory, redact):
                         if isinstance(record, dict) and 'receiver_version' in record and not in_postmortem:
                             samples.append(record)
                             if dark_start and not disconnected:
-                                events.append(dict(action='DISCONNECTED', sampled_ms=record['sampled_ms']-1, confirmed_at=time.time(), before_init=True))
+                                events.append(dict(action='DISCONNECTED', sampled_ms=record['sampled_ms']-1, confirmed_at=dark_confirmed_at, before_init=True))
                                 disconnected = True
                             if len(samples) == 1 and record.get('rx_power_valid') and record.get('rx_power_nw', 0) > 0:
                                 print(f"RX power: {10*math.log10(record['rx_power_nw']/1000000):.2f} dBm; LOS={record.get('controller_los')}, sync={record.get('synced')}.", flush=True)
@@ -446,10 +475,11 @@ def capture(pin, case, iperf, directory, redact):
     result['required_dark_samples'] = 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15
     result['status'] = case_outcome(result)
     if result['rx_samples'] < 15 and result['status'] != 'containment-failure': result['status'] = 'inconclusive'
-    result['ids'] = case.get('ids', [])
+    result['planned_ids'] = case.get('ids', [])
     result['independent_recovery'] = name == 'rx-confirm' and len(result['recovery_sequence']) == 1 and bool(result['recovery_winner'])
     if case['mode'] == 'rx' and not physical and result['returncode'] == 0 and result['rx_samples'] != case['samples']:
         result.update(status='failed', sample_count_error=True)
+    result['test_outcomes'] = test_outcomes(case, result, ''.join(lines))
     return result
 
 

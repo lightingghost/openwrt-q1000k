@@ -142,4 +142,31 @@ int main(void) {
         args.cases='arbitrary-register-write'
         with self.assertRaises(ValueError): C.discovery_plan(args)
 
+    def test_conflicting_physical_selection_is_rejected(self):
+        args=argparse.Namespace(physical_only=True,skip_physical=True)
+        with self.assertRaisesRegex(ValueError,'cannot be combined'):
+            C.discovery_plan(args)
+
+    def test_report_distinguishes_planned_from_executed_tests(self):
+        result=dict(stages={'activation':'timeout'},status='functional-negative',
+                    trace={'milestones':{}},security={'data_rx_key_valid':{'samples':0}})
+        case=dict(ids=['A01','A04','D01','D02','D03','D04','D05','D06'])
+        outcome=C.test_outcomes(case,result,'')
+        self.assertEqual(outcome['A01'],'timeout')
+        self.assertEqual(outcome['A04'],'no-verified-profile-observed')
+        self.assertTrue(all(outcome[k]=='not-run' for k in ('D02','D03','D04','D05','D06')))
+        case=dict(ids=['R00','R01','R02','R03','R04','R08'])
+        result=dict(stages={'passive':'no-reacquisition','recovery':'recovered-after-sequence'},
+                    independent_recovery=False)
+        outcome=C.test_outcomes(case,result,'recovery_action=1 phase=observed stable=0\n'
+                                          'recovery_action=2 phase=observed stable=5\n')
+        self.assertEqual(outcome['R00'],'no-reacquisition')
+        self.assertEqual(outcome['R01'],'no-reacquisition')
+        self.assertEqual(outcome['R02'],'frames-restored-after-sequence')
+        self.assertEqual(outcome['R03'],'not-run')
+        self.assertEqual(outcome['R04'],'not-run')
+        self.assertEqual(outcome['R08'],'recovered-after-sequence')
+        result['independent_recovery']=True
+        self.assertEqual(C.test_outcomes(case,result,'')['R08'],'independent-recovery-observed')
+
 if __name__=='__main__': unittest.main()

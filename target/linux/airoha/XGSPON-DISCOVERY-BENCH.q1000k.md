@@ -32,6 +32,19 @@ One RAM FIT and one portable Python/OpenSSH collector. Hardware outcomes remain 
 
 ## Interpretation
 
+The hypothesis identifiers mean:
+
+| Hypothesis | Question |
+|---|---|
+| H1 | Does the required burst profile reach hardware correctly? |
+| H2 | Do discovery opportunities produce upstream responses? |
+| H3 | Is a relevant ONU-ID assignment or ranging message missing, ignored or rejected? |
+| H4 | Does a local reset discard useful discovery progress? |
+| H5 | Does failed reconnect result from absent RX-only recovery or a recovery-sequence defect? |
+| H6 | Which receiver state needs restoration after loss of signal? |
+| H7 | Do event ordering, repeated profile installation or diagnostics disturb acquisition? |
+| H8 | After O5, what blocks usable service? |
+
 The default run attempts connected RX controls, normal discovery, passive RX reconnect plus the recovery ladder, a fresh independent test of the winning action, normal-mode reconnect, reduced sampling and (only when observed) the longer SN reset threshold. R10/R11 are selectable extra physical controls. Service cases run immediately after O5/provisioning when their prerequisites exist. Each image contains every listed control; a single collection will not necessarily exercise every branch.
 
 Actions 1–6 are fixed kernel controls, once per action per PHY lifetime, with TX inhibited. Action 7 fully unloads/reloads the known stack after exporting history. Actions 5/6 use the full MAC/DMA drain transaction, so a success includes that transaction; it cannot by itself attribute causality exclusively to PHY or controller initialization. A cumulative ladder win is labelled `recovered-after-sequence`. Only `rx-confirm` with one selected action establishes an independent recovery result.
