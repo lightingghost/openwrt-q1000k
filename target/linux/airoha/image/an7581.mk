@@ -238,9 +238,16 @@ TARGET_DEVICES += quantum_q1000k-xgspon-bench
 
 # One RAM image for receive, activation, OMCI and WAN validation.
 define Device/quantum_q1000k-xgspon-activation
-  $(call Device/quantum_q1000k-xgspon-bench)
+  DEVICE_VENDOR := Quantum Fiber
+  DEVICE_MODEL := Q1000K
   DEVICE_VARIANT := XGS-PON RAM activation bench
   DEVICE_DTS := an7581-q1000k-xgspon-activation
-  DEVICE_PACKAGES += q1000k-xgspon-validation
+  DEVICE_PACKAGES := rtl826x-firmware q1000k-xgspon-bench q1000k-xgspon-validation
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 128k
+  KERNEL_INITRAMFS_SUFFIX := -bench.itb
+  IMAGES :=
+  ARTIFACTS :=
+  SOC := an7581
 endef
 TARGET_DEVICES += quantum_q1000k-xgspon-activation
