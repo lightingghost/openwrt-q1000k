@@ -1,5 +1,9 @@
 # Q1000K: deep receiver consolidated bench
 
+**Hardware result, 2026-09-16:** `oem-post-init` recovered downstream frames in
+two independent receive-only captures. See the
+[results and incomplete-case limits](XGSPON-RX-RESULTS-20260916.q1000k.md).
+
 **2026-09-16 extension:** the [58-case repeated-acquisition bench](XGSPON-REPEAT-RX.q1000k.md)
 retains every case below and adds one bounded repeated OEM reset/clock case.
 

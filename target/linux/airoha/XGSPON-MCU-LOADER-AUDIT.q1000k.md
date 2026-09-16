@@ -139,8 +139,15 @@ section map has not been recovered here.
 hypothesis for our loader. The actual OEM files match, the original startup
 accommodates them, and our complete expanded transfers are verified. Readback
 plus MCU-enable still does not prove correct execution, analog calibration,
-high-speed electrical output or optical frame decoding. Those remain covered
-by the controller/analog/clock experiments and pending hardware measurements.
+high-speed electrical output or optical frame decoding on their own.
+
+**Hardware follow-up, 2026-09-16:** the unchanged short PM/DM files, zero-filled
+tails and same unit DSD record subsequently supported sustained downstream
+reception after the isolated OEM controller `0x110[8]` step. Two independent
+receive-only runs recovered frames without a loader or input change. See
+[the hardware results](XGSPON-RX-RESULTS-20260916.q1000k.md). This is stronger
+system-level evidence for the existing loader path, while absolute calibration
+accuracy and every detail of MCU execution remain unmeasured.
 
 ## Reproduction and primary references
 

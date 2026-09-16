@@ -2336,3 +2336,46 @@ input files. That input-format difference does not show missing OEM firmware.
 The existing OEM-A0 transport case previously loaded and verified successfully
 on hardware without recovering frames. No MCU loader runtime change was needed
 for this question. OEM code has not been RAM-booted or executed for this work.
+
+## 2026-09-16: downstream reception recovered by the isolated OEM post-init bit
+
+User brought up `8fee7f3b48` at `192.168.255.1`, with serial capture at
+`/tmp/serial_output.log`, and requested power measurement and tests. Initial
+RX power was 14,900 nW / −18.268 dBm, with both LOS indications clear.
+
+The isolated `oem-post-init` experiment changed only A2 `0x110[8]` from zero
+to one, reproducing the missing OEM `xponconfig` step. A 90-sample run received
+706,022 frames; an independent 180-sample confirmation received 1,542,510.
+Both had fourteen pre-intervention samples with no sync and zero frames,
+then every remaining sample was synchronized. The longer run sustained
+approximately 8,000 frames/second over 191,658 ms. Sampled FEC, framing and
+loss-of-frame error counters remained zero. Optical TX and registration
+remained disabled. The same unit DSD and short OEM PM/DM inputs were used.
+
+The matched single OEM reset and new six-attempt repeated-reset cases each
+completed 90 samples with zero frames and no synchronization; all reset
+boundaries, timing, budget termination and restoration passed. `eye-current`
+also completed without reception. The initial `oem-post-cal` and separate
+`oem-analog` runs stopped on paired-diagnostic checks after fourteen samples,
+with successful cleanup. The timing of long calibration between separate
+snapshot reads is the leading collector explanation, not an optical result.
+
+A diagnostic-only host variant enabled tracing of the unchanged helper.
+The first mixed-trace output was rejected as malformed JSON despite normal
+device completion. A separate-trace, 30-sample `oem-post-cal` repeat passed
+the normal validators and received 174,529 frames. Its transition error
+counters were already nonzero at the first synchronized sample and remained
+constant afterward. Neither trace run reproduced the original guard failure;
+tracing changes timing. No on-device helper/module change was made.
+
+The final unmodified 30-sample baseline again had light and no frames with
+`0x110[8]` clear. All eleven invocations passed postflight and private input
+cleanup; the bench finished idle. The full 58-case matrix did not complete:
+eight distinct cases were reached, seven have validated captures, and fifty
+were not run in this session. Physical reconnect testing remains pending.
+
+See [complete results, hypothesis interpretation and limits](XGSPON-RX-RESULTS-20260916.q1000k.md).
+Raw archives and derived summaries are under
+`build-artifacts/q1000k-xgspon/rx-results-20260916/` and its sibling capture
+archives. The result identifies the normal-startup correction; that integration
+and subscriber registration/service validation are still outstanding.

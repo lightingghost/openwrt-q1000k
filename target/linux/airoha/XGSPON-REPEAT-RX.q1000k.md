@@ -3,8 +3,13 @@
 Prepared 2026-09-16 on `q1000k-xgspon`. The user requested the additional
 hypothesis from the [Sirherobrine23 audit](XGSPON-SIRHEROBRINE-AUDIT.q1000k.md)
 in the next bench. This adds **one case to the existing 57**, for **58 total**:
-56 connected cases and two confirmed physical controls. Hardware results are
-pending; software tests cannot establish recovered-clock lock or valid frames.
+56 connected cases and two physical controls requiring operator confirmation.
+
+**Hardware result, 2026-09-16:** the matched one- and six-attempt cases completed
+with no sync or frames, with all timing, budget and cleanup checks passed.
+The separate isolated OEM controller `0x110[8]` write recovered frames twice.
+The full 58-case matrix remains incomplete; see the
+[actual results and coverage](XGSPON-RX-RESULTS-20260916.q1000k.md).
 
 ## Hypothesis and matched controls
 

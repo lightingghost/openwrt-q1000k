@@ -1,7 +1,14 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
+**Latest hardware result, 2026-09-16:** the isolated OEM controller
+`0x110[8]=1` step recovered downstream synchronization and frames in two
+freshly initialized receive-only runs. The longer confirmation sustained
+about 8,000 frames/second for 192 seconds after the change, with TX disabled.
+The combined calibration case stopped on a diagnostic guard; it is incomplete,
+not a negative optical result. See the [results and exact coverage](XGSPON-RX-RESULTS-20260916.q1000k.md).
+
 **Built replacement:** `8fee7f3b48`, 58 cases, [repeated acquisition plan](XGSPON-REPEAT-RX.q1000k.md).
-All software checks passed; hardware collection is pending. The [MCU loader
+All software checks passed; hardware collection is recorded above. The [MCU loader
 audit](XGSPON-MCU-LOADER-AUDIT.q1000k.md) confirms the short OEM PM/DM inputs
 are expanded and fully verified, as required by the original startup layout.
 
@@ -23,7 +30,7 @@ a separate issue; the diagnostic-only image need not be booted first.
 
 **Previous bench:** [receiver acquisition experiments and collection plan](XGSPON-RX-ACQUISITION.q1000k.md)
 
-**Latest hardware evidence:** [2026-09-15 acquisition results](XGSPON-RX-RESULTS-20260915.q1000k.md).
+**Previous hardware evidence:** [2026-09-15 acquisition results](XGSPON-RX-RESULTS-20260915.q1000k.md).
 All 34 connected cases and the fresh dark-checker control completed with valid
 captures. None recovered frames. The separate passive reconnect control is
 incomplete because its physical phases were not confirmed within its window.
