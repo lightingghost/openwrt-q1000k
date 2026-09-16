@@ -33,6 +33,7 @@ static void capture_failure(const char *format, ...)
     va_end(args);
     assert(length>=0 && (size_t)length<sizeof(failure_log)-used);
 }
+#define pr_info(...) capture_failure(__VA_ARGS__)
 #define pr_err_ratelimited(...) capture_failure(__VA_ARGS__)
 #define TRUE 1
 #define FALSE 0
@@ -223,7 +224,7 @@ u32 q1000k_phy_rx_probe_writes(void) { return 0; }
 int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain)
 {
     assert(!q1000k_phy_callback_context() && controller_inhibit && !controller.tx);
-    assert(qphy_rx_attempts==1 && qphy_active);
+    assert(qphy_rx_attempts>=1 && qphy_rx_attempts <= (qphy_rx_probe_mode==Q1000K_RX_PROBE_OEM_RESET_REPEAT ? 6 : 1) && qphy_active);
     assert(controller_los == (qphy_rx_probe_mode==Q1000K_RX_PROBE_CHECKER_DARK));
     reacquire_calls++; reacquire_restore_pll=restore_pll; reacquire_restore_gain=restore_gain;
     if(reacquire_bad_tx) controller.tx=true;
@@ -698,6 +699,53 @@ static void rx_probe_tests(void)
     reset();
 }
 
+static void rx_repeat_tests(void)
+{
+    struct q1000k_rx_sample sample;
+    for (int stop=0;stop<7;stop++) {
+        reset(); controller_inhibit=true; controller_los=false;
+        assert(!q1000k_phy_init());
+        assert(!q1000k_phy_set_rx_bench(true,true,false,false));
+        assert(!q1000k_phy_set_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT));
+        assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG) && !q1000k_phy_start());
+        if (stop==4) {
+            regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+            assert(!q1000k_phy_rx_sample(&sample));
+            regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=0;
+        }
+        for(int i=0;i<10;i++) qphy_poll_work(&qphy_poll_job);
+        assert(reacquire_calls==(stop==4 ? 0 : 1));
+        if (stop==1 || stop==2) {
+            if(stop==1) regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+            else controller_los=true;
+            /* A transient observed outside the recovery poll still stops it. */
+            assert(!q1000k_phy_rx_sample(&sample));
+            controller_los=false; regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=0;
+        }
+        if(stop==5) {
+            assert(!q1000k_phy_stop() && !q1000k_phy_start());
+        }
+        if(stop==6) {
+            regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+            regs[(EN7581_XGPON_PHY_XG_PON_INT_STA&0x1ffff)/4]=QPHY_RX_BENCH_IRQS;
+            assert(irq_fn(75,&device)==IRQ_HANDLED);
+            regs[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=0;
+        }
+        if(stop==3) reacquire_error=-ETIMEDOUT;
+        for(int i=0;i<10;i++) {
+            unsigned previous=reacquire_calls;
+            jiffies+=4999; qphy_poll_work(&qphy_poll_job);
+            if(!stop && i<5) assert(reacquire_calls==previous);
+            jiffies+=1; qphy_poll_work(&qphy_poll_job);
+        }
+        assert(reacquire_calls==(stop==0 ? 6 : stop==3 ? 2 : stop==4 ? 0 : 1));
+        assert(qphy_repeat_reason && !controller.tx);
+        assert(!strcmp(qphy_repeat_reason, stop==0 ? "budget" : stop==2 ? "los" : stop==3 ? "error" : stop==5 ? "shutdown" : "sync"));
+        if(stop==3) assert(qphy_fault==-ETIMEDOUT && !qphy_active);
+    }
+    reset();
+}
+
 static void rx_bench_tests(void)
 {
     struct q1000k_rx_sample sample, saved;
@@ -739,6 +787,7 @@ int main(void)
     shutdown_diagnostics();
     rx_reacquire_tests();
     rx_probe_tests();
+    rx_repeat_tests();
     rx_snapshot_faults();
     rx_bench_tests();
     prepare_wan();

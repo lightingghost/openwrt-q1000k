@@ -1,4 +1,7 @@
-# Q1000K: next consolidated receiver bench
+# Q1000K: deep receiver consolidated bench
+
+**2026-09-16 extension:** the [58-case repeated-acquisition bench](XGSPON-REPEAT-RX.q1000k.md)
+retains every case below and adds one bounded repeated OEM reset/clock case.
 
 Prepared 2026-09-15 on `q1000k-xgspon`. This extends the previous acquisition
 bench with **21 new cases in one image**, for **57 cases total** including two

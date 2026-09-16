@@ -189,11 +189,12 @@ def plan(baseline_only=False, suite=None, skip_live_control=False, selected_case
                 optical_tx=False, flash=False,
                 register_probe='immutable per-case selection' if any(case.get('probe') for case in cases) else None,
                 coverage=coverage, automatic_retries=False,
+                bounded_recovery=dict(suite.plan(samples)['bounded_recovery'], zero_attempt_control='connected-baseline'),
                 minimum_sampling_seconds=sum(case['samples'] for case in cases),
                 optical_service_verified=False, signal_quality_verified=False,
                 live_reconnection_tested=False, collection_completion_is_not_optical_service_validation=True,
                 remaining_hypotheses={
-                    'clock-reset': dict(software='Run isolated clock/recovery sequences and compare NCPO, frequency and FIFO status',
+                    'clock-reset': dict(software='Compare zero, one and up to six identical OEM reset/clock acquisitions; retain per-attempt timing, counters, NCPO, frequency and FIFO status',
                                         pending='Actual recovered-clock/data measurement and documented reset interpretation'),
                     'route-polarity': dict(software='Exercise fixed RX electrical-output settings, retain input-route and PCS counter evidence',
                                            pending='Electrical continuity/polarity measurement or board-specific OEM comparison'),

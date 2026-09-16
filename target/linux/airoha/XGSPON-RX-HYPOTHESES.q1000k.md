@@ -1,6 +1,16 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
-**Next consolidated bench:** [deep receiver/OEM audit and 57-case collection plan](XGSPON-DEEP-RX-AUDIT.q1000k.md).
+**Community comparison, 2026-09-16:** [Sirherobrine23 source audit](XGSPON-SIRHEROBRINE-AUDIT.q1000k.md).
+The inspected implementation is GPON/EPON and does not supply an AN7581 XGS
+receive path. Its startup fixes support auditing local MAC/PHY dependencies;
+our cold-start path already initializes and releases the MAC before sync.
+Its periodic no-LOS/no-ready recovery adds a bounded repeated-acquisition
+hypothesis beyond our one-attempt cases. Its generic calibration/firmware
+loader rejects the unit's unchanged OEM inputs. These are source findings,
+not new bench results. The requested [58-case replacement and repeated recovery
+plan](XGSPON-REPEAT-RX.q1000k.md) adds the bounded experiment to the same bench.
+
+**Earlier consolidated plan (all cases retained):** [deep receiver/OEM audit and 57-case collection plan](XGSPON-DEEP-RX-AUDIT.q1000k.md).
 This adds 21 cases to the previous acquisition image, including the missing
 OEM controller post-init bit, gain/peaking selection before calibration,
 fresh eye observations and the exact OEM twelve-bit reset. Shutdown remains

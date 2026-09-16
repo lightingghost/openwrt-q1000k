@@ -24,9 +24,11 @@ def evaluate(report):
     enabled = all(v & (1 << 16) for v in regs['rx_control'])
     reset_released = all(v & 3 == 3 for v in regs['pcs_reset'])
     clear_inactive = all(not v & (1 << 16) for v in regs['pcs_debug_control'])
-    framing_activity = any(pcs[k]['delta_mod32'] for k in ('psync_mismatch', 'sfc_hec_error', 'pon_id_hec_error'))
-    codeword_activity = any(pcs[k]['delta_mod32'] for k in ('cw_start', 'cw_end'))
-    mac_activity = any(pcs[k]['delta_mod32'] for k in ('sof_to_mac', 'eof_to_mac'))
+    phases = report.get('pcs_counter_phases') or {'all': pcs}
+    activity = {k: any(p[k]['delta_mod32'] for p in phases.values()) for k in pcs}
+    framing_activity = any(activity[k] for k in ('psync_mismatch', 'sfc_hec_error', 'pon_id_hec_error'))
+    codeword_activity = any(activity[k] for k in ('cw_start', 'cw_end'))
+    mac_activity = any(activity[k] for k in ('sof_to_mac', 'eof_to_mac'))
     light = report['rx_states']['controller_los'] == [False] and report['rx_states']['phy_los'] == [False]
     hypotheses = [
         dict(id='optical-power', hypothesis='Insufficient or unstable received optical power',

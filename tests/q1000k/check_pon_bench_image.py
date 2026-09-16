@@ -193,6 +193,10 @@ def inspect(image, revision):
                 assert ('parmtype=pon_' + param + ':').encode() in read(matches[0]), param
         if name == 'phy_10g':
             assert 'q1000k_phy_rx_reacquire' in symbols
+            assert b'q1000k: RX recovery phase=' in read(matches[0])
+            assert b'q1000k: RX recovery stopped reason=' in read(matches[0])
+    assert b'RX_DIAGNOSTICS_VERSION=5' in read('usr/sbin/q1000k-pon-bench')
+    assert b'oem-reset-repeat) probe=38' in read('usr/sbin/q1000k-pon-bench')
     assert b'reacquire=0' in read('usr/sbin/q1000k-pon-bench')
     assert b'--restore-gain' in read('usr/sbin/q1000k-pon-bench')
     assert b'--restore-pll' in read('usr/sbin/q1000k-pon-bench')
@@ -200,7 +204,7 @@ def inspect(image, revision):
     assert b'30|90|180' in read('usr/sbin/q1000k-pon-bench')
     assert b'limit=$samples' in read('usr/sbin/q1000k-pon-bench')
     mac = next(name for name in records if name.endswith('/xpon_10g.ko'))
-    for field in (b'"receiver_version":5', b'"pcs_counters":', b'"rx_clock_divider":', b'"gain_restore_enabled":', b'"rx_frontend_gain":', b'"rx_power_valid":', b'"rx_power_nw":', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
+    for field in (b'"diagnostics_version":5', b'"receiver_version":5', b'"pcs_counters":', b'"rx_clock_divider":', b'"gain_restore_enabled":', b'"rx_frontend_gain":', b'"rx_power_valid":', b'"rx_power_nw":', b'"pll_restore_enabled":', b'"pll_outputs":', b'"rx_lock_force":', b'"rx_oscal_control":', b'"pll_pcw2":'):
         assert field in read(mac)
     forbidden = {n.replace('-', '_') for n in modules}
     for name in records:

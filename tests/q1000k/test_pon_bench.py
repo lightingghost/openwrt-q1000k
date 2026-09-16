@@ -74,7 +74,7 @@ if action=='cat':
         retry=params.get('rx_reacquire')=='1'
         data=dict(rx_bench=True, registration_enabled=False, tx_inhibited=True,tx_enabled=False,
                   gain_restore_enabled=params.get('rx_restore_gain')=='1', receiver_version=5, rx_power_valid=True, rx_power_nw=19900,
-                  pll_restore_enabled=params.get('rx_restore_pll')=='1', reacquire_enabled=retry, reacquire_attempts=1 if retry and n>=15 else 0,
+                  pll_restore_enabled=params.get('rx_restore_pll')=='1', reacquire_enabled=retry, reacquire_attempts=(min(6,max(0,(n-15)//6+1)) if params.get('rx_probe')=='38' else int(retry and n>=15)),
                   mac_irq_mask=0, controller_los=not lit,phy_los=not lit,synced=lit,sync_status=0,
                   frames=n if lit else 0,lof=0,fec_total=n if lit else 0,fec_corrected=0,
                   fec_uncorrected=0,irq_calls=0,poll_calls=n,sampled_ms=n*1000)
@@ -84,8 +84,8 @@ if action=='cat':
         n=int((root/'rx-count').read_text())
         params=json.loads((root/'module-params').read_text())
         mode=int(params.get('rx_probe',0))
-        attempts=int(params.get('rx_reacquire')=='1' and n>=15)
-        data=dict(diagnostics_version=4,probe=mode,attempts=attempts,writes=attempts if mode else 0,
+        attempts=min(6,max(0,(n-15)//6+1)) if mode==38 else int(params.get('rx_reacquire')=='1' and n>=15)
+        data=dict(diagnostics_version=5,probe=mode,attempts=attempts,writes=attempts if mode else 0,
                   sampled_ms=n*1000,checker_control=5,data_route_control=0,bist_lane_control=0,
                   tdc_ncpo=0,fifo_clock_status=0)
         data.update(json.loads(os.environ.get('BENCH_DIAGNOSTICS','{}')))
@@ -320,6 +320,18 @@ else: raise AssertionError(action)
         self.run_bench('receive', fiber='connected', reacquire=True, restore_gain=True)
         self.assertIn('rx_restore_gain=1', [c for c in self.calls() if c[0]=='insmod'][-1])
         self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])
+
+    def test_repeat_accepts_six_but_rejects_short_window_and_seventh_attempt(self):
+        self.env['BENCH_FIBER']='connected'
+        self.env['BENCH_STATUS']=json.dumps({'los': False})
+        self.run_bench('receive',fiber='connected',probe='oem-reset-repeat',reacquire=True,samples=30,success=False)
+        self.assertEqual(self.calls(),[])
+        result=self.run_bench('receive',fiber='connected',probe='oem-reset-repeat',reacquire=True,samples=90)
+        rx=[json.loads(line) for line in result.stdout.splitlines() if line.startswith('{') and '"rx_bench"' in line]
+        self.assertEqual([rx[0]['reacquire_attempts'],rx[-1]['reacquire_attempts']],[0,6])
+        self.assertIn('rx_probe=38',[c for c in self.calls() if c[0]=='insmod'][-1])
+        self.env['BENCH_RX_STATUS']=json.dumps({'reacquire_attempts':7})
+        self.run_bench('receive',fiber='connected',probe='oem-reset-repeat',reacquire=True,samples=90,success=False)
 
     def test_reacquire_rejects_repeated_attempts_and_cleans_up(self):
         self.env['BENCH_FIBER']='connected'

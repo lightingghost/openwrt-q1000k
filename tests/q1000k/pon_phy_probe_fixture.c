@@ -89,6 +89,7 @@ static void reset(void) {
  WORD(EN7581_XPON_PMA_RX_DISB_MODE_3)|=1;
  WORD(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan)=0xa40c1234;
  memcpy(original,registers,sizeof(original));
+ repeat_calls=0; repeat_failed=probe_closed=false;
  post_saved=post_bit=post_pending=false; saved_count=probe_writes=0; operations=fail_at=context_error=updates=corrupt_update=delays=long_delays=0;
  medium_delays=meter_reads=bad_meter=0; trace_count=0;
  gpPhyPriv=&phy; phy.wan_sel=10; phy.pma_init_done=1; phy.first_plugin_flag=0;
@@ -186,6 +187,10 @@ int main(void) {
    assert((WORD(EN7581_XPON_PMA_SW_RST_SET)&~0xfffU)==(ORIGINAL(EN7581_XPON_PMA_SW_RST_SET)&~0xfffU));
   }
   if(mode==Q1000K_RX_PROBE_OEM_POST_INIT || mode==Q1000K_RX_PROBE_OEM_POST_CAL) assert(post_saved && post_bit);
+  if(mode==Q1000K_RX_PROBE_OEM_RESET_REPEAT) {
+   for(unsigned n=1;n<Q1000K_RX_REPEAT_LIMIT;n++) assert(!q1000k_phy_rx_probe(mode));
+   assert(repeat_calls==6);
+  }
   assert(q1000k_phy_rx_probe(mode)==-EBUSY);
   assert(!q1000k_phy_rx_probe_cleanup() && !saved_count && !post_saved && !post_bit && !memcmp(registers,original,sizeof(original)));
   assert(q1000k_phy_rx_probe(mode)==-EBUSY); /* lifetime attempt remains consumed */
@@ -204,6 +209,18 @@ int main(void) {
    assert(q1000k_phy_rx_probe_cleanup()==-EIO && (saved_count || post_pending));
    fail_at=0; assert(!q1000k_phy_rx_probe_cleanup() && !memcmp(registers,original,sizeof(original)));
   }
+ }
+ /* Every failure in a later pass stops the series and preserves originals. */
+ reset(); assert(!q1000k_phy_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT));
+ int first_ops=operations;
+ for(int n=1;n<=first_ops;n++) {
+  reset(); assert(!q1000k_phy_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT));
+  operations=0; fail_at=n;
+  assert(q1000k_phy_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT)==-EIO);
+  fail_at=0;
+  if(repeat_failed) assert(q1000k_phy_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT)==-EBUSY);
+  assert(!q1000k_phy_rx_probe_cleanup() && !memcmp(registers,original,sizeof(original)));
+  assert(q1000k_phy_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT)==-EBUSY);
  }
  reset(); context_error=-EPERM; assert(q1000k_phy_rx_probe(1)==-EPERM && !updates);
  reset(); phy.trans_tx_status=1; assert(q1000k_phy_rx_probe(1)==-EACCES && !updates);

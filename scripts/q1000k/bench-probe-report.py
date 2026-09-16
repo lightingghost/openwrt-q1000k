@@ -11,7 +11,7 @@ PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-lo
           'cdr-auto-release', 'cdr-internal-auto', 'prcal-finalize', 'fll-auto',
           'rx-sequence-auto', 'post-eye-ready', 'oem-clock-cycle', 'oem-rx-acquire',
           'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun',
-          'eye-current', 'oem-analog', 'oem-full-reset', 'oem-cal-reset', 'oem-cal-auto', 'oem-eye-0', 'oem-eye-1', 'oem-eye-2', 'oem-eye-3', 'oem-eye-4', 'oem-eye-5', 'oem-eye-6', 'oem-eye-7', 'oem-post-init', 'oem-post-cal')
+          'eye-current', 'oem-analog', 'oem-full-reset', 'oem-cal-reset', 'oem-cal-auto', 'oem-eye-0', 'oem-eye-1', 'oem-eye-2', 'oem-eye-3', 'oem-eye-4', 'oem-eye-5', 'oem-eye-6', 'oem-eye-7', 'oem-post-init', 'oem-post-cal', 'oem-reset-repeat')
 HEADER = Path(__file__).resolve().parents[2] / 'package/kernel/airoha-pon/src/bsp/include/q1000k_rx_diag.h'
 FIELDS = tuple(re.findall(r'X\((\w+),', HEADER.read_text()))
 V2_FIELDS = ('tdc_ncpo', 'fifo_clock_status')
@@ -21,7 +21,7 @@ V3_FIELDS = ('cdr_injection', 'cdr_lpf_override', 'fll_idac', 'fll_load',
 V4_FIELDS = ('eye_pi_raw', 'eye_ready_raw', 'eye_done_raw', 'eye_horizontal_raw', 'eye_vertical_raw', 'eye_latch_control', 'fll_adc_raw0', 'fll_adc_raw1', 'fll_adc_raw2', 'fll_adc_raw3', 'fll_adc_raw4')
 FIELDS_BY_VERSION = {1: tuple(k for k in FIELDS if k not in V2_FIELDS + V3_FIELDS + V4_FIELDS),
                      2: tuple(k for k in FIELDS if k not in V3_FIELDS + V4_FIELDS),
-                     3: tuple(k for k in FIELDS if k not in V4_FIELDS), 4: FIELDS}
+                     3: tuple(k for k in FIELDS if k not in V4_FIELDS), 4: FIELDS, 5: FIELDS}
 
 
 def eye_observation(serial, probe, attempts):
@@ -58,16 +58,78 @@ def eye_observation(serial, probe, attempts):
                         'A failed completion is retained as an observation; there is no hidden recovery retry.'])
 
 
+def recovery_series(serial, probe, attempts):
+    """Require a complete, ordered record of each reset and a terminal latch.
+
+    Deltas are between the end of one reset and the start of the next; never
+    across the reset itself. The full raw boundary words remain in the report.
+    """
+    prefix = 'q1000k: RX recovery '
+    if probe != 'oem-reset-repeat':
+        if prefix in serial:
+            raise ValueError('Unexpected repeated recovery records')
+        return None
+    if type(attempts) is not int or not 0 <= attempts <= 6:
+        raise ValueError('Repeated recovery attempt count exceeds its bound')
+    keys = ('sampled_ms', 'synced', 'controller_los', 'phy_los', 'frames', 'lof',
+            'fec_total', 'fec_corrected', 'fec_uncorrected', 'cw_start', 'cw_end',
+            'sof_to_mac', 'eof_to_mac', 'psync_mismatch', 'sfc_hec_error',
+            'pon_id_hec_error', 'ncpo', 'writes')
+    pattern = re.escape(prefix) + r'phase=(before|after) attempt=(\d+) ' + ' '.join(
+        key + r'=(\d+)' for key in keys) + r'(?:\r?\n|$)'
+    matches = list(re.finditer(pattern, serial))
+    stops = list(re.finditer(re.escape(prefix) + r'stopped reason=(budget|sync|los|error|shutdown) attempts=(\d+)(?:\r?\n|$)', serial))
+    if len(matches) != attempts * 2 or len(stops) != 1 or serial.count(prefix) != len(matches)+1:
+        raise ValueError('Missing, duplicated or failed repeated recovery records')
+    stop = stops[0]
+    reason = stop[1]
+    if int(stop[2]) != attempts or (reason == 'budget' and attempts != 6):
+        raise ValueError('Repeated recovery stop count disagrees with diagnostics')
+    pairs, intervals = [], []
+    for index in range(attempts):
+        a, b = matches[index*2:index*2+2]
+        if (a[1], b[1], int(a[2]), int(b[2])) != ('before', 'after', index+1, index+1):
+            raise ValueError('Recovery records are out of order')
+        before = dict(zip(keys, map(int, a.groups()[2:])))
+        after = dict(zip(keys, map(int, b.groups()[2:])))
+        for row in (before, after):
+            if any(row[k] > 0xffffffff for k in keys if k != 'sampled_ms') or any(
+                    row[k] not in (0, 1) for k in ('synced', 'controller_los', 'phy_los')):
+                raise ValueError('Recovery boundary value is invalid')
+        if (before['synced'] or before['controller_los'] or before['phy_los'] or
+                after['sampled_ms'] < before['sampled_ms'] or
+                after['writes'] <= before['writes'] or a.start() > stop.start()):
+            raise ValueError('Recovery ran after a stop condition or has invalid boundaries')
+        if (after['synced'] and reason != 'sync') or (
+                not after['synced'] and (after['controller_los'] or after['phy_los']) and reason != 'los'):
+            raise ValueError('Recovery stop reason disagrees with observed sync/LOS')
+        if index:
+            previous = pairs[-1]['after']
+            elapsed = before['sampled_ms'] - previous['sampled_ms']
+            if elapsed < 5000 or before['writes'] != previous['writes'] or any(
+                    previous[k] for k in ('synced', 'controller_los', 'phy_los')):
+                raise ValueError('Recovery interval or stop latch was not respected')
+            counters = keys[4:-2]
+            intervals.append(dict(after_attempt=index, before_attempt=index+1, elapsed_ms=elapsed,
+                counter_delta_mod32={k: (before[k]-previous[k]) & 0xffffffff for k in counters}))
+        pairs.append(dict(attempt=index+1, before=before, after=after))
+    return dict(maximum_attempts=6, minimum_interval_ms=5000, attempts=attempts,
+                stop_reason=reason, boundaries=pairs, acquisition_intervals=intervals,
+                deltas_cross_reset=False, raw_ncpo_is_not_lock_proof=True)
+
+
 def summarize(capture):
     record = json.loads((capture/'checkpoint.json').read_text())
     version = record.get('diagnostics_version')
     if type(version) is not int or version not in FIELDS_BY_VERSION:
-        raise ValueError('Capture requires diagnostics schema 1, 2, 3 or 4')
+        raise ValueError('Capture requires diagnostics schema 1, 2, 3, 4 or 5')
     fields = FIELDS_BY_VERSION[version]
     probe = record.get('probe')
     if probe is not None and probe not in PROBES:
         raise ValueError('Unknown probe in checkpoint')
     mode = PROBES.index(probe)+1 if probe else 0
+    if probe == 'oem-reset-repeat' and version < 5:
+        raise ValueError('Repeated recovery requires diagnostic schema 5')
     if mode > 22 and version < 4:
         raise ValueError("Deep receiver probe requires diagnostic schema 4")
     if mode > 10 and version < 3:
@@ -99,7 +161,7 @@ def summarize(capture):
             raise ValueError('Diagnostic mode/schema mismatch')
         if not previous_ms < row['sampled_ms'] or not 0 <= row['sampled_ms']-sample['sampled_ms'] <= 1500:
             raise ValueError('Stale/unpaired diagnostics')
-        if not max(attempts,sample['reacquire_attempts']) <= row['attempts'] <= int(record.get('reacquire_once',False)):
+        if not max(attempts,sample['reacquire_attempts']) <= row['attempts'] <= (6 if probe == 'oem-reset-repeat' else int(record.get('reacquire_once',False))):
             raise ValueError('Invalid probe attempt count')
         if row['writes'] < writes or (row['writes'] and (not mode or not row['attempts'])):
             raise ValueError('Invalid probe write count')
@@ -109,6 +171,7 @@ def summarize(capture):
             raise ValueError('Upstream test generator or loopback is active')
         previous_ms, attempts, writes = row['sampled_ms'],row['attempts'],row['writes']
     serial = (capture/'serial.log').read_text()
+    recovery = recovery_series(serial, probe, attempts)
     eye = eye_observation(serial, probe, attempts)
     post_expected = bool(attempts and probe in ('oem-post-init', 'oem-post-cal'))
     if serial.count('q1000k: RX OEM post-init checked=1 mask=00000100 value=00000100') != int(post_expected):
@@ -134,14 +197,15 @@ def summarize(capture):
         target=row['rx_meter_lock_target']; result=row['rx_meter_result']>>16
         meter.append((target & 0xffff) <= result <= (target>>16))
     return dict(schema_version=1, diagnostics_version=version, capture=str(capture), probe=probe, attempts=attempts,
-                fresh_eye=eye, oem_post_init_verified=post_expected,
+                fresh_eye=eye, oem_post_init_verified=post_expected, recovery_series=recovery,
                 checked_writes=writes, samples=len(rows), restoration_confirmed=bool(mode and attempts),
                 raw_words=words(rows), before=words([r for r in rows if not r['attempts']]),
                 after=words([r for r in rows if r['attempts']]),
                 rx_meter_upper16_within_configured_window=sorted(set(meter)),
                 checker_event_values=sorted({r['checker_event'] for r in rows}),
                 checker_error_delta_mod32=None if attempts else counter_delta(rows)['delta_mod32'],
-                checker_error_phases=dict(before=counter_delta(before),after=counter_delta(after)),
+                checker_error_phases=dict(before=counter_delta(before),after=counter_delta(after) if not recovery else None),
+                attempt_phases={str(n): counter_delta([r for r in rows if r['attempts']==n]) for n in range(attempts+1)},
                 counter_delta_crosses_intervention=False,
                 passive_clock_words={k: dict(first=rows[0][k], last=rows[-1][k],
                     minimum=min(r[k] for r in rows), maximum=max(r[k] for r in rows),

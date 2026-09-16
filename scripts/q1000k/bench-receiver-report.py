@@ -191,7 +191,7 @@ def summarize(capture):
         if reacquire or 'reacquire_enabled' in item or 'reacquire_attempts' in item:
             attempts = item.get('reacquire_attempts')
             if (item.get('reacquire_enabled') is not reacquire or type(attempts) is not int or
-                    not last_attempts <= attempts <= int(reacquire) or
+                    not last_attempts <= attempts <= (6 if record.get('probe') == 'oem-reset-repeat' and reacquire else int(reacquire)) or
                     (attempts and item['poll_calls'] < 10)):
                 raise ValueError('Receive reacquisition guard failed')
             last_attempts = attempts
@@ -210,12 +210,18 @@ def summarize(capture):
         'optical': _report.optical_summary(rx),
         'pcs_counters': {key: {'first': rx[0]['pcs_counters'][key],
                               'last': rx[-1]['pcs_counters'][key],
-                              'delta_mod32': (rx[-1]['pcs_counters'][key] - rx[0]['pcs_counters'][key]) & 0xffffffff}
+                              'delta_mod32': None if reacquire else (rx[-1]['pcs_counters'][key] - rx[0]['pcs_counters'][key]) & 0xffffffff}
                          for key in PCS_COUNTERS} if versions == {5} else None,
+        'pcs_counter_phases': {str(n): {key: {
+            'samples': len(items),
+            'delta_mod32': (items[-1]['pcs_counters'][key]-items[0]['pcs_counters'][key]) & 0xffffffff if len(items)>1 else None
+            } for key in PCS_COUNTERS} for n in range(last_attempts+1)
+            for items in [[x for x in rx if x.get('reacquire_attempts',0)==n]]} if versions == {5} else None,
+        'phy_words_by_attempt': {str(n): words([x['receiver'] for x in rx if x.get('reacquire_attempts',0)==n], names) for n in range(last_attempts+1)},
         'phy_words_before_reacquire': words([x['receiver'] for x in rx
                                             if x.get('reacquire_attempts', 0) == 0], names),
         'phy_words_after_reacquire': words([x['receiver'] for x in rx
-                                           if x.get('reacquire_attempts', 0) == 1], names),
+                                           if x.get('reacquire_attempts', 0) > 0], names),
         'rx_states': {k: sorted({x[k] for x in rx}) for k in
                       ('controller_los', 'phy_los', 'synced', 'sync_status')},
         'counters': {k: {'first': rx[0][k], 'last': rx[-1][k]} for k in COUNTERS},

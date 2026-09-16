@@ -4,9 +4,10 @@
 # may be visible. No service or boot hook calls this program.
 . /lib/q1000k-xgspon/common.sh
 export LC_ALL=C
-RX_DIAGNOSTICS_VERSION=4
+RX_DIAGNOSTICS_VERSION=5
 umask 077
 reacquire=0
+attempt_limit=0
 restore_pll=0
 restore_gain=0
 probe=0
@@ -125,7 +126,7 @@ rx_status() {
 	fi
 	json_get_type type reacquire_attempts; json_get_var attempts reacquire_attempts
 	[ "$type" = int ] && [ "$attempts" -ge "$last_attempts" ] &&
-		[ "$attempts" -le "$reacquire" ] || return 1
+		[ "$attempts" -le "$attempt_limit" ] || return 1
 	last_attempts=$attempts
 	for field in mac_irq_mask sync_status frames lof fec_total fec_corrected fec_uncorrected irq_calls poll_calls sampled_ms; do
 		json_get_type type "$field"; json_get_var value "$field"
@@ -165,7 +166,7 @@ rx_diagnostics() {
 	json_get_var sampled_ms sampled_ms
 	[ "$sampled_ms" -ge "$last_sample" ] && [ "$((sampled_ms - last_sample))" -le 1500 ] || return 1
 	json_get_var attempts attempts; json_get_var writes writes
-	[ "$attempts" -ge "$last_attempts" ] && [ "$attempts" -le "$reacquire" ] || return 1
+	[ "$attempts" -ge "$last_attempts" ] && [ "$attempts" -le "$attempt_limit" ] || return 1
 	[ "$writes" -ge "$last_probe_writes" ] || return 1
 	[ "$probe" != 0 ] || [ "$writes" = 0 ] || return 1
 	json_get_var checker checker_control; json_get_var route data_route_control; json_get_var lane bist_lane_control
@@ -274,7 +275,7 @@ case "$1" in
 						oem-eye-5) probe=33 ;;
 						oem-eye-6) probe=34 ;;
 						oem-eye-7) probe=35 ;;
-						oem-post-init) probe=36 ;; oem-post-cal) probe=37 ;;
+						oem-post-init) probe=36 ;; oem-post-cal) probe=37 ;; oem-reset-repeat) probe=38 ;;
 						*) fail 'Unknown bounded receiver probe.' ;;
 					esac
 					shift 2 ;;
@@ -298,7 +299,12 @@ case "$1" in
 		done
 		[ "$restore_pll" = 0 ] || [ "$reacquire" = 1 ] || fail 'PLL restoration requires --reacquire-once.'
 		[ "$restore_gain" = 0 ] || [ "$reacquire" = 1 ] || fail 'Receiver gain restoration requires --reacquire-once.'
-		[ "$probe" = 0 ] || { [ "$reacquire" = 1 ] && [ "$restore_pll" = 0 ] && [ "$restore_gain" = 0 ]; } || fail 'Probe requires exclusive single recovery.' ;;
+		[ "$probe" = 0 ] || { [ "$reacquire" = 1 ] && [ "$restore_pll" = 0 ] && [ "$restore_gain" = 0 ]; } || fail 'Probe requires exclusive recovery.'
+		attempt_limit=$reacquire
+		if [ "$probe" = 38 ]; then
+			[ "$samples" -ge 90 ] || fail 'Repeated recovery requires at least 90 samples.'
+			attempt_limit=6
+		fi ;;
 	*) fail 'Commands: status, controller, stack, receive' ;;
 esac
 

@@ -25,7 +25,7 @@ RECEIVER=module('bench-receiver-report')
 HYPOTHESES=module('bench-hypotheses')
 
 # Cases map onto the immutable module enum; no arbitrary addresses or values.
-DEEP_PROBES=('oem-post-init','oem-post-cal') + RUN.PROBES[22:35]
+DEEP_PROBES=('oem-post-init','oem-post-cal','oem-reset-repeat') + RUN.PROBES[22:35]
 CONNECTED_PROBES=DEEP_PROBES + tuple(name for name in RUN.PROBES[:22] if name != 'checker-dark')
 CONTROLLER_CASES={'oem-md32':dict(oem_md32=True,rx_output='unchanged')}
 for output in ('400-flat','600-flat','600-boost'):
@@ -49,7 +49,7 @@ COVERAGE={
                     external='Dark and reconnected controls using this image; optional live disconnect/reconnect within a 180-s baseline tests IRQ response.'),
  'receiver-gain': dict(cases=['gain-auto','gain-low']+[n for n in CONNECTED_PROBES if n.startswith('oem-eye-') or n in ('eye-current','oem-analog','oem-cal-reset','oem-cal-auto')]+[name for name in CONNECTED_PROBES if name == 'oem-peaking'], shared='Gain, equalization, analog and controller readbacks',
                       external='OEM gain=1 and gain+PLL already failed on prior bench. Unknown equalizer/calibration values require board evidence, not a blind sweep.'),
- 'clock-rate-reset': dict(cases=['oem-full-reset','oem-analog','oem-cal-reset','oem-cal-auto','public-recovery','tdc-delay','pll-order','oem-order']+[name for name in CONNECTED_PROBES if name in ('cdr-auto-release','cdr-internal-auto','prcal-finalize','fll-auto','rx-sequence-auto','post-eye-ready','oem-clock-cycle','oem-rx-acquire','combined-auto','prcal-rerun')],
+ 'clock-rate-reset': dict(cases=['oem-full-reset','oem-reset-repeat','oem-analog','oem-cal-reset','oem-cal-auto','public-recovery','tdc-delay','pll-order','oem-order']+[name for name in CONNECTED_PROBES if name in ('cdr-auto-release','cdr-internal-auto','prcal-finalize','fll-auto','rx-sequence-auto','post-eye-ready','oem-clock-cycle','oem-rx-acquire','combined-auto','prcal-rerun')],
                          shared='RX/PLL/PMA/TDC frequency monitors, targets, dividers, reset and sequence controls',
                          external='Independent recovered-clock measurement if readbacks remain ambiguous; The separate oem-full-reset case uses the exact OEM twelve-bit reset; upper-bit meanings remain unknown.'),
  'receive-path': dict(cases=['eye-current','oem-post-init','oem-post-cal','bit-order','checker']+[name for name in CONTROLLER_CASES if name.startswith('rx-output-')], shared='Input mux, bus width, data route, fixed EN7573 RX output settings and independent RX checker',
@@ -66,8 +66,14 @@ COVERAGE={
 }
 
 
+def case_samples(name, samples):
+    if name == 'oem-reset-repeat':
+        return max(90, samples)
+    return samples if name not in ('baseline', 'baseline-repeat') else 30
+
+
 def plan(samples, selected_case=None):
-    cases = [dict(name=n,probe=p,reacquire=r,samples=samples if r or n in CONTROLLER_CASES else 30,
+    cases = [dict(name=n,probe=p,reacquire=r,samples=case_samples(n, samples),
                   **CONTROLLER_CASES.get(n,dict(oem_md32=False,rx_output='unchanged'))) for n,p,r in CASES]
     if selected_case is not None:
         cases = [case for case in cases if case['name'] == selected_case]
@@ -75,18 +81,22 @@ def plan(samples, selected_case=None):
             raise ValueError('Unknown or excluded case: ' + selected_case)
     return dict(schema_version=1,host=RUN.HOST,optical_tx=False,flash=False,
                 cases=cases,automatic_retries=False,
+                bounded_recovery={'case':'oem-reset-repeat','maximum_attempts':6,'minimum_interval_ms':5000,
+                                  'single_attempt_control':'oem-full-reset','zero_attempt_control':'baseline'},
                 coverage=COVERAGE,external_tests_status='pending physical evidence; not automated',
                 stop_conditions=['Any guard, kernel, diagnostic, cleanup or input-removal failure',
-                                 'Light is lost during a connected case', 'Missing single probe attempt or restored-field marker'],
+                                 'Light is lost during a connected case', 'Missing required probe attempts, recovery boundary records or restored-field marker'],
                 collection_completion_is_not_optical_service_validation=True)
 
 
 def check_artifact_compatibility(cases, version):
     """Reject unsupported modes locally, before staging anything on a device."""
-    if type(version) is not int or version not in (1,2,3,4):
+    if type(version) is not int or version not in (1,2,3,4,5):
         raise ValueError('Unsupported artifact receiver diagnostics schema')
     if version == 3 and any(case.get("probe") in RUN.PROBES[22:] for case in cases):
         raise ValueError("Artifact diagnostics schema 4 is required for deep receiver cases")
+    if version == 4 and any(case.get('probe') == 'oem-reset-repeat' for case in cases):
+        raise ValueError('Artifact diagnostics schema 5 is required for repeated recovery')
     legacy_probes=RUN.PROBES[:10]
     unsupported=[case['name'] for case in cases if version < 3 and (
         case.get('probe') not in (None,*legacy_probes) or case.get('oem_md32',False) or
@@ -98,7 +108,7 @@ def check_artifact_compatibility(cases, version):
 def stage(args,name,probe,reacquire):
     capture=args.output/name
     command=['receive','--artifact',str(args.artifact),'--output',str(capture),
-             '--inputs',str(args.inputs),'--fiber-connected','--samples',str(args.samples if reacquire or name in CONTROLLER_CASES else 30),
+             '--inputs',str(args.inputs),'--fiber-connected','--samples',str(case_samples(name,args.samples)),
              '--serial-log',str(args.serial_log)]
     if reacquire: command.append('--reacquire-once')
     if probe: command.extend(['--probe',probe])
@@ -136,6 +146,13 @@ def check_case(report,probe,reacquire):
         raise ValueError('Light was not continuously present; stop to inspect the connection')
     if diag['probe']!=probe or rx['reacquire_requested']!=reacquire:
         raise ValueError('Case selection did not match the captured evidence')
+    if probe == 'oem-reset-repeat':
+        series=diag.get('recovery_series')
+        if not series or series['stop_reason'] not in ('budget','sync'):
+            raise ValueError('Repeated recovery did not complete its budget or stop on synchronization')
+        if series['stop_reason']=='budget' and diag['attempts']!=6:
+            raise ValueError('Repeated recovery stopped with an incomplete attempt budget')
+        return 'observed' if diag['attempts'] else 'not-triggered-already-synchronized'
     if reacquire and not rx['downstream_stable'] and diag['attempts']!=1:
         raise ValueError('Unsuccessful receive case did not execute its one-attempt experiment')
     # A already-synchronized receiver does not satisfy the no-sync trigger.

@@ -41,7 +41,9 @@ int q1000k_phy_needs_configure(void);
  * polling observations of light without sync. Optional PLL restoration requires
  * reacquisition and stays under the same single-attempt budget. Optional OEM
  * RX gain uses the same budget and restores its saved bits on stop. Neither enables
- * registration or optical TX.
+ * registration or optical TX. The explicit OEM_RESET_REPEAT probe instead
+ * permits six attempts at least five seconds apart; it latches sync, loss of
+ * light after the first attempt, errors and shutdown until module removal.
  */
 int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain);
 enum q1000k_rx_probe {
@@ -83,9 +85,12 @@ enum q1000k_rx_probe {
 	Q1000K_RX_PROBE_OEM_EYE_7,
 	Q1000K_RX_PROBE_OEM_POST_INIT,
 	Q1000K_RX_PROBE_OEM_POST_CAL,
+	Q1000K_RX_PROBE_OEM_RESET_REPEAT,
 	Q1000K_RX_PROBE_COUNT,
 };
-/* Select before configuration, with RX bench + one-attempt recovery enabled.
+#define Q1000K_RX_REPEAT_LIMIT 6
+#define Q1000K_RX_REPEAT_INTERVAL_MS 5000
+/* Select before configuration, with RX bench + recovery enabled.
  * Exclusive with the older gain/PLL flags. Never enables an optical or PRBS TX.
  */
 int q1000k_phy_set_rx_probe(u32 probe);

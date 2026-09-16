@@ -39,6 +39,8 @@ static u32 qphy_rx_probe_mode;
 static u32 qphy_rx_attempts, qphy_rx_no_sync;
 static bool qphy_rx_seen_light;
 static u32 qphy_rx_irqs, qphy_rx_polls;
+static const char *qphy_repeat_reason;
+static u64 qphy_repeat_next_ms;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
 	EN7581_XGPON_PHY_RX_LOF_INT_EN | EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN | \
 	EN7581_XGPON_PHY_RX_LOS_INT_EN)
@@ -190,10 +192,79 @@ static int qphy_mask(void)
 	return first;
 }
 
+/* Callback mutex owns the entire series and its stop latch. A single observed
+ * sync (including an IRQ/user sample) prevents any later acquisition reset.
+ */
+static void qphy_repeat_stop(const char *reason)
+{
+	if (qphy_rx_probe_mode != Q1000K_RX_PROBE_OEM_RESET_REPEAT || qphy_repeat_reason)
+		return;
+	qphy_repeat_reason = reason;
+	pr_info("q1000k: RX recovery stopped reason=%s attempts=%u\n", reason, qphy_rx_attempts);
+}
+
+static int qphy_repeat_boundary(const struct q1000k_rx_sample *s, const char *phase, u32 attempt)
+{
+	u32 ncpo;
+	int ret = an7581_pon_phy_read(EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4, &ncpo);
+
+	if (ret)
+		return ret;
+	pr_info("q1000k: RX recovery phase=%s attempt=%u sampled_ms=%llu synced=%u controller_los=%u phy_los=%u frames=%u lof=%u fec_total=%u fec_corrected=%u fec_uncorrected=%u cw_start=%u cw_end=%u sof_to_mac=%u eof_to_mac=%u psync_mismatch=%u sfc_hec_error=%u pon_id_hec_error=%u ncpo=%u writes=%u\n",
+		phase, attempt, (unsigned long long)s->sampled_ms, s->synced, s->controller_los, s->phy_los,
+		s->frames, s->lof, s->fec_total, s->fec_corrected, s->fec_uncorrected,
+		s->pcs_counters.cw_start, s->pcs_counters.cw_end,
+		s->pcs_counters.sof_to_mac, s->pcs_counters.eof_to_mac,
+		s->pcs_counters.psync_mismatch, s->pcs_counters.sfc_hec_error,
+		s->pcs_counters.pon_id_hec_error, ncpo, q1000k_phy_rx_probe_writes());
+	return 0;
+}
+
+static int qphy_repeat_poll(struct q1000k_rx_sample *sample)
+{
+	int ret;
+
+	if (qphy_repeat_reason)
+		return 0;
+	if (sample->controller_los || sample->phy_los) {
+		qphy_rx_no_sync = 0;
+		return 0;
+	}
+	if (!qphy_rx_attempts) {
+		if (++qphy_rx_no_sync < 10)
+			return 0;
+	} else if (sample->sampled_ms < qphy_repeat_next_ms) {
+		return 0;
+	}
+	if (qphy_rx_attempts >= Q1000K_RX_REPEAT_LIMIT) {
+		qphy_repeat_stop("budget");
+		return 0;
+	}
+	ret = qphy_repeat_boundary(sample, "before", qphy_rx_attempts + 1);
+	if (ret)
+		return ret;
+	/* Consume the attempt before its first write; failures are never retried. */
+	qphy_rx_attempts++;
+	ret = q1000k_phy_rx_probe(Q1000K_RX_PROBE_OEM_RESET_REPEAT);
+	if (!ret)
+		ret = qphy_rx_sample(sample);
+	if (!ret)
+		ret = qphy_repeat_boundary(sample, "after", qphy_rx_attempts);
+	if (ret) {
+		pr_info("q1000k: RX recovery failure attempt=%u error=%d\n", qphy_rx_attempts, ret);
+		return ret;
+	}
+	qphy_repeat_next_ms = ktime_to_ms(ktime_get_boottime()) + Q1000K_RX_REPEAT_INTERVAL_MS;
+	if (qphy_rx_attempts == Q1000K_RX_REPEAT_LIMIT)
+		qphy_repeat_stop("budget");
+	return 0;
+}
+
 static void qphy_failed(int error)
 {
 	if (!error)
 		return;
+	qphy_repeat_stop("error");
 	WRITE_ONCE(qphy_active, false);
 	WRITE_ONCE(gpPhyPriv->pon_stop_flag, TRUE);
 	WRITE_ONCE(gpPhyPriv->is_phy_start, FALSE);
@@ -216,7 +287,10 @@ static void qphy_poll_work(struct work_struct *work)
 	if (!ret && qphy_rx_bench) {
 		qphy_rx_polls++;
 		ret = qphy_rx_sample(&sample);
-		if (!ret && qphy_rx_reacquire && !qphy_rx_attempts && READ_ONCE(qphy_active)) {
+		if (!ret && qphy_rx_reacquire && READ_ONCE(qphy_active) &&
+		    qphy_rx_probe_mode == Q1000K_RX_PROBE_OEM_RESET_REPEAT) {
+			ret = qphy_repeat_poll(&sample);
+		} else if (!ret && qphy_rx_reacquire && !qphy_rx_attempts && READ_ONCE(qphy_active)) {
 			bool dark_checker = qphy_rx_probe_mode == Q1000K_RX_PROBE_CHECKER_DARK;
 			bool eligible;
 
@@ -590,6 +664,8 @@ static int qphy_stop(void)
 	/* A poll already running when stop began may have rearmed this timer. */
 	timer_delete_sync(&gpPhyPriv->event_poll_timer);
 	qphy_callback_lock();
+	if (qphy_rx_attempts || qphy_rx_no_sync)
+		qphy_repeat_stop("shutdown");
 	if (qphy_controller) {
 		err = q1000k_pon_set_tx(qphy_controller, false);
 		if (!ret) {
@@ -1018,6 +1094,10 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	result.gain_restore_enabled = qphy_rx_restore_gain;
 	result.reacquire_attempts = qphy_rx_attempts;
 	result.sampled_ms = ktime_to_ms(ktime_get_boottime());
+	if (result.synced)
+		qphy_repeat_stop("sync");
+	else if (qphy_rx_attempts && (result.controller_los || result.phy_los))
+		qphy_repeat_stop("los");
 	*sample = result;
 	return 0;
 }
@@ -1290,6 +1370,8 @@ int q1000k_phy_init(void)
 	qphy_rx_probe_mode = 0;
 	qphy_rx_attempts = qphy_rx_no_sync = 0;
 	qphy_rx_seen_light = false;
+	qphy_repeat_reason = NULL;
+	qphy_repeat_next_ms = 0;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;
 	gpPhyPriv->wan_sel = SCU_WAN_CONF_REG_WAN_SEL_XGSPON;

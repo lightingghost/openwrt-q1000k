@@ -21,6 +21,8 @@ static struct { u32 reg, end, start, value; } saved[256];
 static unsigned int saved_count;
 static u32 probe_writes;
 static bool post_pending;
+static u32 repeat_calls;
+static bool repeat_failed, probe_closed;
 static int probe_prcal_finalize(void);
 
 static int probe_ready(void)
@@ -404,10 +406,27 @@ int q1000k_phy_rx_probe(u32 probe)
 	u32 value = 0, route = 0, lane = 0;
 	int ret = probe_ready();
 
-	if (ret) return ret;
+	if (ret) {
+		if (repeat_calls) repeat_failed = true;
+		return ret;
+	}
 	if (!probe || probe >= Q1000K_RX_PROBE_COUNT) return -EINVAL;
-	if (saved_count || probe_writes || post_pending) return -EBUSY;
+	if (probe_closed) return -EBUSY;
 	if (!gpPhyPriv->pma_init_done || gpPhyPriv->first_plugin_flag) return -EAGAIN;
+	if (probe == Q1000K_RX_PROBE_OEM_RESET_REPEAT) {
+		/* Only this fixed recipe may repeat, with its own hard bound.
+		 * Keep the original field values until final lifecycle cleanup.
+		 * Never retry a partial failure or reuse another probe's state.
+		 */
+		if (repeat_failed || repeat_calls >= Q1000K_RX_REPEAT_LIMIT ||
+		    (!repeat_calls && (saved_count || probe_writes || post_pending)))
+			return -EBUSY;
+		repeat_calls++;
+		ret = probe_oem_clock_cycle_reset(true);
+		repeat_failed = !!ret;
+		return ret;
+	}
+	if (saved_count || probe_writes || post_pending || repeat_calls) return -EBUSY;
 	switch (probe) {
 	case Q1000K_RX_PROBE_BIT_ORDER:
 		ret = probe_read(EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL, &value);
@@ -515,6 +534,7 @@ int q1000k_phy_rx_probe_cleanup(void)
 {
 	int ret = q1000k_phy_callback_context();
 
+	if (!ret && (saved_count || probe_writes || post_pending || repeat_calls)) probe_closed = true;
 	if (ret || (!saved_count && !post_pending)) return ret;
 	while (saved_count) {
 		unsigned int i = saved_count - 1;

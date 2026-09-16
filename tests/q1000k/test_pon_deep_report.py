@@ -42,7 +42,12 @@ class DeepReportTests(unittest.TestCase):
                 continue
             with self.subTest(case=case['name']), self.assertRaisesRegex(ValueError, 'schema 4'):
                 SUITE.check_artifact_compatibility([case], 3)
-            SUITE.check_artifact_compatibility([case], 4)
+            if case['probe']=='oem-reset-repeat':
+                with self.assertRaisesRegex(ValueError,'schema 5'):
+                    SUITE.check_artifact_compatibility([case], 4)
+            else:
+                SUITE.check_artifact_compatibility([case], 4)
+            SUITE.check_artifact_compatibility([case], 5)
         self.assertEqual(SUITE.CONNECTED_PROBES[:2], ('oem-post-init', 'oem-post-cal'))
 
     def test_post_init_coexists_with_output_profile_without_relaxing_other_bits(self):

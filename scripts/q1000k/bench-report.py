@@ -41,7 +41,7 @@ def optical_summary(samples):
                 rx_power_dbm=bounds([round(10 * math.log10(x / 1000000), 2) for x in readings]))
 
 
-def receive_summary(samples, fiber, reacquire=False, require_stability=True, restore_pll=False, restore_gain=False):
+def receive_summary(samples, fiber, reacquire=False, require_stability=True, restore_pll=False, restore_gain=False, attempt_limit=1):
     last_sample, last_poll, last_frames, stable = -1, 0, None, 0
     last_attempts = 0
     for item in samples:
@@ -70,7 +70,7 @@ def receive_summary(samples, fiber, reacquire=False, require_stability=True, res
         if reacquire or 'reacquire_enabled' in item or 'reacquire_attempts' in item:
             attempts = item.get('reacquire_attempts')
             if (item.get('reacquire_enabled') is not reacquire or
-                    type(attempts) is not int or not last_attempts <= attempts <= int(reacquire) or
+                    type(attempts) is not int or not last_attempts <= attempts <= (attempt_limit if reacquire else 0) or
                     (attempts and item['poll_calls'] < 10)):
                 raise ValueError('Receive reacquisition guard failed')
             last_attempts = attempts
@@ -187,7 +187,7 @@ def summarize(capture, allow_downstream_failure=False):
                  r'(?:shutdown|reconfigure|activation) failed|'
                  r'FE write .*expected', serial):
         raise ValueError(f'{capture}: kernel failure diagnostic in serial capture')
-    rx = receive_summary(receive, fiber, reacquire, not failed_downstream, restore_pll, restore_gain) if action == 'receive' else None
+    rx = receive_summary(receive, fiber, reacquire, not failed_downstream, restore_pll, restore_gain, 6 if record.get('probe') == 'oem-reset-repeat' else 1) if action == 'receive' else None
     if restore_gain and rx['reacquire_attempts'] and len(re.findall(
             r'q1000k: RX gain restored to (?:0x[0-9a-f]+|0)\b', serial)) != 1:
         raise ValueError('Original receiver gain restoration was not confirmed')
