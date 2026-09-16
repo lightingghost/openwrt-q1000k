@@ -12,6 +12,12 @@ These observations retain clock reacquisition, signal quality and unexplained
 OEM initialization as open questions. They do not establish CDR lock or data
 validity. DSD record transfer and the tested output/clock changes were verified.
 
+The subsequent loader-fix image booted and loaded without the temporary alias.
+Its 30-sample power check still saw light and no frames, but PHY shutdown failed
+after RX draining. The collector stopped before the pending passive reconnect.
+The exact failing shutdown operation was not logged; diagnostics are required
+before another reproduction. See the follow-up section in the results above.
+
 The prior passive plan is retained in [RX-NEXT](XGSPON-RX-NEXT.q1000k.md), with
 its insertion-handler claim corrected. The sections below preserve the earlier
 hypotheses and historical bench coverage; use the latest results above for

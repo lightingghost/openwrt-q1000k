@@ -2158,3 +2158,20 @@ inherited with identical generated test source and driver trees. Only the
 runtime helper changed; the other 13 pinned files, including all nine modules,
 are byte-identical. Configurations/protected refs were preserved. This corrected
 image has not been booted; the hardware evidence belongs to the original image.
+
+## Loader-fix hardware follow-up — 2026-09-15
+
+The user booted the corrected `4c84635a09` image. Its helper loaded the
+controller without an underscore alias and all runtime hashes matched. A
+30-sample connected baseline measured −18.76 to −18.48 dBm, with both LOS
+indicators clear and no downstream synchronization, frames or PCS activity.
+
+Shutdown then failed at pipeline stage 6, immediately after RX draining and
+before PHY quiescence completed. Module removal, postflight and private-input
+cleanup passed, but the collector correctly rejected the capture and stopped
+before the missing passive reconnect control. No retry was performed. The
+existing generic error cannot distinguish interrupt-mask readback, controller
+TX-disable/health, or a previously latched PHY fault. The earlier original-image
+full log contains a successful cold run with the same WAN/reset entry state,
+so cold boot is not an established cause. Exact evidence and limits are in
+[the result follow-up](XGSPON-RX-RESULTS-20260915.q1000k.md).

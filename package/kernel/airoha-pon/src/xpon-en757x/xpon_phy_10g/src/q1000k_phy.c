@@ -89,10 +89,23 @@ static int qphy_reg_write(u32 reg, u32 value)
 	int ret;
 
 	ret = an7581_pon_phy_write(reg, value);
-	if (ret)
+	if (ret) {
+		pr_err_ratelimited("q1000k: PHY register write failed: stage=write reg=%#x expected=%#x error=%d\n",
+				   reg, value, ret);
 		return ret;
+	}
 	ret = an7581_pon_phy_read(reg, &actual);
-	return ret ? ret : actual != value ? -EIO : 0;
+	if (ret) {
+		pr_err_ratelimited("q1000k: PHY register write failed: stage=read reg=%#x expected=%#x error=%d\n",
+				   reg, value, ret);
+		return ret;
+	}
+	if (actual != value) {
+		pr_err_ratelimited("q1000k: PHY register write failed: stage=readback reg=%#x expected=%#x actual=%#x error=%d\n",
+				   reg, value, actual, -EIO);
+		return -EIO;
+	}
+	return 0;
 }
 
 int q1000k_phy_controller_check(void)
@@ -542,15 +555,23 @@ EXPORT_SYMBOL(q1000k_phy_start);
  */
 static int qphy_stop(void)
 {
+	const char *failed_phase = NULL;
+	int prior_fault = READ_ONCE(qphy_fault);
 	int ret = 0, err;
 
-	if (!gpPhyPriv)
+	if (!gpPhyPriv) {
+		pr_err_ratelimited("q1000k: PHY stop failed: phase=no-private-state error=%d prior_fault=%d\n",
+				   -ENODEV, prior_fault);
 		return -ENODEV;
+	}
 	WRITE_ONCE(qphy_active, false);
 	WRITE_ONCE(gpPhyPriv->pon_stop_flag, TRUE);
 	WRITE_ONCE(gpPhyPriv->is_phy_start, FALSE);
-	if (gpPhyPriv->phy_init_done || qphy_irq_dev)
+	if (gpPhyPriv->phy_init_done || qphy_irq_dev) {
 		ret = qphy_mask();
+		if (ret)
+			failed_phase = "mask-before-drain";
+	}
 	if (qphy_irq_dev) {
 		free_irq(qphy_irq, qphy_irq_dev);
 		qphy_irq_dev = NULL;
@@ -564,26 +585,47 @@ static int qphy_stop(void)
 	qphy_callback_lock();
 	if (qphy_controller) {
 		err = q1000k_pon_set_tx(qphy_controller, false);
-		if (!ret)
+		if (!ret) {
 			ret = err;
+			if (ret)
+				failed_phase = "controller-tx-disable";
+		}
 		gpPhyPriv->phyCfg.flags.txPowerEnFlag = false;
 		gpPhyPriv->trans_tx_status = PHY_DISABLE;
 	}
 	if (gpPhyPriv->phy_init_done) {
 		err = qphy_mask();
-		if (!ret)
+		if (!ret) {
 			ret = err;
+			if (ret)
+				failed_phase = "mask-after-drain";
+		}
 	}
-	if (!ret)
+	if (!ret) {
 		ret = q1000k_phy_rx_cleanup();
-	if (!ret)
+		if (ret)
+			failed_phase = "rx-gain-restore";
+	}
+	if (!ret) {
 		ret = q1000k_phy_rx_probe_cleanup();
-	if (!ret)
+		if (ret)
+			failed_phase = "rx-probe-restore";
+	}
+	if (!ret) {
 		ret = an7581_pon_phy_status();
+		if (ret)
+			failed_phase = "provider-status";
+	}
 	if (ret)
 		qphy_failed(ret);
-	if (!ret)
+	if (!ret) {
 		ret = qphy_fault;
+		if (ret)
+			failed_phase = "sticky-fault";
+	}
+	if (ret)
+		pr_err_ratelimited("q1000k: PHY stop failed: phase=%s error=%d prior_fault=%d sticky_fault=%d\n",
+				   failed_phase, ret, prior_fault, qphy_fault);
 	qphy_callback_unlock();
 	return ret;
 }

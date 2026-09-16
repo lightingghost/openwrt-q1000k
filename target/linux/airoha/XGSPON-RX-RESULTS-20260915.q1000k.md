@@ -7,6 +7,61 @@ The fresh dark-checker control did produce a light-dependent checker response.
 That narrows the evidence gap but does not establish a recovered data clock or
 valid XGS-PON data.
 
+## Loader-fix follow-up: power present, shutdown failure
+
+The user subsequently RAM-booted `4c84635a0956bd1a3fce467fe34a219fd5b12f2a`
+and confirmed the fiber was connected and ready for the missing passive control.
+Its preliminary 30-sample baseline loaded successfully using the corrected
+helper, with no temporary module-name alias. Every pinned runtime hash matched.
+
+| Observation | New baseline result |
+| --- | --- |
+| RX power | 13,300–14,200 nW; −18.76 to −18.48 dBm; final −18.54 dBm |
+| Controller and PHY LOS | Clear in all 30 samples |
+| Downstream synchronization / frames / PCS activity | None |
+| TX inhibit / registration | Inhibited throughout / disabled |
+| Controller status during sampling | No reported error |
+| Physical shutdown | Failed with `-EIO` after stage 6 (`RX_DRAINED`) |
+| Module removal, postflight and private-input cleanup | Passed |
+| Passive reconnect | Not started because the baseline failed shutdown |
+
+The serial record at uptime 310.098568 reports
+`shutdown failed after stage 6: -5 retired=0xffffffff containment=-5`.
+Stage 6 means all 32 FE channels retired, TX FIFO empty, MAC stops completed
+and RX DMA drained. The next operation is `q1000k_phy_quiesce()`. The bitmap
+`0xffffffff` records successful retirement of all 32 channels; it is not an
+all-ones hardware-register failure. The containment error may repeat the
+first stored PHY fault rather than identify another failing operation.
+
+The baseline performed no gain or probe restoration. The unresolved first-error
+candidates are a PHY interrupt-mask write/readback mismatch, controller health
+or TX-disable I²C/readback failure, or a previously latched PHY fault. Existing
+logs do not name the failing operation or register. The last healthy controller
+snapshot precedes the error by about 1.55 seconds and cannot exclude a shutdown
+failure. Normal helper GPIO power-off occurs later during controller unload.
+
+Cold entry was WAN `0x12`, local reset `0`, stop word `0`. Although the old
+collection baseline began warm, its full saved log includes an earlier successful
+original-image cold run with exactly this entry state. Cold boot alone therefore
+does not explain the failure. The loader fix changed no kernel-module bytes.
+
+The collector correctly rejected this run. These are retained raw observations,
+not another valid baseline or a completed physical control. A subsequent read-only
+preflight confirmed all PON modules and the helper lock absent. A targeted read
+of the six ordinary interrupt-enable words was unavailable because the image
+has no `devmem` executable; no values were obtained and no register writes made.
+No hardware retry was performed. Failure-only diagnostics now name the first
+shutdown phase, failed register operation/readback and controller I²C/control
+check. Failed transfers omit unavailable values. Shutdown checks, hardware
+operations, error precedence and containment remain enforced. The next image
+must be RAM-booted and its baseline must finish cleanly before a passive control.
+
+Evidence:
+
+- [Capture status and preserved archive](/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-4c84635a09-power-check-01/collection.json)
+- [Failure serial log](/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-4c84635a09-power-check-01/connected-baseline/serial.log)
+- [Follow-up observations](/home/odin/local/q1000k/build-artifacts/q1000k-xgspon/bench-4c84635a09-shutdown-followup/observations.json)
+
 ## Collection status and evidence
 
 The main collection has **35 valid cases out of the planned 36**:

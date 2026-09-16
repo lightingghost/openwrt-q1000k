@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=q1000k-pon-control
-PKG_RELEASE:=9
+PKG_RELEASE:=10
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk

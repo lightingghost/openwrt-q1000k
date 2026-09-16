@@ -37,6 +37,11 @@ struct en7573_io {
 	int (*read)(void *ctx, u8 device, u16 reg, u8 *data, size_t len);
 	int (*write)(void *ctx, u8 device, u16 reg, const u8 *data, size_t len);
 	void (*delay_ms)(void *ctx, unsigned int ms);
+	/* Failure-only control diagnostics. No firmware/calibration payloads.
+	 * mask=0 means the transfer failed and actual/expected are unavailable.
+	 */
+	void (*diagnostic)(void *ctx, const char *stage, u8 device, u16 reg,
+			   int error, u32 actual, u32 expected, u32 mask);
 };
 
 /* A failed sample leaves both values unknown (-1). Sampling never writes. */

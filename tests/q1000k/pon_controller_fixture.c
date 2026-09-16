@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
 #define DEFINE_MUTEX(n) struct mutex n
 #define EXPORT_SYMBOL_GPL(n)
 #define IS_ENABLED(n) 0
@@ -13,7 +15,16 @@
 #define PTR_ERR(p) ((intptr_t)(p))
 #define IS_ERR_OR_NULL(p) (!(p) || (uintptr_t)(p) >= (uintptr_t)-4095)
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
-#define dev_err(...) ((void)0)
+#define dev_err(dev,...) test_dev_err(__VA_ARGS__)
+#define dev_err_ratelimited(dev,...) test_dev_err(__VA_ARGS__)
+static char last_diagnostic[512];
+static unsigned int health_diagnostics;
+static void test_dev_err(const char *format,...)
+{
+    va_list args;
+    va_start(args,format); vsnprintf(last_diagnostic,sizeof(last_diagnostic),format,args); va_end(args);
+    if(strstr(last_diagnostic,"controller health mismatch:")) health_diagnostics++;
+}
 struct mutex { bool held; };
 static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=true; }
 static void mutex_unlock(struct mutex *m) { assert(m->held); m->held=false; }
@@ -120,6 +131,7 @@ int main(void)
     assert(!samples && !writes && !los_calls);
     p=create(); assert(q1000k_pon_get()==p); tx_error=-EREMOTEIO;
     assert(q1000k_pon_set_tx(p,true)==-EREMOTEIO && off==1 && p->fault==-EREMOTEIO);
+    assert(strstr(last_diagnostic,"enable=1 phase=write-readback error=-121 prior_fault=0"));
     assert(q1000k_pon_check(p)==-EREMOTEIO && off==2);
     assert(q1000k_pon_put(p)==-EREMOTEIO);
     pon_unpublish(p); pon_drop_device_ref(p);
@@ -129,6 +141,12 @@ int main(void)
     p=create(); assert(q1000k_pon_get()==p); los_value=-ETIMEDOUT;
     assert(q1000k_pon_get_los(p)==-ETIMEDOUT && off==1);
     assert(q1000k_pon_put(p)==-ETIMEDOUT); pon_unpublish(p); pon_drop_device_ref(p);
+    p=create(); assert(q1000k_pon_get()==p); hw_mcu=0;
+    before=health_diagnostics;
+    assert(q1000k_pon_set_tx(p,false)==-EIO && !writes && off==1 && p->fault==-EIO);
+    assert(health_diagnostics==(unsigned int)before+1);
+    assert(strstr(last_diagnostic,"enable=0 phase=check error=-5 prior_fault=0"));
+    assert(q1000k_pon_put(p)==-EIO); pon_unpublish(p); pon_drop_device_ref(p);
     p=create(); assert(q1000k_pon_get()==p); off_error=-EIO; tx_error=-ETIMEDOUT;
     assert(q1000k_pon_set_tx(p,false)==-ETIMEDOUT && p->fault==-ETIMEDOUT && p->mode==-2);
     assert(q1000k_pon_put(p)==-ETIMEDOUT); pon_unpublish(p); pon_drop_device_ref(p);
@@ -156,6 +174,6 @@ int main(void)
     assert(q1000k_pon_set_tx(p,true)==-EPERM && writes==1);
     assert(q1000k_pon_put(p)==-EPERM);
     pon_unpublish(p); pon_drop_device_ref(p);
-    assert(freed==9);
+    assert(freed==10);
     return 0;
 }

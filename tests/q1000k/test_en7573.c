@@ -11,7 +11,30 @@ struct model {
 	u8 pm[EN7573_PM_SIZE], dm[EN7573_DM_SIZE];
 	unsigned int calls, fail_at, readbacks;
 	bool corrupt, wrong_id, start_seen, md32_a0, output_mismatch, output_unrelated_mismatch, drop_tx_guard;
+	bool tx_readback_mismatch, tx_readback_all_ones;
+	unsigned int diagnostics;
+	const char *diagnostic_stage;
+	u8 diagnostic_device;
+	u16 diagnostic_reg;
+	int diagnostic_error;
+	u32 diagnostic_actual, diagnostic_expected, diagnostic_mask;
 };
+
+static void diagnostic(void *ctx, const char *stage, u8 device, u16 reg,
+		       int error, u32 actual, u32 expected, u32 mask)
+{
+	struct model *m = ctx;
+
+	assert(error);
+	m->diagnostics++;
+	m->diagnostic_stage = stage;
+	m->diagnostic_device = device;
+	m->diagnostic_reg = reg;
+	m->diagnostic_error = error;
+	m->diagnostic_actual = actual;
+	m->diagnostic_expected = expected;
+	m->diagnostic_mask = mask;
+}
 
 static u32 unpack(const u8 *p)
 {
@@ -76,6 +99,10 @@ static int wr(void *ctx, u8 dev, u16 reg, const u8 *buf, size_t len)
 		m->start_seen = true;
 	}
 	m->regs[reg / 4] = unpack(buf);
+	if (reg == EN7573_TX_CONTROL && m->tx_readback_mismatch)
+		m->regs[reg / 4] ^= EN7573_TX_DISABLE;
+	if (reg == EN7573_TX_CONTROL && m->tx_readback_all_ones)
+		m->regs[reg / 4] = ~0U;
 	if (m->output_mismatch && reg == 0x114)
 		m->regs[reg / 4] ^= 0x100;
 	if (m->output_unrelated_mismatch && reg == 0x114)
@@ -136,6 +163,63 @@ static void test_tx_control(void)
     m.regs[EN7573_TX_CONTROL/4]=~0U;
     assert(en7573_set_tx(&io,false)==-EIO);
     assert(en7573_sample_state(&io,&state)==-EIO && state.tx_disabled==-1);
+}
+
+static void test_control_failure_diagnostics(void)
+{
+	const char *tx_stages[] = { "set-tx-read", "set-tx-write", "set-tx-readback" };
+	const char *state_stages[] = { "state-mcu-read", "state-tx-read" };
+	struct model m = {0};
+	struct en7573_io io = { .ctx=&m, .read=rd, .write=wr, .diagnostic=diagnostic };
+	struct en7573_state state;
+	unsigned int fail, bank;
+
+	for (bank=0; bank<2; bank++) {
+		io.md32_a0 = m.md32_a0 = bank;
+		for (fail=1; fail<=2; fail++) {
+			m.calls=m.diagnostics=0; m.fail_at=fail;
+			assert(en7573_sample_state(&io,&state)==-EREMOTEIO);
+			assert(m.calls==fail && m.diagnostics==1);
+			assert(!strcmp(m.diagnostic_stage,state_stages[fail-1]));
+			assert(m.diagnostic_device==(bank && fail==1 ? 0x50 : 0x51));
+			assert(m.diagnostic_reg==(fail==1 ? 0x3018 : 0x3e0));
+			assert(m.diagnostic_error==-EREMOTEIO && !m.diagnostic_mask);
+			assert(state.md32_enabled==-1 && state.tx_disabled==-1);
+		}
+	}
+	m.fail_at=0; m.calls=m.diagnostics=0;
+	m.regs[0x3018/4]=1; m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+	assert(!en7573_sample_state(&io,&state) && m.calls==2 && !m.diagnostics);
+	for (fail=0; fail<2; fail++) {
+		m.calls=m.diagnostics=0;
+		m.regs[0x3018/4]=fail ? 1 : ~0U;
+		m.regs[0x3e0/4]=fail ? ~0U : EN7573_TX_DISABLE;
+		assert(en7573_sample_state(&io,&state)==-EIO && m.calls==2 && m.diagnostics==1);
+		assert(!strcmp(m.diagnostic_stage,fail ? "state-tx-all-ones" : "state-mcu-all-ones"));
+		assert(m.diagnostic_actual==~0U && m.diagnostic_mask==~0U);
+	}
+	m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+	for (fail=1; fail<=3; fail++) {
+		m.calls=m.diagnostics=0; m.fail_at=fail;
+		assert(en7573_set_tx(&io,false)==-EREMOTEIO && m.calls==fail && m.diagnostics==1);
+		assert(!strcmp(m.diagnostic_stage,tx_stages[fail-1]));
+		assert(m.diagnostic_device==0x51 && m.diagnostic_reg==0x3e0);
+		assert(m.diagnostic_error==-EREMOTEIO && !m.diagnostic_mask);
+	}
+	m.fail_at=0; m.calls=m.diagnostics=0;
+	m.regs[0x3e0/4]=~0U;
+	assert(en7573_set_tx(&io,false)==-EIO && m.calls==1 && m.diagnostics==1);
+	assert(!strcmp(m.diagnostic_stage,"set-tx-old-all-ones"));
+	m.calls=m.diagnostics=0; m.regs[0x3e0/4]=0x12340000; m.tx_readback_mismatch=true;
+	assert(en7573_set_tx(&io,false)==-EIO && m.calls==3 && m.diagnostics==1);
+	assert(!strcmp(m.diagnostic_stage,"set-tx-readback-mismatch"));
+	assert(m.diagnostic_actual==0x12340000 && m.diagnostic_expected==0x12340200);
+	assert(m.diagnostic_mask==EN7573_TX_DISABLE);
+	m.calls=m.diagnostics=0; m.tx_readback_mismatch=false; m.tx_readback_all_ones=true;
+	assert(en7573_set_tx(&io,false)==-EIO && m.calls==3 && m.diagnostics==1);
+	assert(!strcmp(m.diagnostic_stage,"set-tx-readback-all-ones"));
+	m.calls=m.diagnostics=0; m.tx_readback_all_ones=false; m.regs[0x3e0/4]=0x12340000;
+	assert(!en7573_set_tx(&io,false) && m.calls==3 && !m.diagnostics);
 }
 
 struct receiver_model { unsigned int calls, fail_at, erased_at; };
@@ -324,6 +408,7 @@ int main(void)
 {
 	test_loader(false); test_loader(true);
 	test_rx_power(); test_read_only_state(); test_tx_control();
+	test_control_failure_diagnostics();
 	test_receiver_read_only(); test_rx_output();
 	puts("EN7573 state, RX output guards/restore, observations and failures passed");
 	return 0;

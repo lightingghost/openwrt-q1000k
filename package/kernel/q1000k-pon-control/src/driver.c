@@ -54,6 +54,10 @@ static int pon_read(void *ctx, u8 device, u16 reg, u8 *data, size_t len)
 		{ .addr = device, .flags = I2C_M_RD, .len = len, .buf = data },
 	};
 	int ret = i2c_transfer(pon->client->adapter, messages, ARRAY_SIZE(messages));
+	if (ret != ARRAY_SIZE(messages))
+		dev_err_ratelimited(&pon->client->dev,
+			"I2C read failed: device=%#x reg=%#x bytes=%zu messages=%d expected=2 error=%d\n",
+			device, reg, len, ret, ret < 0 ? ret : -EIO);
 	return ret < 0 ? ret : ret == ARRAY_SIZE(messages) ? 0 : -EIO;
 }
 
@@ -67,7 +71,31 @@ static int pon_write(void *ctx, u8 device, u16 reg, const u8 *data, size_t len)
 		return -EINVAL;
 	memcpy(buffer + 2, data, len);
 	ret = i2c_transfer(pon->client->adapter, &message, 1);
+	if (ret != 1)
+		dev_err_ratelimited(&pon->client->dev,
+			"I2C write failed: device=%#x reg=%#x bytes=%zu messages=%d expected=1 error=%d\n",
+			device, reg, len, ret, ret < 0 ? ret : -EIO);
 	return ret < 0 ? ret : ret == 1 ? 0 : -EIO;
+}
+
+static void pon_control_diagnostic(void *ctx, const char *stage, u8 device,
+				   u16 reg, int error, u32 actual,
+				   u32 expected, u32 mask)
+{
+	struct q1000k_pon *pon = ctx;
+
+	if (!mask)
+		dev_err_ratelimited(&pon->client->dev,
+			"controller control failure: stage=%s device=%#x reg=%#x error=%d\n",
+			stage, device, reg, error);
+	else if (actual == ~0U)
+		dev_err_ratelimited(&pon->client->dev,
+			"controller control failure: stage=%s device=%#x reg=%#x error=%d actual=%#x validation=not-all-ones\n",
+			stage, device, reg, error, actual);
+	else
+		dev_err_ratelimited(&pon->client->dev,
+			"controller control failure: stage=%s device=%#x reg=%#x error=%d actual=%#x expected=%#x mask=%#x\n",
+			stage, device, reg, error, actual, expected, mask);
 }
 
 static void pon_delay(void *ctx, unsigned int ms)
@@ -225,8 +253,12 @@ static int pon_check_locked(struct q1000k_pon *pon)
 	if (!pon->initialized || pon->mode != 1)
 		return -EAGAIN;
 	ret = en7573_sample_state(&pon->io, &state);
-	if (!ret && (!state.md32_enabled || state.tx_disabled == pon->tx_enabled))
+	if (!ret && (!state.md32_enabled || state.tx_disabled == pon->tx_enabled)) {
+		dev_err_ratelimited(&pon->client->dev,
+			"controller health mismatch: md32_enabled=%d expected=1 tx_disabled=%d expected=%d\n",
+			state.md32_enabled, state.tx_disabled, !pon->tx_enabled);
 		ret = -EIO;
+	}
 	return ret;
 }
 
@@ -358,6 +390,7 @@ EXPORT_SYMBOL_GPL(q1000k_pon_get_rx_power);
 
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 {
+	const char *phase = "check";
 	int ret = pon_context();
 
 	if (ret)
@@ -367,10 +400,19 @@ int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 	mutex_lock(&pon->lock);
 	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
 	/* Boot-time bench policy: no runtime control can grant TX permission. */
-	if (!ret && enable && pon->tx_inhibited)
+	if (!ret && enable && pon->tx_inhibited) {
+		phase = "tx-inhibit-policy";
 		ret = -EPERM;
-	if (!ret)
+	}
+	if (!ret) {
+		phase = "write-readback";
 		ret = en7573_set_tx(&pon->io, enable);
+	}
+	if (ret)
+		dev_err_ratelimited(&pon->client->dev,
+			"controller set-tx failed: enable=%d phase=%s error=%d prior_fault=%d initialized=%d leased=%d dead=%d\n",
+			enable, phase, ret, pon->fault, pon->initialized,
+			pon->leased, pon->dead);
 	if (!ret)
 		pon->tx_enabled = enable;
 	else if (!pon->dead && pon->leased)
@@ -647,7 +689,7 @@ static int pon_probe(struct i2c_client *client)
 	pon->detected[0] = pon->detected[1] = -1;
 	mutex_init(&pon->lock);
 	pon->io = (struct en7573_io){ .ctx = pon, .md32_a0 = bench_md32_a0, .read = pon_read,
-		.write = pon_write, .delay_ms = pon_delay };
+		.write = pon_write, .delay_ms = pon_delay, .diagnostic = pon_control_diagnostic };
 	pon->power[0] = devm_gpiod_get(dev, "gpon-enable", GPIOD_OUT_LOW);
 	if (IS_ERR(pon->power[0]))
 		return dev_err_probe(dev, PTR_ERR(pon->power[0]), "GPON enable GPIO\n");

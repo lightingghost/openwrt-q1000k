@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef uint8_t u8;
@@ -21,6 +23,17 @@ static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
+static char failure_log[65536];
+static void capture_failure(const char *format, ...)
+{
+    size_t used=strlen(failure_log);
+    va_list args;
+    va_start(args,format);
+    int length=vsnprintf(failure_log+used,sizeof(failure_log)-used,format,args);
+    va_end(args);
+    assert(length>=0 && (size_t)length<sizeof(failure_log)-used);
+}
+#define pr_err_ratelimited(...) capture_failure(__VA_ARGS__)
 #define TRUE 1
 #define FALSE 0
 #define PHY_DISABLE 0
@@ -105,7 +118,7 @@ typedef struct { u32 correct_bytes,correct_codewords,uncorrect_codewords,total_r
 typedef struct { u32 frame_count_low,frame_count_high,lof_counter; } PHY_FrameCount_T;
 struct xpon_phy_api_data_s { int ret,api_type,cmd_id; union { int *data; PHY_FecCount_T *rx_fec_cnt; PHY_FrameCount_T *rx_frame_cnt; }; };
 static int provider=1,provider_error,hwid=14,wan=10,mode_error,api_error,poll_error,isr_error,fw_error;
-static unsigned int reads,writes,fail_read,fail_write;
+static unsigned int reads,writes,fail_read,fail_write,mismatch_read;
 static u32 regs[0x8000];
 static int allocated_irq,irq_error,clear_error,clears,polls,isrs,fw_calls,api_calls,mode_calls;
 static int reenter, cancel_run;
@@ -119,7 +132,7 @@ static int GET_HIR(void) { return hwid; }
 static int GET_WAN_CONF(void) { return wan; }
 static int an7581_pon_phy_read(u32 r,u32 *v) {
     reads++; if(reads==fail_read) return -EIO;
-    *v=regs[(r&0x1ffff)/4]; return 0;
+    *v=regs[(r&0x1ffff)/4]; if(reads==mismatch_read) *v^=1; return 0;
 }
 static int an7581_pon_phy_write(u32 r,u32 v) {
     writes++; if(writes==fail_write) return -EIO;
@@ -193,16 +206,17 @@ static int an7581_pon_wan_set(u32 mode)
     assert(controller.held && !controller.tx && mode==10);
     wan_writes++; if(wan_set_error) return wan_set_error; wan=mode; return 0;
 }
+static int gain_cleanup_error, probe_cleanup_error;
 /* PRODUCTION */
 int q1000k_phy_rx_cleanup(void) {
     assert(!q1000k_phy_callback_context() && !qphy_active && !controller.tx);
-    return 0;
+    return gain_cleanup_error;
 }
 
 static int reacquire_calls, reacquire_error;
 static bool reacquire_bad_tx, reacquire_restore_pll, reacquire_restore_gain;
 int q1000k_phy_rx_probe(u32 mode) { return q1000k_phy_rx_reacquire(false, false); }
-int q1000k_phy_rx_probe_cleanup(void) { return 0; }
+int q1000k_phy_rx_probe_cleanup(void) { return probe_cleanup_error; }
 u32 q1000k_phy_rx_probe_writes(void) { return 0; }
 int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain)
 {
@@ -257,7 +271,8 @@ static void reset(void)
     wan_error=wan_set_error=wan_writes=0;
     provider=1; provider_error=no_memory=irq_error=clear_error=mode_error=0;
     atomic_context=irq_context=preempt_rcu=0; hwid=14; wan=10;
-    fail_read=fail_write=reads=writes=0; clears=polls=isrs=fw_calls=api_calls=mode_calls=0;
+    fail_read=fail_write=mismatch_read=reads=writes=0; clears=polls=isrs=fw_calls=api_calls=mode_calls=0;
+    gain_cleanup_error=probe_cleanup_error=0; failure_log[0]=0;
     api_error=poll_error=isr_error=fw_error=reenter=cancel_run=0;
     memset(regs,0,sizeof(regs));
     reacquire_calls=reacquire_error=0; reacquire_bad_tx=false;
@@ -271,6 +286,66 @@ static void initialized(void)
     assert(!q1000k_phy_needs_configure());
     assert(gpPhyPriv->phy_init_done && !qphy_active && !allocated_irq);
     reads=writes=0;
+}
+static void shutdown_diagnostics(void)
+{
+    const u32 reg=EN7581_XPON_PMA_XPON_INT_EN_2;
+    char expected[128];
+    int n;
+
+    /* Failed writes must not read, failed reads must not print uninitialized
+     * actual data, and a mismatch must identify its exact valid readback. */
+    for(n=0;n<4;n++) {
+        initialized(); failure_log[0]=0;
+        fail_write=n==0 ? 1 : 0; fail_read=n==1 ? 1 : 0;
+        mismatch_read=n==2 ? 1 : 0;
+        assert(qphy_reg_write(reg,0)==(n==3 ? 0 : -EIO));
+        assert(writes==1 && reads==(n==0 ? 0 : 1));
+        if(n==3) { assert(!failure_log[0]); continue; }
+        snprintf(expected,sizeof(expected),"stage=%s reg=%#x expected=0",
+                 n==0 ? "write" : n==1 ? "read" : "readback",reg);
+        assert(strstr(failure_log,expected));
+        assert((strstr(failure_log,"actual=")!=NULL)==(n==2));
+        if(n==2) assert(strstr(failure_log,"actual=0x1 error=-5"));
+    }
+    /* Exercise every first/second masking position. Preserve the original
+     * first error and all independent mask writes plus containment writes. */
+    for(n=1;n<=12;n++) {
+        initialized(); assert(!q1000k_phy_start());
+        reads=writes=0; failure_log[0]=0; mismatch_read=n;
+        assert(q1000k_phy_stop()==-EIO && qphy_fault==-EIO);
+        assert(writes==18 && reads==18 && !allocated_irq && !qphy_active);
+        assert(strstr(failure_log,n<=6 ? "phase=mask-before-drain" : "phase=mask-after-drain"));
+        assert(strstr(failure_log,"prior_fault=0 sticky_fault=-5"));
+    }
+    for(n=0;n<4;n++) {
+        initialized(); assert(!q1000k_phy_start());
+        reads=writes=0; failure_log[0]=0;
+        if(n==0) controller_error=-EIO;
+        if(n==1) gain_cleanup_error=-EIO;
+        if(n==2) probe_cleanup_error=-EIO;
+        if(n==3) provider_error=-EIO;
+        assert(q1000k_phy_stop()==-EIO && qphy_fault==-EIO);
+        assert(writes==18 && reads==18 && !allocated_irq && !qphy_active);
+        assert(strstr(failure_log,n==0 ? "phase=controller-tx-disable" :
+            n==1 ? "phase=rx-gain-restore" : n==2 ? "phase=rx-probe-restore" : "phase=provider-status"));
+    }
+    initialized(); assert(!q1000k_phy_start());
+    reads=writes=0; failure_log[0]=0;
+    assert(!q1000k_phy_stop() && reads==12 && writes==12 && !failure_log[0]);
+    initialized(); assert(!q1000k_phy_start());
+    reads=writes=0; failure_log[0]=0; qphy_fault=-ERANGE;
+    assert(q1000k_phy_stop()==-ERANGE && reads==12 && writes==12);
+    assert(strstr(failure_log,"phase=sticky-fault error=-34 prior_fault=-34 sticky_fault=-34"));
+    /* A later stop operation may fail differently; do not replace its return
+     * code with the prior sticky fault, or overwrite that sticky fault. */
+    initialized(); assert(!q1000k_phy_start());
+    reads=writes=0; failure_log[0]=0; qphy_fault=-ERANGE;
+    mismatch_read=1; controller_error=-ETIMEDOUT;
+    assert(q1000k_phy_stop()==-EIO && qphy_fault==-ERANGE);
+    assert(strstr(failure_log,"phase=mask-before-drain error=-5 prior_fault=-34 sticky_fault=-34"));
+    assert(!strstr(failure_log,"phase=controller-tx-disable"));
+    reset();
 }
 static void checked_queries(void)
 {
@@ -659,6 +734,7 @@ static void rx_bench_tests(void)
 }
 int main(void)
 {
+    shutdown_diagnostics();
     rx_reacquire_tests();
     rx_probe_tests();
     rx_snapshot_faults();

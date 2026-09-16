@@ -44,6 +44,15 @@ static u8 control_device(struct en7573_io *io, u16 reg)
 		EN7573_MEMORY : EN7573_CONTROL;
 }
 
+static int control_failure(struct en7573_io *io, const char *stage, u16 reg,
+			   int error, u32 actual, u32 expected, u32 mask)
+{
+	if (io->diagnostic)
+		io->diagnostic(io->ctx, stage, control_device(io, reg), reg,
+			       error, actual, expected, mask);
+	return error;
+}
+
 int en7573_read_control(struct en7573_io *io, u16 reg, u32 *value)
 {
 	u8 data[4];
@@ -62,12 +71,18 @@ int en7573_sample_state(struct en7573_io *io, struct en7573_state *state)
 	state->tx_disabled = -1;
 	ret = en7573_read_control(io, EN7573_MCU_ENABLE, &mcu);
 	if (ret)
-		return ret;
+		return control_failure(io, "state-mcu-read", EN7573_MCU_ENABLE,
+				       ret, 0, 0, 0);
 	ret = en7573_read_control(io, EN7573_TX_CONTROL, &tx);
 	if (ret)
-		return ret;
-	if (mcu == ~0U || tx == ~0U)
-		return -EIO;
+		return control_failure(io, "state-tx-read", EN7573_TX_CONTROL,
+				       ret, 0, 0, 0);
+	if (mcu == ~0U)
+		return control_failure(io, "state-mcu-all-ones", EN7573_MCU_ENABLE,
+				       -EIO, mcu, 0, ~0U);
+	if (tx == ~0U)
+		return control_failure(io, "state-tx-all-ones", EN7573_TX_CONTROL,
+				       -EIO, tx, 0, ~0U);
 	state->md32_enabled = !!(mcu & 1);
 	state->tx_disabled = !!(tx & EN7573_TX_DISABLE);
 	return 0;
@@ -210,15 +225,27 @@ int en7573_set_tx(struct en7573_io *io, bool enable)
 	int ret = en7573_read_control(io, EN7573_TX_CONTROL, &old);
 
 	if (ret)
-		return ret;
+		return control_failure(io, "set-tx-read", EN7573_TX_CONTROL,
+				       ret, 0, 0, 0);
 	if (old == ~0U)
-		return -EIO;
+		return control_failure(io, "set-tx-old-all-ones", EN7573_TX_CONTROL,
+				       -EIO, old, 0, ~0U);
 	expected = enable ? old & ~EN7573_TX_DISABLE : old | EN7573_TX_DISABLE;
 	ret = write_control(io, EN7573_TX_CONTROL, expected);
-	if (!ret)
-		ret = en7573_read_control(io, EN7573_TX_CONTROL, &actual);
-	return ret ? ret : actual == ~0U ||
-		!!(actual & EN7573_TX_DISABLE) == enable ? -EIO : 0;
+	if (ret)
+		return control_failure(io, "set-tx-write", EN7573_TX_CONTROL,
+				       ret, 0, 0, 0);
+	ret = en7573_read_control(io, EN7573_TX_CONTROL, &actual);
+	if (ret)
+		return control_failure(io, "set-tx-readback", EN7573_TX_CONTROL,
+				       ret, 0, 0, 0);
+	if (actual == ~0U)
+		return control_failure(io, "set-tx-readback-all-ones", EN7573_TX_CONTROL,
+				       -EIO, actual, expected, ~0U);
+	if (!!(actual & EN7573_TX_DISABLE) == enable)
+		return control_failure(io, "set-tx-readback-mismatch", EN7573_TX_CONTROL,
+				       -EIO, actual, expected, EN7573_TX_DISABLE);
+	return 0;
 }
 
 int en7573_identify(struct en7573_io *io, u16 *id)
