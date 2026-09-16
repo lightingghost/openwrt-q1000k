@@ -15,8 +15,11 @@ validity. DSD record transfer and the tested output/clock changes were verified.
 The subsequent loader-fix image booted and loaded without the temporary alias.
 Its 30-sample power check still saw light and no frames, but PHY shutdown failed
 after RX draining. The collector stopped before the pending passive reconnect.
-The exact failing shutdown operation was not logged; diagnostics are required
-before another reproduction. See the follow-up section in the results above.
+The exact failing shutdown operation was not logged. Diagnostic replacement
+`ad6bc93b51` is built and software-validated; hardware boot/testing is pending.
+It preserves the existing checks and all 36 cases. Require a clean baseline
+shutdown before the passive control. See the follow-up in the results above
+and the build record in [the bench journal](XGSPON-BENCH.q1000k.md).
 
 The prior passive plan is retained in [RX-NEXT](XGSPON-RX-NEXT.q1000k.md), with
 its insertion-handler claim corrected. The sections below preserve the earlier

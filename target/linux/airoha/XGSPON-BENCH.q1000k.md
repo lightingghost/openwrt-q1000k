@@ -2175,3 +2175,36 @@ TX-disable/health, or a previously latched PHY fault. The earlier original-image
 full log contains a successful cold run with the same WAN/reset entry state,
 so cold boot is not an established cause. Exact evidence and limits are in
 [the result follow-up](XGSPON-RX-RESULTS-20260915.q1000k.md).
+
+## Shutdown diagnostic replacement — 2026-09-15
+
+Built source `ad6bc93b51d093fc290039f7ef1c33094637a653` (vendor r82,
+controller r10, helper r16). Failure-only, rate-limited messages identify PHY
+write/read/readback failures and the first failing stop phase, plus controller
+I²C, health and TX-disable checks. Failed transfers omit unavailable values.
+Hardware I/O order, return-code precedence, sticky faults and containment are
+unchanged. This diagnoses the next occurrence; it does not fix an established
+shutdown cause or the light/no-frame problem.
+
+- Artifact: `build-artifacts/q1000k-xgspon/bench-ad6bc93b51-shutdown-diag`.
+- Kit: `q1000k-rx-shutdown-diagnostic-ad6bc93b51.tar.gz`, 7,723,787 bytes,
+  SHA-256 `dd7207835a5c04bdf906168f04bd8e700bb1167b79de0a4208684db3a9a10f0b`.
+- Firmware: 7,602,176 bytes, SHA-256
+  `a50a8be5f8412a487fdd338bd2131c0e97e2c994ba7f65fd5abecf0ff9413957`.
+- Matching standalone collector SHA-256:
+  `cec7a464b90ff9fbf2c48c59fb797d70f1d5967d58b4c8393a8a1dc79215eaaa`.
+- All 36 acquisition cases remain available. Only the PHY and controller
+  modules changed among fourteen pinned runtime files.
+- Passed 206 PON tests, 13 status tests, UI checks, exact image inspection,
+  new source-matched PHY UML (50 normal +50 RX-only lifecycle cycles, RCU and
+  concurrent poll/IRQ teardown), and portable full/baseline/passive dry-runs.
+- New host failure injection covers all twelve masking positions, every stop
+  phase, return/sticky-fault precedence, controller transfer/health/readback
+  errors and unchanged transaction counts.
+- Normal configs were restored and protected refs preserved. No private input
+  payloads are in the 26-file kit. Hardware testing of this image is pending.
+
+Next: user RAM-boots this exact image, then run its 30-sample connected baseline.
+Require clean physical shutdown before the missing passive reconnect control.
+If it fails again, preserve the new first-operation diagnostics and stop. The
+previous 34-case connected matrix does not need repetition solely for logging.
