@@ -2,11 +2,20 @@
 
 **Current bench:** [complete receiver acquisition experiments and collection plan](XGSPON-RX-ACQUISITION.q1000k.md)
 
-The prior passive plan is retained in [RX-NEXT](XGSPON-RX-NEXT.q1000k.md), with its insertion-handler claim corrected.
-rechecks PR #24577, adds passive NCPO/FIFO telemetry, and provides a standalone
-collector for a complete live dark/reconnect control. It does not repeat the
-13 known-negative trials by default. The historical evidence below remains
-the hardware baseline; the new image has not yet been exercised on the unit.
+**Latest hardware evidence:** [2026-09-15 acquisition results](XGSPON-RX-RESULTS-20260915.q1000k.md).
+All 34 connected cases and the fresh dark-checker control completed with valid
+captures. None recovered frames. The separate passive reconnect control is
+incomplete because its physical phases were not confirmed within its window.
+The fresh checker remained idle in darkness and responded after reconnection;
+its clock-tracking readback did not return to the original illuminated range.
+These observations retain clock reacquisition, signal quality and unexplained
+OEM initialization as open questions. They do not establish CDR lock or data
+validity. DSD record transfer and the tested output/clock changes were verified.
+
+The prior passive plan is retained in [RX-NEXT](XGSPON-RX-NEXT.q1000k.md), with
+its insertion-handler claim corrected. The sections below preserve the earlier
+hypotheses and historical bench coverage; use the latest results above for
+what has now been tested and what remains unresolved.
 
 Prepared 2026-09-15. This is a diagnostic plan, not a claim of optical service.
 The 90-sample PLL trial kept both LOS indications clear, but HUNT stayed zero,

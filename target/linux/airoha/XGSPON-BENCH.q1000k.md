@@ -2117,3 +2117,44 @@ and acknowledge LOS; they do not execute vendor insertion/power-save handlers.
 The fresh dark checker therefore arms after illuminated initialization without
 that handler confound. Unknown stock reset bits11–7 and controller0x110[8]
 remain excluded because their receive-only semantics are not established.
+
+## Acquisition hardware collection and loader fix — 2026-09-15
+
+Ran the original `3e73559f54` image on the user's RAM bench at
+`192.168.255.1`, with `/tmp/serial_output.log` supplied as the active serial
+capture. Initial RX power was -18.51 dBm; the preliminary 30-sample check
+held -18.57 to -18.48 dBm with both LOS indicators clear.
+
+The main 76-minute collection produced all 3,300 requested raw samples:
+34 connected cases and the fresh dark-checker control were valid. The final
+passive reconnect control lacked operator confirmation/transitions within its
+fixed window, so the collection correctly stopped with 35/36 valid cases and
+preserved its archive. No automatic retry was performed. All frame/FEC/PCS
+counters and synchronization observations remained zero/false.
+
+The fresh dark checker is new positive diagnostic evidence: 39 armed dark
+samples spanning 44.030 seconds held event/errors at zero; after reconnection,
+compare/fail appeared at +3.468 seconds and done at +4.631 seconds without
+another probe. Raw NCPO did not return to its original illuminated range.
+LOS gating and omitted vendor insertion recovery limit interpretation; this
+does not prove CDR lock or valid data. Exact OEM clock releases, PrCal rerun,
+DSD transfer verification and all nine output-profile cases are recorded in
+[the complete results](XGSPON-RX-RESULTS-20260915.q1000k.md).
+
+The first power attempt exposed a helper filename bug before controller load.
+A recorded RAM symlink supplied the expected underscore filename while retaining
+the original helper and every module hash. It was removed after final idle
+verification. Per-case postflight/private-input cleanup passed; PON modules
+were unloaded and `ponraw` was down. Optical TX remained inhibited.
+
+Source fix `4c84635a0956bd1a3fce467fe34a219fd5b12f2a` uses installed absolute
+module filenames (helper r16). The rebuilt artifact is
+`build-artifacts/q1000k-xgspon/bench-4c84635a09-loaderfix`, with matching
+`q1000k-rx-acquisition-4c84635a09.tar.gz`. Image SHA-256:
+`fdfb98fe59d6a55914fe098aa9516f81cbcbbb47e7784ff16b1dc58d7c7f2a07`.
+It passed 206 PON tests, 13 status tests, UI checks, exact image inspection and
+an outside-repository 36-case collector dry-run. The prior PHY UML evidence is
+inherited with identical generated test source and driver trees. Only the
+runtime helper changed; the other 13 pinned files, including all nine modules,
+are byte-identical. Configurations/protected refs were preserved. This corrected
+image has not been booted; the hardware evidence belongs to the original image.
