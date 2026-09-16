@@ -4,4 +4,6 @@
 #include <linux/types.h>
 bool q1000k_rx_bench_enabled(void);
 int q1000k_rx_bench_prepare(void);
+int q1000k_snapshot_init(void);
+void q1000k_snapshot_exit(void);
 #endif

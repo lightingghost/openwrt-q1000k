@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+#include "an7581-q1000k-xgspon-bench.dts"
+
+/ {
+	model = "Quantum Fiber Q1000K (XGS-PON RAM activation bench)";
+	quantum,xgspon-activation-bench;
+};
+
+/* Default controller session remains inhibited. A fresh validation_tx=1
+ * session is required for normal protocol activation with private identity. */
+&pon_control {
+	/delete-property/ quantum,tx-inhibit;
+	quantum,activation-bench;
+};

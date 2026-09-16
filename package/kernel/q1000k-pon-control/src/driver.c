@@ -14,6 +14,11 @@
 #include <linux/slab.h>
 #include "en7573.h"
 #include "q1000k_pon.h"
+#include "q1000k_pon_policy.h"
+
+static bool validation_tx;
+module_param(validation_tx, bool, 0400);
+MODULE_PARM_DESC(validation_tx, "Activation-validation DT only: permit normal optical TX in this controller lifetime");
 
 /* Immutable experiment selection; every nonzero option requires the bench
  * DT's hard TX inhibit before the controller can bind or touch hardware.
@@ -35,6 +40,7 @@ struct q1000k_pon {
 	struct mutex lock;
 	struct kref ref;
 	bool dead, leased, tx_enabled, tx_inhibited;
+	bool activation_bench, receiver_startup;
 	int fault;
 	u8 calibration[513];
 	bool calibration_valid, initialized;
@@ -108,7 +114,16 @@ static int pon_off(struct q1000k_pon *pon)
 {
 	int first, second, restore = 0;
 
-	if (pon->oem_post_original.saved)
+	/* Restoration requires TX off, including removal during active service.
+	 * Power removal still runs if disable or restoration fails.
+	 */
+	if (pon->initialized && pon->tx_enabled &&
+	    (pon->oem_post_original.saved || pon->rx_output_original.saved)) {
+		restore = en7573_set_tx(&pon->io, false);
+		if (!restore)
+			pon->tx_enabled = false;
+	}
+	if (!restore && pon->oem_post_original.saved)
 		restore = en7573_oem_post_init(&pon->io, &pon->oem_post_original, true);
 	if (!restore && pon->rx_output_original.saved)
 		restore = en7573_restore_rx_output(&pon->io, &pon->rx_output_original);
@@ -348,6 +363,37 @@ int q1000k_pon_oem_post_init(struct q1000k_pon *pon, bool restore)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_oem_post_init);
+
+int q1000k_pon_receiver_startup(struct q1000k_pon *pon)
+{
+	u32 value;
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon))
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret && pon->receiver_startup) {
+		if (pon->tx_enabled)
+			ret = -EACCES;
+		else if (!pon->oem_post_original.saved)
+			ret = en7573_oem_post_init(&pon->io, &pon->oem_post_original, false);
+		/* A normal MAC/PHY reactivation preserves the controller lifetime.
+		 * Verify its owned bit rather than replacing the original snapshot.
+		 */
+		if (!ret)
+			ret = en7573_read_control(&pon->io, 0x110, &value);
+		if (!ret && (value == ~0U || !(value & 0x100)))
+			ret = -EIO;
+	}
+	if (ret && !pon->dead && pon->leased && ret != -EAGAIN)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_receiver_startup);
 
 int q1000k_pon_get_tx(struct q1000k_pon *pon, bool *enabled)
 {
@@ -709,7 +755,15 @@ static int pon_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 	pon->client = client;
-	pon->tx_inhibited = of_property_read_bool(dev->of_node, "quantum,tx-inhibit");
+	pon->activation_bench = of_property_read_bool(dev->of_node, "quantum,activation-bench");
+	ret = q1000k_pon_tx_policy(of_property_read_bool(dev->of_node, "quantum,tx-inhibit"),
+				  pon->activation_bench, validation_tx, &pon->tx_inhibited);
+	if (ret)
+		return dev_err_probe(dev, ret, "TX permission requires the activation-validation DT\n");
+	/* Preserve the older immutable-inhibit image's diagnostic controls.
+	 * Normal startup and the new validation image receive the proven fix.
+	 */
+	pon->receiver_startup = pon->activation_bench || !pon->tx_inhibited;
 	if (bench_rx_output > 3 || ((bench_md32_a0 || bench_rx_output) &&
 				 !pon->tx_inhibited))
 		return dev_err_probe(dev, -EACCES, "RX experiments require TX-inhibited bench and valid profile\n");

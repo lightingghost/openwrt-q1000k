@@ -1,0 +1,18 @@
+{
+  "serial": "",
+  "wan_mac": "",
+  "registration_id": "",
+  "vendor_id": "",
+  "equipment_id": "",
+  "hardware_version": "",
+  "software_version_a": "",
+  "software_version_b": "",
+  "sync_circuit_pack": "1",
+  "active_bank": "",
+  "committed_bank": "",
+  "logical_onu_id": "",
+  "logical_password": "",
+  "omci_version": "",
+  "mib_profile": "native-pptp",
+  "fix_vlans": "0"
+}

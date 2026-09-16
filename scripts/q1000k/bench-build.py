@@ -84,8 +84,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--builder', type=Path, default=REPO.parent / 'q1000k-build-xgspon')
     parser.add_argument('--output', required=True, type=Path, help='New artifact directory')
+    parser.add_argument('--profile', choices=('bench', 'activation'), default='bench')
     parser.add_argument('--jobs', type=int, default=8)
     args = parser.parse_args()
+    image_name = IMAGE.replace('xgspon-bench-initramfs', 'xgspon-activation-initramfs') if args.profile == 'activation' else IMAGE
+    manifest_name = MANIFEST.replace('xgspon-bench.manifest', 'xgspon-activation.manifest') if args.profile == 'activation' else MANIFEST
     if args.jobs < 1:
         parser.error('--jobs must be positive')
     if git('branch', '--show-current') != 'q1000k-xgspon':
@@ -101,7 +104,7 @@ def main():
     backup = output / 'normal-config-backup'
     backup.mkdir()
     selection = output / 'selection-work'
-    record = dict(schema_version=1, revision=revision, branch='q1000k-xgspon',
+    record = dict(schema_version=1, revision=revision, branch='q1000k-xgspon', profile=args.profile,
                   source=str(REPO), artifact=str(output), started=time.time(), status='building',
                   builder=str(builder), builder_revision=subprocess.check_output(
                       ['git', '-C', str(builder), 'rev-parse', 'HEAD'], text=True).strip(),
@@ -114,7 +117,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             tool = builder / 'scripts/q1000k-xgspon-build.py'
-            run([sys.executable, tool, 'prepare', '--profile', 'bench', '--repo', REPO,
+            run([sys.executable, tool, 'prepare', '--profile', args.profile, '--repo', REPO,
                  '--revision', revision, selection], output / 'prepare.log')
             with bench_config(REPO, selection, backup):
                 run(['make', 'defconfig'], output / 'build.log')
@@ -129,7 +132,7 @@ def main():
             run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/q1000k',
                  '-p', 'test_xgspon.py'], output / 'status-tests.log')
             run(['node', REPO / 'tests/q1000k/test_xgspon_views.cjs'], output / 'views-tests.log')
-            for name in (IMAGE, MANIFEST):
+            for name in (image_name, manifest_name):
                 shutil.copy2(REPO / 'bin/targets/airoha/an7581' / name, output / name)
             shutil.copy2(selection / 'selection.json', output / 'selection.json')
             kernels = list((REPO / 'build_dir/target-aarch64_cortex-a53_musl/linux-airoha_an7581').glob('linux-*/.config'))
@@ -137,10 +140,12 @@ def main():
                 raise ValueError('Kernel configuration is ambiguous')
             shutil.copy2(kernels[0], output / 'kernel.config')
             run([sys.executable, REPO / 'tests/q1000k/check_pon_bench_image.py',
-                 output / IMAGE, revision], output / 'inspection.json')
+                 output / image_name, revision, '--profile', args.profile], output / 'inspection.json')
             root = REPO / 'build_dir/target-aarch64_cortex-a53_musl/root-airoha'
             paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
+            if args.profile == 'activation':
+                paths.append('usr/sbin/q1000k-pon-validate')
             for name in ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu',
                          'airoha_ecnt_pon_phy', 'airoha_ecnt_xpon', 'phy_10g', 'xpon', 'omci', 'xpon_10g'):
                 modules = list(root.glob('lib/modules/*/' + name + '.ko'))
@@ -152,7 +157,7 @@ def main():
                 target = output / 'runtime' / path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(root / path, target)
-            record.update(status='passed', image=str(output / IMAGE), sha256=digest(output / IMAGE))
+            record.update(status='passed', image=str(output / image_name), sha256=digest(output / image_name))
         except BaseException as error:
             record.update(status='failed', error=str(error))
             raise

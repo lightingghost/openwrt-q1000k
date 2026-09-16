@@ -171,6 +171,8 @@ static int q1000k_pon_check(struct q1000k_pon *p)
 {
     return p==&controller && p->held ? controller_error : -ENODEV;
 }
+static int q1000k_pon_receiver_startup(struct q1000k_pon *p)
+{ return q1000k_pon_check(p); }
 static int q1000k_pon_oem_post_init(struct q1000k_pon *p,bool restore)
 { (void)restore; return q1000k_pon_check(p); }
 static int q1000k_pon_get_tx(struct q1000k_pon *p,bool *enabled)
@@ -782,8 +784,28 @@ static void rx_bench_tests(void)
     assert(q1000k_phy_set_tx(true)==-EACCES && !controller.tx && !qphy_active);
     reset(); controller_inhibit=false; controller_los=true;
 }
+static void coherent_snapshot_tests(void)
+{
+    struct q1000k_rx_sample rx, saved_rx;
+    struct q1000k_rx_diagnostics diag, saved_diag;
+    reset(); controller_inhibit=false; initialized();
+    assert(!q1000k_phy_start() && !q1000k_phy_receiver_startup());
+    assert(!q1000k_phy_set_tx(true));
+    assert(q1000k_phy_rx_sample(&rx)==-EAGAIN);
+    assert(!q1000k_phy_snapshot(&rx,&diag) && rx.tx_enabled && !rx.tx_inhibited && !rx.rx_bench);
+    assert(diag.sampled_ms>=rx.sampled_ms);
+    saved_rx=rx; saved_diag=diag;
+    fail_read=reads+3;
+    assert(q1000k_phy_snapshot(&rx,&diag)==-EIO);
+    assert(!memcmp(&rx,&saved_rx,sizeof(rx)) && !memcmp(&diag,&saved_diag,sizeof(diag)));
+    assert(!controller.tx && !qphy_active);
+    reset();
+    assert(q1000k_phy_snapshot(&rx,&diag)==-ENODEV);
+    assert(q1000k_phy_receiver_startup()==-ENODEV);
+}
 int main(void)
 {
+    coherent_snapshot_tests();
     shutdown_diagnostics();
     rx_reacquire_tests();
     rx_probe_tests();

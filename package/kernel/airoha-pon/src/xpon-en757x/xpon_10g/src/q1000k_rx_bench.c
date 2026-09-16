@@ -2,6 +2,9 @@
 /* Explicit RX-only RAM bench: no registration executor or MAC interrupts. */
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <an7581_xpon.h>
 #include <q1000k_phy_api.h>
 #include "common/q1000k_protocol.h"
@@ -57,38 +60,18 @@ int q1000k_rx_bench_prepare(void)
 	return ret ?: q1000k_phy_set_rx_probe(rx_probe);
 }
 
-static int qrx_status_get(char *buffer, const struct kernel_param *kp)
+static int qrx_status_format(char *buffer, const struct q1000k_rx_sample *sample, u32 mask)
 {
-	struct q1000k_rx_sample s;
+	struct q1000k_rx_sample s = *sample;
 	char power[16];
-	u32 mask;
-	int ret;
 
-	if (!rx_bench)
-		return -EOPNOTSUPP;
-	ret = q1000k_protocol_status();
-	if (ret)
-		return ret;
-	if (!q1000k_transport_running())
-		return -EAGAIN;
-	/* Module parameter attributes can be read while init is in progress.
-	 * Attachment alone does not establish the optical clocks/WAN selector.
-	 * The PHY sample requires successful configuration and active RX first.
-	 */
-	ret = q1000k_phy_rx_sample(&s);
-	if (ret)
-		return ret;
-	mask = get_xpon_data(0x5040);
-	ret = an7581_xpon_status();
-	if (ret || mask)
-		return ret ?: -EIO;
 	if (s.rx_power_valid)
 		scnprintf(power, sizeof(power), "%u", s.rx_power_nw);
 	else
 		scnprintf(power, sizeof(power), "null");
 	return scnprintf(buffer, PAGE_SIZE,
-		"{\"rx_bench\":true,\"registration_enabled\":false,"
-		"\"tx_inhibited\":true,\"tx_enabled\":false,\"mac_irq_mask\":0,"
+		"{\"rx_bench\":%s,\"registration_enabled\":%s,"
+		"\"tx_inhibited\":%s,\"tx_enabled\":%s,\"mac_irq_mask\":%u,"
 		"\"controller_los\":%s,\"phy_los\":%s,\"synced\":%s,"
 		"\"sync_status\":%u,\"frames\":%u,\"lof\":%u,"
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
@@ -112,6 +95,8 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		"\"rx_osr_control\":%u,\"signal_control\":%u,\"rx_equalizer\":%u,\"rx_frontend_power\":%u},"
 		"\"pcs_counters\":{\"cw_start\":%u,\"cw_end\":%u,\"sof_to_mac\":%u,\"eof_to_mac\":%u,\"psync_mismatch\":%u,"
 		"\"sfc_hec_error\":%u,\"pon_id_hec_error\":%u}}\n",
+		s.rx_bench ? "true" : "false", s.rx_bench ? "false" : "true",
+		s.tx_inhibited ? "true" : "false", s.tx_enabled ? "true" : "false", mask,
 		s.controller_los ? "true" : "false", s.phy_los ? "true" : "false",
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
@@ -154,21 +139,31 @@ static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 		s.pcs_counters.sfc_hec_error,
 		s.pcs_counters.pon_id_hec_error);
 }
-static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
-module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);
-
-/* Separate attribute: maximum u32 values plus all keys fit below PAGE_SIZE. */
-static int qrx_diagnostics_get(char *buffer, const struct kernel_param *kp)
+static int qrx_status_get(char *buffer, const struct kernel_param *kp)
 {
-	struct q1000k_rx_diagnostics s;
+	struct q1000k_rx_sample s;
+	u32 mask;
 	int ret;
 
 	if (!rx_bench) return -EOPNOTSUPP;
 	ret = q1000k_protocol_status();
 	if (ret) return ret;
 	if (!q1000k_transport_running()) return -EAGAIN;
-	ret = q1000k_phy_rx_diagnostics(&s);
+	ret = q1000k_phy_rx_sample(&s);
 	if (ret) return ret;
+	mask = get_xpon_data(0x5040);
+	ret = an7581_xpon_status();
+	if (ret || mask) return ret ?: -EIO;
+	return qrx_status_format(buffer, &s, mask);
+}
+static const struct kernel_param_ops qrx_status_ops = { .get = qrx_status_get };
+module_param_cb(rx_bench_status, &qrx_status_ops, NULL, 0400);
+
+/* Separate attribute: maximum u32 values plus all keys fit below PAGE_SIZE. */
+static int qrx_diagnostics_format(char *buffer, const struct q1000k_rx_diagnostics *sample)
+{
+	struct q1000k_rx_diagnostics s = *sample;
+
 	return scnprintf(buffer, PAGE_SIZE,
 		"{\"diagnostics_version\":5,\"probe\":%u,\"attempts\":%u,\"writes\":%u,"
 		"\"sampled_ms\":%llu"
@@ -181,5 +176,61 @@ static int qrx_diagnostics_get(char *buffer, const struct kernel_param *kp)
 #undef QDIAG_VALUE
 	);
 }
+static int qrx_diagnostics_get(char *buffer, const struct kernel_param *kp)
+{
+	struct q1000k_rx_diagnostics s;
+	int ret;
+
+	if (!rx_bench) return -EOPNOTSUPP;
+	ret = q1000k_protocol_status();
+	if (ret) return ret;
+	if (!q1000k_transport_running()) return -EAGAIN;
+	ret = q1000k_phy_rx_diagnostics(&s);
+	return ret ?: qrx_diagnostics_format(buffer, &s);
+}
 static const struct kernel_param_ops qrx_diagnostics_ops = { .get = qrx_diagnostics_get };
 module_param_cb(rx_bench_diagnostics, &qrx_diagnostics_ops, NULL, 0400);
+
+/* Two JSON records from a single PHY callback-locked capture. seq_file avoids
+ * PAGE_SIZE truncation while retaining the existing per-record schemas.
+ * No cache or reader can replace the diagnostic half of another reader's pair.
+ */
+static struct proc_dir_entry *qrx_snapshot_entry;
+static int qrx_snapshot_show(struct seq_file *seq, void *unused)
+{
+	struct q1000k_rx_sample rx;
+	struct q1000k_rx_diagnostics diag;
+	char *buffer;
+	u32 mask;
+	int ret = q1000k_protocol_status();
+
+	if (ret) return ret;
+	if (!q1000k_transport_running()) return -EAGAIN;
+	ret = q1000k_phy_snapshot(&rx, &diag);
+	if (ret) return ret;
+	mask = get_xpon_data(0x5040);
+	ret = an7581_xpon_status();
+	if (ret || mask == ~0U || (rx.rx_bench && mask)) return ret ?: -EIO;
+	buffer = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!buffer) return -ENOMEM;
+	qrx_status_format(buffer, &rx, mask);
+	seq_puts(seq, buffer);
+	qrx_diagnostics_format(buffer, &diag);
+	seq_puts(seq, buffer);
+	kfree(buffer);
+	return 0;
+}
+
+int q1000k_snapshot_init(void)
+{
+	if (qrx_snapshot_entry) return -EBUSY;
+	qrx_snapshot_entry = proc_create_single("q1000k-pon-snapshot", 0400, NULL,
+					     qrx_snapshot_show);
+	return qrx_snapshot_entry ? 0 : -ENOMEM;
+}
+
+void q1000k_snapshot_exit(void)
+{
+	proc_remove(qrx_snapshot_entry);
+	qrx_snapshot_entry = NULL;
+}

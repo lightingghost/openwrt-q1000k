@@ -55,6 +55,7 @@ static int q1000k_pipeline_clear_fcs(void);
 static int q1000k_transport_activate_rx(u32 channels);
 static int q1000k_transport_resume(void);
 static int q1000k_phy_start(void);
+static int q1000k_phy_receiver_startup(void);
 static bool transmitter;
 static int q1000k_phy_set_tx(bool enable);
 /* PRODUCTION */
@@ -155,6 +156,8 @@ static int q1000k_phy_start(void)
 {
     assert(q1000k_pipeline.stage==Q1000K_PIPELINE_RX_ACTIVE); return step();
 }
+static int q1000k_phy_receiver_startup(void)
+{ assert(q1000k_pipeline.stage==Q1000K_PIPELINE_MAC_ACTIVE && !transmitter); return step(); }
 static int q1000k_phy_set_tx(bool enable)
 {
     assert(q1000k_pipeline.stage==Q1000K_PIPELINE_MAC_ACTIVE); transmitter=enable; return step();
@@ -201,7 +204,7 @@ int main(void)
     atomic_context=0;
     for(unsigned int cold=0;cold<2;cold++) {
         ops.reset_mac=reset_requested=cold;
-        for(int failure=0;failure<=53+(cold?2:0);failure++) {
+        for(int failure=0;failure<=54+(cold?2:0);failure++) {
             reset(); fail=failure; contain_fail=failure%35;
             int ret=q1000k_pipeline_reconfigure(&ops,&task1,0x80000081);
             if(!ret) {
@@ -216,14 +219,14 @@ int main(void)
                 assert(q1000k_pipeline.containment_error==(contain_fail?-ENODEV:0));
                 assert(q1000k_pipeline_activate()==-ETIMEDOUT && calls==failure);
             } else {
-                assert(!ret && calls==53+(cold?2:0) && !poison && !containment_calls);
+                assert(!ret && calls==54+(cold?2:0) && !poison && !containment_calls);
                 assert(q1000k_pipeline.stage==Q1000K_PIPELINE_UNDRAINED);
             }
         }
     }
     reset(); reset_requested=ops.reset_mac=false;
     assert(!q1000k_pipeline_reconfigure(&ops,&task1,0x80000081));
-    transmitter=true;
+    transmitter=false;
     assert(!q1000k_pipeline_activate_receive_only() && !transmitter);
     for(int failure=0;failure<2;failure++) {
         reset(); readiness_error=failure ? -EIO : 0;

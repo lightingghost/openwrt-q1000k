@@ -26,4 +26,8 @@ int q1000k_pon_check(struct q1000k_pon *pon);
  * field. Caller holds the controller lease throughout probe and restoration.
  */
 int q1000k_pon_oem_post_init(struct q1000k_pon *pon, bool restore);
+/* Lifecycle owner after PHY/MAC initialization, before TX/protocol activation.
+ * Idempotent within one controller lifetime; disabled on the old RX bench DT.
+ */
+int q1000k_pon_receiver_startup(struct q1000k_pon *pon);
 #endif

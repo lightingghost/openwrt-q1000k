@@ -1,0 +1,25 @@
+Subject: [PATCH] own a coherent RX and active-service snapshot interface
+
+--- a/xpon-en757x/xpon_10g/src/xpondrv.c
++++ b/xpon-en757x/xpon_10g/src/xpondrv.c
+@@ -1369,6 +1369,9 @@
+ **____________________________________________________________________________*/
+ static void xpondrv_cleanup(void)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_snapshot_exit();
++#endif
+ 	/* Close ingress before stopping workers or releasing callback state. */
+ 	smp_store_release(&xpon_ready, false);
+ 	if (!gpPonSysData)
+@@ -1626,6 +1629,10 @@
+ 	ret = q1000k_rx_bench_enabled() ? 0 : q1000k_protocol_start();
+ 	if (ret)
+ 		goto fail;
++	stage = "snapshot-interface";
++	ret = q1000k_snapshot_init();
++	if (ret)
++		goto fail;
+ #endif
+ 	change_alarm_led_status(LED_FLICKER);
+ #ifndef Q1000K_PON_IDENTITY

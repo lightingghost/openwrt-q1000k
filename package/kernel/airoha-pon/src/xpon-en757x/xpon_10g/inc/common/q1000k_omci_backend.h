@@ -3,6 +3,8 @@
 #define _Q1000K_OMCI_BACKEND_H_
 #include <linux/types.h>
 struct net_device;
+struct seq_file;
+void q1000k_omci_security_status(struct seq_file *seq);
 struct sk_buff;
 struct q1000k_pon_profile;
 int q1000k_omci_backend_init(struct net_device *dev);

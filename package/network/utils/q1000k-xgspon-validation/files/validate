@@ -1,0 +1,297 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Finite RAM-only lifecycle. The host collector owns staging and evidence.
+# TX is permitted only in a fresh explicit activation controller session.
+. /lib/q1000k-xgspon/common.sh
+umask 077
+export LC_ALL=C
+fail() { echo "Validation failed: $*" >&2; exit 1; }
+event() { printf 'validation_stage name=%s status=%s\n' "$1" "$2"; }
+preflight() {
+	q1000k-pon-bench status >/dev/null || fail 'RAM bench preflight failed.'
+	[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || fail 'Activation DT is required.'
+	[ "$(cat /proc/sys/kernel/panic)" = 0 ] || fail 'Panic timeout must be zero.'
+}
+owned_modules= controller= locked=0 lower_owned=0 wan_owned=0
+cleanup() {
+	local result=$? module failed=0
+	trap - EXIT
+	trap '' HUP INT TERM
+	[ "$locked" = 1 ] || exit "$result"
+	if [ "$wan_owned" = 1 ]; then
+		ifdown q1000k_wan6 || failed=1
+		ifdown q1000k_wan || failed=1
+	fi
+	for module in $owned_modules; do
+		if [ "$module" = q1000k_pon_control ] && [ -n "$controller" ]; then
+			printf 'off\n' > "$controller/operation" || failed=1
+		fi
+		if ! rmmod "$module"; then
+			echo "Cannot unload $module; retaining its dependencies." >&2
+			failed=1
+			break
+		fi
+	done
+	if [ "$failed" = 0 ] && [ "$lower_owned" = 1 ]; then
+		ip link set dev ponraw down || failed=1
+	fi
+	rmdir /var/run/q1000k-pon-bench.lock || failed=1
+	if [ "$failed" = 0 ]; then event cleanup passed; else event cleanup failed; result=1; fi
+	exit "$result"
+}
+load_module() {
+	local module="$1" filename="$1"
+	shift
+	[ "$module" != q1000k_pon_control ] || filename=q1000k-pon-control
+	if [ "$#" -gt 0 ]; then
+		# Suppress insmod's parameter echo: it may contain subscriber secrets.
+		insmod "/lib/modules/$(uname -r)/$filename.ko" "$@" >/dev/null 2>&1 || fail "Cannot load $module (see serial errors)."
+	else
+		modprobe "$module" || fail "Cannot load $module."
+	fi
+	owned_modules="$module $owned_modules"
+}
+field() {
+	local type
+	json_get_type type "$1"; json_get_var value "$1"
+	[ "$type" = "$2" ]
+}
+controller_check() {
+	local data expected="$1"
+	data=$(cat "$controller/status") && json_load "$data" || return 1
+	printf '%s\n' "$data"
+	field tx_inhibited boolean && [ "$value" = "$inhibit" ] || return 1
+	field last_error int && [ "$value" = 0 ] || return 1
+	field mode string && [ "$value" = "$expected" ] || return 1
+	field tx_disabled boolean || return 1
+	[ "$inhibit" = 0 ] || [ "$value" = 1 ] || return 1
+	if [ "$expected" = xgspon ]; then
+		for key in md32_enabled firmware_verified calibration_supplied; do
+			field "$key" boolean && [ "$value" = 1 ] || return 1
+		done
+	fi
+}
+snapshot() {
+	local pair rx diag current_ms frames synced power_valid n retries=0
+	controller_check xgspon || fail 'Controller health/TX policy changed.'
+	while ! pair=$(cat /proc/q1000k-pon-snapshot); do
+		retries=$((retries+1))
+		[ "$retries" -lt 5 ] || fail 'Coherent PHY snapshot failed after bounded transition retries.'
+		printf 'snapshot_retry=%s\n' "$retries"
+		sleep 1
+	done
+	[ "$(printf '%s\n' "$pair" | wc -l)" = 2 ] || fail 'Snapshot is incomplete.'
+	rx=$(printf '%s\n' "$pair" | sed -n '1p')
+	diag=$(printf '%s\n' "$pair" | sed -n '2p')
+	# Preserve the rejected records too, without interleaved shell traces.
+	printf '%s\n' "$pair"
+	json_load "$rx" || fail 'Invalid RX JSON.'
+	field receiver_version int && [ "$value" = 5 ] || fail 'Wrong RX schema.'
+	field rx_bench boolean && [ "$value" = "$inhibit" ] || fail 'Wrong PHY mode.'
+	field tx_inhibited boolean && [ "$value" = "$inhibit" ] || fail 'PHY TX policy changed.'
+	field tx_enabled boolean || fail 'Missing actual TX state.'
+	[ "$inhibit" = 0 ] || [ "$value" = 0 ] || fail 'TX observed in RX-only mode.'
+	field registration_enabled boolean && [ "$value" = "$allow_tx" ] || fail 'Wrong registration mode.'
+	field sampled_ms int && [ "$value" -gt "$last_ms" ] || fail 'Stale RX sample.'
+	current_ms=$value; last_ms=$value
+	field frames int || fail 'Missing frame counter.'; frames=$value
+	field synced boolean || fail 'Missing sync status.'; synced=$value
+	field rx_power_valid boolean || fail 'Missing optical power validity.'; power_valid=$value
+	if [ "$power_valid" = 1 ]; then
+		field rx_power_nw int && [ "$value" -gt 0 ] || fail 'Invalid power reading.'
+		printf 'rx_power_nw=%s\n' "$value"
+	fi
+	if [ "$synced" = 1 ] && [ "$previous_frames" -ge 0 ] && [ "$frames" != "$previous_frames" ]; then
+		stable=$((stable + 1))
+	else stable=0; fi
+	previous_frames=$frames
+	json_load "$diag" || fail 'Invalid diagnostics JSON.'
+	field diagnostics_version int && [ "$value" = 5 ] || fail 'Wrong diagnostics schema.'
+	field sampled_ms int && [ "$value" -ge "$current_ms" ] && [ "$((value-current_ms))" -le 1500 ] || fail 'Diagnostic pair age exceeds limit.'
+	for key in probe attempts writes; do field "$key" int && [ "$value" = 0 ] || fail 'Unexpected experimental probe.'; done
+	for key in checker_control data_route_control bist_lane_control; do
+		field "$key" int || fail 'Missing loopback guard.'
+		case "$key" in data_route_control) n=65792 ;; *) n=256 ;; esac
+		[ "$((value & n))" = 0 ] || fail 'Loopback/generator guard failed.'
+	done
+	data=$(cat "$controller/receiver_status") && json_load "$data" || fail 'Receiver control unavailable.'
+	printf '%s\n' "$data"
+	field oem_post_saved boolean && [ "$value" = 1 ] || fail 'Automatic OEM startup was not applied.'
+	cat /proc/xgpon/status || fail 'MAC status unavailable.'
+	grep -qx 'protocol_error=0' /proc/xgpon/status || fail 'MAC protocol fault.'
+	omci=$(q1000k-omci -i pon status) && json_load "$omci" || fail 'OMCI status unavailable.'
+	printf '%s\n' "$omci"
+	field state int || fail 'Missing O-state.'; state=$value
+	field service_error int && [ "$value" = 0 ] || fail 'OMCI service installation failed.'
+	field authenticated int || fail 'Missing authentication state.'; authenticated=$value
+	field agent_operational int || fail 'Missing OMCI operational state.'; operational=$value
+	field service_rules int || fail 'Missing service rules.'; rules=$value
+	field mib_objects int || fail 'Missing MIB size.'; objects=$value
+	if [ "$inhibit" = 1 ]; then
+		[ "$state" = 1 ] && [ "$operational" = 0 ] && [ "$authenticated" = 0 ] && [ "$rules" = 0 ] || fail 'RX-only session registered.'
+	fi
+}
+observe() {
+	local count=0 name="$1" limit="$2"
+	event "$name" started
+	while [ "$count" -lt "$limit" ]; do
+		snapshot
+		count=$((count+1))
+		sleep 1 || fail 'Observation interrupted.'
+	done
+	event "$name" observed
+}
+wan_idle() {
+	local interface data
+	for interface in q1000k_wan q1000k_wan6; do
+		[ "$(uci -q get network.$interface.q1000k_profile)" = 1 ] &&
+		[ "$(uci -q get network.$interface.auto)" = 0 ] &&
+		[ "$(uci -q get network.$interface.device)" = pon ] || return 1
+		data=$(ubus call network.interface.$interface status) && json_load "$data" || return 1
+		field up boolean && [ "$value" = 0 ] || return 1
+		field pending boolean && [ "$value" = 0 ] || return 1
+	done
+}
+# Private JSON directory, never factory fallback or persistent identity writes.
+identity_option_read() {
+	local type
+	json_load "$(cat "$identity_dir/identity.json")" || return 1
+	json_get_type type "$1"
+	identity_value=
+	if [ -n "$type" ]; then
+		[ "$type" = string ] || return 1
+		json_get_var identity_value "$1"
+	fi
+	identity_option_valid "$1" "$identity_value"
+}
+case "$1" in
+	status) [ "$#" = 1 ] || fail 'Unexpected status arguments.'; preflight; exit 0 ;;
+	rx|activate) [ "$#" = 5 ] || [ "$#" = 6 ] || fail 'Usage: q1000k-pon-validate rx|activate CALIBRATION IDENTITY_DIR SAMPLES IPERF_IP_OR_NONE [PHASE]'
+		mode=$1; calibration=$2; identity_dir=$3; limit=$4; iperf_server=$5; phase=${6:-rx} ;;
+	*) fail 'Commands: status, rx, activate' ;;
+esac
+case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
+[ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|activation) ;; *) fail 'Invalid phase.' ;; esac
+# Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
+case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
+preflight
+case "$calibration" in /tmp/*) ;; *) fail 'Calibration must be staged in RAM.' ;; esac
+[ -f "$calibration" ] && [ ! -L "$calibration" ] && [ "$(wc -c < "$calibration")" = 513 ] || fail 'Invalid calibration size/type.'
+[ "$(sha256sum "$calibration" | cut -d ' ' -f1)" = f2ec3b0de9683d113755d5d4df4fcafe8a4b47a43153ad0de45cbe9cd34c6e1c ] || fail 'Wrong unit calibration.'
+read_firmware
+[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Wrong OEM firmware pair.'
+allow_tx=0 inhibit=1 serial=TEST00000001 wan_mac=02:00:00:00:00:01 identity_params= registration=
+if [ "$mode" = activate ]; then
+	case "$identity_dir" in /tmp/*) ;; *) fail 'Private identity must be staged in RAM.' ;; esac
+	[ -d "$identity_dir" ] && [ ! -L "$identity_dir" ] && [ -f "$identity_dir/identity.json" ] && [ ! -L "$identity_dir/identity.json" ] || fail 'Private identity is absent.'
+	identity_options || fail 'Invalid private identity.'
+	identity_option_read serial && serial=$identity_value && valid_serial "$serial" || fail 'Explicit subscriber serial is required.'
+	identity_option_read wan_mac && wan_mac=$identity_value && valid_mac "$wan_mac" || fail 'Explicit subscriber WAN MAC is required.'
+	[ -n "$registration" ] || fail 'Explicit registration ID is required (use the real line setting).'
+	wan_idle || fail 'WAN configuration is not idle/owned.'
+	allow_tx=1 inhibit=0
+fi
+[ -n "$registration" ] || registration=000000000000000000000000000000000000000000000000000000000000000000000000
+modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
+for module in $modules; do [ ! -d "/sys/module/$module" ] || fail "Module $module already loaded."; done
+read -r flags < /sys/class/net/ponraw/flags || fail 'Missing native endpoint.'
+printf '%s\n' "$flags" | grep -Eq '^0x[0-9a-fA-F]{1,8}$' && [ "$((flags & 1))" = 0 ] || fail 'Native endpoint already up.'
+[ ! -e /sys/class/net/ponraw/master ] || fail 'Native endpoint is enslaved.'
+mkdir /var/run/q1000k-pon-bench.lock || fail 'Another bench owns the device.'
+locked=1
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+load_module q1000k_pon_control validation_tx="$allow_tx"
+controller=$(find_controller) || fail 'Controller did not bind.'
+controller_check off || fail 'Wrong initial controller state.'
+printf 'detect\n' > "$controller/operation" || fail 'Controller detection failed.'
+controller_check off || fail 'Wrong detected controller state.'
+cat "$calibration" > "$controller/calibration" || fail 'Cannot stage calibration.'
+printf 'initialize\n' > "$controller/operation" || fail 'Controller initialization failed.'
+controller_check xgspon || fail 'Controller initialization check failed.'
+ip link set dev ponraw up || fail 'Cannot open DMA endpoint.'
+lower_owned=1
+for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do load_module "$module"; done
+# Only fixed names and validated hexadecimal/scalar module values are expanded.
+load_module xpon_10g rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
+registration= serial= identity_params= identity_value=
+last_ms=-1 previous_frames=-1 stable=0 state=0 authenticated=0 operational=0 rules=0 objects=0
+if [ "$mode" = rx ]; then
+	observe "$phase" "$limit"
+	[ "$stable" -ge 5 ] || fail 'Stable downstream frames were not observed at the end.'
+	event "$phase" passed
+	exit 0
+fi
+# Every timeout is bounded and recorded independently; later stages need the
+# preceding stage's actual hardware state, never a timer-based assumption.
+event activation started
+count=0 o5_stable=0
+while [ "$count" -lt "$limit" ]; do
+	snapshot
+	if [ "$state" = 5 ] && [ "$authenticated" = 1 ]; then o5_stable=$((o5_stable+1)); else o5_stable=0; fi
+	[ "$o5_stable" -lt 5 ] || break
+	count=$((count+1)); sleep 1
+done
+[ "$o5_stable" -ge 5 ] || { event activation timeout; fail 'O5/authentication not reached.'; }
+event activation passed
+event provisioning started
+count=0 provision_stable=0
+while [ "$count" -lt "$limit" ]; do
+	snapshot
+	if [ "$state" = 5 ] && [ "$authenticated" = 1 ] && [ "$operational" = 1 ] && [ "$rules" -gt 0 ] && [ "$objects" -gt 0 ]; then
+		provision_stable=$((provision_stable+1))
+	else provision_stable=0; fi
+	[ "$provision_stable" -lt 5 ] || break
+	count=$((count+1)); sleep 1
+done
+printf 'mib_begin\n'
+q1000k-omci -i pon mib || fail 'MIB capture failed.'
+printf 'mib_end\n'
+[ "$provision_stable" -ge 5 ] || { event provisioning timeout; fail 'OMCI service rules not installed.'; }
+event provisioning passed
+wan_idle || fail 'WAN ownership changed.'
+event wan started
+wan_owned=1
+ifup q1000k_wan || fail 'DHCP startup failed.'
+ifup q1000k_wan6 || fail 'DHCPv6 startup failed.'
+count=0
+while [ "$count" -lt "$limit" ]; do
+	snapshot
+	for interface in q1000k_wan q1000k_wan6; do
+		printf 'wan_status interface=%s\n' "$interface"
+		ubus call network.interface.$interface status || fail 'WAN status unavailable.'
+	done
+	# Keep the complete bounded window to capture leases, renewal and loss.
+	count=$((count+1)); sleep 1
+done
+ip -j address show dev pon
+ip -j route show dev pon
+ip -6 -j route show dev pon
+# These probes are bound to the optical interface, so management cannot pass them.
+for family in 4 6; do
+	if [ "$family" = 4 ]; then target=1.1.1.1; size=1472; else target=2606:4700:4700::1111; size=1452; fi
+	printf 'traffic_probe family=%s kind=ping\n' "$family"
+	/usr/bin/ping -"$family" -I pon -c 5 -W 2 "$target"; printf 'traffic_result family=%s kind=ping rc=%s\n' "$family" "$?"
+	printf 'traffic_probe family=%s kind=mtu1500\n' "$family"
+	/usr/bin/ping -"$family" -I pon -M do -s "$size" -c 3 -W 2 "$target"; printf 'traffic_result family=%s kind=mtu1500 rc=%s\n' "$family" "$?"
+	# Fixed numeric endpoint avoids resolver traffic escaping over management.
+	[ "$family" = 4 ] && resolve_target=$target || resolve_target="[$target]"
+	curl -"$family" --interface pon --resolve "one.one.one.one:443:$resolve_target" --connect-timeout 10 --max-time 20 --silent --show-error --output /dev/null --write-out 'http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	printf 'traffic_result family=%s kind=https rc=%s\n' "$family" "$?"
+done
+if [ "$iperf_server" != none ]; then
+	for direction in upstream downstream; do
+		case "$iperf_server" in *:*) family=6 ;; *) family=4 ;; esac
+		bound=$(ip -"$family" -o address show dev pon scope global | awk 'NR==1 { split($4,a,"/"); print a[1] }')
+		[ -n "$bound" ] || { event throughput no-address; break; }
+		printf 'throughput direction=%s\n' "$direction"
+		if [ "$direction" = downstream ]; then reverse=-R; else reverse=; fi
+		iperf3 -"$family" -c "$iperf_server" -B "$bound" --bind-dev pon --connect-timeout 5000 -t 20 -J $reverse
+		printf 'throughput_result direction=%s rc=%s\n' "$direction" "$?"
+	done
+else event throughput not-run-no-server; fi
+observe traffic-soak 30
+event wan observed
+# The host computes per-family DHCP/traffic and encryption results from evidence.
+event validation observed

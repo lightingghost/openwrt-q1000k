@@ -235,3 +235,12 @@ define Device/quantum_q1000k-xgspon-bench
   SOC := an7581
 endef
 TARGET_DEVICES += quantum_q1000k-xgspon-bench
+
+# One RAM image for receive, activation, OMCI and WAN validation.
+define Device/quantum_q1000k-xgspon-activation
+  $(call Device/quantum_q1000k-xgspon-bench)
+  DEVICE_VARIANT := XGS-PON RAM activation bench
+  DEVICE_DTS := an7581-q1000k-xgspon-activation
+  DEVICE_PACKAGES += q1000k-xgspon-validation
+endef
+TARGET_DEVICES += quantum_q1000k-xgspon-activation

@@ -918,21 +918,15 @@ out:
 }
 EXPORT_SYMBOL(q1000k_phy_set_rx_probe);
 
-int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *sample)
+/* Caller holds both control and callback locks. */
+static int qphy_diagnostics(struct q1000k_rx_diagnostics *sample)
 {
 	struct q1000k_rx_diagnostics result = {};
-	int ret = qphy_context();
+	int ret;
 
-	if (ret) return ret;
-	if (!sample) return -EINVAL;
-	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
-	mutex_lock(&qphy_control);
-	qphy_callback_lock();
-	ret = qphy_ready();
-	if (ret) goto out;
-	if (!ret && (!qphy_rx_bench || !qphy_active || !gpPhyPriv->phy_init_done))
-		ret = -EAGAIN;
-	if (!ret) ret = q1000k_phy_controller_check();
+	if (!qphy_active || !gpPhyPriv->phy_init_done)
+		return -EAGAIN;
+	ret = q1000k_phy_controller_check();
 #define QDIAG_READ(name, reg) if (!ret) ret = an7581_pon_phy_read(reg, &result.name);
 	Q1000K_RX_DIAG_FIELDS(QDIAG_READ)
 #undef QDIAG_READ
@@ -946,6 +940,69 @@ int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *sample)
 		result.attempts = qphy_rx_attempts;
 		result.writes = q1000k_phy_rx_probe_writes();
 		*sample = result;
+	}
+	return ret;
+}
+
+int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *sample)
+{
+	int ret = qphy_context();
+
+	if (ret) return ret;
+	if (!sample) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret) goto out;
+	if (!ret) ret = qphy_rx_bench ? qphy_diagnostics(sample) : -EAGAIN;
+	if (ret && ret != -EAGAIN) qphy_failed(ret);
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_rx_diagnostics);
+
+int q1000k_phy_receiver_startup(void)
+{
+	int ret = qphy_context();
+
+	if (ret) return ret;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret) goto out;
+	if (!ret && (!qphy_active || !qphy_controller)) ret = -EAGAIN;
+	if (!ret) ret = q1000k_pon_receiver_startup(qphy_controller);
+	if (ret && ret != -EAGAIN) qphy_failed(ret);
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_receiver_startup);
+
+int q1000k_phy_snapshot(struct q1000k_rx_sample *sample,
+			 struct q1000k_rx_diagnostics *diagnostics)
+{
+	struct q1000k_rx_sample rx;
+	struct q1000k_rx_diagnostics diag;
+	int ret = qphy_context();
+
+	if (ret) return ret;
+	if (!sample || !diagnostics) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret) goto out;
+	if (!ret) ret = qphy_rx_sample(&rx);
+	if (!ret) ret = qphy_diagnostics(&diag);
+	if (!ret) {
+		*sample = rx;
+		*diagnostics = diag;
 	} else if (ret != -EAGAIN) {
 		qphy_failed(ret);
 	}
@@ -954,7 +1011,7 @@ out:
 	mutex_unlock(&qphy_control);
 	return ret;
 }
-EXPORT_SYMBOL(q1000k_phy_rx_diagnostics);
+EXPORT_SYMBOL(q1000k_phy_snapshot);
 
 
 /* Callback mutex held. Registers below are ordinary read-only snapshots;
@@ -1027,15 +1084,18 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	bool inhibited, tx;
 	int i, ret;
 
-	if (!qphy_rx_bench || !qphy_controller || !qphy_active)
+	if (!qphy_controller || !qphy_active)
 		return -EAGAIN;
 	ret = q1000k_pon_get_tx_inhibit(qphy_controller, &inhibited);
 	if (!ret)
 		ret = q1000k_pon_get_tx(qphy_controller, &tx);
 	if (ret)
 		return ret;
-	if (!inhibited || tx)
+	if (qphy_rx_bench && (!inhibited || tx))
 		return -EACCES;
+	result.rx_bench = qphy_rx_bench;
+	result.tx_inhibited = inhibited;
+	result.tx_enabled = tx;
 	ret = q1000k_pon_get_los(qphy_controller);
 	if (ret < 0)
 		return ret;
@@ -1051,7 +1111,8 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_XG_PON_INT_EN, &irq_mask);
 	if (ret)
 		return ret;
-	if (sfp == ~0U || result.sync_status == ~0U || irq_mask != QPHY_RX_BENCH_IRQS)
+	if (sfp == ~0U || result.sync_status == ~0U || irq_mask == ~0U ||
+	    (qphy_rx_bench && irq_mask != QPHY_RX_BENCH_IRQS))
 		return -EIO;
 	result.phy_los = !!(sfp & EN7581_XGPON_PHY_SFP_RX_LOS_ST);
 	result.synced = !result.controller_los && !result.phy_los &&
@@ -1116,7 +1177,7 @@ int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample)
 	qphy_callback_lock();
 	ret = qphy_ready();
 	if (!ret) {
-		ret = qphy_rx_sample(sample);
+		ret = qphy_rx_bench ? qphy_rx_sample(sample) : -EAGAIN;
 		if (ret && ret != -EAGAIN)
 			qphy_failed(ret);
 	}

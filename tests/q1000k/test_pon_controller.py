@@ -11,6 +11,20 @@ class ControllerTests(unittest.TestCase):
         fixture = Path(__file__).with_name('test_en7573.c').read_text()
         run_c(fixture, flags=['-O2', '-I' + str(directory), str(directory / 'en7573.c')])
 
+    def test_tx_session_policy_truth_table(self):
+        policy=(ROOT/'package/kernel/q1000k-pon-control/src/q1000k_pon_policy.h').read_text()
+        run_c('#include <assert.h>\n#include <stdbool.h>\n#include <errno.h>\n'+policy+r"""
+int main(void) {
+    for(int hard=0;hard<2;hard++) for(int validation=0;validation<2;validation++) for(int allow=0;allow<2;allow++) {
+        bool inhibit=false;
+        int ret=q1000k_pon_tx_policy(hard,validation,allow,&inhibit);
+        if(allow && (hard || !validation)) assert(ret==-EACCES);
+        else assert(!ret && inhibit==(hard || (validation && !allow)));
+    }
+    return 0;
+}
+""")
+
     def test_output_poweroff_contains_restore_failure(self):
         source=(ROOT/'package/kernel/q1000k-pon-control/src/driver.c').read_text()
         body=source[source.index('static int pon_off('):source.index('static int pon_select(')]
@@ -27,6 +41,9 @@ struct q1000k_pon {
     int *power[2]; bool initialized, tx_enabled; int mode;
 };
 static int restore_error, gpio_error, restores, powers;
+static int disable_error, disables;
+static int en7573_set_tx(struct en7573_io *io, bool enabled)
+{ (void)io; assert(!enabled); disables++; return disable_error; }
 static int en7573_restore_rx_output(struct en7573_io *io, struct en7573_rx_output *original)
 {
     (void)io; restores++;
@@ -49,7 +66,7 @@ int main(void)
     restore_error=-5;
     assert(pon_off(&pon)==-5 && restores==1 && powers==2);
     assert(!a && !b && !pon.initialized && !pon.tx_enabled && pon.mode==-1);
-    assert(!pon.rx_output_original.saved);
+    assert(!pon.rx_output_original.saved && disables==1);
     powers=restores=0;
     pon.rx_output_original.saved=true; gpio_error=-6;
     assert(pon_off(&pon)==-5 && restores==1 && powers==2 && pon.mode==-2);
@@ -58,6 +75,9 @@ int main(void)
     assert(!pon_off(&pon) && restores==1 && powers==2 && pon.mode==-1);
     powers=restores=0;
     assert(!pon_off(&pon) && !restores && powers==2);
+    pon.initialized=pon.tx_enabled=pon.oem_post_original.saved=true;
+    powers=restores=0; disable_error=-5;
+    assert(pon_off(&pon)==-5 && !restores && powers==2 && !pon.tx_enabled);
     return 0;
 }
 """

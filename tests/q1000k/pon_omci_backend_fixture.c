@@ -1,3 +1,5 @@
+#include <stdarg.h>
+#include <stdio.h>
 // SPDX-License-Identifier: GPL-2.0-only
 #include <assert.h>
 #include <errno.h>
@@ -259,6 +261,13 @@ static int q1000k_gwan_cold_reset(int (*install)(void *),void *arg) {
     assert(owned && !native_epoch); cold_count++; int ret=step(); if(ret) return ret;
     install_phase=true; ret=install(arg); install_phase=false; optical_tx=false; return ret;
 }
+static void rcu_read_lock(void) { }
+static void rcu_read_unlock(void) { }
+#define spin_lock_irqsave(lock, flags) do { (flags)=0; spin_lock_bh(lock); } while (0)
+#define spin_unlock_irqrestore(lock, flags) do { (void)(flags); spin_unlock_bh(lock); } while (0)
+struct seq_file { char text[1024]; };
+static void seq_printf(struct seq_file *seq,const char *format,...)
+{ va_list args; va_start(args,format); vsnprintf(seq->text,sizeof(seq->text),format,args); va_end(args); }
 /* PRODUCTION */
 int q1000k_auth_key_report(struct crypto_lskcipher *tfm,const u8 kek[16],const u8 key[16],bool confirm,u8 report[32]) {
     assert(!owned && !auth_held && tfm==(confirm ? qomci_current->cipher : qomci_current->ecb_cipher));
@@ -585,6 +594,9 @@ int main(void)
     token=q1000k_protocol_enter(); assert(!q1000k_omci_key_control(true,2,0,12));
     q1000k_protocol_leave(token); q1000k_omci_control();
     assert(!fault && data_tx==2 && data_rx==2 && !b->data.regenerating);
+    struct seq_file security={}; q1000k_omci_security_status(&security);
+    assert(strstr(security.text,"data_rx_key_valid=2\n") && strstr(security.text,"data_tx_key_index=2\n"));
+    assert(strstr(security.text,"data_key_pending=0\n") && !strstr(security.text,"registration"));
     for(int i=0;i<16;i++) assert(!data_keys[0][i] && !b->data.mac.key[0][i]);
     /* Reset in the core barrier supersedes a previously accepted request. */
     reported=data_reports;

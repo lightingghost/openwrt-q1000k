@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <stdlib.h>
 typedef unsigned int uint;
 typedef uint8_t u8;
 typedef uint32_t u32;
@@ -30,6 +31,18 @@ static int q1000k_protocol_status(void) { return protocol_error; }
 static bool q1000k_transport_running(void) { return running; }
 static u32 get_xpon_data(u32 reg) { assert(reg==0x5040); mac_reads++; return mac_mask; }
 static int an7581_xpon_status(void) { return provider_error; }
+struct seq_file { char out[8192]; };
+struct proc_dir_entry { int unused; };
+static struct proc_dir_entry proc;
+static int proc_error, proc_removed, alloc_error;
+#define GFP_KERNEL 0
+static void *kmalloc(size_t n, int flags) { return alloc_error ? NULL : malloc(n); }
+static void kfree(void *p) { free(p); }
+static void seq_puts(struct seq_file *s, const char *p)
+{ assert(strlen(s->out)+strlen(p)<sizeof(s->out)); strcat(s->out,p); }
+static struct proc_dir_entry *proc_create_single(const char *n,int mode,void *parent,int (*show)(struct seq_file *,void *))
+{ assert(!strcmp(n,"q1000k-pon-snapshot") && mode==0400 && !parent && show); return proc_error ? NULL : &proc; }
+static void proc_remove(struct proc_dir_entry *p) { if(p) { assert(p==&proc); proc_removed++; } }
 /* PRODUCTION */
 int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain) {
     preparations++; if(!phy_error) { phy_mode=enabled; phy_reacquire=reacquire; phy_restore_pll=restore_pll; phy_restore_gain=restore_gain; } return phy_error;
@@ -41,7 +54,7 @@ int q1000k_phy_rx_diagnostics(struct q1000k_rx_diagnostics *s) {
 }
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
     samples++; if(sample_error) return sample_error;
-    memset(s,0,sizeof(*s)); s->synced=true; s->frames=1234; s->sampled_ms=123456789012ULL;
+    memset(s,0,sizeof(*s)); s->rx_bench=rx_bench; s->tx_inhibited=rx_bench; s->tx_enabled=!rx_bench; s->synced=true; s->frames=1234; s->sampled_ms=123456789012ULL;
     s->gain_restore_enabled=phy_restore_gain; s->rx_power_valid=power_valid; s->rx_power_nw=power_valid ? 19900 : 0;
     s->pll_restore_enabled=phy_restore_pll; s->reacquire_enabled=phy_reacquire; s->reacquire_attempts=phy_reacquire ? 1 : 0;
     s->receiver=(struct q1000k_rx_registers){
@@ -68,6 +81,8 @@ int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
     };
     return 0;
 }
+int q1000k_phy_snapshot(struct q1000k_rx_sample *rx,struct q1000k_rx_diagnostics *diag)
+{ int ret=q1000k_phy_rx_sample(rx); memset(&rx->receiver,0xff,sizeof(rx->receiver)); memset(&rx->pcs_counters,0xff,sizeof(rx->pcs_counters)); return ret ? ret : q1000k_phy_rx_diagnostics(diag); }
 int main(void) {
     char out[4096];
     assert(!q1000k_rx_bench_prepare() && !phy_mode && preparations==1);
@@ -128,5 +143,17 @@ int main(void) {
     rx_restore_gain=rx_restore_pll=false; assert(!q1000k_rx_bench_prepare());
     rx_probe=Q1000K_RX_PROBE_COUNT; assert(q1000k_rx_bench_prepare()==-EINVAL); rx_probe=0;
     rx_reacquire=false; rx_restore_gain=true; assert(q1000k_rx_bench_prepare()==-EINVAL);
+    struct seq_file seq={};
+    proc_error=1; assert(q1000k_snapshot_init()==-ENOMEM); proc_error=0;
+    assert(!q1000k_snapshot_init() && q1000k_snapshot_init()==-EBUSY);
+    rx_bench=false; mac_mask=0x1234;
+    assert(!qrx_snapshot_show(&seq,NULL) && strlen(seq.out)>3000);
+    assert(strchr(seq.out,'\n') && strchr(strchr(seq.out,'\n')+1,'\n'));
+    assert(strstr(seq.out,"\"rx_bench\":false") && strstr(seq.out,"\"tx_enabled\":true"));
+    assert(strstr(seq.out,"\"diagnostics_version\":5"));
+    seq.out[0]=0; sample_error=-EIO;
+    assert(qrx_snapshot_show(&seq,NULL)==-EIO && !seq.out[0]); sample_error=0;
+    alloc_error=1; assert(qrx_snapshot_show(&seq,NULL)==-ENOMEM && !seq.out[0]); alloc_error=0;
+    q1000k_snapshot_exit(); q1000k_snapshot_exit(); assert(proc_removed==1);
     return 0;
 }

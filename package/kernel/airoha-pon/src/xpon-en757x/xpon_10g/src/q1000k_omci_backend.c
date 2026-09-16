@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Software-authenticated OMCI transport and ordered XGS registration owner. */
+#include <linux/seq_file.h>
 #include <crypto/skcipher.h>
 #include <an7581_xpon.h>
 #include <q1000k_phy_api.h>
@@ -63,6 +64,33 @@ struct qomci_backend {
 	int service_error;
 };
 static struct qomci_backend __rcu *qomci_current;
+
+void q1000k_omci_security_status(struct seq_file *seq)
+{
+	struct qomci_backend *b;
+	unsigned long flags;
+	bool valid = false, active = false, ranged = false;
+	u8 rx_valid = 0, tx_index = 0, pending = 0;
+	u64 epoch = 0;
+
+	rcu_read_lock();
+	b = rcu_dereference(qomci_current);
+	if (b) {
+		spin_lock_irqsave(&b->auth_lock, flags);
+		valid = b->keys_valid; active = b->active; ranged = b->ranged;
+		rx_valid = b->data.mac.rx_valid; tx_index = b->data.mac.tx_index;
+		pending = b->data.regenerating; epoch = b->published;
+		spin_unlock_irqrestore(&b->auth_lock, flags);
+	}
+	rcu_read_unlock();
+	/* Published only after checked key installation. Never expose key bytes,
+	 * registration credentials, or infer encrypted traffic from these flags. */
+	seq_printf(seq, "security_keys_valid=%u\nsecurity_active=%u\nsecurity_ranged=%u\n"
+		   "data_rx_key_valid=%u\ndata_tx_key_index=%u\ndata_key_pending=%u\n"
+		   "security_epoch=%llu\n", valid, active, ranged, rx_valid, tx_index,
+		   pending, (unsigned long long)epoch);
+}
+
 
 int q1000k_omci_ploam_verify(const u8 *message, size_t length)
 {

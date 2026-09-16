@@ -37,7 +37,7 @@ def cpio(data, start):
         records[name] = (mode, payload)
 
 
-def inspect(image, revision):
+def inspect(image, revision, profile='bench'):
     repo = Path(__file__).resolve().parents[2]
     blob = image.read_bytes()
     fit, size = fdt(blob)
@@ -83,7 +83,12 @@ def inspect(image, revision):
     assert not any(p.startswith(nand + '/nand@0/partitions') for p in dt)
     controllers = [p for p, v in dt.items() if b'quantum,q1000k-pon-control' in v.get('compatible', b'').split(b'\0')]
     assert len(controllers) == 1
-    assert 'quantum,tx-inhibit' in dt[controllers[0]]
+    if profile == 'activation':
+        assert 'quantum,xgspon-activation-bench' in dt['/']
+        assert 'quantum,activation-bench' in dt[controllers[0]]
+        assert 'quantum,tx-inhibit' not in dt[controllers[0]]
+    else:
+        assert 'quantum,tx-inhibit' in dt[controllers[0]]
     assert dt['/soc/pcs@1fa08000']['status'] == b'disabled\0'
     for path in ('/soc/phy@1faf0000', '/soc/pon@1fb64000'):
         assert dt[path]['status'] == b'okay\0'
@@ -127,7 +132,7 @@ def inspect(image, revision):
         return data
 
     assert read('build_info').decode().splitlines()[3] == 'Revision: ' + revision
-    assert b'(bench)' in read('build_info')
+    assert ('(' + profile + ')').encode() in read('build_info')
     preinit = read('lib/preinit/00_preinit.conf')
     assert b'pi_ip="192.168.255.1"\n' in preinit
     assert b'pi_broadcast="192.168.255.255"\n' in preinit
@@ -173,6 +178,12 @@ def inspect(image, revision):
                'airoha_ecnt_xpon', 'phy_10g', 'xpon_10g', 'xpon', 'omci')
     runtime_paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
+    if profile == 'activation':
+        runtime_paths.append('usr/sbin/q1000k-pon-validate')
+        assert read('usr/sbin/q1000k-pon-validate') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/validate').read_bytes()
+        for program in ('usr/bin/iperf3', 'usr/bin/curl', 'sbin/ip', 'usr/bin/ping'):
+            assert read(program), program
+        assert not any(p.startswith('etc/rc.d/') and b'q1000k-pon-validate' in v[1] for p,v in records.items())
     for name in modules:
         matches = [p for p in records if p.startswith('lib/modules/') and p.endswith('/' + name + '.ko')]
         assert len(matches) == 1, name
@@ -182,6 +193,13 @@ def inspect(image, revision):
         # Every bench module owns initialization, including the hook lists.
         # A library with neither callback can unload but is not initialized.
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
+        if profile == 'activation' and name == 'q1000k-pon-control':
+            assert b'parmtype=validation_tx:bool' in read(matches[0])
+            assert 'q1000k_pon_receiver_startup' in symbols
+        if profile == 'activation' and name == 'xpon_10g':
+            assert {'q1000k_snapshot_init', 'q1000k_snapshot_exit', 'q1000k_omci_security_status'} <= symbols
+        if profile == 'activation' and name == 'phy_10g':
+            assert {'q1000k_phy_snapshot', 'q1000k_phy_receiver_startup'} <= symbols
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])
             assert b'parmtype=rx_restore_gain:bool' in read(matches[0])
@@ -217,7 +235,7 @@ def inspect(image, revision):
                 sha256=hashlib.sha256(blob).hexdigest(), verified_fit_images=checked,
                 kernel_uncompressed_bytes=len(expanded), initramfs_entries=len(records),
                 unloadable_pon_modules=list(modules),
-                nand_disabled=True, tx_inhibited=True, management_ip='192.168.255.1',
+                nand_disabled=True, tx_inhibited=(profile == 'bench'), tx_inhibited_by_default=True, profile=profile, management_ip='192.168.255.1',
                 configured_panic_timeout=panic, runtime_panic_readback_required=True,
                 runtime_sha256sums={p: hashlib.sha256(read(p)).hexdigest() for p in runtime_paths},
                 rootfs_checks='passed', identity_configuration_checks='passed', device_access=False)
@@ -227,7 +245,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('image', type=Path)
     parser.add_argument('revision')
+    parser.add_argument('--profile', choices=('bench', 'activation'), default='bench')
     args = parser.parse_args()
     if not __debug__ or not re.fullmatch('[0-9a-f]{40}', args.revision):
         parser.error('Require a full lowercase commit and non-optimized Python')
-    print(json.dumps(inspect(args.image, args.revision), indent=2))
+    print(json.dumps(inspect(args.image, args.revision, args.profile), indent=2))

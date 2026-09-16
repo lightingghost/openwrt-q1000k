@@ -97,7 +97,9 @@ omci_status() {
 
 rx_status() {
 	local data field type value controller_los phy_los synced frames sampled_ms poll_calls attempts
-	data=$(cat /sys/module/xpon_10g/parameters/rx_bench_status) && json_load "$data" || return 1
+	data=${1:-}
+	[ -n "$data" ] || data=$(cat /sys/module/xpon_10g/parameters/rx_bench_status) || return 1
+	json_load "$data" || return 1
 	for field in rx_bench tx_inhibited; do
 		json_get_type type "$field"; json_get_var value "$field"
 		[ "$type" = boolean ] && [ "$value" = 1 ] || return 1
@@ -156,7 +158,9 @@ rx_status() {
 
 rx_diagnostics() {
 	local data field type value sampled_ms attempts writes checker route lane
-	data=$(cat /sys/module/xpon_10g/parameters/rx_bench_diagnostics) && json_load "$data" || return 1
+	data=${1:-}
+	[ -n "$data" ] || data=$(cat /sys/module/xpon_10g/parameters/rx_bench_diagnostics) || return 1
+	json_load "$data" || return 1
 	for field in diagnostics_version probe attempts writes sampled_ms checker_control data_route_control bist_lane_control tdc_ncpo fifo_clock_status; do
 		json_get_type type "$field"; json_get_var value "$field"
 		[ "$type" = int ] && [ "$value" -ge 0 ] || return 1
@@ -164,7 +168,11 @@ rx_diagnostics() {
 	json_get_var value diagnostics_version; [ "$value" = "$RX_DIAGNOSTICS_VERSION" ] || return 1
 	json_get_var value probe; [ "$value" = "$probe" ] || return 1
 	json_get_var sampled_ms sampled_ms
-	[ "$sampled_ms" -ge "$last_sample" ] && [ "$((sampled_ms - last_sample))" -le 1500 ] || return 1
+	[ "$sampled_ms" -ge "$last_sample" ] && [ "$((sampled_ms - last_sample))" -le 1500 ] || {
+		echo "Rejected diagnostic pair: rx_ms=$last_sample diag_ms=$sampled_ms" >&2
+		printf '%s\n' "$data" >&2
+		return 1
+	}
 	json_get_var attempts attempts; json_get_var writes writes
 	[ "$attempts" -ge "$last_attempts" ] && [ "$attempts" -le "$attempt_limit" ] || return 1
 	[ "$writes" -ge "$last_probe_writes" ] || return 1
@@ -370,8 +378,15 @@ while [ "$count" -lt "$limit" ]; do
 		omci_status || fail 'OMCI status unavailable or receive-only session is not unassigned.'
 	fi
 	if [ "$mode" = receive ]; then
-		rx_status || fail 'Receive-only guard/status check failed.'
-		rx_diagnostics || fail 'Receiver probe diagnostics/guard check failed.'
+		if [ -r /proc/q1000k-pon-snapshot ]; then
+			pair=$(cat /proc/q1000k-pon-snapshot) || fail 'Coherent snapshot failed.'
+			[ "$(printf '%s\n' "$pair" | wc -l)" = 2 ] || fail 'Incomplete coherent snapshot.'
+			rx_status "$(printf '%s\n' "$pair" | sed -n '1p')" || fail 'Receive-only guard/status check failed.'
+			rx_diagnostics "$(printf '%s\n' "$pair" | sed -n '2p')" || fail 'Receiver probe diagnostics/guard check failed.'
+		else
+			rx_status || fail 'Receive-only guard/status check failed.'
+			rx_diagnostics || fail 'Receiver probe diagnostics/guard check failed.'
+		fi
 	fi
 	# Capture class brightness; software blinking may sample either phase.
 	if [ "$mode" != controller ]; then

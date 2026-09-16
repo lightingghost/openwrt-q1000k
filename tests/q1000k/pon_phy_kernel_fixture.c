@@ -97,6 +97,8 @@ static int q1000k_pon_check(struct q1000k_pon *p)
 {
     return p==&controller && p->held ? controller_error : -ENODEV;
 }
+static int q1000k_pon_receiver_startup(struct q1000k_pon *p)
+{ return q1000k_pon_check(p); }
 static int q1000k_pon_oem_post_init(struct q1000k_pon *p,bool restore)
 { (void)restore; return q1000k_pon_check(p); }
 static int q1000k_pon_get_tx(struct q1000k_pon *p,bool *enabled)
@@ -348,7 +350,8 @@ static int __init phy_test_init(void)
         struct q1000k_rx_diagnostics diagnostic;
         registers[(EN7581_XPON_PMA_SS_LCPLL_TDC_RO_4&0x1ffff)/4]=0x400+n;
         registers[(EN7581_XPON_PMA_FIFO_CK_STATUS&0x1ffff)/4]=0x500+n;
-        check(!q1000k_phy_rx_diagnostics(&diagnostic) && diagnostic.probe==0);
+        check(!q1000k_phy_snapshot(&sample,&diagnostic) && diagnostic.probe==0);
+        check(diagnostic.sampled_ms>=sample.sampled_ms && !sample.tx_enabled && sample.tx_inhibited);
         check(diagnostic.rx_meter_result==n);
         check(diagnostic.tdc_ncpo==0x400+n && diagnostic.fifo_clock_status==0x500+n);
         check(sample.rx_power_valid && sample.rx_power_nw==19900);

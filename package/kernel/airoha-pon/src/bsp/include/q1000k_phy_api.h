@@ -142,6 +142,7 @@ struct q1000k_pcs_counters {
 	u32 pon_id_hec_error;
 };
 struct q1000k_rx_sample {
+	bool rx_bench, tx_inhibited, tx_enabled;
 	bool controller_los, phy_los, synced;
 	bool reacquire_enabled;
 	bool pll_restore_enabled, gain_restore_enabled;
@@ -156,6 +157,11 @@ struct q1000k_rx_sample {
 };
 /* Fresh, read-only status/counter sample. No counter latches or clears. */
 int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample);
+/* One callback-locked snapshot, available during RX-only and normal service. */
+int q1000k_phy_snapshot(struct q1000k_rx_sample *sample,
+			 struct q1000k_rx_diagnostics *diagnostics);
+/* Complete Q1000K receiver startup after MAC hardware release, with TX off. */
+int q1000k_phy_receiver_startup(void);
 int q1000k_phy_start(void);
 int q1000k_phy_stop(void);
 /* Lifecycle owner: wait for callbacks; rejects invocation by a callback. */

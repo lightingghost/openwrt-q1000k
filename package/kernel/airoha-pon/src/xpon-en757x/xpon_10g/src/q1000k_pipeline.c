@@ -291,6 +291,9 @@ int q1000k_pipeline_activate_checked(bool transmit, int (*ready)(void *), void *
 	if (ret)
 		goto fail;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_MAC_ACTIVE;
+	ret = q1000k_phy_receiver_startup();
+	if (ret)
+		goto fail;
 	if (ready) {
 		q1000k_table_phase = Q1000K_TABLE_ACTIVATE;
 		WRITE_ONCE(q1000k_table_owner, current);
