@@ -164,7 +164,11 @@ def ssh(script, payload=None, timeout=120):
     return result.stdout.decode(errors='replace')
 
 
-def plan(skip_physical=False, rx_only=False, soak=180):
+def plan(skip_physical=False, rx_only=False, soak=180, physical_only=False):
+    if physical_only:
+        if skip_physical:
+            raise ValueError('--physical-only cannot be combined with --skip-physical')
+        return [dict(name='rx-reconnect', mode='rx', samples=300)]
     cases = [dict(name='rx-startup', mode='rx', samples=30),
              dict(name='rx-repeat-1', mode='rx', samples=30),
              dict(name='rx-repeat-2', mode='rx', samples=30),
@@ -340,8 +344,8 @@ def execute(args, pin):
         raise ValueError('Collection requires --inputs and --output')
     supplied_identity = json.loads(args.identity.read_text()) if args.identity else {}
     identity = validate_identity(supplied_identity) if args.identity else {}
-    rx_only = args.rx_only or not identity
-    cases = plan(args.skip_physical, rx_only, args.soak)
+    rx_only = args.rx_only or args.physical_only or not identity
+    cases = plan(args.skip_physical, rx_only, args.soak, args.physical_only)
     payload = private_inputs(args.inputs, identity)
     if not args.skip_physical and not sys.stdin.isatty():
         raise ValueError('Use an interactive terminal for physical controls, or --skip-physical to record them as not run')
@@ -353,6 +357,7 @@ def execute(args, pin):
     record = dict(schema_version=1, artifact={k:v for k,v in pin.items() if k != 'runtime'},
                   started=time.time(), cases=cases, results=[], status='running',
                   activation_requested=not rx_only, physical_skipped=args.skip_physical,
+                  physical_only=args.physical_only,
                   registration_source=('explicit' if supplied_identity.get('registration_id') else 'zero-default') if not rx_only else 'unused',
                   private_payloads_included=False, hardware_service_verified=False)
     staged = False
@@ -394,6 +399,8 @@ def execute(args, pin):
                 record.update(status='stopped', serial_error=str(error))
             record['finished'] = time.time()
             record['not_run'] = [c['name'] for c in cases if c['name'] not in {r['name'] for r in record['results']}]
+            if args.physical_only:
+                record['not_run'] += ['rx-startup', 'rx-repeat-1', 'rx-repeat-2', 'rx-soak']
             if rx_only:
                 record['not_run'] += ['activation', 'provisioning', 'wan', 'traffic']
                 record['identity_note'] = 'Activation omitted: RX-only selected or no private identity supplied.'
@@ -428,6 +435,7 @@ def main():
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
+    parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')
     parser.add_argument('--soak', type=int, choices=(180, 300, 600), default=180)
     parser.add_argument('--iperf-server', help='Optional reachable numeric iperf3 server address')
     parser.add_argument('--dry-run', action='store_true')
@@ -446,7 +454,7 @@ def main():
     runtime_manifest(pin['runtime'])
     if args.dry_run:
         print(json.dumps(dict(artifact={k:v for k,v in pin.items() if k != 'runtime'},
-                             cases=plan(args.skip_physical, args.rx_only, args.soak),
+                             cases=plan(args.skip_physical, args.rx_only, args.soak, args.physical_only),
                              activation_requires_private_identity=True), indent=2)); return 0
     return execute(args, pin)
 

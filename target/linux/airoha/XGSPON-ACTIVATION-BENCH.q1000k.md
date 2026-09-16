@@ -113,7 +113,9 @@ python3 q1000k-activation-collect.py \
 Run it in a terminal and answer its disconnect/reconnect prompts. Add
 `--skip-physical` for a fully unattended connected-fiber run; that physical test
 is then marked omitted. Add `--iperf-server NUMERIC_IP` for a server reachable
-through the provisioned WAN. Without a server, throughput is marked not run.
+through the provisioned WAN. Use `--physical-only` to collect the omitted
+disconnect/reconnect control later without repeating activation; this selection
+always uses RX-only mode. Without a server, throughput is marked not run.
 Without `--identity`, or with `--rx-only`, all RX stages run but activation,
 provisioning and WAN remain untested. No additional firmware image is needed
 when the private identity becomes available.

@@ -215,6 +215,8 @@ class CollectorTests(unittest.TestCase):
     def test_plan_includes_all_lifecycles_and_activation(self):
         self.assertEqual([x['name'] for x in COLLECT.plan()],['rx-startup','rx-repeat-1','rx-repeat-2','rx-soak','rx-reconnect','activation'])
         self.assertEqual(len(COLLECT.plan(True,True)),4)
+        self.assertEqual(COLLECT.plan(physical_only=True), [dict(name='rx-reconnect', mode='rx', samples=300)])
+        with self.assertRaises(ValueError): COLLECT.plan(skip_physical=True, physical_only=True)
 
     def test_management_lease_cannot_pass_wan(self):
         report=COLLECT.summarize(json.dumps(dict(l3_device='br-lan',up=True,proto='dhcp',**{'ipv4-address':['192.168.255.1']})))
