@@ -62,11 +62,15 @@ def validate_identity(value):
         maximum = {'equipment_id': 20, 'logical_onu_id': 24, 'logical_password': 12}.get(key, 14)
         if (pattern and not re.fullmatch(pattern, text)) or (not pattern and len(text) > maximum):
             raise ValueError('Invalid identity field: ' + key)
-    if any(not value.get(k) for k in ('serial', 'wan_mac', 'registration_id')):
-        raise ValueError('Explicit subscriber serial, wan_mac and registration_id are required for TX')
+    if any(not value.get(k) for k in ('serial', 'wan_mac')):
+        raise ValueError('Explicit subscriber serial and wan_mac are required for TX')
     if value['wan_mac'] == '00:00:00:00:00:00':
         raise ValueError('WAN MAC must be nonzero')
-    return value
+    # The wire format needs 36 bytes, not a separately supplied credential on
+    # every ISP. In particular the 8311 AT&T BGW320 recipe sets no reg_id_hex.
+    # Materialize the zero default for the already shipped launcher, which
+    # requires an explicit field. Preserve a caller's optional nonempty value.
+    return dict(value, registration_id=value.get('registration_id') or '00' * 36)
 
 
 def private_inputs(path, identity):
@@ -334,7 +338,8 @@ def write_json(path, value):
 def execute(args, pin):
     if not args.inputs or not args.output:
         raise ValueError('Collection requires --inputs and --output')
-    identity = validate_identity(json.loads(args.identity.read_text())) if args.identity else {}
+    supplied_identity = json.loads(args.identity.read_text()) if args.identity else {}
+    identity = validate_identity(supplied_identity) if args.identity else {}
     rx_only = args.rx_only or not identity
     cases = plan(args.skip_physical, rx_only, args.soak)
     payload = private_inputs(args.inputs, identity)
@@ -348,6 +353,7 @@ def execute(args, pin):
     record = dict(schema_version=1, artifact={k:v for k,v in pin.items() if k != 'runtime'},
                   started=time.time(), cases=cases, results=[], status='running',
                   activation_requested=not rx_only, physical_skipped=args.skip_physical,
+                  registration_source=('explicit' if supplied_identity.get('registration_id') else 'zero-default') if not rx_only else 'unused',
                   private_payloads_included=False, hardware_service_verified=False)
     staged = False
     with os.fdopen(os.open(Path(tempfile.gettempdir()) / ('q1000k-bench-' + HOST + '.lock'),

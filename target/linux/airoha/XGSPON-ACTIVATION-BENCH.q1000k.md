@@ -81,9 +81,20 @@ the fiber and use the existing verified `q1000k-inputs.tar` (OEM MCU pair plus
 513-byte same-unit DSD slice).
 
 Copy `activation-identity.example.json` to a private file and fill the subscriber
-ONT's actual serial, WAN MAC and registration ID. Registration ID is a string of
-1–36 hexadecimal bytes and is zero-padded on the right by the driver launcher;
-use the line's actual setting. Other fields are optional presentation overrides.
+ONT's actual serial and WAN MAC. Registration ID is optional: an omitted or
+empty field becomes 36 zero bytes in the host collector. The
+[8311 AT&T BGW320 guide](https://pon.wiki/guides/masquerade-as-the-att-inc-bgw320-500-505-with-the-was-110/)
+does not require a separate registration ID. Its
+[`get_8311_reg_id_hex` implementation](https://github.com/djGrrr/8311-was-110-firmware-builder/blob/master/files/common/lib/8311.sh#L170-L172)
+appends zero bytes and takes 36 bytes, yielding all zeros when neither
+registration setting is supplied. For a line that requires one,
+supply 1–36 hexadecimal bytes; the launcher pads shorter values on the right.
+This host correction works with the existing `280555a076` image and its exact
+runtime checksums; the shipped launcher receives the explicit default bytes.
+Other fields are optional driver overrides, but the AT&T guide also specifies
+equipment, hardware/software versions, circuit-pack synchronization and VLAN
+normalization for its BGW320 presentation. Omitting them is not an equivalent
+test of that guide's OMCI provisioning recipe.
 Do not substitute the Q1000K factory identity unless it is the provisioned line
 identity. The collector performs no factory fallback and never commits identity
 to UCI or NAND. It stages the input only in this RAM boot.

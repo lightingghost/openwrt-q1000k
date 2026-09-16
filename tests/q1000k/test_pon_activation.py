@@ -154,6 +154,14 @@ else: raise AssertionError((action,args))
         self.assertIn('Explicit subscriber serial',self.run_case('activate',False).stderr)
         self.assertEqual(self.calls(),[])
 
+    def test_collector_zero_default_is_accepted_by_shipped_launcher(self):
+        normalized = COLLECT.validate_identity(dict(IDENTITY, registration_id=''))
+        (self.identity/'identity.json').write_text(json.dumps(normalized))
+        self.run_case('activate')
+        calls = [c for c in self.calls() if c[0] == 'insmod' and Path(c[1]).stem == 'xpon_10g']
+        self.assertEqual(len(calls), 1)
+        self.assertIn('pon_reg_id=' + '00' * 36, calls[0])
+
     def test_preexisting_wan_not_adopted(self):
         self.env['VALIDATION_BAD']='wan-owned'
         self.run_case('activate',False)
@@ -179,6 +187,18 @@ else: raise AssertionError((action,args))
 
 
 class CollectorTests(unittest.TestCase):
+    def test_optional_registration_default_reaches_existing_launcher(self):
+        for supplied in (dict(serial=IDENTITY['serial'], wan_mac=IDENTITY['wan_mac']),
+                         dict(IDENTITY, registration_id='')):
+            original = dict(supplied)
+            normalized = COLLECT.validate_identity(supplied)
+            self.assertEqual(normalized['registration_id'], '00' * 36)
+            self.assertEqual(supplied, original)
+        self.assertEqual(COLLECT.validate_identity(IDENTITY)['registration_id'], IDENTITY['registration_id'])
+        for malformed in ('0', 'gg', '00' * 37):
+            with self.assertRaises(ValueError):
+                COLLECT.validate_identity(dict(IDENTITY, registration_id=malformed))
+
     def test_identity_validation_and_redaction(self):
         self.assertEqual(COLLECT.validate_identity(IDENTITY),IDENTITY)
         for key,value in [('serial',''),('wan_mac','01:11:22:33:44:55'),('registration_id','x'),('equipment_id','bad\n')]:
