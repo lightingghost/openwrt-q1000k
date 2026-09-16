@@ -202,12 +202,15 @@ cleanup() {
 }
 
 load_module() {
-	local module="$1"
+	local module="$1" filename="$1"
 	shift
 	# OpenWrt modprobe does not forward command-line module parameters.
 	# Parameterized modules come last, after their explicit dependencies.
 	if [ "$#" -gt 0 ]; then
-		insmod "$module" "$@" || fail "Cannot load $module."
+		# insmod opens a filename; the controller's installed filename uses
+		# hyphens while its kernel module/ownership name uses underscores.
+		[ "$module" != q1000k_pon_control ] || filename=q1000k-pon-control
+		insmod "/lib/modules/$(uname -r)/$filename.ko" "$@" || fail "Cannot load $module."
 	else
 		modprobe "$module" || fail "Cannot load $module."
 	fi

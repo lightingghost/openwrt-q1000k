@@ -22,6 +22,9 @@ class BenchTests(unittest.TestCase):
         self.addCleanup(backend.tearDown)
         self.root, self.env, self.write = backend.root, backend.env, backend.write
         self.env['BENCH_TEST_ROOT'] = str(self.root)
+        for module in MODULES:
+            filename = 'q1000k-pon-control' if module == 'q1000k_pon_control' else module
+            self.write('lib/modules/q1000k-fixture/' + filename + '.ko', 'inert fixture module\n')
         self.dt = 'sys/firmware/devicetree/base/'
         self.write(self.dt + 'quantum,xgspon-bench', '')
         self.write(self.dt + 'soc/spi@1fa10000/status', 'disabled\0')
@@ -92,16 +95,27 @@ if action=='cat':
             sys.stdout.buffer.write(pathlib.Path(name).read_bytes())
     sys.exit(0)
 if action=='sleep': sys.exit(0)
+if action=='uname':
+    assert args==['-r']
+    print('q1000k-fixture')
+    sys.exit(0)
 with (root/'calls').open('a') as output: output.write(json.dumps([action]+args)+'\\n')
 if os.environ.get('BENCH_FAIL')==action+':'+args[0]: sys.exit(1)
 if action in ('modprobe','insmod'):
-    if args[0]=='xpon_10g':
+    if action=='insmod':
+        image=pathlib.Path(args[0])
+        if (not image.is_file() or image.parent!=root/'lib/modules/q1000k-fixture' or
+                image.suffix!='.ko'): sys.exit(1)
+        module=image.stem.replace('-','_')
+    else:
+        module=args[0]
+    if module=='xpon_10g':
         # Model ubox: only insmod forwards command-line parameters.
         params=dict(arg.split('=',1) for arg in args[1:]) if action=='insmod' else {}
         if not {'wan_mac','pon_serial','pon_reg_id','pon_lower'} <= params.keys(): sys.exit(1)
         (root/'module-params').write_text(json.dumps(params))
-    (root/'sys/module'/args[0]).mkdir(parents=True)
-    if args[0]=='xpon_10g':
+    (root/'sys/module'/module).mkdir(parents=True)
+    if module=='xpon_10g':
         (root/'proc/xgpon').mkdir(parents=True)
         (root/'proc/xgpon/status').write_text('protocol_error=0\\n')
 elif action=='rmmod':
@@ -117,7 +131,7 @@ elif action=='omci':
     print(json.dumps(data))
 else: raise AssertionError(action)
 '''
-        for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep', 'omci'):
+        for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep', 'omci', 'uname'):
             self.write(name, '#!' + sys.executable + '\n' + fake).chmod(0o755)
         source = (PACKAGE / 'files/bench').read_text()
         # All target paths and every hardware-changing executable are replaced
@@ -125,8 +139,9 @@ else: raise AssertionError(action)
         source = re.sub(r'(?<![A-Za-z0-9])/(sys|proc|tmp|var/run)/',
                         lambda m: str(self.root) + '/' + m[1] + '/', source)
         source = source.replace('/lib/q1000k-xgspon/common.sh', str(backend.common))
+        source = source.replace('/lib/modules/', str(self.root/'lib/modules') + '/')
         source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
-        for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep'):
+        for name in ('modprobe', 'insmod', 'rmmod', 'ip', 'cat', 'sleep', 'uname'):
             source = re.sub(r'(?<![A-Za-z0-9_/-])' + name + r'(?= )',
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('bench', source)
@@ -160,6 +175,10 @@ else: raise AssertionError(action)
         path = self.root / 'calls'
         return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
 
+    def module_file(self, module):
+        filename = 'q1000k-pon-control' if module == 'q1000k_pon_control' else module
+        return str(self.root/'lib/modules/q1000k-fixture'/(filename + '.ko'))
+
     def test_read_only_status_and_missing_acknowledgement(self):
         self.run_bench('status')
         self.run_bench(success=False, acknowledged=False)
@@ -180,14 +199,23 @@ else: raise AssertionError(action)
 
     def test_controller_cycle_and_cleanup(self):
         self.run_bench('controller')
-        self.assertEqual(self.calls(), [['insmod', MODULES[0], 'bench_md32_a0=0', 'bench_rx_output=0'], ['rmmod', MODULES[0]]])
+        self.assertEqual(self.calls(), [['insmod', self.module_file(MODULES[0]), 'bench_md32_a0=0', 'bench_rx_output=0'], ['rmmod', MODULES[0]]])
         self.assertEqual((self.controller / 'calibration').read_bytes(), self.calibration.read_bytes())
         self.assertFalse((self.root / 'var/run/q1000k-pon-bench.lock').exists())
+
+    def test_missing_canonical_controller_file_never_claims_module_ownership(self):
+        Path(self.module_file('q1000k_pon_control')).unlink()
+        result = self.run_bench('controller', success=False)
+        self.assertIn('Cannot load q1000k_pon_control.', result.stderr)
+        self.assertEqual(self.calls(), [['insmod', self.module_file('q1000k_pon_control'),
+                                        'bench_md32_a0=0', 'bench_rx_output=0']])
+        self.assertFalse((self.root/'sys/module/q1000k_pon_control').exists())
+        self.assertFalse((self.root/'var/run/q1000k-pon-bench.lock').exists())
 
     def test_receiver_read_failure_stops_before_phy_and_cleans_controller(self):
         (self.controller / 'receiver_status').unlink()
         self.run_bench(success=False)
-        self.assertEqual(self.calls(), [['insmod', MODULES[0], 'bench_md32_a0=0', 'bench_rx_output=0'], ['rmmod', MODULES[0]]])
+        self.assertEqual(self.calls(), [['insmod', self.module_file(MODULES[0]), 'bench_md32_a0=0', 'bench_rx_output=0'], ['rmmod', MODULES[0]]])
         self.assertEqual((self.controller / 'operation').read_text(), 'off\n')
 
     def test_panic_reboot_blocks_mutations_but_allows_status(self):
@@ -200,8 +228,8 @@ else: raise AssertionError(action)
         self.run_bench()
         calls = self.calls()
         loads = [c for c in calls if c[0] in ('modprobe', 'insmod')]
-        self.assertEqual([c[1] for c in loads], MODULES)
-        self.assertEqual(loads[-1], ['insmod', 'xpon_10g', 'rx_bench=0', 'rx_reacquire=0', 'rx_restore_pll=0', 'rx_restore_gain=0', 'rx_probe=0', 'wan_mac=02:00:00:00:00:01',
+        self.assertEqual([Path(c[1]).stem.replace('-', '_') if c[0] == 'insmod' else c[1] for c in loads], MODULES)
+        self.assertEqual(loads[-1], ['insmod', self.module_file('xpon_10g'), 'rx_bench=0', 'rx_reacquire=0', 'rx_restore_pll=0', 'rx_restore_gain=0', 'rx_probe=0', 'wan_mac=02:00:00:00:00:01',
                                    'pon_serial=TEST00000001', 'pon_reg_id=' + '0' * 72,
                                    'pon_lower=ponraw'])
         self.assertEqual([c[1] for c in calls if c[0] == 'rmmod'], MODULES[::-1])
@@ -259,7 +287,7 @@ else: raise AssertionError(action)
         self.run_bench('receive', fiber='connected', reacquire=True,
                        probe='combined-auto', oem_md32=True, rx_output='600-boost')
         loads = [c for c in self.calls() if c[0] == 'insmod']
-        self.assertEqual(loads[0], ['insmod', 'q1000k_pon_control',
+        self.assertEqual(loads[0], ['insmod', self.module_file('q1000k_pon_control'),
                                    'bench_md32_a0=1', 'bench_rx_output=3'])
         self.assertIn('rx_probe=21', loads[-1])
         self.assertEqual([c[1] for c in self.calls() if c[0]=='rmmod'], MODULES[::-1])

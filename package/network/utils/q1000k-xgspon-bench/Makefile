@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon-bench
-PKG_RELEASE:=15
+PKG_RELEASE:=16
 PKG_LICENSE:=GPL-2.0-only
 include $(INCLUDE_DIR)/package.mk
 
