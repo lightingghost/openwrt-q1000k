@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Explicit RX-only RAM bench: no registration executor or MAC interrupts. */
 #include <linux/module.h>
+#include <linux/ktime.h>
+#include <q1000k_trace.h>
+#include "common/q1000k_gwan.h"
 #include <linux/of.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -221,16 +224,105 @@ static int qrx_snapshot_show(struct seq_file *seq, void *unused)
 	return 0;
 }
 
+static struct proc_dir_entry *qrx_last_entry, *qrx_mac_entry, *qrx_fast_entry;
+static int qrx_last_show(struct seq_file *seq, void *unused)
+{
+	struct q1000k_rx_sample rx;
+	struct q1000k_rx_diagnostics diag;
+	int fault, ret = q1000k_phy_last_snapshot(&rx, &diag, &fault);
+	char *buffer;
+	if (ret) return ret;
+	buffer = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!buffer) return -ENOMEM;
+	seq_printf(seq, "{\"cached_snapshot\":true,\"mac_irq_mask_unavailable\":true,\"phy_fault\":%d}\n", fault);
+	qrx_status_format(buffer, &rx, 0); seq_puts(seq, buffer);
+	qrx_diagnostics_format(buffer, &diag); seq_puts(seq, buffer);
+	kfree(buffer);
+	return 0;
+}
+static int qrx_fast_show(struct seq_file *seq, void *unused)
+{
+	u32 sfp, sync, frames;
+	u64 begin = ktime_get_boottime_ns();
+	int ret = q1000k_phy_fast_sample(&sfp, &sync, &frames);
+	if (ret) return ret;
+	seq_printf(seq, "{\"fast_version\":1,\"begin_ns\":%llu,\"end_ns\":%llu,\"sfp\":%u,\"sync\":%u,\"frames\":%u}\n",
+		begin, ktime_get_boottime_ns(), sfp, sync, frames);
+	return 0;
+}
+
+/* Config words are the existing cold-install/readback registers. Counters use
+ * the existing gponDevGetGtcCounter read semantics (no latch or read-clear).
+ * No interrupt/error ACK or PLOAM FIFO data port is read here. */
+static int qrx_mac_show(struct seq_file *seq, void *unused)
+{
+	static const u32 regs[] = { 0x5100, 0x5104, 0x5108, 0x511c, 0x5120, 0x5124,
+		0x5920, 0x5950, 0x5954, 0x5958, 0x595c, 0x5960, 0x5964, 0x5984 };
+	u32 values[ARRAY_SIZE(regs)];
+	u64 begin = ktime_get_boottime_ns();
+	unsigned int i;
+	int token = q1000k_protocol_enter(), ret;
+	if (token < 0) return token;
+	ret = an7581_xpon_status();
+	for (i = 0; !ret && i < ARRAY_SIZE(regs); i++) {
+		values[i] = get_xpon_data(regs[i]);
+		ret = an7581_xpon_status();
+		if (!ret && i < 6 && values[i] == ~0U) ret = -EIO;
+	}
+	q1000k_protocol_leave(token);
+	if (ret) return ret;
+	seq_printf(seq, "{\"mac_version\":1,\"begin_ns\":%llu,\"end_ns\":%llu,\"registers\":{",
+		begin, ktime_get_boottime_ns());
+	for (i = 0; i < ARRAY_SIZE(regs); i++)
+		seq_printf(seq, "%s\"%04x\":%u", i ? "," : "", regs[i], values[i]);
+	seq_puts(seq, "}}\n");
+	return 0;
+}
+
+static int qrx_recover_drained(void *arg)
+{
+	return q1000k_phy_bench_recover(*(unsigned int *)arg);
+}
+static int qrx_recover_set(const char *value, const struct kernel_param *kp)
+{
+	struct q1000k_rx_sample rx;
+	unsigned int action;
+	int token, ret = kstrtouint(value, 10, &action);
+	if (ret) return ret;
+	if (!rx_bench || action < 1 || action > 6) return -EPERM;
+	token = q1000k_protocol_enter();
+	if (token < 0) return token;
+	ret = q1000k_phy_rx_sample(&rx);
+	if (!ret && (!rx.tx_inhibited || rx.tx_enabled)) ret = -EACCES;
+	if (!ret && (rx.controller_los || rx.phy_los || rx.synced)) ret = -EAGAIN;
+	if (!ret) ret = action <= 4 ? q1000k_phy_bench_recover(action) :
+		q1000k_gwan_refresh(qrx_recover_drained, &action);
+	q1000k_protocol_leave(token);
+	return ret;
+}
+static const struct kernel_param_ops qrx_recover_ops = { .set = qrx_recover_set };
+module_param_cb(bench_recover, &qrx_recover_ops, NULL, 0200);
+
 int q1000k_snapshot_init(void)
 {
 	if (qrx_snapshot_entry) return -EBUSY;
 	qrx_snapshot_entry = proc_create_single("q1000k-pon-snapshot", 0400, NULL,
 					     qrx_snapshot_show);
-	return qrx_snapshot_entry ? 0 : -ENOMEM;
+	qrx_last_entry = proc_create_single("q1000k-pon-last-snapshot", 0400, NULL, qrx_last_show);
+	qrx_mac_entry = proc_create_single("q1000k-pon-mac", 0400, NULL, qrx_mac_show);
+	qrx_fast_entry = proc_create_single("q1000k-pon-fast", 0400, NULL, qrx_fast_show);
+	if (!qrx_snapshot_entry || !qrx_last_entry || !qrx_mac_entry || !qrx_fast_entry) {
+		q1000k_snapshot_exit();
+		return -ENOMEM;
+	}
+	return 0;
 }
 
 void q1000k_snapshot_exit(void)
 {
+	proc_remove(qrx_fast_entry); qrx_fast_entry = NULL;
+	proc_remove(qrx_mac_entry); qrx_mac_entry = NULL;
+	proc_remove(qrx_last_entry); qrx_last_entry = NULL;
 	proc_remove(qrx_snapshot_entry);
 	qrx_snapshot_entry = NULL;
 }

@@ -1,3 +1,4 @@
+#include <q1000k_trace.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /* Sleepable Q1000K PHY control and callback lifetime. */
 #include <linux/interrupt.h>
@@ -29,6 +30,11 @@ static struct task_struct *qphy_owner;
 static struct q1000k_pon *qphy_controller;
 static bool qphy_active, qphy_dead;
 static int qphy_fault;
+static struct q1000k_rx_sample qphy_last_rx;
+static struct q1000k_rx_diagnostics qphy_last_diag;
+static bool qphy_last_valid;
+static u32 qphy_manual_used;
+static u32 qphy_edges = ~0U;
 static struct device *qphy_irq_dev;
 static int qphy_irq = -1;
 static bool qphy_rx_bench;
@@ -166,6 +172,7 @@ int q1000k_phy_trans_power(u32 operation)
 	    (qphy_rx_bench || !READ_ONCE(qphy_active) || !gpPhyPriv->phyCfg.flags.txPowerEnFlag))
 		return -EACCES;
 	ret = q1000k_pon_set_tx(qphy_controller, operation == PHY_ENABLE);
+	q1000k_trace(QT_TX, operation == PHY_ENABLE, ret, qphy_rx_bench, qphy_active, 3, operation);
 	if (!ret && !preserve)
 		gpPhyPriv->trans_tx_status = operation;
 	return ret;
@@ -268,10 +275,15 @@ static void qphy_failed(int error)
 	WRITE_ONCE(qphy_active, false);
 	WRITE_ONCE(gpPhyPriv->pon_stop_flag, TRUE);
 	WRITE_ONCE(gpPhyPriv->is_phy_start, FALSE);
-	if (!qphy_fault)
+	if (!qphy_fault) {
+		q1000k_trace(QT_FAULT, 1, error, qphy_last_valid,
+			qphy_last_rx.frames, qphy_last_rx.sync_status, qphy_manual_used);
 		qphy_fault = error;
-	if (qphy_controller)
-		q1000k_pon_set_tx(qphy_controller, false);
+	}
+	if (qphy_controller) {
+		int tx_error = q1000k_pon_set_tx(qphy_controller, false);
+		q1000k_trace(QT_TX, 0, tx_error, qphy_rx_bench, qphy_active, 2, 0);
+	}
 	qphy_mask();
 }
 
@@ -283,6 +295,7 @@ static void qphy_poll_work(struct work_struct *work)
 	qphy_callback_lock();
 	if (!READ_ONCE(qphy_active))
 		goto out;
+	q1000k_trace(QT_PHY_POLL, qphy_rx_bench, 0, qphy_rx_reacquire, qphy_rx_attempts, 0, 0);
 	ret = q1000k_phy_controller_check();
 	if (!ret && qphy_rx_bench) {
 		qphy_rx_polls++;
@@ -367,6 +380,7 @@ static irqreturn_t qphy_irq_thread(int irq, void *data)
 	}
 	if (!(status & enabled) && !(rogue & rogue_en))
 		goto out;
+	q1000k_trace(QT_PHY_IRQ, qphy_rx_bench, 0, status, enabled, rogue, rogue_en);
 	handled = IRQ_HANDLED;
 	/* Skip the legacy interrupt-count heuristic and its 50 ms busy wait.
 	 * Dispatch only after checking this PHY's enabled pending sources.
@@ -521,6 +535,7 @@ int q1000k_phy_configure(u32 mode)
 	if (ret)
 		goto configure_failed;
 	/* Optical TX stays disabled; its enable belongs to controller/MAC startup. */
+	q1000k_trace_generation(1);
 	ret = phy_mode_config(PHY_XGSPON_CONFIG, PHY_DISABLE);
 	if (!ret)
 		ret = qphy_mask();
@@ -668,6 +683,7 @@ static int qphy_stop(void)
 		qphy_repeat_stop("shutdown");
 	if (qphy_controller) {
 		err = q1000k_pon_set_tx(qphy_controller, false);
+		q1000k_trace(QT_TX, 0, err, qphy_rx_bench, qphy_active, 1, 0);
 		if (!ret) {
 			ret = err;
 			if (ret)
@@ -767,6 +783,7 @@ int q1000k_phy_set_tx(bool enable)
 		ret = -EAGAIN;
 	if (!ret) {
 		ret = q1000k_pon_set_tx(qphy_controller, enable);
+		q1000k_trace(QT_TX, enable, ret, qphy_rx_bench, qphy_active, 0, 0);
 		if (!ret) {
 			gpPhyPriv->phyCfg.flags.txPowerEnFlag = enable;
 			gpPhyPriv->trans_tx_status = enable ? PHY_ENABLE : PHY_DISABLE;
@@ -1003,6 +1020,14 @@ int q1000k_phy_snapshot(struct q1000k_rx_sample *sample,
 	if (!ret) {
 		*sample = rx;
 		*diagnostics = diag;
+		qphy_last_rx = rx; qphy_last_diag = diag; qphy_last_valid = true;
+		{
+			u32 edges = rx.controller_los | rx.phy_los << 1 | rx.synced << 2;
+			if (edges != qphy_edges) {
+				q1000k_trace(QT_PHY_EDGE, 0, 0, qphy_edges, edges, rx.frames, rx.sync_status);
+				qphy_edges = edges;
+			}
+		}
 	} else if (ret != -EAGAIN) {
 		qphy_failed(ret);
 	}
@@ -1424,6 +1449,7 @@ int q1000k_phy_init(void)
 	gpPhyPriv = kzalloc(sizeof(*gpPhyPriv), GFP_KERNEL);
 	if (!gpPhyPriv)
 		return -ENOMEM;
+	qphy_last_valid = false; qphy_manual_used = 0; qphy_edges = ~0U;
 	qphy_rx_bench = false;
 	qphy_rx_reacquire = false;
 	qphy_rx_restore_pll = false;
@@ -1480,3 +1506,91 @@ void q1000k_phy_exit(void)
 	qphy_callback_unlock();
 	mutex_unlock(&qphy_control);
 }
+
+/* Cached capture survives a contained hardware fault. Its original timestamp
+ * is retained; consumers must never treat this as a new healthy observation. */
+int q1000k_phy_last_snapshot(struct q1000k_rx_sample *rx,
+			     struct q1000k_rx_diagnostics *diag, int *fault)
+{
+	int ret = qphy_context();
+	if (ret) return ret;
+	if (!rx || !diag || !fault) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	qphy_callback_lock();
+	ret = qphy_last_valid ? 0 : -ENODATA;
+	if (!ret) { *rx = qphy_last_rx; *diag = qphy_last_diag; *fault = qphy_fault; }
+	qphy_callback_unlock();
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_last_snapshot);
+
+/* Fixed recipes only. Caller serializes the protocol. Actions 5/6 additionally
+ * require the MAC/DMA transaction to have stopped and drained PHY callbacks.
+ * Each action consumes one bit before any write; no retries after a fault. */
+int q1000k_phy_bench_recover(unsigned int action)
+{
+	struct q1000k_rx_sample before;
+	bool inhibited = false, enabled = true;
+	int ret = qphy_context();
+	if (ret) return ret;
+	if (action < 1 || action > 6) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	mutex_lock(&qphy_control);
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (ret) goto out;
+	if (!qphy_rx_bench || qphy_rx_reacquire || !qphy_controller) { ret = -EPERM; goto out; }
+	if (qphy_manual_used & BIT(action)) { ret = -EALREADY; goto out; }
+	ret = q1000k_pon_get_tx_inhibit(qphy_controller, &inhibited);
+	if (!ret) ret = q1000k_pon_get_tx(qphy_controller, &enabled);
+	if (!ret && (!inhibited || enabled)) ret = -EACCES;
+	if (ret) goto out;
+	if (action <= 4) {
+		ret = qphy_rx_sample(&before);
+		if (ret) goto out;
+		if (before.controller_los || before.phy_los || before.synced) { ret = -EAGAIN; goto out; }
+	} else if (qphy_active || qphy_irq_dev) { ret = -EBUSY; goto out; }
+	qphy_manual_used |= BIT(action);
+	q1000k_trace(QT_RECOVERY, action, 0, 0, qphy_manual_used, 0, 0);
+	q1000k_trace_generation(action + 1);
+	if (action <= 2) ret = q1000k_phy_rx_reacquire(action == 2, false);
+	else if (action <= 4) ret = q1000k_phy_rx_bench_recipe(action);
+	else if (action == 5) {
+		/* Force the same complete PHY initialization as a fresh module load;
+		 * keep the controller lease and its calibrated MCU image intact. */
+		gpPhyPriv->phy_init_done = FALSE;
+		gpPhyPriv->pma_init_done = FALSE;
+		gpPhyPriv->first_plugin_flag = TRUE;
+		ret = phy_mode_config(PHY_XGSPON_CONFIG, PHY_DISABLE);
+		if (!ret) ret = qphy_mask();
+	} else ret = q1000k_pon_bench_reinitialize(qphy_controller);
+	if (!ret) ret = q1000k_phy_controller_check();
+	if (!ret) ret = an7581_pon_phy_status();
+	q1000k_trace(QT_RECOVERY, action, ret, 1, qphy_manual_used, 0, 0);
+	if (ret) qphy_failed(ret);
+out:
+	qphy_callback_unlock();
+	mutex_unlock(&qphy_control);
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_bench_recover);
+
+/* Three ordinary MMIO reads; no controller I2C, FIFO or counter clear. */
+int q1000k_phy_fast_sample(u32 *sfp, u32 *sync, u32 *frames)
+{
+	int ret = qphy_context();
+	if (ret) return ret;
+	if (!sfp || !sync || !frames) return -EINVAL;
+	if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+	qphy_callback_lock();
+	ret = qphy_ready();
+	if (!ret && !qphy_active) ret = -EAGAIN;
+	if (!ret) ret = an7581_pon_phy_read(EN7581_XGPON_PHY_SFP_STA, sfp);
+	if (!ret) ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_SYNC_ST, sync);
+	if (!ret) ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_FRAME2PHYD_CNT, frames);
+	if (!ret && (*sfp == ~0U || *sync == ~0U)) ret = -EIO;
+	if (ret && ret != -EAGAIN) qphy_failed(ret);
+	qphy_callback_unlock();
+	return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_fast_sample);

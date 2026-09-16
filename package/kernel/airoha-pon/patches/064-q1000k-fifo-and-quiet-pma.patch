@@ -1,0 +1,43 @@
+--- a/xpon-en757x/xpon_phy_10g/src/en7581.c
++++ b/xpon-en757x/xpon_phy_10g/src/en7581.c
+@@ -266,10 +266,10 @@
+ 
+ 	//clear rogue onu int
+ 	read_data=IO_GPHYREG(EN7581_XPON_PMA_XPON_INT_STA_0);
+-	printk("EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", read_data);
++	if (read_data) printk("EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", read_data);
+ 	IO_SPHYREG(EN7581_XPON_PMA_XPON_INT_STA_0, read_data);
+ 	read_data=IO_GPHYREG(EN7581_XPON_PMA_XPON_INT_STA_0);
+-	printk("EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", read_data);
++	if (read_data) printk("EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", read_data);
+ 
+ 
+ }
+@@ -761,10 +761,10 @@
+ 
+ 	// clear PMA rogue int before trans_power_ON
+ 	phyIntStatus=IO_GPHYREG(EN7581_XPON_PMA_XPON_INT_STA_0);
+-	PON_PHY_PRINT(PHY_MSG_ERR,"EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", phyIntStatus);
++	if (phyIntStatus) PON_PHY_PRINT(PHY_MSG_ERR,"EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", phyIntStatus);
+ 	IO_SPHYREG(EN7581_XPON_PMA_XPON_INT_STA_0, phyIntStatus);
+ 	phyIntStatus=IO_GPHYREG(EN7581_XPON_PMA_XPON_INT_STA_0);
+-	PON_PHY_PRINT(PHY_MSG_ERR,"EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", phyIntStatus);
++	if (phyIntStatus) PON_PHY_PRINT(PHY_MSG_ERR,"EN7581_XPON_PMA_XPON_INT_STA_0= %x\n", phyIntStatus);
+ #endif
+ 	
+ 	switch(gpPhyPriv->wan_sel)
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -525,7 +525,11 @@
+ 	
+ 	gponPloamStatus.Raw = IO_GREG(PLOAMd_FIFO_STS);	
+ 	do {
+-		if((depth = gponDevGetPloamMsg(&ploamMsg)) <= 0){
++		depth = gponDevGetPloamMsg(&ploamMsg);
++#ifdef Q1000K_PON_IDENTITY
++		q1000k_trace(QT_MAC_ERROR, 1, depth <= 0 ? -EMSGSIZE : 0, depth, gponPloamStatus.Raw, 0, 0);
++#endif
++		if(depth <= 0){
+ 			PON_MSG(MSG_ERR, "Receive PLOAM message failed.\n") ;
+             return;
+ 		} 

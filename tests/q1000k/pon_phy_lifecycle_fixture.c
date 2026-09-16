@@ -107,7 +107,7 @@ struct phy_private {
     int scu_hir_np_sys_hw_id,wan_sel,rx_fec_setting,trans_index,i2c_u2_clk_div,i2c_addr_num;
     int phy_status,trans_tx_enable,trans_tx_status,first_plugin_flag,trans_msg_print_cnt;
     int debugLevel,pon_stop_flag,event_poll_timer_value,event_handle_lock,pma_reset_lock;
-    int is_phy_start,is_irq_requested,phy_init_done;
+    int is_phy_start,is_irq_requested,phy_init_done,pma_init_done;
     struct { struct { int mode,txPowerEnFlag; } flags; } phyCfg;
     struct timer_list event_poll_timer;
 };
@@ -212,6 +212,10 @@ static int an7581_pon_wan_set(u32 mode)
     wan_writes++; if(wan_set_error) return wan_set_error; wan=mode; return 0;
 }
 static int gain_cleanup_error, probe_cleanup_error;
+static int manual_error, manual_calls, controller_reloads;
+int q1000k_phy_rx_bench_recipe(unsigned int action)
+{ assert(!q1000k_phy_callback_context() && controller_inhibit && !controller.tx); manual_calls++; return manual_error; }
+static int q1000k_pon_bench_reinitialize(struct q1000k_pon *p) { assert(p->held && !p->tx); controller_reloads++; return 0; }
 /* PRODUCTION */
 int q1000k_phy_rx_cleanup(void) {
     assert(!q1000k_phy_callback_context() && !qphy_active && !controller.tx);
@@ -803,8 +807,43 @@ static void coherent_snapshot_tests(void)
     assert(q1000k_phy_snapshot(&rx,&diag)==-ENODEV);
     assert(q1000k_phy_receiver_startup()==-ENODEV);
 }
+static void manual_recovery_tests(void)
+{
+    struct q1000k_rx_sample rx, cached;
+    struct q1000k_rx_diagnostics diag, cached_diag;
+    int fault, n;
+    reset(); controller_inhibit=true; controller_los=false;
+    assert(!q1000k_phy_init());
+    assert(!q1000k_phy_set_rx_bench(true,false,false,false));
+    assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG));
+    assert(!q1000k_phy_start());
+    assert(!q1000k_phy_snapshot(&rx,&diag));
+    assert(q1000k_phy_bench_recover(0)==-EINVAL && !qphy_manual_used);
+    controller_los=true;
+    assert(q1000k_phy_bench_recover(3)==-EAGAIN && !qphy_manual_used);
+    controller_los=false;
+    assert(q1000k_phy_bench_recover(5)==-EBUSY && !qphy_manual_used);
+    assert(!q1000k_phy_bench_recover(3) && manual_calls==1 && qphy_manual_used==BIT(3));
+    assert(q1000k_phy_bench_recover(3)==-EALREADY && manual_calls==1);
+    manual_error=-EIO;
+    assert(q1000k_phy_bench_recover(4)==-EIO && !qphy_active && !controller.tx);
+    n=reads;
+    assert(!q1000k_phy_last_snapshot(&cached,&cached_diag,&fault) && fault==-EIO && reads==n);
+    assert(!memcmp(&rx,&cached,sizeof(rx)) && !memcmp(&diag,&cached_diag,sizeof(diag)));
+    assert(q1000k_phy_bench_recover(5)==-EIO && !controller_reloads);
+    reset(); manual_error=0; controller_los=false;
+    assert(!q1000k_phy_init()); assert(!q1000k_phy_set_rx_bench(true,false,false,false));
+    assert(!q1000k_phy_configure(PHY_XGSPON_CONFIG)); assert(!q1000k_phy_start());
+    assert(!q1000k_phy_quiesce());
+    n=mode_calls;
+    assert(!q1000k_phy_bench_recover(5) && mode_calls==n+1 && !controller_reloads);
+    assert(!q1000k_phy_bench_recover(6) && controller_reloads==1);
+    assert(!q1000k_phy_start() && !controller.tx);
+    reset(); controller_inhibit=false;
+}
 int main(void)
 {
+    manual_recovery_tests();
     coherent_snapshot_tests();
     shutdown_diagnostics();
     rx_reacquire_tests();

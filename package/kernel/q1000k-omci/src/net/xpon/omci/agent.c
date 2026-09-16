@@ -4417,8 +4417,10 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 	int ret;
 
 	ret = omci_wire_decode(skb->data, skb->len, &request);
-	if (ret)
+	if (ret) {
+		if (odev->ops->diagnostic) odev->ops->diagnostic(odev, 0, 0, ret, 0, 0);
 		return;
+	}
 	omci_agent_log_wire(odev, "RX", skb->data, skb->len);
 	ani_g_test = omci_agent_is_ani_g_test(&request);
 	request_hash = jhash(skb->data, skb->len, 0);
@@ -4427,8 +4429,7 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 	content_capacity = request.device_id == OMCI_BASELINE_DEV_ID ? 32 :
 		OMCI_MAX_PDU_LEN - OMCI_EXTENDED_HEADER_LEN;
 	content = kzalloc(content_capacity, GFP_KERNEL);
-	if (!response || !content)
-		goto out;
+	if (!response || !content) { ret = -ENOMEM; goto out; }
 
 	mutex_lock(&agent->lock);
 	if (!agent->enabled) {
@@ -4501,6 +4502,19 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 		omci_agent_report_operational(odev, true);
 
 out:
+	if (odev->ops->diagnostic) {
+		u8 op = request.message_type & 0x1f;
+		u32 flags = duplicate | unsupported << 1 | fake << 2 | operational_changed << 3;
+		u32 result = 0;
+		/* Only actions whose response starts with a result code. MIB upload
+		 * headers and attribute bytes are not result codes or diagnostics. */
+		if (response_len && (op == 4 || op == 6 || op == 8 || op == 9 ||
+				     op == 26 || op == 28 || op == 29)) {
+			unsigned int off = request.device_id == OMCI_BASELINE_DEV_ID ? 8 : 10;
+			if (response_len > off) { result = response[off]; flags |= 16; }
+		}
+		odev->ops->diagnostic(odev, request.class_id, op, ret, flags, result);
+	}
 	kfree(content);
 	kfree(response);
 }

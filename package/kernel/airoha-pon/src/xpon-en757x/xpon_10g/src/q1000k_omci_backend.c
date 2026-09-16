@@ -1,3 +1,4 @@
+#include <q1000k_trace.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /* Software-authenticated OMCI transport and ordered XGS registration owner. */
 #include <linux/seq_file.h>
@@ -273,7 +274,14 @@ out:
 	return ret;
 }
 
+static void qomci_diagnostic(struct omci_device *odev, u16 class_id, u8 opcode,
+			     int error, u32 flags, u32 result)
+{
+	q1000k_trace(QT_OMCI, opcode, error, class_id, flags, result, 0);
+}
+
 static const struct omci_device_ops qomci_ops = {
+	.diagnostic = qomci_diagnostic,
 	.onu_type = OMCI_ONU_TYPE_SFU,
 	.uni_count = 1,
 	.start = qomci_start, .stop = qomci_stop, .xmit = qomci_xmit,
@@ -345,6 +353,7 @@ int q1000k_omci_reset(bool emergency, bool reset_phy)
 		q1000k_protocol_fail(ret);
 		return ret;
 	}
+	q1000k_trace(QT_RESET, 0, 0, GPON_CURR_STATE, emergency, reset_phy, b->request.generation);
 	b->request.reset = true;
 	b->request.reset_phy |= reset_phy;
 	b->request.emergency = emergency;
@@ -414,6 +423,9 @@ int q1000k_omci_burst_profile(const struct q1000k_pon_profile *p,
 	ret = q1000k_omci_profile(tag, sequence, acknowledge);
 	if (ret)
 		return ret;
+	q1000k_trace(QT_PROFILE_QUEUE, p->index, 0, b->request.generation,
+		(b->burst_mask & BIT(p->index)) && !memcmp(p, &b->burst[p->index], sizeof(*p)),
+		b->keys_valid && !memcmp(tag, b->keys.pon_tag, 8), b->request.burst_mask);
 	b->request.burst[p->index] = *p;
 	b->request.burst_mask |= BIT(p->index);
 	/* Same-tag broadcasts also need a physical profile install. */
@@ -731,6 +743,7 @@ again:
 	token = q1000k_protocol_enter();
 	if (token < 0) { ret = token; goto failed; }
 	request = b->request;
+	q1000k_trace(QT_PROFILE_APPLY, 0, 0, request.generation, request.burst_mask, request.reset, request.assign);
 	memcpy(install->burst, b->burst, sizeof(install->burst));
 	install->burst_mask = b->burst_mask;
 	if (request.reset || (request.profile && memcmp(request.tag, b->keys.pon_tag, 8)))
@@ -796,6 +809,7 @@ again:
 	token = q1000k_protocol_enter();
 	if (token < 0) { ret = token; goto failed; }
 	if (request.generation != b->request.generation) {
+		q1000k_trace(QT_PROFILE_APPLY, 3, -EAGAIN, request.generation, b->request.generation, 0, 0);
 		q1000k_protocol_leave(token); goto again;
 	}
 	up = request.state == GPON_10G_STATE_O5 && install->onu != 0xffff &&
@@ -844,6 +858,7 @@ again:
 	spin_lock_bh(&b->auth_lock);
 	b->keys = install->keys;
 	b->keys_valid = install->valid;
+	q1000k_trace(QT_PROFILE_APPLY, 1, 0, request.generation, install->burst_mask, install->valid, install->onu);
 	b->index = request.index;
 	spin_unlock_bh(&b->auth_lock);
 	b->request.profile = false;
@@ -920,6 +935,7 @@ again:
 	kfree_sensitive(install);
 	return;
 failed:
+	q1000k_trace(QT_PROFILE_APPLY, 2, ret, 0, 0, 0, 0);
 	qomci_close(b);
 	omci_device_set_auth_epoch(b->omci, 0);
 	q1000k_transport_set_auth_epoch(0);

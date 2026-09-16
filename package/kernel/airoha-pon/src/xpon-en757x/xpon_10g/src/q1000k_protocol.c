@@ -1,3 +1,4 @@
+#include <q1000k_trace.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /* Resumable, bounded MAC protocol executor. No hardware is accessed here. */
 #include <linux/errno.h>
@@ -94,6 +95,7 @@ static void qprotocol_enqueue(struct q1000k_protocol_job *job)
 {
 	if (!qprotocol_live || qprotocol_error || job->dead || job->queued)
 		return;
+	q1000k_trace(QT_JOB_QUEUE, job->type, 0, job->type == Q1000K_JOB_TIMER ? job - qprotocol_timers : 0, 0, 0, 0);
 	list_add_tail(&job->node, &qprotocol_pending);
 	job->queued = true;
 	qprotocol_kick();
@@ -134,6 +136,7 @@ void q1000k_protocol_fail(int error)
 		return;
 	spin_lock_irqsave(&qprotocol_lock, flags);
 	if (qprotocol_live && !qprotocol_error) {
+		q1000k_trace(QT_FAULT, 2, error, 0, 0, 0, 0);
 		qprotocol_error = error;
 		qprotocol_fault_pending = true;
 		qprotocol_kick();
@@ -169,6 +172,7 @@ static void qprotocol_work(struct work_struct *work)
 				job = list_first_entry(&qprotocol_pending, struct q1000k_protocol_job, node);
 				/* Copy transient PHY storage before making it reusable. */
 				type = job->type;
+				q1000k_trace(QT_JOB_RUN, type, 0, job->type == Q1000K_JOB_PHY ? job->phy.source : job->type == Q1000K_JOB_TIMER ? job - qprotocol_timers : 0, job->type == Q1000K_JOB_PHY ? job->phy.event : 0, 0, 0);
 				if (type == Q1000K_JOB_PHY) {
 					source = job->phy.source;
 					event = job->phy.event;

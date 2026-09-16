@@ -5,6 +5,7 @@ import re
 from test_pon_phy_lifecycle import BSP, production_source
 
 source, regs = production_source()
+source = '#define q1000k_trace(event,id,result,a,b,c,d) do { (void)(id); (void)(result); (void)(a); (void)(b); (void)(c); (void)(d); } while (0)\n#define q1000k_trace_generation(...) ((void)0)\n' + source
 host = Path(__file__).with_name('pon_phy_lifecycle_fixture.c').read_text()
 defs = host[host.index('#define TRUE'):host.index('/* REGISTERS */')]
 defs = re.sub(r'^#define (?:IRQ_\w+|IRQF_\w+|GFP_KERNEL)[^\n]*\n', '', defs, flags=re.M)

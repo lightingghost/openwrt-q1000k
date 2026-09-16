@@ -1,6 +1,7 @@
 # Q1000K next consolidated bench: discovery and receiver recovery
 
-Status: **implementation plan, not a built image or completed test matrix**.
+Status: **implemented discovery/recovery bench; final image build and hardware acceptance are tracked separately**.
+See [implemented test map](XGSPON-DISCOVERY-BENCH.q1000k.md) and the packaged capability manifest for supported controls and explicit measurement limits.
 Prepared 2026-09-16 from image `280555a076`, its three hardware collections,
 and the source at `ec3c22c811`. Develop on `q1000k-xgspon` and produce one RAM
 bench image with one portable collector. Normal optical TX is already authorized.

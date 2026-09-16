@@ -130,6 +130,9 @@ static int q1000k_pon_put(struct q1000k_pon *p)
 }
 static int an7581_pon_phy_prepare_pins(void) { return pins_error; }
 static int an7581_pon_pbus_enable(void) { return pbus_error; }
+static int handle_event(char *p);
+int q1000k_phy_rx_bench_recipe(unsigned int action) { return handle_event(NULL); }
+static int q1000k_pon_bench_reinitialize(struct q1000k_pon *p) { return 0; }
 /* PRODUCTION */
 int q1000k_phy_rx_cleanup(void) {
     check(!q1000k_phy_callback_context() && !qphy_active && !controller.tx);
@@ -296,6 +299,44 @@ static void stop_during_reacquire(bool quiesce, bool restore_pll, bool restore_g
     check(!gpPhyPriv && !fake_irq_owned && !work_busy(&qphy_poll_job));
     controller_los=true;
 }
+static DECLARE_COMPLETION(manual_done);
+static DECLARE_COMPLETION(snapshot_done);
+static int manual_task(void *unused)
+{
+    check(!q1000k_phy_bench_recover(3)); complete(&manual_done);
+    while(!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
+    __set_current_state(TASK_RUNNING); return 0;
+}
+static int snapshot_task(void *unused)
+{
+    struct q1000k_rx_sample rx;
+    struct q1000k_rx_diagnostics diag;
+    check(!q1000k_phy_snapshot(&rx,&diag)); complete(&snapshot_done);
+    while(!kthread_should_stop()) { set_current_state(TASK_INTERRUPTIBLE); schedule(); }
+    __set_current_state(TASK_RUNNING); return 0;
+}
+static void manual_recovery_concurrent_snapshot(void)
+{
+    struct task_struct *recover, *reader;
+    qphy_dead=false; qphy_fault=0; controller_inhibit=true; controller_los=false;
+    check(!q1000k_phy_init()); check(!q1000k_phy_set_rx_bench(true,false,false,false));
+    check(!q1000k_phy_configure(PHY_XGSPON_CONFIG)); check(!q1000k_phy_start());
+    registers[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+    registers[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=0;
+    reinit_completion(&event_entered); reinit_completion(&event_release);
+    WRITE_ONCE(hold_event,true);
+    recover=kthread_run(manual_task,NULL,"qphy-manual"); check(!IS_ERR(recover));
+    check(wait_for_completion_timeout(&event_entered,5*HZ));
+    reader=kthread_run(snapshot_task,NULL,"qphy-snapshot"); check(!IS_ERR(reader));
+    msleep(20); check(!completion_done(&snapshot_done) && !controller.tx);
+    WRITE_ONCE(hold_event,false); complete(&event_release);
+    check(wait_for_completion_timeout(&manual_done,5*HZ));
+    check(wait_for_completion_timeout(&snapshot_done,5*HZ));
+    kthread_stop(recover); kthread_stop(reader);
+    check(q1000k_phy_bench_recover(3)==-EALREADY);
+    q1000k_phy_exit(); check(!controller.held && !fake_irq_owned);
+}
+
 static int __init phy_test_init(void)
 {
     struct xpon_phy_api_data_s data={.api_type=XPON_PHY_API_TYPE_GET};
@@ -375,6 +416,7 @@ static int __init phy_test_init(void)
         stop_during_reacquire(true,false,false,mode);
     }
     check(reacquisitions==6+2*(Q1000K_RX_PROBE_COUNT-1) && !controller.held);
+    manual_recovery_concurrent_snapshot();
     pr_info("Q1000K_PON_PHY_KERNEL_PASS: 50 normal + 50 RX-only cycles, RCU guards, concurrent poll and IRQ teardown\n");
     return 0;
 }

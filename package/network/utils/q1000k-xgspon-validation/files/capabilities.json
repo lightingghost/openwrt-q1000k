@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "bench": "discovery-recovery",
+  "hardware_acceptance": false,
+  "trace": {
+    "version": 1,
+    "capacity": 4096,
+    "record_bytes": 48,
+    "per_event_id_counts": true,
+    "first_event_retained": true,
+    "path": "/proc/q1000k-pon-events",
+    "host_drain_seconds_approx": 5,
+    "overflow_is_inconclusive": true,
+    "counter_errno_counts": true
+  },
+  "interfaces": [
+    "/proc/q1000k-pon-snapshot",
+    "/proc/q1000k-pon-last-snapshot",
+    "/proc/q1000k-pon-mac",
+    "/proc/q1000k-pon-fast"
+  ],
+  "control": "/sys/module/xpon_10g/parameters/bench_recover",
+  "recovery_actions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "kernel_actions": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "host_full_stack_action": 7,
+  "rx_schema": 5,
+  "diagnostics_schema": 5,
+  "mac_schema": 1,
+  "fast_schema": 1,
+  "sn_thresholds": [
+    20,
+    40
+  ],
+  "activation_wall_deadline_seconds": 240,
+  "unavailable": [
+    "Optical burst quality/OLT receive trace",
+    "Per-encrypted-GEM traffic attribution",
+    "Verified optical TX power/bias sensor",
+    "Dynamic kprobes/ftrace fallback",
+    "Active interface-bound DNS query; lease DNS servers are recorded"
+  ],
+  "tests": [
+    {
+      "id": "B01",
+      "test": "Input, firmware, runtime and ownership checks",
+      "selection": "All sessions",
+      "hypothesis": "H1-H8",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "B02",
+      "test": "Three fresh RX starts",
+      "selection": "rx-startup,rx-repeat-1,rx-repeat-2",
+      "hypothesis": "H5-H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "B03",
+      "test": "Connected-fiber RX soak",
+      "selection": "rx-soak",
+      "hypothesis": "H5-H7",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "A01",
+      "test": "Normal discovery, 240-second wall deadline",
+      "selection": "activation",
+      "hypothesis": "H1-H4",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "A02",
+      "test": "Matched discovery with fewer full snapshots",
+      "selection": "activation-quiet",
+      "hypothesis": "H7",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "A03",
+      "test": "SN reset threshold 20 versus 40",
+      "selection": "activation-long-sn; conditional on observed threshold reset",
+      "hypothesis": "H4",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "A04",
+      "test": "Wire-byte shadow decoder and repeated profile accounting",
+      "selection": "All activation sessions",
+      "hypothesis": "H1,H7",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R00",
+      "test": "Passive reconnect before any intervention",
+      "selection": "rx-reconnect",
+      "hypothesis": "H5",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R01",
+      "test": "Checked PMA out/in",
+      "selection": "Recovery action 1",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R02",
+      "test": "PMA out/in plus known PLL restoration",
+      "selection": "Recovery action 2",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R03",
+      "test": "OEM clock cycle and full digital reset",
+      "selection": "Recovery action 3",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R04",
+      "test": "OEM gain plus fresh analog calibration",
+      "selection": "Recovery action 4",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R05",
+      "test": "Full PHY initialization with retained controller",
+      "selection": "Recovery action 5; drained MAC/DMA transaction",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R06",
+      "test": "Controller reinitialization with retained PHY settings",
+      "selection": "Recovery action 6; drained MAC/DMA transaction, same verified MCU/DSD",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R07",
+      "test": "Full module stack reinitialization",
+      "selection": "Recovery action 7",
+      "hypothesis": "H5-H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R08",
+      "test": "Winning action alone after a new outage",
+      "selection": "rx-confirm; conditional or explicit --recovery-action",
+      "hypothesis": "H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R09",
+      "test": "Reconnect with normal registration callbacks",
+      "selection": "activation-reconnect",
+      "hypothesis": "H5",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R10",
+      "test": "Initialize in darkness, then reconnect",
+      "selection": "rx-dark-start; opt in",
+      "hypothesis": "H5-H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "R11",
+      "test": "Short and long dark controls",
+      "selection": "rx-short-outage,rx-long-outage; opt in",
+      "hypothesis": "H5-H6",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "D01",
+      "test": "Stable O5/authentication",
+      "selection": "Automatically on any successful activation",
+      "hypothesis": "H8",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "D02",
+      "test": "OMCI opcode/class/result events, MIB and rules",
+      "selection": "Automatically after O5",
+      "hypothesis": "H8",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "D03",
+      "test": "Key selection/epoch and directional GEM/OMCI counters",
+      "selection": "All activation snapshots; encrypted-traffic attribution unavailable",
+      "hypothesis": "H8",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "D04",
+      "test": "DHCPv4, DHCPv6 address/PD, routes and PON-bound traffic",
+      "selection": "Automatically after provisioning",
+      "hypothesis": "H8",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "D05",
+      "test": "1500-byte MTU, HTTPS and optional iperf",
+      "selection": "Automatically after provisioning; iperf needs numeric server",
+      "hypothesis": "H8",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "D06",
+      "test": "Post-traffic soak and checked teardown",
+      "selection": "Automatically after traffic; all sessions check cleanup",
+      "hypothesis": "H8",
+      "implemented": true,
+      "hardware_run": false
+    }
+  ],
+  "event_names": {
+    "1": "generation",
+    "2": "fault",
+    "3": "phy_irq",
+    "4": "phy_poll",
+    "5": "phy_edge",
+    "6": "tx",
+    "7": "recovery",
+    "8": "mac_irq",
+    "9": "mac_error",
+    "10": "ploam_verify",
+    "11": "ploam_dispatch",
+    "12": "profile",
+    "13": "profile_queue",
+    "14": "profile_apply",
+    "15": "assign",
+    "16": "reset",
+    "17": "state",
+    "18": "job_queue",
+    "19": "job_run",
+    "20": "mac_config",
+    "21": "mac_profile",
+    "22": "omci",
+    "23": "recovery_phase"
+  },
+  "discovery_irq_bits": {
+    "2": "SN request received",
+    "3": "SN sent",
+    "4": "Ranging request received",
+    "5": "Registration sent"
+  }
+}

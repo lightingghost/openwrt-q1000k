@@ -179,7 +179,8 @@ def inspect(image, revision, profile='bench'):
     runtime_paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
     if profile == 'activation':
-        runtime_paths.append('usr/sbin/q1000k-pon-validate')
+        runtime_paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/share/q1000k-bench/capabilities.json'])
+        assert read('usr/share/q1000k-bench/capabilities.json') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/capabilities.json').read_bytes()
         assert read('usr/sbin/q1000k-pon-validate') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/validate').read_bytes()
         for program in ('usr/bin/iperf3', 'usr/bin/curl', 'sbin/ip', 'usr/bin/ping'):
             assert read(program), program
@@ -195,11 +196,14 @@ def inspect(image, revision, profile='bench'):
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
         if profile == 'activation' and name == 'q1000k-pon-control':
             assert b'parmtype=validation_tx:bool' in read(matches[0])
-            assert 'q1000k_pon_receiver_startup' in symbols
+            assert {'q1000k_pon_receiver_startup','q1000k_pon_bench_reinitialize'} <= symbols
+        if profile == 'activation' and name == 'airoha_ecnt_hook':
+            assert {'q1000k_trace','q1000k_trace_generation','q1000k_trace_init'} <= symbols
         if profile == 'activation' and name == 'xpon_10g':
-            assert {'q1000k_snapshot_init', 'q1000k_snapshot_exit', 'q1000k_omci_security_status'} <= symbols
+            assert b'parm=bench_sn_limit:' in read(matches[0]) or b'bench_sn_limit' in read(matches[0])
+            assert {'q1000k_snapshot_init', 'q1000k_snapshot_exit', 'q1000k_omci_security_status', 'qrx_recover_set', 'qrx_mac_show', 'qrx_last_show', 'qrx_fast_show'} <= symbols
         if profile == 'activation' and name == 'phy_10g':
-            assert {'q1000k_phy_snapshot', 'q1000k_phy_receiver_startup'} <= symbols
+            assert {'q1000k_phy_snapshot', 'q1000k_phy_receiver_startup', 'q1000k_phy_bench_recover', 'q1000k_phy_last_snapshot', 'q1000k_phy_fast_sample', 'q1000k_phy_rx_bench_recipe'} <= symbols
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])
             assert b'parmtype=rx_restore_gain:bool' in read(matches[0])

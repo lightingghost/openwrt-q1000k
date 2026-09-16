@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -16,7 +17,7 @@ typedef uint64_t u64;
 #define PAGE_SIZE 4096
 #define scnprintf snprintf
 struct kernel_param { int unused; };
-struct kernel_param_ops { int (*get)(char *,const struct kernel_param *); };
+struct kernel_param_ops { int (*set)(const char *,const struct kernel_param *); int (*get)(char *,const struct kernel_param *); };
 struct device_node { int unused; };
 static struct device_node root;
 static bool board=true, bench=true, running=true, phy_mode, phy_reacquire, phy_restore_pll, phy_restore_gain, power_valid;
@@ -41,9 +42,24 @@ static void kfree(void *p) { free(p); }
 static void seq_puts(struct seq_file *s, const char *p)
 { assert(strlen(s->out)+strlen(p)<sizeof(s->out)); strcat(s->out,p); }
 static struct proc_dir_entry *proc_create_single(const char *n,int mode,void *parent,int (*show)(struct seq_file *,void *))
-{ assert(!strcmp(n,"q1000k-pon-snapshot") && mode==0400 && !parent && show); return proc_error ? NULL : &proc; }
+{ assert(!strncmp(n,"q1000k-pon-",11) && mode==0400 && !parent && show); return proc_error ? NULL : &proc; }
 static void proc_remove(struct proc_dir_entry *p) { if(p) { assert(p==&proc); proc_removed++; } }
+#define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
+static u64 ktime_get_boottime_ns(void) { return 1000000; }
+static void seq_printf(struct seq_file *s, const char *fmt, ...)
+{ va_list ap; va_start(ap,fmt); vsnprintf(s->out+strlen(s->out),sizeof(s->out)-strlen(s->out),fmt,ap); va_end(ap); }
+static int q1000k_protocol_enter(void) { return protocol_error; }
+static void q1000k_protocol_leave(int token) { assert(!token); }
+static int kstrtouint(const char *s,unsigned int base,unsigned int *v)
+{ char *end; unsigned long n=strtoul(s,&end,base); if(*end && *end!='\n') return -EINVAL; *v=n; return 0; }
+static int q1000k_gwan_refresh(int (*fn)(void *),void *arg) { return fn(arg); }
+void q1000k_snapshot_exit(void);
 /* PRODUCTION */
+int q1000k_phy_last_snapshot(struct q1000k_rx_sample *s,struct q1000k_rx_diagnostics *d,int *f)
+{ return -ENODATA; }
+int q1000k_phy_bench_recover(unsigned int action) { return 0; }
+int q1000k_phy_fast_sample(u32 *sfp,u32 *sync,u32 *frames) { *sfp=*sync=*frames=0; return 0; }
+
 int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain) {
     preparations++; if(!phy_error) { phy_mode=enabled; phy_reacquire=reacquire; phy_restore_pll=restore_pll; phy_restore_gain=restore_gain; } return phy_error;
 }
@@ -154,6 +170,6 @@ int main(void) {
     seq.out[0]=0; sample_error=-EIO;
     assert(qrx_snapshot_show(&seq,NULL)==-EIO && !seq.out[0]); sample_error=0;
     alloc_error=1; assert(qrx_snapshot_show(&seq,NULL)==-ENOMEM && !seq.out[0]); alloc_error=0;
-    q1000k_snapshot_exit(); q1000k_snapshot_exit(); assert(proc_removed==1);
+    q1000k_snapshot_exit(); q1000k_snapshot_exit(); assert(proc_removed==4);
     return 0;
 }

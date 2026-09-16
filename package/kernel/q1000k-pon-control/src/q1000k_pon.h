@@ -30,4 +30,7 @@ int q1000k_pon_oem_post_init(struct q1000k_pon *pon, bool restore);
  * Idempotent within one controller lifetime; disabled on the old RX bench DT.
  */
 int q1000k_pon_receiver_startup(struct q1000k_pon *pon);
+/* Exclusive PHY lease owner, after callback/IRQ/DMA drain, RX-inhibited
+ * activation bench only. Reverify the original MCU pair and retained DSD. */
+int q1000k_pon_bench_reinitialize(struct q1000k_pon *pon);
 #endif

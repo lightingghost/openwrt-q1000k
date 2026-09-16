@@ -5,7 +5,23 @@
 . /lib/q1000k-xgspon/common.sh
 umask 077
 export LC_ALL=C
-fail() { echo "Validation failed: $*" >&2; exit 1; }
+fail() { event failure containment; echo "Validation failed: $*" >&2; exit 1; }
+now() { local up rest; read -r up rest < /proc/uptime; echo "${up%.*}"; }
+history() {
+	[ -r /proc/q1000k-pon-events ] || return 0
+	cat /proc/q1000k-pon-events
+}
+postmortem() {
+	echo postmortem_begin
+	history
+	[ ! -r /proc/q1000k-pon-last-snapshot ] || cat /proc/q1000k-pon-last-snapshot
+	echo postmortem_end
+}
+negative() {
+	event outcome functional-negative
+	observe aftermath 30
+	exit 2
+}
 event() { printf 'validation_stage name=%s status=%s\n' "$1" "$2"; }
 preflight() {
 	q1000k-pon-bench status >/dev/null || fail 'RAM bench preflight failed.'
@@ -13,6 +29,7 @@ preflight() {
 	[ "$(cat /proc/sys/kernel/panic)" = 0 ] || fail 'Panic timeout must be zero.'
 }
 owned_modules= controller= locked=0 lower_owned=0 wan_owned=0
+manual_recovery=0 stack_generation=0
 cleanup() {
 	local result=$? module failed=0
 	trap - EXIT
@@ -22,6 +39,15 @@ cleanup() {
 		ifdown q1000k_wan6 || failed=1
 		ifdown q1000k_wan || failed=1
 	fi
+	postmortem
+	stop_stack || failed=1
+	rm -f /var/run/q1000k-pon-bench.lock/control
+	rmdir /var/run/q1000k-pon-bench.lock || failed=1
+	if [ "$failed" = 0 ]; then event cleanup passed; else event cleanup failed; result=1; fi
+	exit "$result"
+}
+stop_stack() {
+	local module failed=0
 	for module in $owned_modules; do
 		if [ "$module" = q1000k_pon_control ] && [ -n "$controller" ]; then
 			printf 'off\n' > "$controller/operation" || failed=1
@@ -35,9 +61,8 @@ cleanup() {
 	if [ "$failed" = 0 ] && [ "$lower_owned" = 1 ]; then
 		ip link set dev ponraw down || failed=1
 	fi
-	rmdir /var/run/q1000k-pon-bench.lock || failed=1
-	if [ "$failed" = 0 ]; then event cleanup passed; else event cleanup failed; result=1; fi
-	exit "$result"
+	[ "$failed" = 0 ] || return 1
+	owned_modules= controller= lower_owned=0
 }
 load_module() {
 	local module="$1" filename="$1"
@@ -95,7 +120,9 @@ snapshot() {
 	field sampled_ms int && [ "$value" -gt "$last_ms" ] || fail 'Stale RX sample.'
 	current_ms=$value; last_ms=$value
 	field frames int || fail 'Missing frame counter.'; frames=$value
-	field synced boolean || fail 'Missing sync status.'; synced=$value
+	field synced boolean || fail 'Missing sync status.'; synced=$value; rx_synced=$value
+	field controller_los boolean || fail 'Missing controller LOS.'; ctl_los=$value
+	field phy_los boolean || fail 'Missing PHY LOS.'; phy_los=$value
 	field rx_power_valid boolean || fail 'Missing optical power validity.'; power_valid=$value
 	if [ "$power_valid" = 1 ]; then
 		field rx_power_nw int && [ "$value" -gt 0 ] || fail 'Invalid power reading.'
@@ -108,15 +135,20 @@ snapshot() {
 	json_load "$diag" || fail 'Invalid diagnostics JSON.'
 	field diagnostics_version int && [ "$value" = 5 ] || fail 'Wrong diagnostics schema.'
 	field sampled_ms int && [ "$value" -ge "$current_ms" ] && [ "$((value-current_ms))" -le 1500 ] || fail 'Diagnostic pair age exceeds limit.'
-	for key in probe attempts writes; do field "$key" int && [ "$value" = 0 ] || fail 'Unexpected experimental probe.'; done
+	for key in probe attempts writes; do
+		field "$key" int || fail 'Missing experimental probe state.'
+		[ "$value" = 0 ] || { [ "$key" = writes ] && [ "$manual_recovery" = 1 ]; } || fail 'Unexpected experimental probe.'
+	done
 	for key in checker_control data_route_control bist_lane_control; do
 		field "$key" int || fail 'Missing loopback guard.'
 		case "$key" in data_route_control) n=65792 ;; *) n=256 ;; esac
 		[ "$((value & n))" = 0 ] || fail 'Loopback/generator guard failed.'
 	done
 	data=$(cat "$controller/receiver_status") && json_load "$data" || fail 'Receiver control unavailable.'
-	printf '%s\n' "$data"
+	[ "$phase" != activation-quiet ] || [ "$((count % 5))" = 0 ] && printf '%s\n' "$data"
 	field oem_post_saved boolean && [ "$value" = 1 ] || fail 'Automatic OEM startup was not applied.'
+	cat /proc/q1000k-pon-mac || fail 'MAC diagnostic snapshot unavailable.'
+	{ [ "$((count % 5))" != 0 ] && [ "$phase" != activation-quiet ]; } || history
 	cat /proc/xgpon/status || fail 'MAC status unavailable.'
 	grep -qx 'protocol_error=0' /proc/xgpon/status || fail 'MAC protocol fault.'
 	omci=$(q1000k-omci -i pon status) && json_load "$omci" || fail 'OMCI status unavailable.'
@@ -166,15 +198,20 @@ identity_option_read() {
 }
 case "$1" in
 	status) [ "$#" = 1 ] || fail 'Unexpected status arguments.'; preflight; exit 0 ;;
-	rx|activate) [ "$#" = 5 ] || [ "$#" = 6 ] || fail 'Usage: q1000k-pon-validate rx|activate CALIBRATION IDENTITY_DIR SAMPLES IPERF_IP_OR_NONE [PHASE]'
-		mode=$1; calibration=$2; identity_dir=$3; limit=$4; iperf_server=$5; phase=${6:-rx} ;;
+	rx|activate) [ "$#" = 5 ] || [ "$#" = 6 ] || [ "$#" = 7 ] || fail 'Usage: q1000k-pon-validate rx|activate CALIBRATION IDENTITY_DIR SAMPLES IPERF_IP_OR_NONE [PHASE]'
+		mode=$1; calibration=$2; identity_dir=$3; limit=$4; iperf_server=$5; phase=${6:-rx}; recovery_actions=${7:-1,2,3,4,5,6,7} ;;
 	*) fail 'Commands: status, rx, activate' ;;
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|activation) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
+case "$recovery_actions" in
+	1|2|3|4|5|6|7|1,2,3,4,5,6,7) ;;
+	*) fail 'Select the fixed recovery ladder or one action 1..7.' ;;
+esac
+sn_limit=20; [ "$phase" != activation-long-sn ] || sn_limit=40
 preflight
 case "$calibration" in /tmp/*) ;; *) fail 'Calibration must be staged in RAM.' ;; esac
 [ -f "$calibration" ] && [ ! -L "$calibration" ] && [ "$(wc -c < "$calibration")" = 513 ] || fail 'Invalid calibration size/type.'
@@ -188,7 +225,6 @@ if [ "$mode" = activate ]; then
 	identity_options || fail 'Invalid private identity.'
 	identity_option_read serial && serial=$identity_value && valid_serial "$serial" || fail 'Explicit subscriber serial is required.'
 	identity_option_read wan_mac && wan_mac=$identity_value && valid_mac "$wan_mac" || fail 'Explicit subscriber WAN MAC is required.'
-	[ -n "$registration" ] || fail 'Explicit registration ID is required (use the real line setting).'
 	wan_idle || fail 'WAN configuration is not idle/owned.'
 	allow_tx=1 inhibit=0
 fi
@@ -202,6 +238,9 @@ mkdir /var/run/q1000k-pon-bench.lock || fail 'Another bench owns the device.'
 locked=1
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+start_stack() {
+	stack_generation=$((stack_generation+1))
+	printf 'stack_generation=%s\n' "$stack_generation"
 load_module q1000k_pon_control validation_tx="$allow_tx"
 controller=$(find_controller) || fail 'Controller did not bind.'
 controller_check off || fail 'Wrong initial controller state.'
@@ -214,30 +253,92 @@ ip link set dev ponraw up || fail 'Cannot open DMA endpoint.'
 lower_owned=1
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do load_module "$module"; done
 # Only fixed names and validated hexadecimal/scalar module values are expanded.
-load_module xpon_10g rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
-registration= serial= identity_params= identity_value=
+load_module xpon_10g bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
+}
+start_stack
 last_ms=-1 previous_frames=-1 stable=0 state=0 authenticated=0 operational=0 rules=0 objects=0
+physical() {
+	local expiry=$(( $(now) + 600 )) bright_at=0 count=0 action tick step
+	event physical started
+	# The host records human confirmation separately from observed optical edges.
+	while [ "$(now)" -lt "$expiry" ]; do
+		snapshot
+		count=$((count+1))
+		if [ -f /var/run/q1000k-pon-bench.lock/control ] &&
+		   [ "$(cat /var/run/q1000k-pon-bench.lock/control)" = RECONNECTED ] &&
+		   [ "$ctl_los" = 0 ] && [ "$phy_los" = 0 ]; then
+			[ "$bright_at" != 0 ] || bright_at=$(now)
+			[ "$(( $(now)-bright_at ))" -lt 60 ] || break
+		fi
+		# Fast transition samples use MMIO only, not repeated controller I2C.
+		for tick in 1 2 3 4 5; do
+			cat /proc/q1000k-pon-fast || fail 'Fast RX capture failed.'
+			sleep 0.2
+		done
+	done
+	[ "$bright_at" != 0 ] || { event physical inconclusive; exit 3; }
+	if [ "$stable" -ge 5 ]; then
+		event passive recovered
+		event recovery not-reproduced
+		return 0
+	fi
+	event passive no-reacquisition
+	[ "$inhibit" = 1 ] || { event normal-recovery no-reacquisition; negative; }
+	manual_recovery=1
+	for action in $(printf '%s' "$recovery_actions" | tr ',' ' '); do
+		postmortem
+		printf 'recovery_action=%s phase=before\n' "$action"
+		if [ "$action" = 7 ]; then
+			stop_stack || fail 'Full-stack recovery could not drain.'
+			start_stack
+			manual_recovery=0
+		else
+			printf '%s\n' "$action" > /sys/module/xpon_10g/parameters/bench_recover || fail 'Owned recovery failed; no more actions.'
+		fi
+		printf 'recovery_action=%s phase=applied\n' "$action"
+		stable=0 previous_frames=-1
+		sleep 0.25
+		cat /proc/q1000k-pon-fast || fail 'Post-recovery fast capture failed.'
+		step=$(now); count=0
+		while [ "$(( $(now)-step ))" -lt 30 ]; do
+			snapshot; count=$((count+1)); sleep 1
+		done
+		printf 'recovery_action=%s phase=observed stable=%s\n' "$action" "$stable"
+		if [ "$stable" -ge 5 ]; then
+			event recovery recovered-after-sequence
+			printf 'recovery_winner=%s\n' "$action"
+			return 0
+		fi
+	done
+	negative
+}
+case "$phase" in
+	rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation-reconnect)
+		physical
+		[ "$mode" != rx ] || { event "$phase" observed; exit 0; }
+		;;
+esac
 if [ "$mode" = rx ]; then
 	observe "$phase" "$limit"
-	[ "$stable" -ge 5 ] || fail 'Stable downstream frames were not observed at the end.'
+	[ "$stable" -ge 5 ] || { event "$phase" no-frames; negative; }
 	event "$phase" passed
 	exit 0
 fi
 # Every timeout is bounded and recorded independently; later stages need the
 # preceding stage's actual hardware state, never a timer-based assumption.
 event activation started
-count=0 o5_stable=0
-while [ "$count" -lt "$limit" ]; do
+count=0 o5_stable=0 deadline=$(( $(now) + limit ))
+while [ "$count" -lt "$limit" ] && [ "$(now)" -lt "$deadline" ]; do
 	snapshot
 	if [ "$state" = 5 ] && [ "$authenticated" = 1 ]; then o5_stable=$((o5_stable+1)); else o5_stable=0; fi
 	[ "$o5_stable" -lt 5 ] || break
-	count=$((count+1)); sleep 1
+	count=$((count+1)); if [ "$phase" = activation-quiet ]; then sleep 4; else sleep 1; fi
 done
-[ "$o5_stable" -ge 5 ] || { event activation timeout; fail 'O5/authentication not reached.'; }
+[ "$o5_stable" -ge 5 ] || { event activation timeout; negative; }
 event activation passed
 event provisioning started
-count=0 provision_stable=0
-while [ "$count" -lt "$limit" ]; do
+count=0 provision_stable=0 deadline=$(( $(now) + limit ))
+while [ "$count" -lt "$limit" ] && [ "$(now)" -lt "$deadline" ]; do
 	snapshot
 	if [ "$state" = 5 ] && [ "$authenticated" = 1 ] && [ "$operational" = 1 ] && [ "$rules" -gt 0 ] && [ "$objects" -gt 0 ]; then
 		provision_stable=$((provision_stable+1))
@@ -248,7 +349,7 @@ done
 printf 'mib_begin\n'
 q1000k-omci -i pon mib || fail 'MIB capture failed.'
 printf 'mib_end\n'
-[ "$provision_stable" -ge 5 ] || { event provisioning timeout; fail 'OMCI service rules not installed.'; }
+[ "$provision_stable" -ge 5 ] || { event provisioning timeout; negative; }
 event provisioning passed
 wan_idle || fail 'WAN ownership changed.'
 event wan started

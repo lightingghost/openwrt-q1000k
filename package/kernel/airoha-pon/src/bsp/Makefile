@@ -1,7 +1,7 @@
 ccflags-y += $(AIROHA_PON_CFLAGS)
 
 obj-m += airoha_ecnt_hook.o
-airoha_ecnt_hook-y := core/ecnt_hook.o module/ecnt_hook_meta.o
+airoha_ecnt_hook-y := core/ecnt_hook.o core/q1000k_trace.o module/ecnt_hook_meta.o
 
 obj-m += airoha_ecnt_scu.o
 airoha_ecnt_scu-y := core/ecnt_scu.o module/ecnt_scu_meta.o

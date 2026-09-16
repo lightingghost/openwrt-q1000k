@@ -145,7 +145,7 @@ def main():
             paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
             if args.profile == 'activation':
-                paths.append('usr/sbin/q1000k-pon-validate')
+                paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/share/q1000k-bench/capabilities.json'])
             for name in ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu',
                          'airoha_ecnt_pon_phy', 'airoha_ecnt_xpon', 'phy_10g', 'xpon', 'omci', 'xpon_10g'):
                 modules = list(root.glob('lib/modules/*/' + name + '.ko'))

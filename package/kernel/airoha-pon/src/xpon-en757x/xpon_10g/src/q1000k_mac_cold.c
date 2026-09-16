@@ -1,3 +1,4 @@
+#include <q1000k_trace.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /* AN7581 XGS discovery baseline, from the EN7581 vendor register definitions. */
 #include <linux/bitops.h>
@@ -126,6 +127,7 @@ int q1000k_mac_cold_install(const u8 serial[8], const u8 registration[36], bool 
 		ret = qcold_write(0x5010, get_unaligned_be32(serial + 4), ~0U);
 	for (i = 0; !ret && i < 9; i++)
 		ret = qcold_write(0x5018 + 4 * i, get_unaligned_be32(registration + 32 - 4 * i), ~0U);
+	q1000k_trace(QT_MAC_CONFIG, 0, ret, !ret, 0, 0, 0);
 	for (i = 0; !ret && i < sizeof(defaults) / sizeof(defaults[0]); i++)
 		ret = qcold_update(defaults[i].reg, defaults[i].mask, defaults[i].value, defaults[i].omit);
 	if (!ret)
@@ -170,6 +172,7 @@ int q1000k_mac_activation_set(u8 state)
 		return -EPERM;
 	if (state != 1 && state != 2 && state != 4 && state != 5 && state != 7)
 		return -EOPNOTSUPP;
+	q1000k_trace(QT_STATE, state, 0, 0, 0, 0, 0);
 	return qcold_update(0x5104, 0xf, state, 0);
 }
 
@@ -208,5 +211,7 @@ int q1000k_mac_profile_install(u8 index, u8 version, u16 length)
 	ret = qcold_update(0x5120 + 4 * (index / 2), 0xffffU << shift, (u32)length << shift, 0);
 	/* Publish validity only after the caller verified the PHY and length. */
 	shift = index * 8;
-	return ret ?: qcold_update(0x511c, 0xf1U << shift, ((u32)version << 4 | 1) << shift, 0);
+	if (!ret) ret = qcold_update(0x511c, 0xf1U << shift, ((u32)version << 4 | 1) << shift, 0);
+	q1000k_trace(QT_MAC_PROFILE, index, ret, version, length, 0, 0);
+	return ret;
 }

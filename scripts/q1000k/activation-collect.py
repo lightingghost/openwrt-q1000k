@@ -105,7 +105,7 @@ def runtime_manifest(text):
         entries[match[2]] = match[1]
     fixed = {'/usr/sbin/q1000k-pon-validate', '/usr/sbin/q1000k-pon-bench',
              '/lib/q1000k-xgspon/common.sh', '/usr/share/libubox/jshn.sh',
-             '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config'}
+             '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config', '/usr/share/q1000k-bench/capabilities.json'}
     modules = set(entries) - fixed
     if not fixed <= entries.keys() or len(modules) != 9 or {
             Path(p).stem.replace('-', '_') for p in modules} != set(MODULES):
@@ -180,6 +180,90 @@ def plan(skip_physical=False, rx_only=False, soak=180, physical_only=False):
     return cases
 
 
+# Names describe sessions; IDs map to the published hypothesis/test matrix.
+PHYSICAL = {'rx-reconnect', 'rx-confirm', 'activation-reconnect', 'rx-dark-start',
+            'rx-short-outage', 'rx-long-outage'}
+
+def discovery_plan(args):
+    rx_only = args.rx_only or args.physical_only or not args.identity
+    cases = []
+    if not args.physical_only:
+        cases = [dict(name=n, mode='rx', samples=30, ids=['B02']) for n in
+                 ('rx-startup', 'rx-repeat-1', 'rx-repeat-2')]
+        cases.append(dict(name='rx-soak', mode='rx', samples=args.soak, ids=['B03']))
+        if not rx_only:
+            cases.append(dict(name='activation', mode='activate', samples=240, ids=['A01','A04','D01','D02','D03','D04','D05','D06']))
+    if not args.skip_physical:
+        cases += [dict(name='rx-reconnect', mode='rx', samples=600, ids=['R00','R01','R02','R03','R04','R05','R06','R07']),
+                  dict(name='rx-confirm', mode='rx', samples=600, ids=['R08'], requires_winner=True)]
+        if not rx_only:
+            cases.append(dict(name='activation-reconnect', mode='activate', samples=240, ids=['R09']))
+    if not rx_only and not args.physical_only:
+        cases += [dict(name='activation-quiet', mode='activate', samples=240, ids=['A02','A04']),
+                  dict(name='activation-long-sn', mode='activate', samples=240, ids=['A03'], requires_sn_reset=True)]
+    optional = [dict(name=n, mode='rx', samples=600, ids=[i]) for n,i in
+                [('rx-dark-start','R10'),('rx-short-outage','R11'),('rx-long-outage','R11')]]
+    if getattr(args, 'cases', None):
+        selected = set(args.cases.split(','))
+        known = {c['name'] for c in cases + optional}
+        if not selected <= known: raise ValueError('Unavailable/unknown case selection: ' + ', '.join(sorted(selected-known)))
+        cases = [c for c in cases + optional if c['name'] in selected]
+    for case in cases:
+        case['recovery_actions'] = getattr(args, 'recovery_action', None) or '1,2,3,4,5,6,7'
+        if case.get('requires_winner') and getattr(args, 'recovery_action', None):
+            case.pop('requires_winner')
+    return cases
+
+
+def trace_summary(records):
+    events = [r for r in records if isinstance(r,dict) and r.get('trace_version') == 1 and not r.get('first')]
+    counts = {}; per_stack = {}
+    for r in records:
+        if isinstance(r,dict) and r.get('trace_count') == 1:
+            per_stack.setdefault(r.get('stack_generation',1), {})[f"{r['event']}:{r['id']}"] = {k:r[k] for k in ('count','errors')}
+    for entries in per_stack.values():
+        for key, value in entries.items():
+            total = counts.setdefault(key, dict(count=0,errors=0))
+            for field in total: total[field] += value[field]
+    groups = {}
+    for r in events: groups.setdefault(r.get('stack_generation',1), set()).add(r['seq'])
+    gaps = 0
+    for values in groups.values():
+        seen = sorted(values)
+        gaps += sum(b-a-1 for a,b in zip(seen, seen[1:]))
+        if seen: gaps += seen[0]-1
+    def counter(event, ident):
+        return counts.get(f'{event}:{ident}', {}).get('count',0)
+    milestones = dict(profile_verified=counter(10,1)-counts.get('10:1',{}).get('errors',0),
+        profile_commit_observed=any(r['event']==14 and r['id']==1 and r['b'] and r['c'] for r in events),
+        sn_request_interrupts=counter(8,2),sn_sent_interrupts=counter(8,3),
+        ranging_request_interrupts=counter(8,4),registration_sent_interrupts=counter(8,5),
+        local_assignment_observed=any(r['event']==15 and r['a']==1 for r in events),
+        ranging_accepted=counter(11,4)-counts.get('11:4',{}).get('errors',0))
+    return dict(milestones=milestones, events=sum(map(len,groups.values())), counters=counts, internal_sequence_gaps=gaps,
+                concurrent_wrap=any(isinstance(r,dict) and 'trace_gap' in r for r in records),
+                sn_threshold_reset=any(r['event']==16 and r['id']==1 for r in events),
+                first_reset=next((r for r in events if r['event']==16), None),
+                first_fault=next((r for r in events if r['event']==2), None),
+                generation_changes=sorted({r['generation'] for r in events}))
+
+
+def case_outcome(result, trace_required=True):
+    # A functional negative is useful evidence; containment cannot be waived.
+    if result['stages'].get('cleanup') != 'passed' or result['stages'].get('failure') == 'containment':
+        return 'containment-failure'
+    physical = result.get('physical_control')
+    if not result['diagnostics_pairs_valid'] or (physical and (not physical['confirmed'] or physical.get('dark_samples',0) < result.get('required_dark_samples',15))):
+        return 'inconclusive'
+    t = result.get('trace', {})
+    if trace_required and (not t.get('events') or t.get('internal_sequence_gaps') or t.get('concurrent_wrap')):
+        return 'inconclusive'
+    if result['returncode'] == 2 and result['stages'].get('outcome') == 'functional-negative':
+        return 'functional-negative'
+    if result['returncode'] == 3: return 'inconclusive'
+    return 'observed' if result['returncode'] == 0 else 'inconclusive'
+
+
 def json_records(text):
     decoder, values, offset = json.JSONDecoder(), [], 0
     while offset < len(text):
@@ -196,8 +280,9 @@ def json_records(text):
 
 def summarize(text, returncode=0, events=None):
     records = json_records(text)
-    rx = [r for r in records if isinstance(r, dict) and 'receiver_version' in r]
-    diag = [r for r in records if isinstance(r, dict) and 'diagnostics_version' in r]
+    live_records = json_records(re.sub(r'postmortem_begin.*?postmortem_end', '', text, flags=re.S))
+    rx = [r for r in live_records if isinstance(r, dict) and 'receiver_version' in r]
+    diag = [r for r in live_records if isinstance(r, dict) and 'diagnostics_version' in r]
     stages = dict(re.findall(r'^validation_stage name=(\S+) status=(\S+)$', text, re.M))
     pairs_valid = bool(rx) and len(rx) == len(diag)
     if pairs_valid:
@@ -241,6 +326,12 @@ def summarize(text, returncode=0, events=None):
             and result['physical_control']['dark_samples'] >= 15 and result['physical_control']['recovered_samples'] >= 15)
         if not result['physical_control']['passed']:
             result['status'] = 'failed'
+    result['trace'] = trace_summary(records)
+    winners = re.findall(r'^recovery_winner=([1-7])$', text, re.M)
+    result['recovery_winner'] = winners[-1] if winners else None
+    result['recovery_sequence'] = re.findall(r'^recovery_action=([1-7]) phase=applied$', text, re.M)
+    result['security'] = {key:dict(first=values[0] if values else None, last=values[-1] if values else None,
+                                  nonzero_samples=sum(v != 0 for v in values), samples=len(values)) for key,values in security.items()}
     return result
 
 
@@ -269,10 +360,15 @@ def redactor(identity):
 def capture(pin, case, iperf, directory, redact):
     name = case['name']
     script = guards(pin) + 'exec q1000k-pon-validate ' + shlex.join([
-        case['mode'], STAGE + '/xgspon-calibration.bin', STAGE, str(case['samples']), iperf, name]) + '\n'
-    physical = name == 'rx-reconnect'
+        case['mode'], STAGE + '/xgspon-calibration.bin', STAGE, str(case['samples']), iperf, name, case.get('recovery_actions','1,2,3,4,5,6,7')]) + '\n'
+    physical = name in PHYSICAL
     events, samples, lines = [], [], []
-    deadline = time.monotonic() + (case['samples'] * (8 if case['mode'] == 'activate' else 3) + 180)
+    trace_seen = set(); stack_generation = 0; in_postmortem = False
+    dark_start = name == 'rx-dark-start'
+    if dark_start:
+        print('Disconnect fiber before initialization, then type DISCONNECTED.', flush=True)
+        if input().strip() != 'DISCONNECTED': raise ValueError('Dark initialization needs explicit confirmation')
+    deadline = time.monotonic() + (1500 if physical else case['samples'] * (8 if case['mode'] == 'activate' else 3) + 180)
     process = subprocess.Popen(SSH + ['sh', '-s'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, bufsize=0)
     process.stdin.write(script.encode()); process.stdin.close()
@@ -289,6 +385,7 @@ def capture(pin, case, iperf, directory, redact):
                     answer = sys.stdin.readline().strip()
                     if answer == waiting:
                         events.append(dict(action=answer, sampled_ms=samples[-1]['sampled_ms'], confirmed_at=time.time()))
+                        ssh('set -eu; test -d /var/run/q1000k-pon-bench.lock; printf ' + shlex.quote(answer+'\n') + ' > /var/run/q1000k-pon-bench.lock/control', timeout=15)
                         disconnected |= answer == 'DISCONNECTED'; reconnected |= answer == 'RECONNECTED'; waiting = None
                     elif not answer and not sys.stdin.isatty():
                         raise RuntimeError('Physical control input ended')
@@ -302,20 +399,36 @@ def capture(pin, case, iperf, directory, redact):
                     while b'\n' in pending:
                         chunk, pending = pending.split(b'\n', 1)
                         line = chunk.decode(errors='replace') + '\n'
-                        lines.append(line); output.write(redact(line)); output.flush()
+                        if line.startswith('stack_generation='):
+                            stack_generation = int(line.split('=')[1]); trace_seen.clear()
+                        if line.strip() == 'postmortem_begin': in_postmortem = True
+                        elif line.strip() == 'postmortem_end': in_postmortem = False
                         try: record = json.loads(line)
                         except ValueError: record = None
-                        if isinstance(record, dict) and 'receiver_version' in record:
+                        if isinstance(record, dict) and any(k.startswith('trace_') for k in record):
+                            record['stack_generation'] = stack_generation
+                            line = json.dumps(record)+'\n'
+                        if isinstance(record, dict) and record.get('trace_version') == 1:
+                            key = (stack_generation, record['seq'], record.get('first',False))
+                            if key in trace_seen: continue
+                            trace_seen.add(key)
+                            record['stack_generation'] = stack_generation
+                            line = json.dumps(record)+'\n'
+                        lines.append(line); output.write(redact(line)); output.flush()
+                        if isinstance(record, dict) and 'receiver_version' in record and not in_postmortem:
                             samples.append(record)
+                            if dark_start and not disconnected:
+                                events.append(dict(action='DISCONNECTED', sampled_ms=record['sampled_ms']-1, confirmed_at=time.time(), before_init=True))
+                                disconnected = True
                             if len(samples) == 1 and record.get('rx_power_valid') and record.get('rx_power_nw', 0) > 0:
                                 print(f"RX power: {10*math.log10(record['rx_power_nw']/1000000):.2f} dBm; LOS={record.get('controller_los')}, sync={record.get('synced')}.", flush=True)
                 if physical and not waiting and samples:
                     if not disconnected and len(samples) >= 15 and all(r.get('synced') for r in samples[-15:]):
                         waiting = 'DISCONNECTED'
                         print('Disconnect fiber now, then type DISCONNECTED. Capture continues.', flush=True)
-                    elif disconnected and not reconnected and len(samples) >= 15 and all(
+                    elif disconnected and not reconnected and len(samples) >= (dark_min := 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15) and all(
                             r.get('controller_los') is True and r.get('phy_los') is True and not r.get('synced')
-                            and r['sampled_ms'] > events[-1]['sampled_ms'] for r in samples[-15:]):
+                            and r['sampled_ms'] > events[-1]['sampled_ms'] for r in samples[-dark_min:]):
                         waiting = 'RECONNECTED'
                         print('Dark control recorded. Reconnect fiber, then type RECONNECTED. Capture continues.', flush=True)
                 if time.monotonic() - last_notice >= 15:
@@ -330,7 +443,12 @@ def capture(pin, case, iperf, directory, redact):
         raise
     result = summarize(''.join(lines), code, events if physical else None)
     result['name'] = name
-    if case['mode'] == 'rx' and result['rx_samples'] != case['samples']:
+    result['required_dark_samples'] = 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15
+    result['status'] = case_outcome(result)
+    if result['rx_samples'] < 15 and result['status'] != 'containment-failure': result['status'] = 'inconclusive'
+    result['ids'] = case.get('ids', [])
+    result['independent_recovery'] = name == 'rx-confirm' and len(result['recovery_sequence']) == 1 and bool(result['recovery_winner'])
+    if case['mode'] == 'rx' and not physical and result['returncode'] == 0 and result['rx_samples'] != case['samples']:
         result.update(status='failed', sample_count_error=True)
     return result
 
@@ -342,12 +460,13 @@ def write_json(path, value):
 def execute(args, pin):
     if not args.inputs or not args.output:
         raise ValueError('Collection requires --inputs and --output')
+    prior = json.loads(args.resume.read_text()) if getattr(args,'resume',None) else None
     supplied_identity = json.loads(args.identity.read_text()) if args.identity else {}
     identity = validate_identity(supplied_identity) if args.identity else {}
     rx_only = args.rx_only or args.physical_only or not identity
-    cases = plan(args.skip_physical, rx_only, args.soak, args.physical_only)
+    cases = discovery_plan(args)
     payload = private_inputs(args.inputs, identity)
-    if not args.skip_physical and not sys.stdin.isatty():
+    if any(c['name'] in PHYSICAL for c in cases) and not sys.stdin.isatty():
         raise ValueError('Use an interactive terminal for physical controls, or --skip-physical to record them as not run')
     serial_stat = args.serial_log.stat()
     if not args.serial_log.is_file():
@@ -360,21 +479,44 @@ def execute(args, pin):
                   physical_only=args.physical_only,
                   registration_source=('explicit' if supplied_identity.get('registration_id') else 'zero-default') if not rx_only else 'unused',
                   private_payloads_included=False, hardware_service_verified=False)
+    record['input_archive_sha256'] = digest(args.inputs.read_bytes())
+    record['identity_sha256'] = digest(json.dumps(identity,sort_keys=True).encode())
     staged = False
     with os.fdopen(os.open(Path(tempfile.gettempdir()) / ('q1000k-bench-' + HOST + '.lock'),
                           os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             (args.output/'preflight.log').write_text(ssh(guards(pin)))
+            record['boot_id'] = ssh('cat /proc/sys/kernel/random/boot_id').strip()
+            if prior:
+                if (prior.get('artifact') != record['artifact'] or prior.get('boot_id') != record['boot_id'] or
+                    not prior.get('cleanup_verified') or any(prior.get(k) != record[k] for k in ('input_archive_sha256','identity_sha256'))):
+                    raise ValueError('Resume requires the same pinned image, boot, inputs and verified idle cleanup')
+                record['resumed_from'] = str(args.resume)
+                prior_cases = {c['name']:c for c in prior.get('cases',[])}
+                if any(c['name'] in prior_cases and c != prior_cases[c['name']] for c in cases):
+                    raise ValueError('Resume case settings differ from the saved collection')
+                completed = {r['name'] for r in prior['results'] if r['status'] in ('observed','functional-negative')}
+                record['results'] = [r for r in prior['results'] if r['name'] in completed]
+                cases = [c for c in cases if c['name'] not in completed]
+                # Only whole finished sessions are reused. Never reconstruct a
+                # failed receiver state from a checkpoint or resume mid-action.
             ssh(f'set -eu; umask 077; test ! -e {STAGE}; test ! -e {FIRMWARE}; mkdir {STAGE}')
             staged = True
             ssh(f'set -eu; tar -x -C {STAGE}; cd {STAGE}; sha256sum -c sha256sums >/dev/null; mkdir -p {FIRMWARE}; cp A60993.elf.pm A60993.elf.dm {FIRMWARE}/', payload=payload)
             for case in cases:
+                if case.get('requires_winner'):
+                    prior = next((r for r in record['results'] if r['name']=='rx-reconnect'), {})
+                    if not prior.get('recovery_winner') or prior.get('status') != 'observed':
+                        record['results'].append(dict(name=case['name'], status='skipped', reason='No valid winning action to reproduce')); continue
+                    case['recovery_actions'] = prior['recovery_winner']
+                if case.get('requires_sn_reset') and not any(r.get('status') in ('observed','functional-negative') and r.get('trace',{}).get('sn_threshold_reset') for r in record['results']):
+                    record['results'].append(dict(name=case['name'], status='skipped', reason='SN threshold reset not observed')); continue
                 result = capture(pin, case, args.iperf_server or 'none', args.output, redact)
                 record['results'].append(result)
                 write_json(args.output/'collection.json', record)
                 (args.output/(case['name']+'-postflight.log')).write_text(ssh(guards(pin)))
-                if result['status'] != 'observed':
+                if result['status'] == 'containment-failure':
                     raise RuntimeError(case['name'] + ' did not meet its capture/cleanup checks')
             record['status'] = 'collection-complete'
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
@@ -436,6 +578,9 @@ def main():
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')
+    parser.add_argument('--resume', type=Path, help='Continue independent sessions from a collection.json on the same idle boot')
+    parser.add_argument('--cases', help='Comma-separated session names from --dry-run; each begins with fresh ownership')
+    parser.add_argument('--recovery-action', choices=tuple('1234567'), help='Independently select one fixed recovery action in the same image')
     parser.add_argument('--soak', type=int, choices=(180, 300, 600), default=180)
     parser.add_argument('--iperf-server', help='Optional reachable numeric iperf3 server address')
     parser.add_argument('--dry-run', action='store_true')
@@ -454,7 +599,7 @@ def main():
     runtime_manifest(pin['runtime'])
     if args.dry_run:
         print(json.dumps(dict(artifact={k:v for k,v in pin.items() if k != 'runtime'},
-                             cases=plan(args.skip_physical, args.rx_only, args.soak, args.physical_only),
+                             cases=discovery_plan(args),
                              activation_requires_private_identity=True), indent=2)); return 0
     return execute(args, pin)
 

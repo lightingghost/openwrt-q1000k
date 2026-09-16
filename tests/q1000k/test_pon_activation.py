@@ -25,6 +25,8 @@ class ActivationTests(unittest.TestCase):
         self.root, self.env = fixture.root, fixture.env
         self.env['ACTIVATION_ROOT'] = str(self.root)
         fixture.write(fixture.dt+'quantum,xgspon-activation-bench', '')
+        fixture.write('proc/uptime','0.00 0.00\n')
+        fixture.write('proc/q1000k-pon-mac','{"mac_version":1}\n')
         fixture.write(str(fixture.controller.relative_to(self.root))+'/receiver_status', '{"oem_post_saved":true}\n')
         self.identity = self.root/'tmp/private'
         self.identity.mkdir(); (self.identity/'identity.json').write_text(json.dumps(IDENTITY))
@@ -41,7 +43,7 @@ if action=='cat':
         emit(dict(mode='xgspon' if active else 'off',tx_inhibited=not tx(),tx_disabled=not tx() or not active,
             last_error=0,md32_enabled=active,firmware_verified=active,calibration_supplied=active))
     elif args==[str(root/'proc/q1000k-pon-snapshot')]:
-        counter=root/'validation-count'; n=int(counter.read_text())+1 if counter.exists() else 1; counter.write_text(str(n))
+        counter=root/'validation-count'; n=int(counter.read_text())+1 if counter.exists() else 1; counter.write_text(str(n)); (root/'proc/uptime').write_text(str(n)+'.00 0.00\n')
         bad=os.environ.get('VALIDATION_BAD','')
         emit(dict(receiver_version=5,rx_bench=not tx(),tx_inhibited=not tx(),tx_enabled=tx() or bad=='tx',
             registration_enabled=tx(),sampled_ms=n*1000,frames=n,synced=True,controller_los=False,phy_los=False,

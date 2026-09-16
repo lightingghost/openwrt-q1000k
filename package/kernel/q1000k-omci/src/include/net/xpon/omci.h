@@ -389,6 +389,10 @@ struct omci_traffic_scheduler_config {
  *	if needed. The fault is permanent for this device registration.
  */
 struct omci_device_ops {
+	/* Optional observational callback. No payload/identity/key bytes. Called
+	 * outside agent locks; provider must not re-enter OMCI lifecycle APIs. */
+	void (*diagnostic)(struct omci_device *odev, u16 class_id, u8 opcode,
+			   int error, u32 flags, u32 result);
 	/* Nonzero values pin the physical UNI model before the first MIB. */
 	u8 onu_type, uni_count;
 	int (*start)(struct omci_device *odev);

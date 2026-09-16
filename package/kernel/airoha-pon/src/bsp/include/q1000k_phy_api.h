@@ -160,6 +160,11 @@ int q1000k_phy_rx_sample(struct q1000k_rx_sample *sample);
 /* One callback-locked snapshot, available during RX-only and normal service. */
 int q1000k_phy_snapshot(struct q1000k_rx_sample *sample,
 			 struct q1000k_rx_diagnostics *diagnostics);
+int q1000k_phy_last_snapshot(struct q1000k_rx_sample *sample,
+			     struct q1000k_rx_diagnostics *diagnostics, int *fault);
+int q1000k_phy_bench_recover(unsigned int action);
+int q1000k_phy_rx_bench_recipe(unsigned int action);
+int q1000k_phy_fast_sample(u32 *sfp, u32 *sync, u32 *frames);
 /* Complete Q1000K receiver startup after MAC hardware release, with TX off. */
 int q1000k_phy_receiver_startup(void);
 int q1000k_phy_start(void);

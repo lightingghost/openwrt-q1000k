@@ -1,0 +1,54 @@
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -493,6 +493,17 @@
+ 		q1000k_trace(QT_PROFILE, pRecvProfMsg->raw.prof_index, match ? 0 : -EILSEQ,
+ 			w[4] | (u32)w[5] << 8 | (u32)w[6] << 16 | (u32)w[15] << 24,
+ 			w[16], GPON_CURR_STATE, pRecvProfMsg->raw.seq_no);
++		{
++			u32 pattern[4] = {};
++			unsigned int i;
++			for (i = 0; i < 8; i++) {
++				pattern[i / 4] |= (u32)w[7 + i] << (24 - 8 * (i % 4));
++				pattern[2 + i / 4] |= (u32)w[17 + i] << (24 - 8 * (i % 4));
++			}
++			/* Delimiter/preamble only; stop before the PON tag at byte 25. */
++			q1000k_trace(QT_PROFILE, 4 + pRecvProfMsg->raw.prof_index, 0,
++				pattern[0], pattern[1], pattern[2], pattern[3]);
++		}
+ 	}
+ 	if (GPON_CURR_STATE != GPON_10G_STATE_O2_3 && GPON_CURR_STATE != GPON_10G_STATE_O4 &&
+ 	    GPON_CURR_STATE != GPON_10G_STATE_O5)
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -491,6 +491,12 @@
+ 
+ 	if((is_same_msg) && ((same_cnt % 3) != 0) ){
+ 		PON_MSG(MSG_OAM, "Receive the PLOAM message same:%8X\n", pPloamMsg->value[0]) ;
++#ifdef Q1000K_PON_IDENTITY
++		/* Existing duplicate suppression precedes authentication. Record it
++		 * explicitly; do not represent a suppressed message as MIC-verified. */
++		q1000k_trace(QT_PLOAM_DISPATCH, pPloamMsg->raw.msg_id, -EALREADY,
++			0, GPON_CURR_STATE, pPloamMsg->raw.seq_no, 0);
++#endif
+ 		return TRUE;
+ 	}
+ 	else{
+@@ -842,6 +848,10 @@
+ 	if (status.gponFifoErrSts.Raw || status.gponTxErrSts.Raw)
+ 		q1000k_trace(QT_MAC_ERROR, 0, 0, status.gponFifoErrSts.Raw, status.gponTxErrSts.Raw, intStatus.Raw, GPON_CURR_STATE);
+ #endif
++#ifdef Q1000K_PON_IDENTITY
++	if (status.gponRxErrSts.Raw || status.gponbwpChkStatus.Raw)
++		q1000k_trace(QT_MAC_ERROR, 2, 0, status.gponRxErrSts.Raw, status.gponbwpChkStatus.Raw, intStatus.Raw, GPON_CURR_STATE);
++#endif
+ 	/*clear the interrupt detail error status*/
+ 	gponDevSetErrStatusClear();
+ 
+@@ -926,6 +936,7 @@
+ 				PON_MSG((MSG_INT|MSG_ERR), "XGPON IRQ: tx error interrupt,status:%.8x\n",status.gponTxErrSts.Raw) ;
+ 				if((status.gponTxErrSts.Bits.tx_late_start_err) && (sw_resync_flag)){
+ #ifdef Q1000K_PON_IDENTITY
++					q1000k_trace(QT_RESET, 2, 0, GPON_CURR_STATE, status.gponTxErrSts.Raw, 0, 0);
+ 					/* A late burst must retire the old ranging and namespace. */
+ 					q1000k_protocol_fail(q1000k_omci_reset(gpGponPriv->emergencyState, false));
+ #else

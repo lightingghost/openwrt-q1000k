@@ -1,0 +1,152 @@
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_ploam.c
+@@ -1,3 +1,4 @@
++#include <q1000k_trace.h>
+ #include "common/q1000k_omci_backend.h"
+ #include "common/q1000k_protocol_compat.h"
+ /***************************************************************
+@@ -363,7 +364,7 @@
+ {
+ #ifdef Q1000K_PON_IDENTITY
+ 	PLOAM_RAW_General_T decoded;
+-	unsigned int id;
++	unsigned int id, stage = 1, dest, category;
+ 	int ret;
+ 
+ 	if (!q1000k_protocol_owned())
+@@ -373,10 +374,14 @@
+ 	/* Authenticate all 48 wire bytes before any legacy handler, including
+ 	 * broadcasts. The final FIFO status word is not a MIC substitute.
+ 	 */
++	id = pGenPloamMsg->raw.msg_id;
++	dest = ((u16)pGenPloamMsg->raw.dest_id[0] << 8 | pGenPloamMsg->raw.dest_id[1]) & 0x3ff;
++	category = dest == 0x3ff ? 1 : dest == 0x3fe ? 2 : dest == GPON_ONU_ID ? 3 : 4;
+ 	ret = q1000k_omci_ploam_verify((const u8 *)pGenPloamMsg, 48);
++	q1000k_trace(QT_PLOAM_VERIFY, id, ret, category, GPON_CURR_STATE, pGenPloamMsg->raw.seq_no, 48);
+ 	if (ret)
+ 		goto rejected;
+-	id = pGenPloamMsg->raw.msg_id;
++	stage = 2;
+ 	switch (id) {
+ 	case PLOAM_DOWN_MSG_PROFILE:
+ 	case PLOAM_DOWN_MSG_ASSIGN_ONUID:
+@@ -394,6 +399,7 @@
+ 		ret = -EOPNOTSUPP;
+ 		goto rejected;
+ 	}
++	stage = 3;
+ 	if (!gpGponPriv->ploamRecvHandler[id]) {
+ 		ret = -EOPNOTSUPP;
+ 		goto rejected;
+@@ -402,10 +408,14 @@
+ 	decoded = *pGenPloamMsg;
+ 	decoded.raw.dest_id[0] &= 0x03;
+ 	gpGponPriv->dsPloamCounter[id]++;
++	stage = 4;
+ 	ret = gpGponPriv->ploamRecvHandler[id](&decoded);
+-	if (!ret)
++	if (!ret) {
++		q1000k_trace(QT_PLOAM_DISPATCH, id, 0, category, GPON_CURR_STATE, decoded.raw.seq_no, stage);
+ 		return 0;
++	}
+ rejected:
++	q1000k_trace(QT_PLOAM_DISPATCH, id, ret, category, GPON_CURR_STATE, pGenPloamMsg->raw.seq_no, stage);
+ 	q1000k_ploam_rejected++;
+ 	WRITE_ONCE(q1000k_ploam_last_error, ret);
+ 	if (ret == -EIO || ret == -ENODEV || ret == -ETIMEDOUT || ret == -EUCLEAN)
+@@ -469,6 +479,21 @@
+ 		return -EINVAL;
+ 	if (!q1000k_protocol_owned())
+ 		return -EPERM;
++	/* Observe the actual production bitfield decoder against wire bytes,
++	 * including other-rate profiles. Never use shadow values for hardware. */
++	{
++		const u8 *w = (const u8 *)pRecvProfMsg;
++		bool match = pRecvProfMsg->raw.prof_index == (w[4] & 3) &&
++			pRecvProfMsg->raw.line_rate == ((w[4] >> 2) & 1) &&
++			pRecvProfMsg->raw.prof_version == (w[4] >> 4) &&
++			pRecvProfMsg->raw.fec == (w[5] & 1) &&
++			pRecvProfMsg->raw.delimiter_lens == (w[6] & 15) &&
++			pRecvProfMsg->raw.preamble_lens == (w[15] & 15) &&
++			pRecvProfMsg->raw.preamble_repeat_cnt == w[16];
++		q1000k_trace(QT_PROFILE, pRecvProfMsg->raw.prof_index, match ? 0 : -EILSEQ,
++			w[4] | (u32)w[5] << 8 | (u32)w[6] << 16 | (u32)w[15] << 24,
++			w[16], GPON_CURR_STATE, pRecvProfMsg->raw.seq_no);
++	}
+ 	if (GPON_CURR_STATE != GPON_10G_STATE_O2_3 && GPON_CURR_STATE != GPON_10G_STATE_O4 &&
+ 	    GPON_CURR_STATE != GPON_10G_STATE_O5)
+ 		return -EINVAL;
+@@ -616,6 +641,9 @@
+ 		return -1 ;
+ 	}
+ 		
++#ifdef Q1000K_PON_IDENTITY
++	q1000k_trace(QT_ASSIGN, 0, 0, !memcmp(gpGponPriv->gponCfg.sn, pAssignOnuIdMsg->raw.sn, GPON_SN_LENS), GPON_CURR_STATE, 0, 0);
++#endif
+ 	/* Compare the serial number of system and Assign_ONU-ID PLOAM message */
+ 	if(memcmp(gpGponPriv->gponCfg.sn, pAssignOnuIdMsg->raw.sn, GPON_SN_LENS)) {
+ 		PON_MSG((MSG_ERR|MSG_OAM), "PLOAM: The serial number of PLOAM message is incorrect\n") ;
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon.c
+@@ -1,3 +1,4 @@
++#include <q1000k_trace.h>
+ /***************************************************************
+ Copyright Statement:
+ 
+@@ -674,7 +675,9 @@
+ {
+ #ifdef Q1000K_PON_IDENTITY
+ 	if (snSendInO23Cnt++ >= max_cnt) {
+-		int ret = q1000k_omci_reset(gpGponPriv->emergencyState, true);
++		int ret;
++		q1000k_trace(QT_RESET, 1, 0, GPON_CURR_STATE, snSendInO23Cnt, max_cnt, 1);
++		ret = q1000k_omci_reset(gpGponPriv->emergencyState, true);
+ 
+ 		snSendInO23Cnt = 0;
+ 		if (ret)
+@@ -818,11 +821,23 @@
+ 
+ 	//Clear the interrupt status
+ 	intStatus.Raw &= intEnable.Raw ;
++#ifdef Q1000K_PON_IDENTITY
++	{
++		u32 bit;
++		for (bit = 0; bit < 32; bit++)
++			if (intStatus.Raw & (1U << bit))
++				q1000k_trace(QT_MAC_IRQ, bit, 0, intStatus.Raw, intEnable.Raw, GPON_CURR_STATE, snSendInO23Cnt);
++	}
++#endif
+ 	IO_SREG(INT_STATUS, intStatus.Raw) ;
+ 
+ 	memset(&status, 0x0, sizeof(GPON_DEV_ERR_STATUS_T));		
+ 	gponDevGetErrStatus(&status); 
+ 	
++#ifdef Q1000K_PON_IDENTITY
++	if (status.gponFifoErrSts.Raw || status.gponTxErrSts.Raw)
++		q1000k_trace(QT_MAC_ERROR, 0, 0, status.gponFifoErrSts.Raw, status.gponTxErrSts.Raw, intStatus.Raw, GPON_CURR_STATE);
++#endif
+ 	/*clear the interrupt detail error status*/
+ 	gponDevSetErrStatusClear();
+ 
+--- a/xpon-en757x/xpon_10g/src/gpon/gpon_runtime.c
++++ b/xpon-en757x/xpon_10g/src/gpon/gpon_runtime.c
+@@ -59,6 +59,19 @@
+ uint bwmap_print_flag = 0x7fff;
+ uint sw_resync_flag = 1;
+ int max_cnt = 20;
++/* Fresh module session only; retain the production default and all other
++ * fault/ranging protections. Two explicit values keep the comparison bounded. */
++static int q1000k_sn_limit_set(const char *value, const struct kernel_param *kp)
++{
++	int n, ret = kstrtoint(value, 0, &n);
++	if (ret) return ret;
++	if (n != 20 && n != 40) return -EINVAL;
++	return param_set_int(value, kp);
++}
++static const struct kernel_param_ops q1000k_sn_limit_ops = {
++	.set = q1000k_sn_limit_set, .get = param_get_int,
++};
++module_param_cb(bench_sn_limit, &q1000k_sn_limit_ops, &max_cnt, 0400);
+ int omciMicErrSwCnt = 0;
+ 
+ #if defined(TCSUPPORT_CPU_EN7581)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Bounded RX-only experiments. No raw register access is exposed to users. */
 #include <linux/bits.h>
+#include <q1000k_trace.h>
 #include <linux/delay.h>
 #include <linux/printk.h>
 #include <an7581_pon_phy.h>
@@ -89,6 +90,7 @@ static int probe_steps(const struct qprobe_step *steps, unsigned int count,
 	unsigned int i;
 	int ret;
 
+	q1000k_trace(QT_RECOVERY_PHASE, 0, 0, count, probe_writes, long_tdc, reset_delay);
 	for (i = 0; i < count; i++) {
 		ret = probe_ready();
 		if (ret)
@@ -556,4 +558,18 @@ int q1000k_phy_rx_probe_cleanup(void)
 u32 q1000k_phy_rx_probe_writes(void)
 {
 	return probe_writes;
+}
+
+/* Fixed manual ladder shares saved originals across its two actions. The
+ * lifecycle owner enforces per-action budgets, TX-off and no-sync eligibility.
+ * This does not expose the other experimental probes for repeated execution. */
+int q1000k_phy_rx_bench_recipe(unsigned int action)
+{
+	int ret = probe_ready();
+	if (ret) return ret;
+	if (probe_closed || repeat_calls || post_pending) return -EBUSY;
+	if (!gpPhyPriv->pma_init_done || gpPhyPriv->first_plugin_flag) return -EAGAIN;
+	if (action == 3) return probe_oem_clock_cycle_reset(true);
+	if (action == 4) return probe_analog(true, -1, false);
+	return -EINVAL;
 }

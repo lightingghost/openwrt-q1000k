@@ -47,7 +47,7 @@ struct en7573_state { int md32_enabled,tx_disabled; };
 struct q1000k_pon {
     struct mutex lock;
     struct kref ref;
-    bool dead,leased,tx_enabled,initialized,tx_inhibited,receiver_startup;
+    bool dead,leased,tx_enabled,initialized,tx_inhibited,receiver_startup,activation_bench;
     int fault,mode,last_error;
     const char *stage;
     unsigned char calibration[513];
@@ -87,6 +87,9 @@ static int en7573_oem_post_init(struct en7573_io *io,struct en7573_oem_post *ori
 static int post_read_error;
 static int en7573_read_control(struct en7573_io *io, unsigned int reg, u32 *value)
 { assert(io && reg==0x110); *value=0x100; return post_read_error; }
+static int initialize_calls, initialize_error;
+static int pon_initialize(struct q1000k_pon *p)
+{ assert(p->lock.held && p->leased && p->tx_inhibited && !p->tx_enabled); initialize_calls++; return initialize_error; }
 /* PRODUCTION */
 static struct q1000k_pon *create(void)
 {
@@ -211,5 +214,14 @@ int main(void)
     assert(q1000k_pon_receiver_startup(p)==-EREMOTEIO && !p->initialized);
     assert(q1000k_pon_put(p)==-EREMOTEIO); pon_unpublish(p); pon_drop_device_ref(p);
     post_read_error=0;
+    p=create(); p->activation_bench=p->tx_inhibited=true;
+    assert(q1000k_pon_bench_reinitialize(p)==-EPERM && !initialize_calls);
+    assert(q1000k_pon_get()==p);
+    atomic_context=1; assert(q1000k_pon_bench_reinitialize(p)==-EWOULDBLOCK && !initialize_calls); atomic_context=0;
+    assert(!q1000k_pon_bench_reinitialize(p) && initialize_calls==1 && p->leased);
+    initialize_error=-EIO;
+    assert(q1000k_pon_bench_reinitialize(p)==-EIO && initialize_calls==2 && !p->initialized && !p->tx_enabled);
+    assert(q1000k_pon_bench_reinitialize(p)==-EIO && initialize_calls==2);
+    assert(q1000k_pon_put(p)==-EIO); pon_unpublish(p); pon_drop_device_ref(p);
     return 0;
 }
