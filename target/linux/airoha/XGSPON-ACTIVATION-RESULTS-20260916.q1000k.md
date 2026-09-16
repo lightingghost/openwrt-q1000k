@@ -1,5 +1,14 @@
 # Q1000K activation and reconnect results — 2026-09-16
 
+**Follow-up analysis:** the [next consolidated bench plan](XGSPON-NEXT-BENCH-PLAN.q1000k.md)
+compares all seven captures. The OCP control change also occurs in healthy
+sessions before any outage; it is not specific to reconnect failure. The
+physical test used passive RX mode with normal recovery callbacks suppressed,
+so it does not establish whether normal activation-mode reconnect works.
+Activation published profile-derived keys as valid in 176/180 samples,
+supporting capture of successful profile processing and hardware discovery
+responses alongside rejected messages. Raw results below remain unchanged.
+
 ## Conclusions
 
 1. A separately supplied registration ID is not required by the 8311 AT&T BGW320 recipe. The previous prerequisite was our host/launcher policy. The collector now supplies 36 zero bytes when the field is empty or omitted, matching 8311's default, while preserving an explicit optional override.
@@ -48,7 +57,7 @@ The activation capture spans 215.540 seconds between first and last samples and 
 
 At the end, the PLOAM rejection counter was 651. The sampled last error was -95 (`EOPNOTSUPP`) in 178 observations, -22 (`EINVAL`) in one, and zero in the first. These are samples of the last-error field, not per-error message counts. `protocol_error` stayed zero. This points to PLOAM dispatch/validation as a priority, but does not prove every rejected message is relevant to this ONU or that these rejects caused the discovery failure.
 
-The current parser can return `EOPNOTSUPP` for an unsupported message, missing handler, mismatched burst-profile line-rate, unsupported disable mode or an assignment-path limitation. Status does not export the message ID or rejection stage, so selecting one as the confirmed cause would exceed the evidence. OMCI provisioning, DHCP, traffic and throughput remain untested because O5 was not reached.
+The current parser can return `EOPNOTSUPP` for an unsupported message, missing handler, mismatched burst-profile line-rate or unsupported disable mode; downstream backend operations can also return errors. The legacy assignment-path `EOPNOTSUPP` in the source is inside a branch excluded by the Q1000K build, so it is not a live candidate. Status does not export the message ID or rejection stage, so selecting one as the confirmed cause would exceed the evidence. OMCI provisioning, DHCP, traffic and throughput remain untested because O5 was not reached.
 
 ### Physical control and fresh-start recovery
 

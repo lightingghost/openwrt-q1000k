@@ -11,6 +11,11 @@ the same boot recovered sync in 30/30 samples. Registration ID now defaults to
 the test. Prioritize PLOAM rejection diagnostics and bounded LOS-clear receiver
 recovery. See [complete activation/reconnect evidence and next tests](XGSPON-ACTIVATION-RESULTS-20260916.q1000k.md).
 
+**Next image plan:** [discovery, recovery and evidence collection](XGSPON-NEXT-BENCH-PLAN.q1000k.md)
+packs 25 test/control entries into one image. Follow-up comparison demotes the
+OCP value as a fault clue, finds evidence of some accepted profile processing,
+and distinguishes deliberately passive RX reconnect from normal-mode recovery.
+
 **Earlier isolated result, 2026-09-16:** the isolated OEM controller
 `0x110[8]=1` step recovered downstream synchronization and frames in two
 freshly initialized receive-only runs. The longer confirmation sustained
