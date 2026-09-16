@@ -387,7 +387,7 @@ static struct phy *gpPhyData;
 static struct { void *pPonNetDev[4]; } wan_data, *gpWanPriv;
 static void *gpMcsPriv,*gpGponPriv,*gpEponPriv;
 static int mode=-1,fix_reg_list,xpondrv_hook_dispatch_ops;
-enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, PROC, HOOK, API, WORKER, COLD, PROTOSTART, STEPS };
+enum { ID=1, UNION, ALLOC, ATTACH, PROTOCOL, GLOBALS, WAN, MCI, GPON, OMCI, PROC, HOOK, API, WORKER, COLD, PROTOSTART, SNAPSHOT, STEPS };
 static int step,fail_at,live[STEPS],irq_resources=1,providers=1;
 static int ready_published,rcu_drained,tx_stopped,pipeline_error,mac_error,xpon_protocol_ops;
 static bool xpon_is_ready(void); /* production definition is non-static */
@@ -411,8 +411,18 @@ static int q1000k_protocol_start(void) {
     if(fail_at==PROTOSTART) return -EIO;
     live[PROTOSTART]=1; return 0;
 }
+static int q1000k_snapshot_init(void) {
+    assert(xpon_ready && live[COLD]);
+    if(rx_bench) { assert(step==COLD && !live[PROTOSTART]); step=PROTOSTART; }
+    assert(++step==SNAPSHOT && !live[SNAPSHOT]);
+    if(fail_at==SNAPSHOT) return -EIO;
+    live[SNAPSHOT]=1; return 0;
+}
+static void q1000k_snapshot_exit(void) {
+    if(live[SNAPSHOT]) { assert(xpon_ready && live[COLD]); release(SNAPSHOT); }
+}
 static void q1000k_protocol_stop(void) {
-    assert(!xpon_ready && live[ALLOC]);
+    assert(!xpon_ready && live[ALLOC] && !live[SNAPSHOT]);
     if(live[PROTOSTART]) release(PROTOSTART);
     release(PROTOCOL);
 }
@@ -518,6 +528,7 @@ int main(void) {
         assert(xpondrv_init()==expected && step==fault && ready_published==(fault>=COLD));
         if(fault==WAN) assert(strstr(error_log,"at wan-init: -5"));
         if(fault==COLD) assert(strstr(error_log,"at cold-start: -5"));
+        if(fault==SNAPSHOT) assert(strstr(error_log,"at snapshot-interface: -5"));
         clean();
         reset(0); assert(!xpondrv_init() && xpon_is_ready() && ready_published==1);
         xpondrv_cleanup(); clean(); /* complete startup and teardown after every failure */
