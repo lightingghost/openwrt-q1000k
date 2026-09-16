@@ -1,13 +1,24 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
-**Latest hardware result, 2026-09-16:** the isolated OEM controller
+**Latest consolidated bench result, 2026-09-16:** image `280555a076`
+automatically receives frames at fresh startup: 90/90 startup/reload samples
+and 180/180 soak samples synchronized with TX inhibited. TX-enabled activation
+retained sync but timed out in O1/O2 with PLOAM rejections; it did not reach O5.
+The confirmed passive reconnect test failed to resume frames despite restored
+light and the OEM startup bit remaining set. A fresh stack initialization on
+the same boot recovered sync in 30/30 samples. Registration ID now defaults to
+36 zero bytes, matching 8311; no separate AT&T credential was required to run
+the test. Prioritize PLOAM rejection diagnostics and bounded LOS-clear receiver
+recovery. See [complete activation/reconnect evidence and next tests](XGSPON-ACTIVATION-RESULTS-20260916.q1000k.md).
+
+**Earlier isolated result, 2026-09-16:** the isolated OEM controller
 `0x110[8]=1` step recovered downstream synchronization and frames in two
 freshly initialized receive-only runs. The longer confirmation sustained
 about 8,000 frames/second for 192 seconds after the change, with TX disabled.
 The combined calibration case stopped on a diagnostic guard; it is incomplete,
 not a negative optical result. See the [results and exact coverage](XGSPON-RX-RESULTS-20260916.q1000k.md).
 
-**Built replacement:** `8fee7f3b48`, 58 cases, [repeated acquisition plan](XGSPON-REPEAT-RX.q1000k.md).
+**Earlier replacement:** `8fee7f3b48`, 58 cases, [repeated acquisition plan](XGSPON-REPEAT-RX.q1000k.md).
 All software checks passed; hardware collection is recorded above. The [MCU loader
 audit](XGSPON-MCU-LOADER-AUDIT.q1000k.md) confirms the short OEM PM/DM inputs
 are expanded and fully verified, as required by the original startup layout.
