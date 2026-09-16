@@ -2264,3 +2264,75 @@ can test the most concrete missing step, with pre-intervention samples, without
 first executing a separate baseline/unload case. The full default plan has
 5,190 seconds of sampling plus overhead; individual cases and 30-sample
 acquisition windows are selectable using this same firmware and collector.
+
+## 2026-09-16: bounded repeated acquisition, consolidated replacement
+
+User requested the additional hypothesis from the Sirherobrine23 comparison in
+the new bench. [The repeated-acquisition plan](XGSPON-REPEAT-RX.q1000k.md) adds
+`oem-reset-repeat`: up to six identical OEM twelve-bit reset/clock acquisitions
+in one module lifetime, at least five seconds after the previous attempt
+finishes. Existing `oem-full-reset` is the matched one-attempt control.
+Synchronization, LOS after the series begins, error, shutdown or budget
+exhaustion latches the series off. A stop/start cannot resume a stopped series.
+Original fields are saved once and restored once during final cleanup.
+
+All previous 57 collector case definitions are byte-for-byte equal as decoded
+plan objects after removing the new case: **58 total**, including the two
+confirmed physical controls. The repeated case requires at least 90 samples;
+`--samples 30` promotes only that case to 90. Default sampling is 5,280 seconds
+(88 minutes) plus initialization, cleanup and prompt time. Every reset has
+before/after frame, FEC, PCS, NCPO, write-count and timing evidence. Reports
+reject incomplete/invalid series and avoid counter deltas across resets.
+
+Artifact: `build-artifacts/q1000k-xgspon/bench-8fee7f3b48-repeat-rx/`.
+Firmware source: `8fee7f3b48cb0a51376eaf55438d203235438599` on `q1000k-xgspon`.
+Runtime implementation commit: `5d98edd4645a7c22ebdc9e0db85cdea0fabd4ec6`;
+final follow-up updates schema test expectations and the MCU audit.
+Package releases: airoha-pon 84, controller unchanged at 11, helper 18.
+Probe diagnostics schema 5; receiver and controller schemas unchanged.
+
+- Firmware: 7,602,176 bytes; SHA-256
+  `0e326567ecdc0f067b4f4e3fd27a314b7c10dea02c0612d0cde1ddb2fe046db4`.
+- Collector: `q1000k-rx-collect.py`; SHA-256
+  `4d622b412e770444b39bfd279b901c19081ff5cf0da8ad8ba72c023711886da4`.
+- Kit: `q1000k-rx-repeat-8fee7f3b48.tar.gz`, 7,806,632 bytes, 33 files;
+  SHA-256 `e13eb839205854a981281114f57435942dd40583d1082afa429148967437e7bc`.
+  Firmware, collector, audit/plans, checksums, configs and validation logs are
+  included. OEM binaries and calibration payloads are excluded.
+
+Passed 220 PON host tests, 13 status tests, UI tests, exact FIT/initramfs
+inspection and source-matched PHY UML `/tmp/q1000k-pon-phy-uml.YxkIaF`.
+The kernel test ran 50 normal + 50 RX-only cycles and concurrent teardown
+across all probe modes. Host tests cover initial/subsequent-attempt failures,
+readback mismatches, stop/start persistence, IRQ/user sync latching, LOS,
+timing, budget, restoration and serial-report completeness. Portable collector
+checks passed for the complete plan, seven individual cases and both short-window
+promotion and the 180-sample repeat window. Every kit member was compared with
+its source artifact and all checksums passed. Only three of fourteen pinned
+runtime files changed from the previous deep image: helper, PHY and MAC
+schema output. Normal configs and protected refs were preserved.
+
+The initial sandbox attempt could not create fakeroot's packaging socket;
+UML also required ptrace outside that sandbox. Authorized local reruns passed.
+The first complete host run found three test expectations still pinned to
+schema 4. They were updated to accept schema 5 and retain old-image rejection;
+the final full 220-test run passed. These intermediate builds are not separate
+hardware images the user needs to boot.
+
+Hardware testing of this replacement remains pending. The shutdown problem is
+not claimed fixed; its existing exact-operation diagnostics and stop conditions
+are retained. `--case oem-reset-repeat` can test the new hypothesis directly
+with pre-intervention samples, on this same image.
+
+### MCU firmware follow-up
+
+[MCU loader audit](XGSPON-MCU-LOADER-AUDIT.q1000k.md) answers the user's questions
+about destinations and short inputs. The actual NAND module uses zero-initialized
+16 KiB/4 KiB `.bss` buffers, reads the original 15,232-byte PM and 56-byte DM files
+without a full-size requirement, then transfers full buffers. Our loader
+explicitly implements firmware + zero-tail + calibration construction and
+verifies every word. Sirherobrine23's loader instead requires full-capacity
+input files. That input-format difference does not show missing OEM firmware.
+The existing OEM-A0 transport case previously loaded and verified successfully
+on hardware without recovering frames. No MCU loader runtime change was needed
+for this question. OEM code has not been RAM-booted or executed for this work.

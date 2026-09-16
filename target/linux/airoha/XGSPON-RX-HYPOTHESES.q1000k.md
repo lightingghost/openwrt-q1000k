@@ -1,5 +1,10 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
+**Built replacement:** `8fee7f3b48`, 58 cases, [repeated acquisition plan](XGSPON-REPEAT-RX.q1000k.md).
+All software checks passed; hardware collection is pending. The [MCU loader
+audit](XGSPON-MCU-LOADER-AUDIT.q1000k.md) confirms the short OEM PM/DM inputs
+are expanded and fully verified, as required by the original startup layout.
+
 **Community comparison, 2026-09-16:** [Sirherobrine23 source audit](XGSPON-SIRHEROBRINE-AUDIT.q1000k.md).
 The inspected implementation is GPON/EPON and does not supply an AN7581 XGS
 receive path. Its startup fixes support auditing local MAC/PHY dependencies;
