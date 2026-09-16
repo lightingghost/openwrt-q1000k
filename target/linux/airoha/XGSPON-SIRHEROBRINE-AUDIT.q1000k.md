@@ -96,6 +96,8 @@ controlled test. The imported GPON success does not identify that dependency.
 
 ## Direct DSD/firmware compatibility check
 
+Follow-up: [MCU memory destinations, short-file padding and original OEM loader](XGSPON-MCU-LOADER-AUDIT.q1000k.md).
+
 The actual unit record at NAND offset `0x412000` is the same 513-byte input used
 by our bench: SHA-256
 `f2ec3b0de9683d113755d5d4df4fcafe8a4b47a43153ad0de45cbe9cd34c6e1c`.

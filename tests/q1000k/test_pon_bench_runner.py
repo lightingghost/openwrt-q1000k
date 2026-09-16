@@ -27,7 +27,7 @@ class RunnerTests(unittest.TestCase):
             helper = artifact/'runtime/usr/sbin/q1000k-pon-bench'
             helper.parent.mkdir(parents=True)
             helper.write_text('RX_DIAGNOSTICS_VERSION=2\n')
-            old = dict(artifact=artifact, probe='checker', oem_md32=False, rx_output='unchanged')
+            old = dict(artifact=artifact, probe='checker', oem_md32=False, rx_output='unchanged', samples=90)
             RUN.validate_experiment_artifact(SimpleNamespace(**old))
             for change in [dict(probe='checker-dark'), dict(probe='cdr-auto-release'),
                            dict(oem_md32=True), dict(rx_output='400-flat')]:
@@ -38,9 +38,17 @@ class RunnerTests(unittest.TestCase):
                 RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
 
             for probe in RUN.PROBES[22:]:
-                with self.assertRaisesRegex(ValueError, 'v4'):
+                with self.assertRaisesRegex(ValueError, 'schema 5' if probe=='oem-reset-repeat' else 'v4'):
                     RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
             helper.write_text('RX_DIAGNOSTICS_VERSION=4\n')
+            for probe in RUN.PROBES:
+                args=SimpleNamespace(**(old | dict(probe=probe)))
+                if probe=='oem-reset-repeat':
+                    with self.assertRaisesRegex(ValueError,'schema 5'):
+                        RUN.validate_experiment_artifact(args)
+                else:
+                    RUN.validate_experiment_artifact(args)
+            helper.write_text('RX_DIAGNOSTICS_VERSION=5\n')
             for probe in RUN.PROBES:
                 RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
 
@@ -49,10 +57,10 @@ class RunnerTests(unittest.TestCase):
             artifact=Path(directory)
             helper=artifact/'runtime/usr/sbin/q1000k-pon-bench'
             helper.parent.mkdir(parents=True)
-            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2),('RX_DIAGNOSTICS_VERSION=3\n',3),('RX_DIAGNOSTICS_VERSION=4\n',4)):
+            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2),('RX_DIAGNOSTICS_VERSION=3\n',3),('RX_DIAGNOSTICS_VERSION=4\n',4),('RX_DIAGNOSTICS_VERSION=5\n',5)):
                 helper.write_text(text)
                 self.assertEqual(RUN.diagnostics_version(artifact),expected)
-            for text in ('RX_DIAGNOSTICS_VERSION=5\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
+            for text in ('RX_DIAGNOSTICS_VERSION=6\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
                 helper.write_text(text)
                 with self.assertRaises(ValueError): RUN.diagnostics_version(artifact)
 
