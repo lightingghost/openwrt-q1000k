@@ -1,6 +1,12 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
-**Current bench:** [complete receiver acquisition experiments and collection plan](XGSPON-RX-ACQUISITION.q1000k.md)
+**Next consolidated bench:** [deep receiver/OEM audit and 57-case collection plan](XGSPON-DEEP-RX-AUDIT.q1000k.md).
+This adds 21 cases to the previous acquisition image, including the missing
+OEM controller post-init bit, gain/peaking selection before calibration,
+fresh eye observations and the exact OEM twelve-bit reset. Shutdown remains
+a separate issue; the diagnostic-only image need not be booted first.
+
+**Previous bench:** [receiver acquisition experiments and collection plan](XGSPON-RX-ACQUISITION.q1000k.md)
 
 **Latest hardware evidence:** [2026-09-15 acquisition results](XGSPON-RX-RESULTS-20260915.q1000k.md).
 All 34 connected cases and the fresh dark-checker control completed with valid
@@ -17,8 +23,8 @@ Its 30-sample power check still saw light and no frames, but PHY shutdown failed
 after RX draining. The collector stopped before the pending passive reconnect.
 The exact failing shutdown operation was not logged. Diagnostic replacement
 `ad6bc93b51` is built and software-validated; hardware boot/testing is pending.
-It preserves the existing checks and all 36 cases. Require a clean baseline
-shutdown before the passive control. See the follow-up in the results above
+Its diagnostics are now incorporated in the next consolidated image. A guard
+or cleanup failure still stops collection, preserving the actual error. See the follow-up in the results above
 and the build record in [the bench journal](XGSPON-BENCH.q1000k.md).
 
 The prior passive plan is retained in [RX-NEXT](XGSPON-RX-NEXT.q1000k.md), with

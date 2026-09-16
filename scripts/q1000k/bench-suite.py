@@ -25,27 +25,34 @@ RECEIVER=module('bench-receiver-report')
 HYPOTHESES=module('bench-hypotheses')
 
 # Cases map onto the immutable module enum; no arbitrary addresses or values.
-CONNECTED_PROBES=tuple(name for name in RUN.PROBES if name != 'checker-dark')
+DEEP_PROBES=('oem-post-init','oem-post-cal') + RUN.PROBES[22:35]
+CONNECTED_PROBES=DEEP_PROBES + tuple(name for name in RUN.PROBES[:22] if name != 'checker-dark')
 CONTROLLER_CASES={'oem-md32':dict(oem_md32=True,rx_output='unchanged')}
 for output in ('400-flat','600-flat','600-boost'):
     CONTROLLER_CASES['rx-output-'+output]=dict(oem_md32=False,rx_output=output)
     CONTROLLER_CASES['oem-acquire-'+output]=dict(oem_md32=False,rx_output=output)
     CONTROLLER_CASES['oem-md32-acquire-'+output]=dict(oem_md32=True,rx_output=output)
-CASES=(('baseline',None,False), ('public-recovery',None,True)) + tuple(
-    (name,name,True) for name in CONNECTED_PROBES) + tuple(
-    (name,'oem-rx-acquire' if 'acquire' in name else None,'acquire' in name)
+for output in ('400-flat','600-flat','600-boost'):
+    CONTROLLER_CASES['oem-cal-'+output]=dict(oem_md32=False,rx_output=output)
+    CONTROLLER_CASES['oem-post-cal-'+output]=dict(oem_md32=False,rx_output=output)
+CASES=(('baseline',None,False),) + tuple(
+    (name,name,True) for name in CONNECTED_PROBES) + (('public-recovery',None,True),) + tuple(
+    (name, 'oem-post-cal' if name.startswith('oem-post-cal-') else
+          'oem-cal-reset' if name.startswith('oem-cal-') else
+          'oem-rx-acquire' if 'acquire' in name else None,
+     'acquire' in name or '-cal-' in name)
     for name in CONTROLLER_CASES) + (('baseline-repeat',None,False),)
 COVERAGE={
  'optical-power': dict(cases=['baseline','baseline-repeat'], shared='Controller RX nW/dBm every sample',
                       external='Compare same-fiber gateway reading; wavelength-selective calibrated meter settles absolute level.'),
  'false-light': dict(cases=['baseline','baseline-repeat'], shared='Controller LOS, raw PHY LOS/polarity and optical power together',
                     external='Dark and reconnected controls using this image; optional live disconnect/reconnect within a 180-s baseline tests IRQ response.'),
- 'receiver-gain': dict(cases=['gain-auto','gain-low']+[name for name in CONNECTED_PROBES if name == 'oem-peaking'], shared='Gain, equalization, analog and controller readbacks',
+ 'receiver-gain': dict(cases=['gain-auto','gain-low']+[n for n in CONNECTED_PROBES if n.startswith('oem-eye-') or n in ('eye-current','oem-analog','oem-cal-reset','oem-cal-auto')]+[name for name in CONNECTED_PROBES if name == 'oem-peaking'], shared='Gain, equalization, analog and controller readbacks',
                       external='OEM gain=1 and gain+PLL already failed on prior bench. Unknown equalizer/calibration values require board evidence, not a blind sweep.'),
- 'clock-rate-reset': dict(cases=['public-recovery','tdc-delay','pll-order','oem-order']+[name for name in CONNECTED_PROBES if name in ('cdr-auto-release','cdr-internal-auto','prcal-finalize','fll-auto','rx-sequence-auto','post-eye-ready','oem-clock-cycle','oem-rx-acquire','combined-auto','prcal-rerun')],
+ 'clock-rate-reset': dict(cases=['oem-full-reset','oem-analog','oem-cal-reset','oem-cal-auto','public-recovery','tdc-delay','pll-order','oem-order']+[name for name in CONNECTED_PROBES if name in ('cdr-auto-release','cdr-internal-auto','prcal-finalize','fll-auto','rx-sequence-auto','post-eye-ready','oem-clock-cycle','oem-rx-acquire','combined-auto','prcal-rerun')],
                          shared='RX/PLL/PMA/TDC frequency monitors, targets, dividers, reset and sequence controls',
-                         external='Independent recovered-clock measurement if readbacks remain ambiguous; unknown upper reset bits are excluded.'),
- 'receive-path': dict(cases=['bit-order','checker']+[name for name in CONTROLLER_CASES if name.startswith('rx-output-')], shared='Input mux, bus width, data route, fixed EN7573 RX output settings and independent RX checker',
+                         external='Independent recovered-clock measurement if readbacks remain ambiguous; The separate oem-full-reset case uses the exact OEM twelve-bit reset; upper-bit meanings remain unknown.'),
+ 'receive-path': dict(cases=['eye-current','oem-post-init','oem-post-cal','bit-order','checker']+[name for name in CONTROLLER_CASES if name.startswith('rx-output-')], shared='Input mux, bus width, data route, fixed EN7573 RX output settings and independent RX checker',
                       external='Establish EN7573-to-SoC RX differential continuity/polarity from schematic or identified test points. No documented polarity switch exists in imported source.'),
  'pcs-framing': dict(cases=['bit-order','descrambler','fec-oc','fec-off'], shared='PSync, HEC, codeword, frame and FEC counters',
                      external='All are receiver settings. No TX framing, optical activation or OLT configuration is changed.'),
@@ -53,7 +60,7 @@ COVERAGE={
                              external='Normal optical traffic is not PRBS. A quiet checker is inconclusive; errors do not quantify BER.'),
  'line-type': dict(cases=['baseline','checker'], shared='Configured rate and frequency-window raw evidence',
                    external='Confirm gateway optical mode/module on the working line. Wavelength/modulation need appropriate external measurement if still uncertain.'),
- 'analog-health': dict(cases=['gain-auto','gain-low','oem-order','baseline-repeat']+list(CONTROLLER_CASES),
+ 'analog-health': dict(cases=['oem-analog','oem-cal-reset','oem-cal-auto','oem-post-init','oem-post-cal','gain-auto','gain-low','oem-order','baseline-repeat']+list(CONTROLLER_CASES),
                       shared='Firmware/calibration hashes, controller MCU/status, optical power and analog readbacks',
                       external='Known-good optics/board or suitable electrical measurement separates hardware health from calibration. No EEPROM/calibration writes.'),
 }
@@ -76,8 +83,10 @@ def plan(samples, selected_case=None):
 
 def check_artifact_compatibility(cases, version):
     """Reject unsupported modes locally, before staging anything on a device."""
-    if type(version) is not int or version not in (1,2,3):
+    if type(version) is not int or version not in (1,2,3,4):
         raise ValueError('Unsupported artifact receiver diagnostics schema')
+    if version == 3 and any(case.get("probe") in RUN.PROBES[22:] for case in cases):
+        raise ValueError("Artifact diagnostics schema 4 is required for deep receiver cases")
     legacy_probes=RUN.PROBES[:10]
     unsupported=[case['name'] for case in cases if version < 3 and (
         case.get('probe') not in (None,*legacy_probes) or case.get('oem_md32',False) or

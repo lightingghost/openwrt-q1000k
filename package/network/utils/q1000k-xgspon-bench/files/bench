@@ -4,7 +4,7 @@
 # may be visible. No service or boot hook calls this program.
 . /lib/q1000k-xgspon/common.sh
 export LC_ALL=C
-RX_DIAGNOSTICS_VERSION=3
+RX_DIAGNOSTICS_VERSION=4
 umask 077
 reacquire=0
 restore_pll=0
@@ -261,6 +261,20 @@ case "$1" in
 						oem-clock-cycle) probe=17 ;; oem-rx-acquire) probe=18 ;;
 						oem-peaking) probe=19 ;; checker-dark) probe=20 ;;
 						combined-auto) probe=21 ;; prcal-rerun) probe=22 ;;
+						eye-current) probe=23 ;;
+						oem-analog) probe=24 ;;
+						oem-full-reset) probe=25 ;;
+						oem-cal-reset) probe=26 ;;
+						oem-cal-auto) probe=27 ;;
+						oem-eye-0) probe=28 ;;
+						oem-eye-1) probe=29 ;;
+						oem-eye-2) probe=30 ;;
+						oem-eye-3) probe=31 ;;
+						oem-eye-4) probe=32 ;;
+						oem-eye-5) probe=33 ;;
+						oem-eye-6) probe=34 ;;
+						oem-eye-7) probe=35 ;;
+						oem-post-init) probe=36 ;; oem-post-cal) probe=37 ;;
 						*) fail 'Unknown bounded receiver probe.' ;;
 					esac
 					shift 2 ;;

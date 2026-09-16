@@ -115,6 +115,13 @@ int q1000k_phy_controller_check(void)
 	return ret ? ret : qphy_controller ? q1000k_pon_check(qphy_controller) : -ENODEV;
 }
 
+int q1000k_phy_controller_oem_post(bool restore)
+{
+	int ret = q1000k_phy_controller_check();
+
+	return ret ?: q1000k_pon_oem_post_init(qphy_controller, restore);
+}
+
 int q1000k_phy_board_profile(void)
 {
 	int ret = q1000k_phy_controller_check();

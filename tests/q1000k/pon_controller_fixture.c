@@ -42,6 +42,7 @@ static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
 static void kfree(void *p) { assert(p); freed++; free(p); }
 typedef uint32_t u32;
 struct en7573_io { void *ctx; };
+struct en7573_oem_post { bool saved; };
 struct en7573_state { int md32_enabled,tx_disabled; };
 struct q1000k_pon {
     struct mutex lock;
@@ -51,6 +52,7 @@ struct q1000k_pon {
     const char *stage;
     unsigned char calibration[513];
     struct en7573_io io;
+    struct en7573_oem_post oem_post_original;
     int *los[2];
 };
 static int samples,writes,off,los_calls,sample_error,tx_error,off_error,los_value,hw_mcu,hw_disabled;
@@ -75,6 +77,13 @@ static int en7573_set_tx(struct en7573_io *io,bool enable)
 }
 static int pon_off(struct q1000k_pon *p) { assert(p->lock.held); off++; p->initialized=false; p->mode=off_error ? -2 : -1; p->tx_enabled=false; return off_error; }
 static int gpiod_get_value_cansleep(int *gpio) { assert(gpio); los_calls++; return los_value; }
+static int post_calls;
+static int en7573_oem_post_init(struct en7573_io *io,struct en7573_oem_post *original,bool restore)
+{
+ struct q1000k_pon *p=io->ctx;
+ assert(p->lock.held && p->leased && p->tx_inhibited && !p->tx_enabled);
+ post_calls++; original->saved=!restore; return 0;
+}
 /* PRODUCTION */
 static struct q1000k_pon *create(void)
 {
@@ -162,6 +171,11 @@ int main(void)
     p=create(); p->tx_inhibited=true;
     assert(q1000k_pon_set_tx(p,true)==-EPERM && !writes && !off);
     assert(q1000k_pon_get()==p);
+    assert(!q1000k_pon_oem_post_init(p,false) && post_calls==1 && p->oem_post_original.saved);
+    assert(!q1000k_pon_oem_post_init(p,true) && post_calls==2 && !p->oem_post_original.saved);
+    atomic_context=1;
+    assert(q1000k_pon_oem_post_init(p,false)==-EWOULDBLOCK && post_calls==2);
+    atomic_context=0;
     bool inhibited=false;
     assert(!q1000k_pon_get_tx_inhibit(p,&inhibited) && inhibited);
     assert(q1000k_pon_get_tx_inhibit(p,NULL)==-EINVAL);
@@ -175,5 +189,10 @@ int main(void)
     assert(q1000k_pon_put(p)==-EPERM);
     pon_unpublish(p); pon_drop_device_ref(p);
     assert(freed==10);
+    p=create();
+    assert(q1000k_pon_oem_post_init(p,false)==-EPERM && post_calls==2);
+    assert(q1000k_pon_get()==p);
+    assert(q1000k_pon_oem_post_init(p,false)==-EACCES && post_calls==2 && off==1);
+    assert(q1000k_pon_put(p)==-EACCES); pon_unpublish(p); pon_drop_device_ref(p);
     return 0;
 }

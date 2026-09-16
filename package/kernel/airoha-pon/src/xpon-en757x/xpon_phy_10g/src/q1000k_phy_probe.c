@@ -12,13 +12,16 @@
 struct qprobe_step { u32 reg, end, start, value, delay_us; };
 #include "q1000k_phy_probe_steps.h"
 #include "q1000k_phy_probe_oem_steps.h"
+#include "q1000k_phy_probe_deep_steps.h"
 
 /* Save distinct fields before their first update, including partial failures.
  * Replay originals in reverse order after callbacks drain, with TX still off.
  */
-static struct { u32 reg, end, start, value; } saved[128];
+static struct { u32 reg, end, start, value; } saved[256];
 static unsigned int saved_count;
 static u32 probe_writes;
+static bool post_pending;
+static int probe_prcal_finalize(void);
 
 static int probe_ready(void)
 {
@@ -142,13 +145,22 @@ static int probe_recover(u32 mode)
 	return probe_ready();
 }
 
-static int probe_oem_clock_cycle(void)
+static int probe_oem_clock_cycle_reset(bool full)
 {
 	int ret;
 
 	RUN(oem_tdc_off);
 	RUN(oem_rx_l2r);
-	RUN(oem_known_reset);
+	if (full) {
+		/* Exact twelve-bit reset from both Q1000K OEM binaries. Upper
+		 * five field meanings remain unknown; isolated from the legacy
+		 * seven-bit experiment. Optical TX is independently inhibited
+		 * at the controller, checked around every register update.
+		 */
+		RUN(oem_full_reset);
+	} else {
+		RUN(oem_known_reset);
+	}
 	RUN(oem_rx_l2d);
 	/* OEM XPON_TDC_on @0x28a94 shares this public prefix, with 5ms
 	 * final settling and no final forced LPF reset. No FLL reset.
@@ -158,6 +170,102 @@ static int probe_oem_clock_cycle(void)
 		return ret;
 	RUN(txpll_on);
 	RUN(oem_rx_ready);
+	return probe_ready();
+}
+
+static int probe_oem_clock_cycle(void)
+{
+	return probe_oem_clock_cycle_reset(false);
+}
+
+/* A fresh, finite eye observation. Never call the vendor readout helper:
+ * it silently retries LPF reset on a failed measurement. Retain raw words
+ * and completion flags even when no opening was found. This is not BER.
+ */
+static int probe_eye(void)
+{
+	u32 pi, done, ready, horizontal, vertical, dac0, dac1;
+	int ret;
+
+	ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_cdr_pr_pieye_pwdb, 0, 0, 1, true);
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_cdr_pr_pieye_pwdb, 8, 8, 1, true);
+	if (ret)
+		return ret;
+	RUN(oem_eye_setting_xgs);
+	RUN(oem_xpon_eye_cal);
+	RUN(oem_eye_start);
+	RUN(oem_eye_latch);
+#define EYE_READ(reg, value) do { ret = probe_read(reg, &value); if (ret) return ret; } while (0)
+	EYE_READ(EN7581_XPON_PMA_RX_TORGS_DEBUG_2, pi);
+	EYE_READ(EN7581_XPON_PMA_RX_TORGS_DEBUG_9, done);
+	EYE_READ(EN7581_XPON_PMA_RX_TORGS_DEBUG_5, ready);
+	EYE_READ(EN7581_XPON_PMA_RX_TORGS_DEBUG_10, horizontal);
+	EYE_READ(EN7581_XPON_PMA_RX_TORGS_DEBUG_11, vertical);
+	EYE_READ(EN7581_XPON_PMA_ADD_RO_RX2ANA_1, dac0);
+	EYE_READ(EN7581_XPON_PMA_ADD_RO_RX2ANA_2, dac1);
+#undef EYE_READ
+	pr_info("q1000k: RX eye fresh=1 pi=%08x done=%08x ready=%08x horizontal=%08x vertical=%08x dac0=%08x dac1=%08x\n",
+		pi, done, ready, horizontal, vertical, dac0, dac1);
+	RUN(oem_eye_stop);
+	return probe_ready();
+}
+
+/* Apply the OEM gain before analog calibration, not after the public eye
+ * scan. Each fixed peaking candidate gets its own clean module lifetime.
+ * Does not claim to replay the complete OEM first-plug state machine.
+ */
+static int probe_analog(bool full_reset, int peaking, bool automatic)
+{
+	int ret;
+
+	RUN(oem_xpon_rx_preset);
+	RUN(oem_tdc_off);
+	RUN(oem_rx_l2r);
+	ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl, 8, 8, 1, true);
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl, 1, 0, 1, true);
+	if (!ret && peaking >= 0)
+		ret = probe_write(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan, 19, 16, peaking, true);
+	if (ret)
+		return ret;
+	ret = probe_prcal_finalize();
+	if (ret)
+		return ret;
+	RUN(oem_xpon_rx_oscal);
+	RUN(oem_xpon_rx_pical);
+	RUN(oem_xpon_rx_pdos);
+	RUN(oem_xpon_rx_feos);
+	RUN(oem_xpon_rx_sdcal);
+	/* OEM first-plug orders reset -> L2D -> eye -> TDC -> ready.
+	 * Keep eye calibration ahead of tracking enable in this experiment.
+	 */
+	ret = probe_write(EN7581_XPON_PMA_RX_CTRL_SEQUENCE_FORCE_CTRL_1, 8, 8, 1, true);
+	if (!ret)
+		ret = probe_write(EN7581_XPON_PMA_RX_CTRL_SEQUENCE_DISB_CTRL_1, 8, 8, 0, true);
+	if (ret)
+		return ret;
+	udelay(1);
+	if (full_reset) {
+		RUN(oem_full_reset);
+	} else {
+		RUN(oem_known_reset);
+	}
+	RUN(oem_rx_l2d);
+	ret = probe_eye();
+	if (ret)
+		return ret;
+	ret = probe_steps(xpon_tdc_on, ARRAY_SIZE(xpon_tdc_on) - 4, true, false);
+	if (ret)
+		return ret;
+	RUN(oem_rx_ready);
+	if (automatic) {
+		ret = probe_write(EN7581_XPON_PMA_SS_RX_FLL_3, 0, 0, 0, true);
+		if (ret)
+			return ret;
+		RUN(cdr_internal_auto);
+		RUN(rx_sequence_auto);
+	}
 	return probe_ready();
 }
 
@@ -298,7 +406,7 @@ int q1000k_phy_rx_probe(u32 probe)
 
 	if (ret) return ret;
 	if (!probe || probe >= Q1000K_RX_PROBE_COUNT) return -EINVAL;
-	if (saved_count || probe_writes) return -EBUSY;
+	if (saved_count || probe_writes || post_pending) return -EBUSY;
 	if (!gpPhyPriv->pma_init_done || gpPhyPriv->first_plugin_flag) return -EAGAIN;
 	switch (probe) {
 	case Q1000K_RX_PROBE_BIT_ORDER:
@@ -353,6 +461,37 @@ int q1000k_phy_rx_probe(u32 probe)
 		return probe_oem_rx_acquire(true);
 	case Q1000K_RX_PROBE_PRCAL_RERUN:
 		return probe_prcal_rerun();
+	case Q1000K_RX_PROBE_EYE_CURRENT:
+		ret = probe_eye();
+		if (ret)
+			return ret;
+		RUN(post_eye_ready);
+		RUN(oem_rx_ready);
+		return probe_ready();
+	case Q1000K_RX_PROBE_OEM_ANALOG:
+		return probe_analog(false, -1, false);
+	case Q1000K_RX_PROBE_OEM_FULL_RESET:
+		return probe_oem_clock_cycle_reset(true);
+	case Q1000K_RX_PROBE_OEM_CAL_RESET:
+		return probe_analog(true, -1, false);
+	case Q1000K_RX_PROBE_OEM_CAL_AUTO:
+		return probe_analog(true, -1, true);
+	case Q1000K_RX_PROBE_OEM_EYE_0 ... Q1000K_RX_PROBE_OEM_EYE_7:
+		return probe_analog(true, probe - Q1000K_RX_PROBE_OEM_EYE_0, false);
+	case Q1000K_RX_PROBE_OEM_POST_INIT:
+	case Q1000K_RX_PROBE_OEM_POST_CAL:
+		/* Both NAND and update execute this controller bit after loading
+		 * the PON modules. Do so only after the no-sync trigger here.
+		 * The controller saves and verifies the field independently.
+		 */
+		post_pending = true;
+		ret = q1000k_phy_controller_oem_post(false);
+		if (ret)
+			return ret;
+		probe_writes++;
+		pr_info("q1000k: RX OEM post-init checked=1 mask=00000100 value=00000100\n");
+		return probe == Q1000K_RX_PROBE_OEM_POST_CAL ?
+			probe_analog(true, -1, false) : probe_ready();
 	case Q1000K_RX_PROBE_CHECKER:
 	case Q1000K_RX_PROBE_CHECKER_DARK:
 		/* Receiver PRBS checker only. The incoming XGS signal is not
@@ -376,13 +515,19 @@ int q1000k_phy_rx_probe_cleanup(void)
 {
 	int ret = q1000k_phy_callback_context();
 
-	if (ret || !saved_count) return ret;
+	if (ret || (!saved_count && !post_pending)) return ret;
 	while (saved_count) {
 		unsigned int i = saved_count - 1;
 
 		ret = probe_write(saved[i].reg, saved[i].end, saved[i].start, saved[i].value, false);
 		if (ret) return ret;
 		saved_count--;
+	}
+	if (post_pending) {
+		ret = q1000k_phy_controller_oem_post(true);
+		if (ret)
+			return ret;
+		post_pending = false;
 	}
 	pr_info("q1000k: RX probe fields restored\n");
 	return 0;

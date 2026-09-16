@@ -52,5 +52,17 @@
 	X(eye_pi_mode, EN7581_XPON_PMA_RX_DISB_MODE_3) \
 	X(eye_count_ready, EN7581_XPON_PMA_RX_FORCE_MODE_6) \
 	X(eye_count_mode, EN7581_XPON_PMA_RX_DISB_MODE_5) \
-	X(rx_peaking_control, EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan)
+	X(rx_peaking_control, EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan) \
+	/* Passive words can be stale; only the serial fresh-eye record is latched. */ \
+	X(eye_pi_raw, EN7581_XPON_PMA_RX_TORGS_DEBUG_2) \
+	X(eye_ready_raw, EN7581_XPON_PMA_RX_TORGS_DEBUG_5) \
+	X(eye_done_raw, EN7581_XPON_PMA_RX_TORGS_DEBUG_9) \
+	X(eye_horizontal_raw, EN7581_XPON_PMA_RX_TORGS_DEBUG_10) \
+	X(eye_vertical_raw, EN7581_XPON_PMA_RX_TORGS_DEBUG_11) \
+	X(eye_latch_control, EN7581_XPON_PMA_RX_DEBUG_0) \
+	X(fll_adc_raw0, EN7581_XPON_PMA_RO_FLL_ADC_0) \
+	X(fll_adc_raw1, EN7581_XPON_PMA_RO_FLL_ADC_1) \
+	X(fll_adc_raw2, EN7581_XPON_PMA_RO_FLL_ADC_2) \
+	X(fll_adc_raw3, EN7581_XPON_PMA_RO_FLL_ADC_3) \
+	X(fll_adc_raw4, EN7581_XPON_PMA_RO_FLL_ADC_4)
 #endif

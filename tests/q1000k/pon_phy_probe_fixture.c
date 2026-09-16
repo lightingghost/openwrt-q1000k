@@ -22,7 +22,7 @@ static struct {
 static u32 registers[0x8000], original[0x8000];
 static int operations, fail_at, context_error, updates, corrupt_update, delays, long_delays;
 static int medium_delays, meter_reads, bad_meter;
-static struct { u32 reg, end, start, value, delay; } trace[1024];
+static struct { u32 reg, end, start, value, delay; } trace[4096];
 static unsigned int trace_count;
 #define WORD(reg) registers[((reg)&0x1ffff)/4]
 #define ORIGINAL(reg) original[((reg)&0x1ffff)/4]
@@ -48,7 +48,7 @@ static int an7581_pon_phy_update(u32 reg,u32 end,u32 start,u32 value) {
  /* Neither upstream generator nor loopback is ever written. */
  assert(reg!=EN7581_XPON_PMA_ADD_XPON_MODE_1 && reg!=EN7581_XPON_PMA_SS_BIST_1);
  if(reg==EN7581_XPON_PMA_BISTCTL_CONTROL) assert(end==16 && start==16);
- if(reg==EN7581_XPON_PMA_SW_RST_SET) assert(end<=6);
+ if(reg==EN7581_XPON_PMA_SW_RST_SET) assert(end<=11 && end==start);
  if(reg==EN7581_XGPON_PHY_DBG_CTRL) assert(end<16);
  assert(trace_count<ARRAY_SIZE(trace));
  trace[trace_count++]=(typeof(trace[0])){reg,end,start,value,0};
@@ -63,10 +63,17 @@ static void udelay(unsigned int us) {
  trace[trace_count++]=(typeof(trace[0])){0,0,0,0,us};
 }
 static void usleep_range(unsigned int lo,unsigned int hi) {
- assert((lo==1000 || lo==5000) && hi==lo+100);
- if(lo==5000) long_delays++; else medium_delays++;
+ assert((lo==1000 || lo==5000 || lo==5500) && hi==lo+100);
+ if(lo==5000) long_delays++; else if(lo==1000) medium_delays++;
  assert(trace_count<ARRAY_SIZE(trace));
  trace[trace_count++]=(typeof(trace[0])){0,0,0,0,lo};
+}
+static bool post_saved, post_bit;
+int q1000k_phy_controller_oem_post(bool restore) {
+ int ret=next(); if(ret) return ret;
+ if(restore) { post_saved=false; post_bit=false; }
+ else { assert(!post_saved); post_saved=true; post_bit=true; }
+ return 0;
 }
 /* PRODUCTION */
 static void reset(void) {
@@ -82,14 +89,14 @@ static void reset(void) {
  WORD(EN7581_XPON_PMA_RX_DISB_MODE_3)|=1;
  WORD(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan)=0xa40c1234;
  memcpy(original,registers,sizeof(original));
- saved_count=probe_writes=0; operations=fail_at=context_error=updates=corrupt_update=delays=long_delays=0;
+ post_saved=post_bit=post_pending=false; saved_count=probe_writes=0; operations=fail_at=context_error=updates=corrupt_update=delays=long_delays=0;
  medium_delays=meter_reads=bad_meter=0; trace_count=0;
  gpPhyPriv=&phy; phy.wan_sel=10; phy.pma_init_done=1; phy.first_plugin_flag=0;
  phy.trans_tx_status=0; phy.phyCfg.flags.txPowerEnFlag=false;
 }
 int main(void) {
  for(u32 mode=1;mode<Q1000K_RX_PROBE_COUNT;mode++) {
-  reset(); assert(!q1000k_phy_rx_probe(mode) && saved_count && updates);
+  reset(); assert(!q1000k_phy_rx_probe(mode) && (saved_count || post_saved) && (updates || post_bit));
   int count=operations, writes=updates;
   u32 rxreg=(EN7581_XGPON_PHY_XG_PON_RX_SYNC_CTRL&0x1ffff)/4;
   u32 dbgreg=(EN7581_XGPON_PHY_DBG_CTRL&0x1ffff)/4;
@@ -100,9 +107,9 @@ int main(void) {
 
   int clock_cycle=mode==Q1000K_RX_PROBE_OEM_CLOCK_CYCLE || mode==Q1000K_RX_PROBE_OEM_RX_ACQUIRE ||
    mode==Q1000K_RX_PROBE_COMBINED_AUTO || mode==Q1000K_RX_PROBE_PRCAL_RERUN;
-  assert(long_delays==(mode==Q1000K_RX_PROBE_PRCAL_RERUN ? 16 :
+  if(mode<=Q1000K_RX_PROBE_PRCAL_RERUN) assert(long_delays==(mode==Q1000K_RX_PROBE_PRCAL_RERUN ? 16 :
    (mode==Q1000K_RX_PROBE_TDC_DELAY || mode==Q1000K_RX_PROBE_OEM_ORDER || clock_cycle)?1:0));
-  assert(medium_delays==(mode==Q1000K_RX_PROBE_PRCAL_RERUN ? 2 : clock_cycle?1:0));
+  if(mode<=Q1000K_RX_PROBE_PRCAL_RERUN) assert(medium_delays==(mode==Q1000K_RX_PROBE_PRCAL_RERUN ? 2 : clock_cycle?1:0));
   if(mode==Q1000K_RX_PROBE_CDR_AUTO_RELEASE) {
    assert((WORD(EN7581_XPON_PMA_rg_force_da_pxp_cdr_lpf_lck2data)&0x01010101)==0x101);
    assert(updates==6 && trace_count==8);
@@ -168,8 +175,19 @@ int main(void) {
   if(mode==Q1000K_RX_PROBE_OEM_RX_ACQUIRE || mode==Q1000K_RX_PROBE_COMBINED_AUTO)
    assert((WORD(EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl)&0x103)==0x101);
   if(mode==Q1000K_RX_PROBE_PRCAL_RERUN) assert(meter_reads==16);
+  if(mode>=Q1000K_RX_PROBE_OEM_ANALOG && mode<=Q1000K_RX_PROBE_OEM_EYE_7 && mode!=Q1000K_RX_PROBE_OEM_FULL_RESET) {
+   assert((WORD(EN7581_XPON_PMA_rg_force_da_pxp_rx_fe_gain_ctrl)&0x103)==0x101);
+   unsigned peak=mode>=Q1000K_RX_PROBE_OEM_EYE_0 ? mode-Q1000K_RX_PROBE_OEM_EYE_0 : 4;
+   assert(((WORD(EN7581_XPON_PMA_rg_da_pxp_jcpll_sdm_scan)>>16)&15)==peak);
+  }
+  if(mode==Q1000K_RX_PROBE_OEM_FULL_RESET || mode==Q1000K_RX_PROBE_OEM_CAL_RESET ||
+     mode==Q1000K_RX_PROBE_OEM_CAL_AUTO || (mode>=Q1000K_RX_PROBE_OEM_EYE_0 && mode<=Q1000K_RX_PROBE_OEM_EYE_7)) {
+   assert((WORD(EN7581_XPON_PMA_SW_RST_SET)&0xfff)==0xfff);
+   assert((WORD(EN7581_XPON_PMA_SW_RST_SET)&~0xfffU)==(ORIGINAL(EN7581_XPON_PMA_SW_RST_SET)&~0xfffU));
+  }
+  if(mode==Q1000K_RX_PROBE_OEM_POST_INIT || mode==Q1000K_RX_PROBE_OEM_POST_CAL) assert(post_saved && post_bit);
   assert(q1000k_phy_rx_probe(mode)==-EBUSY);
-  assert(!q1000k_phy_rx_probe_cleanup() && !saved_count && !memcmp(registers,original,sizeof(original)));
+  assert(!q1000k_phy_rx_probe_cleanup() && !saved_count && !post_saved && !post_bit && !memcmp(registers,original,sizeof(original)));
   assert(q1000k_phy_rx_probe(mode)==-EBUSY); /* lifetime attempt remains consumed */
   for(int n=1;n<=count;n++) {
    reset(); fail_at=n; assert(q1000k_phy_rx_probe(mode)==-EIO);
@@ -183,7 +201,7 @@ int main(void) {
   assert(!q1000k_phy_rx_probe_cleanup()); count=operations;
   for(int n=1;n<=count;n++) {
    reset(); assert(!q1000k_phy_rx_probe(mode)); operations=0; fail_at=n;
-   assert(q1000k_phy_rx_probe_cleanup()==-EIO && saved_count);
+   assert(q1000k_phy_rx_probe_cleanup()==-EIO && (saved_count || post_pending));
    fail_at=0; assert(!q1000k_phy_rx_probe_cleanup() && !memcmp(registers,original,sizeof(original)));
   }
  }

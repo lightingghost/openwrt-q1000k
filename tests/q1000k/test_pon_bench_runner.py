@@ -34,6 +34,13 @@ class RunnerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     RUN.validate_experiment_artifact(SimpleNamespace(**(old | change)))
             helper.write_text('RX_DIAGNOSTICS_VERSION=3\n')
+            for probe in RUN.PROBES[:22]:
+                RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
+
+            for probe in RUN.PROBES[22:]:
+                with self.assertRaisesRegex(ValueError, 'v4'):
+                    RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
+            helper.write_text('RX_DIAGNOSTICS_VERSION=4\n')
             for probe in RUN.PROBES:
                 RUN.validate_experiment_artifact(SimpleNamespace(**(old | dict(probe=probe))))
 
@@ -42,10 +49,10 @@ class RunnerTests(unittest.TestCase):
             artifact=Path(directory)
             helper=artifact/'runtime/usr/sbin/q1000k-pon-bench'
             helper.parent.mkdir(parents=True)
-            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2),('RX_DIAGNOSTICS_VERSION=3\n',3)):
+            for text,expected in (('#!/bin/sh\n',1),('RX_DIAGNOSTICS_VERSION=2\n',2),('RX_DIAGNOSTICS_VERSION=3\n',3),('RX_DIAGNOSTICS_VERSION=4\n',4)):
                 helper.write_text(text)
                 self.assertEqual(RUN.diagnostics_version(artifact),expected)
-            for text in ('RX_DIAGNOSTICS_VERSION=4\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
+            for text in ('RX_DIAGNOSTICS_VERSION=5\n','RX_DIAGNOSTICS_VERSION=2\nRX_DIAGNOSTICS_VERSION=2\n'):
                 helper.write_text(text)
                 with self.assertRaises(ValueError): RUN.diagnostics_version(artifact)
 

@@ -170,7 +170,7 @@ static int qrx_diagnostics_get(char *buffer, const struct kernel_param *kp)
 	ret = q1000k_phy_rx_diagnostics(&s);
 	if (ret) return ret;
 	return scnprintf(buffer, PAGE_SIZE,
-		"{\"diagnostics_version\":3,\"probe\":%u,\"attempts\":%u,\"writes\":%u,"
+		"{\"diagnostics_version\":4,\"probe\":%u,\"attempts\":%u,\"writes\":%u,"
 		"\"sampled_ms\":%llu"
 #define QDIAG_FORMAT(name, reg) ",\"" #name "\":%u"
 		Q1000K_RX_DIAG_FIELDS(QDIAG_FORMAT)

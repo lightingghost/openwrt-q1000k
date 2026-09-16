@@ -21,7 +21,7 @@ COLLECT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COLLECT)
 
 
-def artifact(path, version=3):
+def artifact(path, version=4):
     path.mkdir()
     image = b'fixture RAM image'
     helper = f'RX_DIAGNOSTICS_VERSION={version}\n'.encode()
@@ -65,7 +65,7 @@ class PortableTests(unittest.TestCase):
             self.assertEqual(result['host'], '192.168.255.1')
             self.assertEqual(result['mode'], 'experiments')
             self.assertEqual(result['artifact']['revision'], 'a'*40)
-            self.assertEqual(result['artifact']['diagnostics_version'], 3)
+            self.assertEqual(result['artifact']['diagnostics_version'], 4)
             self.assertFalse(result['optical_service_verified'])
             # Importing every companion exercises the embedded header and all
             # reader dependencies, without importing from the original checkout.
@@ -262,7 +262,7 @@ class WorkflowTests(unittest.TestCase):
                 patch.object(COLLECT, 'confirm', side_effect=confirmations or [True]), \
                 patch.object(COLLECT, 'capture_case', side_effect=capture or capture_ok) as run, \
                 patch.object(COLLECT, 'summarize_case', side_effect=summary or [dict(status='observed'), dict(status='observed')]):
-            status = COLLECT.execute(args, ROOT, saved, dict(revision='a'*40, diagnostics_version=3))
+            status = COLLECT.execute(args, ROOT, saved, dict(revision='a'*40, diagnostics_version=4))
         return status, run.call_count, json.loads((args.output/'collection.json').read_text())
 
     def test_failure_retains_raw_evidence_and_skips_next_stage(self):

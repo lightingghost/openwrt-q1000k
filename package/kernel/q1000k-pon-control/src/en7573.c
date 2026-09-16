@@ -165,6 +165,34 @@ static int rx_output_update(struct en7573_io *io, u16 reg, u32 mask, u32 value)
 	return rx_output_guard(io);
 }
 
+int en7573_oem_post_init(struct en7573_io *io, struct en7573_oem_post *original,
+			bool restore)
+{
+	u32 value;
+	int ret;
+
+	if (!io || !io->read || !io->write || !original)
+		return -EINVAL;
+	if (restore && !original->saved)
+		return 0;
+	if (!restore && original->saved)
+		return -EBUSY;
+	ret = rx_output_guard(io);
+	if (!ret)
+		ret = en7573_read_control(io, 0x110, &value);
+	if (ret || value == ~0U)
+		return ret ? ret : -EIO;
+	if (!restore) {
+		original->control = value;
+		original->saved = true;
+	}
+	ret = rx_output_update(io, 0x110, 0x100,
+			       restore ? original->control : 0x100);
+	if (!ret && restore)
+		original->saved = false;
+	return ret;
+}
+
 int en7573_apply_rx_output(struct en7573_io *io, unsigned int profile,
 			  struct en7573_rx_output *original)
 {

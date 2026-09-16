@@ -18,9 +18,11 @@ class ControllerTests(unittest.TestCase):
 #include <assert.h>
 #include <stdbool.h>
 struct en7573_io { int unused; };
+struct en7573_oem_post { bool saved; };
 struct en7573_rx_output { unsigned int control, shape; bool saved; };
 struct q1000k_pon {
     struct en7573_io io;
+    struct en7573_oem_post oem_post_original;
     struct en7573_rx_output rx_output_original;
     int *power[2]; bool initialized, tx_enabled; int mode;
 };
@@ -31,6 +33,8 @@ static int en7573_restore_rx_output(struct en7573_io *io, struct en7573_rx_outpu
     if (!restore_error) original->saved=false;
     return restore_error;
 }
+static int en7573_oem_post_init(struct en7573_io *io,struct en7573_oem_post *o,bool restore)
+{ (void)io; assert(restore); restores++; if(!restore_error) o->saved=false; return restore_error; }
 static int gpiod_set_value_cansleep(int *gpio,int value)
 {
     assert(!value); powers++; *gpio=value;

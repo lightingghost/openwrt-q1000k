@@ -18,7 +18,8 @@ PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-lo
           'tdc-delay', 'pll-order', 'oem-order', 'checker',
           'cdr-auto-release', 'cdr-internal-auto', 'prcal-finalize', 'fll-auto',
           'rx-sequence-auto', 'post-eye-ready', 'oem-clock-cycle', 'oem-rx-acquire',
-          'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun')
+          'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun',
+          'eye-current', 'oem-analog', 'oem-full-reset', 'oem-cal-reset', 'oem-cal-auto', 'oem-eye-0', 'oem-eye-1', 'oem-eye-2', 'oem-eye-3', 'oem-eye-4', 'oem-eye-5', 'oem-eye-6', 'oem-eye-7', 'oem-post-init', 'oem-post-cal')
 HOST = '192.168.255.1'
 SSH = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
@@ -136,7 +137,7 @@ def diagnostics_version(artifact):
     versions = re.findall(r'^RX_DIAGNOSTICS_VERSION=(\d+)$', helper, re.M)
     if not versions:
         return 1
-    if len(versions) != 1 or versions[0] not in ('1', '2', '3'):
+    if len(versions) != 1 or versions[0] not in ('1', '2', '3', '4'):
         raise ValueError('Unsupported artifact receiver diagnostics schema')
     return int(versions[0])
 
@@ -192,6 +193,9 @@ def requires_acquisition_firmware(args):
 
 
 def validate_experiment_artifact(args):
+    probe = getattr(args, "probe", None)
+    if probe in PROBES[22:] and diagnostics_version(args.artifact) < 4:
+        raise ValueError("Deep receiver experiments require diagnostics v4 firmware")
     if requires_acquisition_firmware(args) and diagnostics_version(args.artifact) < 3:
         raise ValueError('Acquisition/controller experiments require diagnostics v3 firmware; RAM boot the new bench')
 

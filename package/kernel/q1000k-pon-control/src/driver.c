@@ -31,6 +31,7 @@ struct q1000k_pon {
 	struct gpio_descs *select;
 	struct en7573_io io;
 	struct en7573_rx_output rx_output_original;
+	struct en7573_oem_post oem_post_original;
 	struct mutex lock;
 	struct kref ref;
 	bool dead, leased, tx_enabled, tx_inhibited;
@@ -107,7 +108,9 @@ static int pon_off(struct q1000k_pon *pon)
 {
 	int first, second, restore = 0;
 
-	if (pon->rx_output_original.saved)
+	if (pon->oem_post_original.saved)
+		restore = en7573_oem_post_init(&pon->io, &pon->oem_post_original, true);
+	if (!restore && pon->rx_output_original.saved)
 		restore = en7573_restore_rx_output(&pon->io, &pon->rx_output_original);
 	first = gpiod_set_value_cansleep(pon->power[0], 0);
 	second = gpiod_set_value_cansleep(pon->power[1], 0);
@@ -116,6 +119,8 @@ static int pon_off(struct q1000k_pon *pon)
 	 */
 	if (!first && !second)
 		pon->rx_output_original.saved = false;
+	if (!first && !second)
+		pon->oem_post_original.saved = false;
 	pon->initialized = false;
 	pon->tx_enabled = false;
 	pon->mode = first || second ? -2 : -1;
@@ -322,6 +327,27 @@ int q1000k_pon_check(struct q1000k_pon *pon)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_check);
+
+int q1000k_pon_oem_post_init(struct q1000k_pon *pon, bool restore)
+{
+	int ret = pon_context();
+
+	if (ret)
+		return ret;
+	if (IS_ERR_OR_NULL(pon))
+		return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret && (!pon->tx_inhibited || pon->tx_enabled))
+		ret = -EACCES;
+	if (!ret)
+		ret = en7573_oem_post_init(&pon->io, &pon->oem_post_original, restore);
+	if (ret && !pon->dead && pon->leased && ret != -EAGAIN)
+		pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_oem_post_init);
 
 int q1000k_pon_get_tx(struct q1000k_pon *pon, bool *enabled)
 {
@@ -595,7 +621,7 @@ static ssize_t receiver_status_show(struct device *dev,
 		ret = en7573_sample_receiver(&pon->io, &sample);
 	if (!ret)
 		ret = sysfs_emit(buffer,
-			"{\"schema_version\":1,\"controller_version\":2,\"receiver_status\":true,"
+			"{\"schema_version\":1,\"controller_version\":3,\"receiver_status\":true,"
 			"\"bench_md32_a0\":%s,\"bench_rx_output\":%u,"
 			"\"sampled_ms\":%llu,\"mcu_a0\":%u,\"mcu_a2\":%u,"
 			"\"apd_control\":%u,\"ocp_control\":%u,\"firmware_status\":%u,"
@@ -605,7 +631,8 @@ static ssize_t receiver_status_show(struct device *dev,
 			"\"rssi_adc\":%u,\"rssi_current_raw\":%u,"
 			"\"rx_output_mask_control\":64,\"rx_output_mask_shape\":1059012360,"
 			"\"rx_output_saved\":%s,\"rx_output_original_control\":%u,"
-			"\"rx_output_original_shape\":%u}\n",
+			"\"rx_output_original_shape\":%u,\"oem_post_saved\":%s,"
+			"\"oem_post_original_control\":%u}\n",
 			pon->io.md32_a0 ? "true" : "false", bench_rx_output,
 			ktime_get_boottime_ns() / 1000000, sample.mcu_a0, sample.mcu_a2,
 			sample.apd, sample.ocp, sample.firmware, sample.los_control,
@@ -613,7 +640,9 @@ static ssize_t receiver_status_show(struct device *dev,
 			sample.ocp_status, sample.temperature_raw, sample.supply_raw,
 			sample.apd_voltage_raw, sample.rssi_adc, sample.rssi_current_raw,
 			pon->rx_output_original.saved ? "true" : "false",
-			pon->rx_output_original.control, pon->rx_output_original.shape);
+			pon->rx_output_original.control, pon->rx_output_original.shape,
+			pon->oem_post_original.saved ? "true" : "false",
+			pon->oem_post_original.control);
 	mutex_unlock(&pon->lock);
 	return ret;
 }

@@ -44,8 +44,12 @@ def controller_diagnostics(rows, record):
         if record.get('oem_md32') or record.get('rx_output', 'unchanged') != 'unchanged':
             raise ValueError('Controller experiment requires version 2 observations')
         return None
-    if versions != {2} or any(type(r.get('controller_version')) is not int for r in rows):
+    if versions not in ({2}, {3}) or any(type(r.get('controller_version')) is not int for r in rows):
         raise ValueError('Inconsistent controller diagnostics version')
+    version = next(iter(versions))
+    post = record.get('probe') in ('oem-post-init', 'oem-post-cal')
+    if post and version < 3:
+        raise ValueError('OEM post-init requires controller diagnostics version 3')
     oem = record.get('oem_md32', False)
     output = record.get('rx_output', 'unchanged')
     if type(oem) is not bool or output not in OUTPUT_PROFILES:
@@ -53,6 +57,15 @@ def controller_diagnostics(rows, record):
     mode, control, shape = OUTPUT_PROFILES[output]
     raw = words(rows, CONTROLLER_V2_WORDS)
     for r in rows:
+        post_mask = 0
+        if version == 3:
+            saved, original = r.get('oem_post_saved'), r.get('oem_post_original_control')
+            if type(saved) is not bool or type(original) is not int or not 0 <= original <= 0xffffffff:
+                raise ValueError('Invalid OEM post-init observations')
+            if saved:
+                if not post or r['rx_output_control'] != (original | 0x100):
+                    raise ValueError('OEM post-init changed unexpected fields or lost its bit')
+                post_mask = 0x100
         if (r.get('bench_md32_a0') is not oem or type(r.get('bench_rx_output')) is not int or
                 r['bench_rx_output'] != mode or r.get('rx_output_saved') is not bool(mode) or
                 r.get('rx_output_mask_control') != 0x40 or
@@ -61,13 +74,14 @@ def controller_diagnostics(rows, record):
         if mode and (r['rx_output_control'] & 0x40 != control or
                      r['rx_output_shape'] & 0x3f1f3f08 != shape):
             raise ValueError('Electrical output fields did not retain the selected profile')
-        if mode and ((r['rx_output_control'] ^ r['rx_output_original_control']) & ~0x40 or
+        if mode and ((r['rx_output_control'] ^ r['rx_output_original_control']) & ~(0x40 | post_mask) or
                      (r['rx_output_shape'] ^ r['rx_output_original_shape']) & ~0x3f1f3f08):
             raise ValueError('Electrical output changed unrelated fields')
         if any(r[k] > 0xffff for k in ('temperature_raw', 'supply_raw', 'apd_voltage_raw',
                                      'rssi_adc', 'rssi_current_raw')):
             raise ValueError('Invalid controller analog sample width')
-    return dict(controller_version=2, oem_md32=oem, rx_output=output, raw_words=raw,
+    return dict(controller_version=version, oem_md32=oem, rx_output=output, raw_words=raw,
+                oem_post_saved=sorted({r['oem_post_saved'] for r in rows}) if version == 3 else None,
                 apd_voltage_v=sorted({r['apd_voltage_raw']/8 for r in rows}),
                 rssi_current_ua=sorted({r['rssi_current_raw'] >> 5 for r in rows}),
                 temperature_c=sorted({(r['temperature_raw']-(65536 if r['temperature_raw'] & 0x8000 else 0))/256 for r in rows}),

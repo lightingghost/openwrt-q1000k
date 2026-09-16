@@ -22,4 +22,8 @@ int q1000k_pon_get_tx_inhibit(struct q1000k_pon *pon, bool *inhibited);
 int q1000k_pon_get_rx_power(struct q1000k_pon *pon, u32 *nanowatts);
 int q1000k_pon_get_los(struct q1000k_pon *pon);
 int q1000k_pon_check(struct q1000k_pon *pon);
+/* Immutable TX-inhibited bench only; exact OEM post-module bit, one saved
+ * field. Caller holds the controller lease throughout probe and restoration.
+ */
+int q1000k_pon_oem_post_init(struct q1000k_pon *pon, bool restore);
 #endif

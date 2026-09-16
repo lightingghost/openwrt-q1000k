@@ -39,7 +39,7 @@ class SuiteTests(unittest.TestCase):
                 results=[ValueError('unsafe') if i==fail else observation(p,r)
                          for i,(_,p,r) in enumerate(SUITE.CASES)]
                 with patch.object(SUITE,'stage',side_effect=results) as stage, \
-                     patch.object(SUITE.RUN,'diagnostics_version',return_value=3):
+                     patch.object(SUITE.RUN,'diagnostics_version',return_value=4):
                     status=SUITE.execute(args)
                 self.assertEqual(stage.call_count,total if fail is None else fail+1)
                 self.assertEqual(status,0 if fail is None else 1)
@@ -52,7 +52,7 @@ class SuiteTests(unittest.TestCase):
             args=argparse.Namespace(output=Path(directory)/'suite',artifact=Path('/artifact'),
                                     samples=90,case='checker')
             with patch.object(SUITE,'stage',return_value=observation('checker',True)) as stage, \
-                 patch.object(SUITE.RUN,'diagnostics_version',return_value=3):
+                 patch.object(SUITE.RUN,'diagnostics_version',return_value=4):
                 self.assertEqual(SUITE.execute(args),0)
             self.assertEqual(stage.call_count,1)
             self.assertEqual(stage.call_args.args[1:],('checker','checker',True))

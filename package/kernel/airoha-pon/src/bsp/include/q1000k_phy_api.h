@@ -68,6 +68,21 @@ enum q1000k_rx_probe {
 	Q1000K_RX_PROBE_CHECKER_DARK,
 	Q1000K_RX_PROBE_COMBINED_AUTO,
 	Q1000K_RX_PROBE_PRCAL_RERUN,
+	Q1000K_RX_PROBE_EYE_CURRENT,
+	Q1000K_RX_PROBE_OEM_ANALOG,
+	Q1000K_RX_PROBE_OEM_FULL_RESET,
+	Q1000K_RX_PROBE_OEM_CAL_RESET,
+	Q1000K_RX_PROBE_OEM_CAL_AUTO,
+	Q1000K_RX_PROBE_OEM_EYE_0,
+	Q1000K_RX_PROBE_OEM_EYE_1,
+	Q1000K_RX_PROBE_OEM_EYE_2,
+	Q1000K_RX_PROBE_OEM_EYE_3,
+	Q1000K_RX_PROBE_OEM_EYE_4,
+	Q1000K_RX_PROBE_OEM_EYE_5,
+	Q1000K_RX_PROBE_OEM_EYE_6,
+	Q1000K_RX_PROBE_OEM_EYE_7,
+	Q1000K_RX_PROBE_OEM_POST_INIT,
+	Q1000K_RX_PROBE_OEM_POST_CAL,
 	Q1000K_RX_PROBE_COUNT,
 };
 /* Select before configuration, with RX bench + one-attempt recovery enabled.
@@ -164,6 +179,7 @@ int q1000k_phy_pma_init(void);
 int q1000k_phy_rx_reacquire(bool restore_pll, bool restore_gain);
 int q1000k_phy_rx_cleanup(void);
 int q1000k_phy_rx_probe(u32 probe);
+int q1000k_phy_controller_oem_post(bool restore);
 int q1000k_phy_rx_probe_cleanup(void);
 u32 q1000k_phy_rx_probe_writes(void);
 int q1000k_phy_controller_check(void);

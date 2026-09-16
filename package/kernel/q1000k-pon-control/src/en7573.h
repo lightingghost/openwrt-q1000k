@@ -60,6 +60,15 @@ struct en7573_rx_output {
 	u32 control, shape;
 	bool saved;
 };
+struct en7573_oem_post {
+	u32 control;
+	bool saved;
+};
+/* Q1000K xponconfig, after PHY/MAC loading: A2 0x110[8] = 1.
+ * Meaning is undocumented. Independent TX_DISABLE must remain asserted.
+ */
+int en7573_oem_post_init(struct en7573_io *io, struct en7573_oem_post *original,
+			bool restore);
 /* Fixed source-table candidates, never a general register write API.
  * Caller must enforce immutable bench TX inhibition and serialize accesses.
  */

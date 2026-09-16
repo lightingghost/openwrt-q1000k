@@ -343,6 +343,37 @@ static void test_loader(bool oem_a0)
 	printf("EN7573 transport: %s passed\n", oem_a0 ? "OEM A0" : "public A2");
 }
 
+static void test_oem_post(void)
+{
+    struct model m = {0};
+    struct en7573_io io = {.ctx=&m,.read=rd,.write=wr};
+    struct en7573_oem_post original = {0};
+    unsigned int calls, fail;
+    m.regs[0x3018/4]=1; m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+    m.regs[0x110/4]=0x01002c1f;
+    assert(!en7573_oem_post_init(&io,&original,false));
+    assert(original.saved && original.control==0x01002c1f && m.regs[0x110/4]==0x01002d1f);
+    assert(m.regs[0x3e0/4]==EN7573_TX_DISABLE);
+    calls=m.calls;
+    assert(en7573_oem_post_init(&io,&original,false)==-EBUSY);
+    m.regs[0x110/4]^=0x80000000;
+    assert(!en7573_oem_post_init(&io,&original,true) && !original.saved);
+    assert(m.regs[0x110/4]==0x81002c1f);
+    for(fail=1;fail<=calls;fail++) {
+        memset(&m,0,sizeof(m)); memset(&original,0,sizeof(original));
+        m.regs[0x3018/4]=1; m.regs[0x3e0/4]=EN7573_TX_DISABLE; m.regs[0x110/4]=0x01002c1f;
+        m.fail_at=fail;
+        assert(en7573_oem_post_init(&io,&original,false)==-EREMOTEIO && m.calls==fail);
+        m.fail_at=0;
+        assert(!en7573_oem_post_init(&io,&original,true));
+        assert(m.regs[0x110/4]==0x01002c1f && m.regs[0x3e0/4]==EN7573_TX_DISABLE);
+    }
+    m.regs[0x3e0/4]=0;
+    assert(en7573_oem_post_init(&io,&original,false)==-EACCES && !original.saved);
+    m.regs[0x3e0/4]=EN7573_TX_DISABLE; m.regs[0x3018/4]=0;
+    assert(en7573_oem_post_init(&io,&original,false)==-EACCES && !original.saved);
+}
+
 static void test_rx_output(void)
 {
 	const u32 mask = 0x3f1f3f08, shapes[] = {0,0x14001400,0x1e001e00,0x36083208};
@@ -410,6 +441,7 @@ int main(void)
 	test_rx_power(); test_read_only_state(); test_tx_control();
 	test_control_failure_diagnostics();
 	test_receiver_read_only(); test_rx_output();
+	test_oem_post();
 	puts("EN7573 state, RX output guards/restore, observations and failures passed");
 	return 0;
 }
