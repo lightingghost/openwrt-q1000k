@@ -5,6 +5,15 @@ import struct
 
 def elf_defined_symbols(data):
     """Read symbols from a little-endian AArch64 relocatable kernel module."""
+    return _elf_symbols(data, defined=True)
+
+
+def elf_undefined_symbols(data):
+    """Read imported symbols, including calls from inlined implementation code."""
+    return _elf_symbols(data, defined=False)
+
+
+def _elf_symbols(data, *, defined):
     assert len(data) >= 64 and data[:6] == b'\x7fELF\x02\x01'
     assert struct.unpack_from('<HH', data, 16) == (1, 183)
     offset = struct.unpack_from('<Q', data, 40)[0]
@@ -28,7 +37,7 @@ def elf_defined_symbols(data):
             name = struct.unpack_from('<I', data, entry)[0]
             index = struct.unpack_from('<H', data, entry + 6)[0]
             assert name < len(names)
-            if index:  # SHN_UNDEF is zero.
+            if bool(index) == defined:  # SHN_UNDEF is zero.
                 symbols.add(names[name:names.index(0, name)].decode('ascii'))
     assert found
     return symbols

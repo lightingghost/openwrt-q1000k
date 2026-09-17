@@ -12,7 +12,7 @@ import stat
 import struct
 import subprocess
 import zlib
-from pon_image_format import elf_defined_symbols, fdt, u32
+from pon_image_format import elf_defined_symbols, elf_undefined_symbols, fdt, u32
 
 
 def cpio(data, start):
@@ -216,7 +216,11 @@ def inspect(image, revision, profile='bench'):
             assert 'q1000k_phy_profile_matches' in symbols
             assert b'parmtype=isolated_tx_bench:bool' in read(matches[0])
             assert {'qiso_set', 'qiso_get', 'qiso_mpd_get'} <= symbols
-            assert {'qout_run', 'output_before_get', 'output_on_get', 'output_after_get'} <= symbols
+            # GCC may inline qout_run into the finite owner's setter. Check
+            # the retained handlers and its linked controller APIs instead.
+            assert {'output_before_get', 'output_on_get', 'output_after_get'} <= symbols
+            assert {'q1000k_pon_output_gates', 'q1000k_pon_output_hold',
+                    'q1000k_pon_output_sample'} <= elf_undefined_symbols(read(matches[0]))
             assert {'q1000k_phy_snapshot', 'q1000k_phy_receiver_startup', 'q1000k_phy_bench_recover', 'q1000k_phy_last_snapshot', 'q1000k_phy_fast_sample', 'q1000k_phy_rx_bench_recipe'} <= symbols
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])
