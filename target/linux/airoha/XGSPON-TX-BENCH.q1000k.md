@@ -3,11 +3,87 @@
 Implemented 2026-09-16 on `q1000k-xgspon`. Hardware results pending.
 One activation RAM image, one pinned portable collector. No external optical
 meter is available. No NAND writes or extra fiber outages are needed for the
-default suite. Use the existing private unit MCU/DSD archive and subscriber JSON.
+default suite. Use the existing private unit MCU/DSD archive. Subscriber identity
+is required only for the optional connected-fiber activation suite.
 
-## Collector cases
+## Default: disconnected-fiber experiments
 
-The portable collector defaults to `--suite tx`. With an identity, it selects:
+The portable collector defaults to `--suite isolated`. Keep fiber disconnected
+for the entire run. No physical actions or subscriber identity are needed. Each
+case loads only the controller, provider modules and PHY. `ponraw` stays down;
+MAC, registration and OMCI executors remain unloaded. An immutable PHY mode
+rejects normal start. Every case initializes from the verified unit MCU/DSD pair.
+
+| Script case / ID | Option compared | Reference / hypothesis | Diagnostic purpose |
+|---|---|---|---|
+| `isolated-1` / I01 | Controller TX enable, normal gate, no producer | OEM normal gate | Reference: does merely enabling the controller change drive/current or TX power? |
+| `isolated-2` / I02 | PRBS7, existing cold-start clock state | Clock/power-save hypothesis | Contrast with I03 to isolate the additional no-downstream clock preparation. |
+| `isolated-3` / I03 | PRBS7 plus native no-downstream clock preparation | Imported AN7581 vendor PHY | Main active reference without OLT grants. |
+| `isolated-4` / I04 | PRBS23 | Native XGS equivalent of pattern diagnostics | Pattern dependence / sensor consistency. |
+| `isolated-5` / I05 | PRBS31 | Native XGS equivalent of pattern diagnostics | Pattern dependence / sensor consistency. |
+| `isolated-6` / I06 | All-zero pattern | PR 24577-style data/laser diagnostic | Contrast zero/one/alternating and internal modulation, bias, power. |
+| `isolated-7` / I07 | All-one pattern | PR 24577-style data/laser diagnostic | Same; no arbitrary analog-current value. |
+| `isolated-8` / I08 | Alternating pattern | PR 24577-style data/laser diagnostic | Balanced-data reference. |
+| `isolated-9` / I09 | PRBS7, invert only PMA BEN polarity bit | Sirherobrine separate polarity controls; OEM profile 82 baseline | Is burst-enable polarity blocking the active pattern? |
+| `isolated-10` / I10 | PRBS7, OEM `AdaptivePon(0)` eye fields | Q1000K OEM | Does explicitly applying this unit's calibrated XGS eye restore drive? |
+| `isolated-11` / I11 | OEM alternate eye 1 | Q1000K OEM selectable eye | Validate availability; this unit's eye 1 fails field bounds and is skipped before writes. |
+| `isolated-12` / I12 | Eye 0 plus TSSI calibration refresh | Sirherobrine EN7572 `load_eye` | Separate a DDMI calibration difference from a real drive change. |
+| `isolated-13` / I13 | Eye 1 plus TSSI refresh | Sirherobrine alternate eye | Same eligibility guard as I11; expected unavailable on this DSD. |
+| `isolated-14` / I14 | PRBS7, controller BEN forced off | OEM/Sir BEN field | Negative control: are current/power readings sensitive to gating? |
+| `isolated-15` / I15 | PRBS7, loop restart only | OEM/Sir loop-enable toggle | Separate a stalled control loop from changed eye calibration. |
+| `isolated-16` / I16 | PRBS7 restricted to normal timeslots | Native XGS generator gating | Negative control with no grants; compare ungated I03. |
+| `isolated-17` / I17 | PRBS7 generator with controller TX disabled | Independent controller gate | Electrical pattern activity versus laser-enable dependence. |
+| `isolated-18` / I18 | Repeat I03 in a fresh session | Temperature / drift / reproducibility | Check whether the active reference changes over the run. |
+
+I03–I18 use native `FIRST_PLUG_IN -> PLUG_OUT -> 350 ms` preparation, from
+AN7581's no-downstream PRBS path. This is an additional initialization pass, not
+a claim that the serializer is locked. Readbacks retain PLL power/force/status
+and the passive TX frequency result; a passive meter may be stale.
+
+The kernel checks controller LOS and PHY LOS before emission and periodically
+while it owns the PHY. Emission has a five-second target deadline; an in-flight
+I2C transaction and the final disable can extend it. Actual TX enable/disable
+boottime timestamps are recorded. There is no userspace-controlled indefinite
+pattern mode. Signal detection ends the test. Cleanup disables the independent
+controller TX gate, verifies it, and restores changed generator, polarity and
+calibration controls. Any restoration failure stops the collection. A fresh
+module/controller lifetime discards the clock-initialization state.
+
+The script captures three TX-off samples before the test, samples controller
+DDMI/control status about every 250 ms while the kernel operation runs, and
+captures five after restoration. The kernel records 16 PHY register values at
+before/active/after boundaries. `valid_phases` marks which snapshots completed;
+unavailable slots are not observations. `collection.json` aligns entire I2C
+samples with the actual enable interval. `isolated-summary.md` presents before,
+enabled and after power/current ranges with valid sample counts. Raw errno,
+control readbacks, result/restore errors and serial logs remain in the archive.
+
+The known DSD's eye 0 passes the field checks; eye 1 fails current/monitor bounds.
+The OEM reads the first 512 bytes directly into `flash_bob`; its eye 0 selects
+bytes 256–511. No shift or invented fallback calibration is applied. Invalid
+eyes report `unavailable-calibration` and the remaining cases continue.
+
+### Reference mapping and limits
+
+These are Q1000K implementations of the audited controls, not three complete
+firmwares. OEM calibration maps to the extracted `AdaptivePon` instructions;
+Sirherobrine adds a four-byte TSSI update at A2 `0xb4`. Both preserve this unit's
+calibrated current limits. PR 24577 pattern diagnostics use the native XGS
+`XG_CONTINUE_CTRL` at PHY `+0xa78`, not a copied GPON address. Sirherobrine's
+GPON `0x058b/0x0577` response delays and GPON fine-delay defaults are not XGS
+values and are not applied. The OEM XGS response time remains `0x1600`.
+
+Disconnected fiber cannot establish valid optical burst timing, an on-fiber
+serial-number response, OLT acceptance, ranging or O5. All those are marked not
+run, not failed. The image retains the connected-fiber suite below to test
+profile quiesces, hardware response state, received assignment and O5 later.
+The build also exercises the existing serial encoding and PLOAM/profile fixtures;
+those are software checks, not an OLT experiment. No registration ID is needed
+for the disconnected suite.
+
+## Optional connected-fiber collector cases
+
+Select `--suite tx` and supply an identity to run:
 
 | Case | Window | What it tests / collects |
 |---|---:|---|
@@ -46,7 +122,9 @@ before PHY removal powers the controller off. Cleanup continues if a final
 sensor read fails, and explicitly records the missing observation.
 
 MAC schema 2 omits reserved `0x5958/0x595c` and correctly identifies OMCI at
-`0x5960/0x5964`, XGEM at `0x5968/0x596c`. Cold MAC generations separate counter
+`0x5960/0x5964`, XGEM at `0x5968/0x596c`. `0x5920` is invalid-profile
+burst grants and `0x5984` is transmitted ACK PLOAM; earlier placeholder labels
+for these two are corrected. Cold MAC generations separate counter
 resets from modulo-32-bit deltas. Fast schema 2 emits `available:false` only for
 EAGAIN, with no fabricated frame counters; real errors propagate. Coherent
 snapshot EAGAIN retries stop after five attempts and preserve every gap record.
@@ -85,7 +163,7 @@ OEM `phy_tx_ctl` at `0xd8d0` calls `ledTurnOff(42)` for enable and
 notifier table. The static entry at `.data+0x1b8` has mode byte zero, making
 that call a no-op until configuration changes the table. This does not establish
 the runtime mapping or justify an arbitrary GPIO write. Existing Q1000K board
-profile 82 matches the OEM constants; its polarity is observed, not guessed.
+profile 82 matches the OEM constants; the isolated polarity case toggles only the audited PMA BEN bit and restores it.
 
 OEM `xpon_10g.ko` (`bd01941044584af4eee9fda21541f089f1f26d4d0ba3765b7986ae16dd304017`)
 has `gponDevSetSerialNumber` at `0x11538`, writing the same big-endian serial

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "bench": "tx-discovery",
+  "bench": "isolated-tx-and-discovery",
   "hardware_acceptance": false,
   "trace": {
     "version": 1,
@@ -21,7 +21,8 @@
     "/proc/q1000k-pon-last-snapshot",
     "/proc/q1000k-pon-mac",
     "/proc/q1000k-pon-fast",
-    "controller-sysfs/transmitter_status"
+    "controller-sysfs/transmitter_status",
+    "/sys/module/phy_10g/parameters/isolated_tx_test"
   ],
   "control": "/sys/module/xpon_10g/parameters/bench_recover",
   "recovery_actions": [
@@ -344,7 +345,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "tx",
+  "default_suite": "isolated",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -359,7 +360,7 @@
     "5318": "INTEGRITY_KEY_INDICES",
     "5284": "PLOAM_FILTER_CONTROL",
     "52f0": "PLOAM_MIC_CONTROL",
-    "5920": "RX_HEC_ERROR",
+    "5920": "INVLD_PROF_BST_GNT_CNT",
     "5944": "TX_BST_CNT_INTERNAL_MPI_SOF",
     "5950": "RX_PLOAM",
     "5954": "TX_PLOAM",
@@ -367,6 +368,118 @@
     "5964": "TX_OMCI",
     "5968": "RX_XGEM",
     "596c": "TX_XGEM",
-    "5984": "EXISTING_DEBUG_COUNTER_RAW"
+    "5984": "TX_ACK_PLOAMU_CNT"
+  },
+  "isolated_tx": {
+    "version": 1,
+    "fiber": "disconnected",
+    "mac_loaded": false,
+    "subscriber_identity_required": false,
+    "window_target_ms": 5000,
+    "in_flight_io_can_extend_window": true,
+    "one_test_per_phy_lifetime": true,
+    "register_snapshots": [
+      "before",
+      "active",
+      "after"
+    ],
+    "periodic_dual_los_guard": true,
+    "cases": [
+      {
+        "id": 1,
+        "name": "isolated-1",
+        "label": "normal-gate-no-producer"
+      },
+      {
+        "id": 2,
+        "name": "isolated-2",
+        "label": "prbs7-existing-clock"
+      },
+      {
+        "id": 3,
+        "name": "isolated-3",
+        "label": "prbs7-native-clock"
+      },
+      {
+        "id": 4,
+        "name": "isolated-4",
+        "label": "prbs23"
+      },
+      {
+        "id": 5,
+        "name": "isolated-5",
+        "label": "prbs31"
+      },
+      {
+        "id": 6,
+        "name": "isolated-6",
+        "label": "all-zero"
+      },
+      {
+        "id": 7,
+        "name": "isolated-7",
+        "label": "all-one"
+      },
+      {
+        "id": 8,
+        "name": "isolated-8",
+        "label": "alternating"
+      },
+      {
+        "id": 9,
+        "name": "isolated-9",
+        "label": "ben-inverted"
+      },
+      {
+        "id": 10,
+        "name": "isolated-10",
+        "label": "oem-eye0"
+      },
+      {
+        "id": 11,
+        "name": "isolated-11",
+        "label": "oem-eye1"
+      },
+      {
+        "id": 12,
+        "name": "isolated-12",
+        "label": "sir-eye0-tssi"
+      },
+      {
+        "id": 13,
+        "name": "isolated-13",
+        "label": "sir-eye1-tssi"
+      },
+      {
+        "id": 14,
+        "name": "isolated-14",
+        "label": "ben-forced-off"
+      },
+      {
+        "id": 15,
+        "name": "isolated-15",
+        "label": "loop-restart"
+      },
+      {
+        "id": 16,
+        "name": "isolated-16",
+        "label": "in-timeslot-no-grants"
+      },
+      {
+        "id": 17,
+        "name": "isolated-17",
+        "label": "generator-tx-disabled"
+      },
+      {
+        "id": 18,
+        "name": "isolated-18",
+        "label": "prbs7-repeat"
+      }
+    ],
+    "known_unit_calibration": {
+      "eye0": "eligible",
+      "eye1": "out-of-range; expect unavailable-calibration"
+    },
+    "optical_waveform_measured": false
   }
 }

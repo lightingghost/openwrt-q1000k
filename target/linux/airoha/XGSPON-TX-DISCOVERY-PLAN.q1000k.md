@@ -1,3 +1,8 @@
+> Latest steering (2026-09-16): next bench has **disconnected fiber**. The
+> consolidated image now defaults to the 18-case PHY-only isolated suite in
+> [XGSPON-TX-BENCH.q1000k.md](XGSPON-TX-BENCH.q1000k.md). Connected discovery
+> cases below remain selectable for a later session; they are not run in darkness.
+
 # Q1000K upstream discovery: analysis and next bench specification
 
 Prepared 2026-09-16 after normal internet recovery. Branch `q1000k-xgspon`.

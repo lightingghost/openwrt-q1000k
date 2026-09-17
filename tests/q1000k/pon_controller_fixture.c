@@ -90,6 +90,12 @@ static int en7573_read_control(struct en7573_io *io, unsigned int reg, u32 *valu
 static int initialize_calls, initialize_error;
 static int pon_initialize(struct q1000k_pon *p)
 { assert(p->lock.held && p->leased && p->tx_inhibited && !p->tx_enabled); initialize_calls++; return initialize_error; }
+struct en7573_tx_recipe { u32 words[8]; unsigned int count; };
+static int recipe_error, recipe_calls;
+static int en7573_tx_recipe(struct en7573_io *io, const unsigned char *cal,
+                           unsigned int recipe, struct en7573_tx_recipe *saved, bool restore)
+{ struct q1000k_pon *p=io->ctx; assert(p->lock.held && p->leased && !p->tx_enabled);
+  recipe_calls++; if(recipe_error) return recipe_error; saved->count=restore ? 0 : 8; return 0; }
 /* PRODUCTION */
 static struct q1000k_pon *create(void)
 {
@@ -223,5 +229,18 @@ int main(void)
     assert(q1000k_pon_bench_reinitialize(p)==-EIO && initialize_calls==2 && !p->initialized && !p->tx_enabled);
     assert(q1000k_pon_bench_reinitialize(p)==-EIO && initialize_calls==2);
     assert(q1000k_pon_put(p)==-EIO); pon_unpublish(p); pon_drop_device_ref(p);
+    struct en7573_tx_recipe saved={0};
+    p=create(); assert(q1000k_pon_get()==p);
+    assert(q1000k_pon_tx_recipe(p,2,&saved,false)==-EACCES && !recipe_calls && off==1);
+    q1000k_pon_put(p); pon_unpublish(p); pon_drop_device_ref(p);
+    p=create(); p->activation_bench=true; assert(q1000k_pon_get()==p);
+    recipe_error=-ENODATA;
+    assert(q1000k_pon_tx_recipe(p,3,&saved,false)==-ENODATA && !off && !p->fault && !saved.count);
+    recipe_error=0;
+    assert(!q1000k_pon_tx_recipe(p,2,&saved,false) && saved.count==8);
+    assert(!q1000k_pon_tx_recipe(p,2,&saved,true) && !saved.count);
+    recipe_error=-EREMOTEIO;
+    assert(q1000k_pon_tx_recipe(p,2,&saved,false)==-EREMOTEIO && off==1 && !p->initialized);
+    q1000k_pon_put(p); pon_unpublish(p); pon_drop_device_ref(p);
     return 0;
 }

@@ -29,7 +29,7 @@ preflight() {
 	[ "$(cat /proc/sys/kernel/panic)" = 0 ] || fail 'Panic timeout must be zero.'
 }
 owned_modules= controller= locked=0 lower_owned=0 wan_owned=0
-manual_recovery=0 stack_generation=0
+manual_recovery=0 stack_generation=0 isolated_pid=
 cleanup() {
 	local result=$? module failed=0
 	trap - EXIT
@@ -39,6 +39,9 @@ cleanup() {
 		ifdown q1000k_wan6 || failed=1
 		ifdown q1000k_wan || failed=1
 	fi
+	# A synchronous kernel test retains ownership until TX-off/restoration.
+	# Wait for that finite operation before unloading any dependency.
+	[ -z "$isolated_pid" ] || { wait "$isolated_pid" || :; isolated_pid=; }
 	postmortem
 	stop_stack || failed=1
 	rm -f /var/run/q1000k-pon-bench.lock/control
@@ -226,13 +229,13 @@ identity_option_read() {
 }
 case "$1" in
 	status) [ "$#" = 1 ] || fail 'Unexpected status arguments.'; preflight; exit 0 ;;
-	rx|activate) [ "$#" = 5 ] || [ "$#" = 6 ] || [ "$#" = 7 ] || fail 'Usage: q1000k-pon-validate rx|activate CALIBRATION IDENTITY_DIR SAMPLES IPERF_IP_OR_NONE [PHASE]'
+	rx|activate|isolated) [ "$#" = 5 ] || [ "$#" = 6 ] || [ "$#" = 7 ] || fail 'Usage: q1000k-pon-validate rx|activate CALIBRATION IDENTITY_DIR SAMPLES IPERF_IP_OR_NONE [PHASE]'
 		mode=$1; calibration=$2; identity_dir=$3; limit=$4; iperf_server=$5; phase=${6:-rx}; recovery_actions=${7:-1,2,3,4,5,6,7} ;;
 	*) fail 'Commands: status, rx, activate' ;;
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -259,6 +262,7 @@ if [ "$mode" = activate ]; then
 	wan_idle || fail 'WAN configuration is not idle/owned.'
 	allow_tx=1 inhibit=0
 fi
+[ "$mode" != isolated ] || { allow_tx=1; inhibit=0; }
 [ -n "$registration" ] || registration=000000000000000000000000000000000000000000000000000000000000000000000000
 modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
 for module in $modules; do [ ! -d "/sys/module/$module" ] || fail "Module $module already loaded."; done
@@ -281,6 +285,11 @@ cat "$calibration" > "$controller/calibration" || fail 'Cannot stage calibration
 printf 'initialize\n' > "$controller/operation" || fail 'Controller initialization failed.'
 controller_check xgspon || fail 'Controller initialization check failed.'
 tx_observe initialized-tx-off || fail 'TX-off reference capture failed.'
+if [ "$mode" = isolated ]; then
+ for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon; do load_module "$module"; done
+ load_module phy_10g isolated_tx_bench=1
+ return 0
+fi
 ip link set dev ponraw up || fail 'Cannot open DMA endpoint.'
 lower_owned=1
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do load_module "$module"; done
@@ -288,6 +297,37 @@ for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_x
 load_module xpon_10g bench_profile_coalesce="$coalesce" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
 }
 start_stack
+if [ "$mode" = isolated ]; then
+ case "$phase" in isolated-*) test_id=${phase#isolated-} ;; *) fail 'Wrong isolated phase.' ;; esac
+ event "$phase" started
+ for tick in 1 2 3; do tx_observe isolated-before || fail 'TX reference capture failed.'; sleep 1; done
+ # Kernel checks both LOS indications before enabling TX and throughout the
+ # finite window. Neither ponraw nor the MAC/registration stack is started.
+ printf '%s\n' "$test_id" > /sys/module/phy_10g/parameters/isolated_tx_test &
+ isolated_pid=$!
+ tick=0
+ while kill -0 "$isolated_pid" 2>/dev/null; do
+  tx_observe isolated-window || :
+  sleep 0.25
+  tick=$((tick+1))
+  [ "$tick" -lt 320 ] || fail 'Isolated kernel operation exceeded observation bound.'
+ done
+ test_rc=0; wait "$isolated_pid" || test_rc=$?; isolated_pid=
+ printf 'isolated_writer_rc=%s\n' "$test_rc"
+ data=$(cat /sys/module/phy_10g/parameters/isolated_tx_test) || fail 'Missing isolated result.'
+ printf '%s\n' "$data"
+ json_load "$data" || fail 'Invalid isolated result.'
+ field id int && [ "$value" = "$test_id" ] || fail 'Isolated test did not start.'
+ field restored boolean && [ "$value" = 1 ] || fail 'TX controls were not restored.'
+ field tx_off boolean && [ "$value" = 1 ] || fail 'TX-off was not verified.'
+ field error int || fail 'Missing test result.'
+ if [ "$value" = -61 ]; then event "$phase" unavailable-calibration;
+ elif [ "$value" = 0 ] && [ "$test_rc" = 0 ]; then event "$phase" observed;
+ else fail 'Isolated test failed (see captured result).'; fi
+ for tick in 1 2 3 4 5; do tx_observe isolated-after || fail 'Post-TX capture failed.'; sleep 1; done
+ controller_check xgspon || fail 'Controller unhealthy after isolated experiment.'
+ exit 0
+fi
 last_ms=-1 previous_frames=-1 stable=0 state=0 authenticated=0 operational=0 rules=0 objects=0
 physical() {
 	local expiry=$(( $(now) + 600 )) bright_at=0 count=0 action tick step

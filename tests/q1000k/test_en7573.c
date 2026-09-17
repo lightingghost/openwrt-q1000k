@@ -468,8 +468,57 @@ static void test_transmitter(void)
  }
  assert(en7573_sample_transmitter(NULL,&s)==-EINVAL);
 }
+
+static void test_calibrated_tx_recipes(void)
+{
+ struct model m = { 0 };
+ struct en7573_io io = { .ctx=&m, .read=rd, .write=wr };
+ struct en7573_tx_recipe saved;
+ u8 cal[512]={0};
+ unsigned int i, recipe, calls;
+ u32 original[sizeof(m.regs)/sizeof(m.regs[0])];
+ for(i=0;i<2;i++) {
+  u8 *e=cal+i*256; e[0x86]=0x23+i; e[0x87]=1; e[0x88]=0x56+i; e[0x89]=4;
+  e[0x8a]=0x65; e[0x8c]=1; e[0x8d]=0x78; e[0x8e]=0x9a; e[0x8f]=3;
+  e[0x90]=5; e[0x91]=2; e[0x92]=6; e[0x93]=2;
+  e[0xb4]=0x12+i; e[0xb5]=0x34; e[0xb6]=0x56; e[0xb7]=0x78;
+ }
+ for(recipe=1;recipe<=6;recipe++) {
+  memset(&m,0,sizeof(m)); memset(&saved,0,sizeof(saved));
+  for(i=0;i<sizeof(m.regs)/sizeof(m.regs[0]);i++) m.regs[i]=0xa5000000;
+  m.regs[0x3018/4]=1; m.regs[0x3e0/4]=EN7573_TX_DISABLE;
+  m.regs[0xb4/4]=~0U; /* erased calibration is valid saved data */
+  memcpy(original,m.regs,sizeof(original));
+  assert(!en7573_tx_recipe(&io,cal,recipe,&saved,false)); calls=m.calls;
+  assert(saved.count==(recipe==4 || recipe==5 ? 8U : 7U));
+  assert(en7573_tx_recipe(&io,cal,recipe,&saved,false)==-EBUSY);
+  if(recipe>=2 && recipe<=5) {
+   unsigned int eye=recipe==2 || recipe==4;
+   assert((m.regs[0x210/4]&0x0fff1fff)==((0x123+eye)<<16 | (0x456+eye)));
+   assert((m.regs[0x130/4]&0x3f01)==0x1501);
+   if(recipe>=4) assert(m.regs[0xb4/4]==0x78563412+eye);
+   else assert(m.regs[0xb4/4]==original[0xb4/4]);
+  }
+  assert(!en7573_tx_recipe(&io,cal,recipe,&saved,true) && !saved.count);
+  assert(!memcmp(original,m.regs,sizeof(original)));
+  for(i=1;i<=calls;i++) {
+   memcpy(m.regs,original,sizeof(original)); m.calls=0; m.fail_at=i; memset(&saved,0,sizeof(saved));
+   assert(en7573_tx_recipe(&io,cal,recipe,&saved,false)==-EREMOTEIO);
+   m.fail_at=0;
+   assert(!en7573_tx_recipe(&io,cal,recipe,&saved,true));
+   assert(!memcmp(original,m.regs,sizeof(original)));
+  }
+ }
+ memset(cal,0xff,sizeof(cal)); memset(&saved,0,sizeof(saved)); m.fail_at=0;
+ assert(en7573_tx_recipe(&io,cal,2,&saved,false)==-ENODATA && !saved.count);
+ m.regs[0x3e0/4]=0;
+ assert(en7573_tx_recipe(&io,cal,1,&saved,false)==-EACCES && !saved.count);
+ puts("Calibrated TX recipes: eye mapping, all transfer failures, restoration and guards passed");
+}
+
 int main(void)
 {
+ test_calibrated_tx_recipes();
 	test_transmitter();
 	test_loader(false); test_loader(true);
 	test_rx_power(); test_read_only_state(); test_tx_control();

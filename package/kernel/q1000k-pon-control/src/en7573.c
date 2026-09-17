@@ -212,6 +212,81 @@ static int rx_output_update(struct en7573_io *io, u16 reg, u32 mask, u32 value)
 	return rx_output_guard(io);
 }
 
+static const u16 tx_recipe_regs[EN7573_TX_SAVED] = {
+ 0x100, 0x210, 0x124, 0x130, 0x128, 0x13c, 0x208, 0xb4,
+};
+
+/* TSSI calibration is a four-byte data word, so an erased all-ones value
+ * can be saved/restored. It is not a controller-health register. */
+static int tx_recipe_tssi(struct en7573_io *io, u32 value)
+{
+ u32 actual;
+ int ret = rx_output_guard(io);
+ if (!ret) ret = write_control(io, 0xb4, value);
+ if (!ret) ret = en7573_read_control(io, 0xb4, &actual);
+ if (!ret && actual != value) ret = -EIO;
+ return ret ?: rx_output_guard(io);
+}
+
+int en7573_tx_recipe(struct en7573_io *io, const u8 *cal, unsigned int recipe,
+                     struct en7573_tx_recipe *saved, bool restore)
+{
+ const u8 *eye;
+ u32 imod, iav, erc, value;
+ unsigned int i, count;
+ int ret, first = 0;
+ if (!io || !io->read || !io->write || !saved) return -EINVAL;
+ if (restore && !saved->count) return 0;
+ ret = rx_output_guard(io);
+ if (ret) return ret;
+ if (restore) {
+  /* Reverse order restores the original gate last. Continue restoring on
+   * a bus failure; the controller owner removes power if anything fails. */
+  for (i = saved->count; i; i--) {
+   ret = i == 8 ? tx_recipe_tssi(io, saved->words[i-1]) :
+    rx_output_update(io, tx_recipe_regs[i-1], ~0U, saved->words[i-1]);
+   if (ret && !first) first = ret;
+  }
+  if (!first) saved->count = 0;
+  return first;
+ }
+ if (recipe < 1 || recipe > 6 || !cal) return -EINVAL;
+ if (saved->count) return -EBUSY;
+ eye = cal + ((recipe == 2 || recipe == 4) ? 256 : 0);
+ imod = (u32)eye[0x86] | (u32)eye[0x87] << 8;
+ iav = (u32)eye[0x88] | (u32)eye[0x89] << 8;
+ erc = (u32)eye[0x8e] | (u32)eye[0x8f] << 8;
+ /* Reject absent/out-of-range calibrated eyes, never invent drive codes. */
+ if (recipe >= 2 && recipe <= 5 &&
+     ((!imod && !iav) || imod > 0xfff || iav > 0x1fff || erc > 0xfff ||
+      eye[0x8c] > 1 || eye[0x90] > 7 || eye[0x91] > 7 ||
+      eye[0x92] > 7 || eye[0x93] > 3)) return -ENODATA;
+ if ((recipe == 4 || recipe == 5) && get_le32(eye + 0xb4) == ~0U) return -ENODATA;
+ count = recipe == 4 || recipe == 5 ? 8 : 7;
+ for (i = 0; i < count; i++) {
+  ret = en7573_read_control(io, tx_recipe_regs[i], &value);
+  if (ret || (i != 7 && value == ~0U)) return ret ?: -EIO;
+  saved->words[i] = value;
+ }
+ saved->count = count;
+ ret = rx_output_update(io, 0x100, 0xc, 0x8); /* BEN off */
+ if (recipe == 6 || ret) return ret;
+ if (recipe >= 2) {
+#define TX_STEP(reg, mask, val) do { if (!ret) ret = rx_output_update(io, reg, mask, val); } while (0)
+  TX_STEP(0x210, 0x0fff1fff, (imod << 16) | iav);
+  TX_STEP(0x124, 0xff00, (u32)eye[0x8a] << 8);
+  TX_STEP(0x130, 0x3f01, (((u32)eye[0x91] << 3 | eye[0x90]) << 8) | eye[0x8c]);
+  TX_STEP(0x128, 0x0fffff00, erc << 16 | (u32)eye[0x8d] << 8);
+  TX_STEP(0x13c, 0x70060, (u32)eye[0x92] << 16 | (u32)eye[0x93] << 5);
+  if (!ret && recipe >= 4) ret = tx_recipe_tssi(io, get_le32(eye + 0xb4));
+ }
+ TX_STEP(0x208, 1, 0);
+ TX_STEP(0x208, 1, 1);
+ TX_STEP(0x100, 0xc, recipe == 1 ? saved->words[0] : 0);
+#undef TX_STEP
+ return ret;
+}
+
 int en7573_oem_post_init(struct en7573_io *io, struct en7573_oem_post *original,
 			bool restore)
 {

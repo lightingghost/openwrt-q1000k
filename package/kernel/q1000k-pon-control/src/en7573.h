@@ -85,6 +85,14 @@ struct en7573_tx_field { const char *name, *unit; u16 reg; u8 width; u32 scale; 
 struct en7573_transmitter { u32 raw[EN7573_TX_FIELDS]; int error[EN7573_TX_FIELDS]; };
 extern const struct en7573_tx_field en7573_tx_fields[EN7573_TX_FIELDS];
 int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *sample);
+/* Fixed disconnected-bench recipes: 1 restart; 2/3 OEM eye0/1;
+ * 4/5 same eyes with Sirherobrine TSSI refresh; 6 BEN forced off.
+ * Save all affected words before any write; caller must restore with TX off.
+ */
+#define EN7573_TX_SAVED 8
+struct en7573_tx_recipe { u32 words[EN7573_TX_SAVED]; unsigned int count; };
+int en7573_tx_recipe(struct en7573_io *io, const u8 *cal, unsigned int recipe,
+                     struct en7573_tx_recipe *saved, bool restore);
 int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample);
 /* Published RX power: 0x51:0x0068, BE16 in 0.1 uW units. Zero/saturated
  * words are unavailable (-ENODATA); errors leave the output unchanged.

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Sleepable Q1000K PHY control and callback lifetime. */
 #include <linux/interrupt.h>
+#include <linux/delay.h>
+#include "en7581_pma.h"
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -29,6 +31,7 @@ static DEFINE_MUTEX(qphy_callback);
 static struct task_struct *qphy_owner;
 static struct q1000k_pon *qphy_controller;
 static bool qphy_active, qphy_dead;
+static bool isolated_tx_bench;
 static int qphy_fault;
 static struct q1000k_rx_sample qphy_last_rx;
 static struct q1000k_rx_diagnostics qphy_last_diag;
@@ -558,6 +561,7 @@ int q1000k_phy_start(void)
 	struct device *dev;
 	int irq, ret = qphy_context();
 
+	if (isolated_tx_bench) return -EPERM;
 	if (ret)
 		return ret;
 	/* Deferred MAC events may arrive before the PHY callback returns.
@@ -1631,3 +1635,5 @@ int q1000k_phy_fast_sample(u32 *sfp, u32 *sync, u32 *frames)
 	return ret;
 }
 EXPORT_SYMBOL(q1000k_phy_fast_sample);
+
+#include "q1000k_phy_isolated.h"

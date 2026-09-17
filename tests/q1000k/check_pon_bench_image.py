@@ -196,7 +196,7 @@ def inspect(image, revision, profile='bench'):
         assert {'init_module', 'cleanup_module'} <= symbols, (name, 'module lacks init/exit lifecycle')
         if profile == 'activation' and name == 'q1000k-pon-control':
             assert b'parmtype=validation_tx:bool' in read(matches[0])
-            assert {'transmitter_status_show', 'en7573_sample_transmitter'} <= symbols
+            assert {'transmitter_status_show', 'en7573_sample_transmitter', 'q1000k_pon_tx_recipe', 'en7573_tx_recipe'} <= symbols
             assert b'connector_emission_verified' in read(matches[0])
             assert {'q1000k_pon_receiver_startup','q1000k_pon_bench_reinitialize'} <= symbols
         if profile == 'activation' and name == 'airoha_ecnt_hook':
@@ -209,6 +209,8 @@ def inspect(image, revision, profile='bench'):
             assert {'q1000k_snapshot_init', 'q1000k_snapshot_exit', 'q1000k_omci_security_status', 'qrx_recover_set', 'qrx_mac_show', 'qrx_last_show', 'qrx_fast_show'} <= symbols
         if profile == 'activation' and name == 'phy_10g':
             assert 'q1000k_phy_profile_matches' in symbols
+            assert b'parmtype=isolated_tx_bench:bool' in read(matches[0])
+            assert {'qiso_set', 'qiso_get'} <= symbols
             assert {'q1000k_phy_snapshot', 'q1000k_phy_receiver_startup', 'q1000k_phy_bench_recover', 'q1000k_phy_last_snapshot', 'q1000k_phy_fast_sample', 'q1000k_phy_rx_bench_recipe'} <= symbols
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])

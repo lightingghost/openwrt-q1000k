@@ -43,6 +43,9 @@ if action=='cat':
         active=(ctl/'operation').read_text().strip()=='initialize'
         emit(dict(mode='xgspon' if active else 'off',tx_inhibited=not tx(),tx_disabled=not tx() or not active,
             last_error=0,md32_enabled=active,firmware_verified=active,calibration_supplied=active))
+    elif args==[str(root/'sys/module/phy_10g/parameters/isolated_tx_test')]:
+        emit(dict(isolated_tx_version=1,id=int(pathlib.Path(args[0]).read_text()),error=0,
+            restored=os.environ.get('VALIDATION_BAD')!='restore',tx_off=True))
     elif args==[str(root/'proc/q1000k-pon-snapshot')]:
         counter=root/'validation-count'; n=int(counter.read_text())+1 if counter.exists() else 1; counter.write_text(str(n)); (root/'proc/uptime').write_text(str(n)+'.00 0.00\n')
         bad=os.environ.get('VALIDATION_BAD','')
@@ -76,12 +79,17 @@ if action in ('modprobe','insmod'):
     module=pathlib.Path(args[0]).stem.replace('-','_') if action=='insmod' else args[0]
     if module=='q1000k_pon_control': (root/'controller-params').write_text(json.dumps(dict(a.split('=',1) for a in args[1:])))
     (root/'sys/module'/module).mkdir(parents=True)
+    if module=='phy_10g' and 'isolated_tx_bench=1' in args:
+        d=root/'sys/module/phy_10g/parameters'; d.mkdir(); (d/'isolated_tx_test').write_text('0')
     if module=='xpon_10g':
         (root/'proc/xgpon').mkdir(parents=True,exist_ok=True)
         (root/'proc/xgpon/status').write_text('protocol_error=0\nsecurity_keys_valid=1\ndata_rx_key_valid=1\ndata_tx_key_index=1\ndata_key_pending=0\n')
 elif action=='rmmod':
     if args[0]=='q1000k_pon_control': assert (ctl/'operation').read_text()=='off\n'
-    (root/'sys/module'/args[0]).rmdir()
+    d=root/'sys/module'/args[0]
+    if (d/'parameters').exists():
+        (d/'parameters/isolated_tx_test').unlink(); (d/'parameters').rmdir()
+    d.rmdir()
 elif action=='ip':
     if args[:4]==['link','set','dev','ponraw']: pass
     elif '-j' in args: emit([])
@@ -121,6 +129,18 @@ else: raise AssertionError((action,args))
     def calls(self):
         p=self.root/'validation-calls'
         return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+
+    def test_disconnected_phy_only_and_restore_failure(self):
+        for bad in ('', 'restore'):
+            self.env['VALIDATION_BAD']=bad
+            result=subprocess.run(['busybox','ash',str(self.script),'isolated',str(self.fixture.calibration),
+                str(self.identity),'30','none','isolated-3'],env=self.env,capture_output=True,text=True,timeout=90)
+            self.assertEqual(result.returncode==0,not bad,result.stdout[-2500:]+result.stderr)
+            self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+            self.assertFalse((self.root/'sys/module/phy_10g').exists())
+        self.assertFalse(any('xpon_10g' in str(c) or 'omci' in str(c) for c in self.calls()))
+        self.assertTrue(any('isolated_tx_bench=1' in c for c in self.calls()))
+        self.assertFalse(any(c[0]=='ip' for c in self.calls()))
 
     def test_rx_default_policy_automatic_init_and_cleanup(self):
         result=self.run_case()

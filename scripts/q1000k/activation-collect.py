@@ -197,9 +197,29 @@ def plan(skip_physical=False, rx_only=False, soak=180, physical_only=False):
 PHYSICAL = {'rx-reconnect', 'rx-confirm', 'activation-reconnect', 'rx-dark-start',
             'rx-short-outage', 'rx-long-outage'}
 
+ISOLATED_TESTS = [
+ 'normal-gate-no-producer', 'prbs7-existing-clock', 'prbs7-native-clock',
+ 'prbs23', 'prbs31', 'all-zero', 'all-one', 'alternating', 'ben-inverted',
+ 'oem-eye0', 'oem-eye1', 'sir-eye0-tssi', 'sir-eye1-tssi', 'ben-forced-off',
+ 'loop-restart', 'in-timeslot-no-grants', 'generator-tx-disabled', 'prbs7-repeat',
+]
+
 def discovery_plan(args):
     if args.physical_only and args.skip_physical:
         raise ValueError('--physical-only cannot be combined with --skip-physical')
+    if getattr(args, 'suite', 'legacy') == 'isolated':
+        if args.physical_only or args.identity:
+            raise ValueError('Isolated suite requires disconnected fiber and no subscriber identity')
+        if args.rx_only:
+            raise ValueError('Isolated suite emits bounded test patterns; use --suite legacy --rx-only for RX-only work')
+        cases = [dict(name=f'isolated-{i}', label=label, mode='isolated', samples=30,
+                      ids=[f'I{i:02d}'])
+                 for i,label in enumerate(ISOLATED_TESTS, 1)]
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown isolated case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
     if getattr(args, 'suite', 'legacy') == 'tx' and not args.physical_only:
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -494,7 +514,7 @@ def capture(pin, case, iperf, directory, redact):
                                stderr=subprocess.STDOUT, bufsize=0, start_new_session=True)
     process.stdin.write(script.encode()); process.stdin.close(); process.stdin = None
     waiting = None; disconnected = reconnected = False; pending = b''; last_notice = time.monotonic()
-    print(f'{name}: collecting; TX {"permitted" if case["mode"] == "activate" else "inhibited"}.', flush=True)
+    print(f'{name}: collecting; TX {"permitted" if case["mode"] in ("activate", "isolated") else "inhibited"}.', flush=True)
     try:
         with (directory / (name + '.log')).open('w') as output:
             while True:
@@ -584,6 +604,39 @@ def capture(pin, case, iperf, directory, redact):
     result['name'] = name
     result['required_dark_samples'] = 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15
     result['status'] = case_outcome(result)
+    if case['mode'] == 'isolated':
+        rows = [json.loads(line) for line in lines if line.startswith('{"isolated_tx_version":')]
+        result['isolated'] = rows[-1] if rows else {}
+        sample = result['isolated']
+        clean = (result['returncode'] == 0 and result['stages'].get('cleanup') == 'passed'
+                 and sample.get('restored') is True and sample.get('tx_off') is True
+                 and sample.get('id') == int(name.split('-')[1]))
+        valid = sample.get('valid_phases', 0)
+        unavailable = sample.get('error') == -61 and valid == 5
+        measured = sample.get('error') == 0 and valid == 7 and sample.get('dark_checks', 0) >= 3
+        result['status'] = ('unavailable-calibration' if unavailable else 'observed') if clean and (unavailable or measured) else 'containment-failure'
+        result['planned_ids'] = case.get('ids', [])
+        result['test_label'] = case['label']
+        result['test_outcomes'] = {i:result['status'] for i in case.get('ids', [])}
+        # Label internal measurements by the kernel's actual TX interval.
+        # Fresh I2C timestamps still do not establish DDMI refresh/age.
+        begin, end = sample.get('enabled_ns',0), sample.get('disabled_ns',0)
+        tx_rows = []
+        for line in lines:
+            try: row = json.loads(line)
+            except ValueError: continue
+            if isinstance(row,dict) and row.get('transmitter_version') == 1: tx_rows.append(row)
+        result['tx']['aligned'] = {}
+        for phase in ('before','enabled','after'):
+            aligned = [r for r in tx_rows if (phase == 'before' and r['end_ns'] <= begin or
+                      phase == 'enabled' and begin and r['begin_ns'] >= begin and r['end_ns'] <= end or
+                      phase == 'after' and r['begin_ns'] >= end)] if end else []
+            result['tx']['aligned'][phase] = {}
+            for field in ('bias','modulation','tx_power','bias_code','modulation_code','ocp_status','ben_status'):
+                values = [r['fields'][field]['value'] for r in aligned if r['fields'].get(field,{}).get('valid') is True]
+                result['tx']['aligned'][phase][field] = dict(samples=len(values), minimum=min(values) if values else None,
+                    maximum=max(values) if values else None, changed=len(set(values)) > 1)
+        return result
     if result['rx_samples'] < 15 and result['status'] != 'containment-failure': result['status'] = 'inconclusive'
     result['planned_ids'] = case.get('ids', [])
     result['independent_recovery'] = name == 'rx-confirm' and len(result['recovery_sequence']) == 1 and bool(result['recovery_winner'])
@@ -683,7 +736,10 @@ def execute(args, pin):
             record['not_run'] = [c['name'] for c in cases if c['name'] not in {r['name'] for r in record['results']}]
             if args.physical_only:
                 record['not_run'] += ['rx-startup', 'rx-repeat-1', 'rx-repeat-2', 'rx-soak']
-            if rx_only:
+            if getattr(args, 'suite', 'legacy') == 'isolated':
+                record['not_run'] += ['OLT discovery', 'serial acceptance', 'ranging', 'O5', 'OMCI provisioning', 'WAN traffic']
+                record['identity_note'] = 'Disconnected PHY-only suite; no identity programmed and no registration executor loaded.'
+            elif rx_only:
                 record['not_run'] += ['activation', 'provisioning', 'wan', 'traffic']
                 record['identity_note'] = 'Activation omitted: RX-only selected or no private identity supplied.'
             active = next((r for r in record['results'] if r['name'] == 'activation'), {})
@@ -695,6 +751,21 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
+            if getattr(args, 'suite', 'legacy') == 'isolated':
+                report = ['# Disconnected transmitter observations', '',
+                    'Internal sensor readings; connector emission and O5 remain unverified.', '',
+                    '| Case | Result | Internal TX nW before / enabled / after | Bias uA before / enabled / after | TX off / restored |',
+                    '|---|---|---|---|---|']
+                def ranges(result, field):
+                    values=[]
+                    for phase in ('before','enabled','after'):
+                        v=result.get('tx',{}).get('aligned',{}).get(phase,{}).get(field,{})
+                        values.append(f"{v['minimum']}..{v['maximum']} ({v['samples']} samples)" if v.get('samples') else 'unavailable')
+                    return ' / '.join(values)
+                for result in record['results']:
+                    iso=result.get('isolated',{})
+                    report.append(f"| {result['name']} {result.get('test_label','')} | {result['status']} | {ranges(result,'tx_power')} | {ranges(result,'bias')} | {iso.get('tx_off')} / {iso.get('restored')} |")
+                (args.output/'isolated-summary.md').write_text('\n'.join(report)+'\n')
             files = sorted(p for p in args.output.iterdir() if p.is_file())
             (args.output/'sha256sums').write_text(''.join(f'{digest(p.read_bytes())}  {p.name}\n' for p in files))
             archive = args.output.with_suffix('.tar.gz')
@@ -716,7 +787,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('tx','legacy'), default='tx', help='TX measurements and baseline/coalesced/repeat/quiet comparison; legacy exposes the earlier physical recovery suite')
+    parser.add_argument('--suite', choices=('isolated','tx','legacy'), default='isolated', help='Default: disconnected PHY-only transmitter tests. tx selects connected-fiber discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

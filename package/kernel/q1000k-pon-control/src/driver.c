@@ -478,6 +478,25 @@ int q1000k_pon_get_rx_power(struct q1000k_pon *pon, u32 *nanowatts)
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_get_rx_power);
 
+int q1000k_pon_tx_recipe(struct q1000k_pon *pon, unsigned int recipe,
+                        struct en7573_tx_recipe *saved, bool restore)
+{
+ int ret = pon_context();
+ if (ret) return ret;
+ if (IS_ERR_OR_NULL(pon) || !saved) return -EINVAL;
+ mutex_lock(&pon->lock);
+ ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+ if (!ret && (!pon->activation_bench || pon->tx_inhibited || pon->tx_enabled))
+  ret = -EACCES;
+ if (!ret) ret = en7573_tx_recipe(&pon->io, pon->calibration, recipe, saved, restore);
+ /* ENODATA before writes means an unavailable calibrated eye. */
+ if (ret && !(ret == -ENODATA && !saved->count) && pon->leased && !pon->dead)
+  pon_contain(pon, ret);
+ mutex_unlock(&pon->lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_tx_recipe);
+
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 {
 	const char *phase = "check";
