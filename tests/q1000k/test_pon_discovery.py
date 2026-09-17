@@ -117,7 +117,8 @@ int main(void) {
                 cases=[dict(name='activation',mode='activate',samples=240),dict(name='rx-startup',mode='rx',samples=30)]
                 results=[dict(name='activation',status=failed,stages={'activation':'timeout'}),
                          dict(name='rx-startup',status='observed',stages={})]
-                with mock.patch.object(C,'discovery_plan',return_value=cases), mock.patch.object(C,'private_inputs',return_value=b'fixture'), \
+                with mock.patch.object(C.tempfile,'gettempdir',return_value=str(root)), \
+                     mock.patch.object(C,'discovery_plan',return_value=cases), mock.patch.object(C,'private_inputs',return_value=b'fixture'), \
                      mock.patch.object(C,'guards',return_value='fixture'), mock.patch.object(C,'ssh',return_value='fixture-boot'), \
                      mock.patch.object(C,'capture',side_effect=results) as capture, contextlib.redirect_stdout(io.StringIO()):
                     C.execute(args,dict(runtime='fixture',revision='a'*40))
@@ -146,6 +147,26 @@ int main(void) {
         args=argparse.Namespace(physical_only=True,skip_physical=True)
         with self.assertRaisesRegex(ValueError,'cannot be combined'):
             C.discovery_plan(args)
+
+    def test_retained_first_reset_survives_ring_loss_without_hiding_gaps(self):
+        first=dict(trace_version=1,first=True,seq=2,ns=100,generation=2,
+                   event=16,id=1,result=0,a=2,b=21,c=20,d=1)
+        latest=dict(first,first=False,seq=5000,ns=200,event=5,id=0)
+        counter=dict(trace_count=1,event=16,id=1,count=1,errors=0)
+        result=C.trace_summary([latest,first,counter])
+        self.assertTrue(result['sn_threshold_reset'])
+        self.assertEqual(result['first_reset'],first)
+        self.assertEqual(result['internal_sequence_gaps'],4999)
+        self.assertEqual(result['events'],1)
+        self.assertTrue(C.trace_summary([counter])['sn_threshold_reset'])
+
+    def test_explicit_long_sn_selection_can_follow_separate_capture(self):
+        args=argparse.Namespace(rx_only=False,physical_only=False,identity=Path('private.json'),
+                               skip_physical=True,soak=180,cases='activation-long-sn',recovery_action=None)
+        cases=C.discovery_plan(args)
+        self.assertEqual(len(cases),1)
+        self.assertEqual(cases[0]['sn_comparison_selection'],'explicit')
+        self.assertNotIn('requires_sn_reset',cases[0])
 
     def test_report_distinguishes_planned_from_executed_tests(self):
         result=dict(stages={'activation':'timeout'},status='functional-negative',

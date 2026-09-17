@@ -210,6 +210,9 @@ def discovery_plan(args):
         known = {c['name'] for c in cases + optional}
         if not selected <= known: raise ValueError('Unavailable/unknown case selection: ' + ', '.join(sorted(selected-known)))
         cases = [c for c in cases + optional if c['name'] in selected]
+        for case in cases:
+            if case.pop('requires_sn_reset', False):
+                case['sn_comparison_selection'] = 'explicit'
     for case in cases:
         case['recovery_actions'] = getattr(args, 'recovery_action', None) or '1,2,3,4,5,6,7'
         if case.get('requires_winner') and getattr(args, 'recovery_action', None):
@@ -218,7 +221,8 @@ def discovery_plan(args):
 
 
 def trace_summary(records):
-    events = [r for r in records if isinstance(r,dict) and r.get('trace_version') == 1 and not r.get('first')]
+    retained = [r for r in records if isinstance(r,dict) and r.get('trace_version') == 1]
+    events = [r for r in retained if not r.get('first')]
     counts = {}; per_stack = {}
     for r in records:
         if isinstance(r,dict) and r.get('trace_count') == 1:
@@ -237,17 +241,17 @@ def trace_summary(records):
     def counter(event, ident):
         return counts.get(f'{event}:{ident}', {}).get('count',0)
     milestones = dict(profile_verified=counter(10,1)-counts.get('10:1',{}).get('errors',0),
-        profile_commit_observed=any(r['event']==14 and r['id']==1 and r['b'] and r['c'] for r in events),
+        profile_commit_observed=any(r['event']==14 and r['id']==1 and r['b'] and r['c'] for r in retained),
         sn_request_interrupts=counter(8,2),sn_sent_interrupts=counter(8,3),
         ranging_request_interrupts=counter(8,4),registration_sent_interrupts=counter(8,5),
-        local_assignment_observed=any(r['event']==15 and r['a']==1 for r in events),
+        local_assignment_observed=any(r['event']==15 and r['a']==1 for r in retained),
         ranging_accepted=counter(11,4)-counts.get('11:4',{}).get('errors',0))
     return dict(milestones=milestones, events=sum(map(len,groups.values())), counters=counts, internal_sequence_gaps=gaps,
                 concurrent_wrap=any(isinstance(r,dict) and 'trace_gap' in r for r in records),
-                sn_threshold_reset=any(r['event']==16 and r['id']==1 for r in events),
-                first_reset=next((r for r in events if r['event']==16), None),
-                first_fault=next((r for r in events if r['event']==2), None),
-                generation_changes=sorted({r['generation'] for r in events}))
+                sn_threshold_reset=bool(counter(16,1)) or any(r['event']==16 and r['id']==1 for r in retained),
+                first_reset=min((r for r in retained if r['event']==16), key=lambda r:r['ns'], default=None),
+                first_fault=min((r for r in retained if r['event']==2), key=lambda r:r['ns'], default=None),
+                generation_changes=sorted({r['generation'] for r in retained}))
 
 
 def test_outcomes(case, result, text):
@@ -540,7 +544,7 @@ def execute(args, pin):
                     if not prior.get('recovery_winner') or prior.get('status') != 'observed':
                         record['results'].append(dict(name=case['name'], status='skipped', reason='No valid winning action to reproduce')); continue
                     case['recovery_actions'] = prior['recovery_winner']
-                if case.get('requires_sn_reset') and not any(r.get('status') in ('observed','functional-negative') and r.get('trace',{}).get('sn_threshold_reset') for r in record['results']):
+                if case.get('requires_sn_reset') and not any(r.get('status') != 'containment-failure' and r.get('stages',{}).get('cleanup') == 'passed' and r.get('trace',{}).get('sn_threshold_reset') for r in record['results']):
                     record['results'].append(dict(name=case['name'], status='skipped', reason='SN threshold reset not observed')); continue
                 result = capture(pin, case, args.iperf_server or 'none', args.output, redact)
                 record['results'].append(result)
