@@ -1222,6 +1222,43 @@ static int qphy_reg_update(u32 reg, u32 mask, u32 value, u32 omit)
 	return qphy_reg_write(reg, (old & ~(mask | omit)) | value);
 }
 
+/* Read only the ordinary profile words, under the callback lock. Return
+ * one for a complete match, zero for a valid mismatch, negative on failure.
+ * This checks current hardware, including after resets/reconfiguration. */
+int q1000k_phy_profile_matches(const struct q1000k_pon_profile *p)
+{
+ u32 offset, info, value;
+ unsigned int i;
+ int ret = qphy_context();
+ if (ret) return ret;
+ if (!q1000k_pon_profile_valid(p)) return -EINVAL;
+ if (READ_ONCE(qphy_owner) == current) return -EDEADLK;
+ offset = 8U * p->index;
+ info = (u32)p->repeat << 16 | (u32)p->preamble_len << 8 | p->delimiter_len;
+ {
+  const u32 regs[] = { EN7581_XGPON_PHY_PREAMBLE1_UPPER + offset,
+   EN7581_XGPON_PHY_PREAMBLE1_LOWER + offset, EN7581_XGPON_PHY_DELIMITER1_UPPER + offset,
+   EN7581_XGPON_PHY_DELIMITER1_LOWER + offset, EN7581_XGPON_PHY_PSBU_INFO1 + 4U * p->index,
+   EN7581_XGPON_PHY_XG_TX_FEC_EN_CTRL };
+  const u32 expected[] = { get_unaligned_be32(p->preamble), get_unaligned_be32(p->preamble + 4),
+   get_unaligned_be32(p->delimiter), get_unaligned_be32(p->delimiter + 4), info, (u32)p->fec << offset };
+  mutex_lock(&qphy_control);
+  qphy_callback_lock();
+  ret = qphy_ready();
+  if (!ret && !gpPhyPriv->phy_init_done) ret = -EAGAIN;
+  for (i = 0; !ret && i < ARRAY_SIZE(regs); i++) {
+   u32 mask = i == 5 ? 1U << offset : ~0U;
+   ret = an7581_pon_phy_read(regs[i], &value);
+   if (!ret && ((value ^ expected[i]) & mask)) break;
+  }
+  if (!ret) ret = i == ARRAY_SIZE(regs);
+  qphy_callback_unlock();
+  mutex_unlock(&qphy_control);
+ }
+ return ret;
+}
+EXPORT_SYMBOL(q1000k_phy_profile_matches);
+
 int q1000k_phy_profile_set(const struct q1000k_pon_profile *p)
 {
 	u32 offset, info;

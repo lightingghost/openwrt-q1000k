@@ -712,6 +712,41 @@ static ssize_t receiver_status_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(receiver_status);
 
+static ssize_t transmitter_status_show(struct device *dev,
+                                       struct device_attribute *attr, char *buffer)
+{
+ struct q1000k_pon *pon = dev_get_drvdata(dev);
+ struct en7573_transmitter sample;
+ unsigned int i;
+ u64 begin, end;
+ ssize_t len;
+ int ret;
+ mutex_lock(&pon->lock);
+ begin = ktime_get_boottime_ns();
+ ret = pon_check_locked(pon);
+ if (!ret) ret = en7573_sample_transmitter(&pon->io, &sample);
+ end = ktime_get_boottime_ns();
+ if (ret) { mutex_unlock(&pon->lock); return ret; }
+ len = sysfs_emit(buffer, "{\"transmitter_version\":1,\"begin_ns\":%llu,\"end_ns\":%llu,"
+  "\"sensor_refresh_verified\":false,\"connector_emission_verified\":false,\"fields\":{", begin, end);
+ for (i = 0; i < EN7573_TX_FIELDS; i++) {
+  const struct en7573_tx_field *f = &en7573_tx_fields[i];
+  char raw[16], value[16];
+  /* A failed transfer has no raw word. Saturation retains its raw value. */
+  if (sample.error[i] && sample.error[i] != -ENODATA) scnprintf(raw, sizeof(raw), "null");
+  else scnprintf(raw, sizeof(raw), "%u", sample.raw[i]);
+  if (sample.error[i]) scnprintf(value, sizeof(value), "null");
+  else if (!f->scale) scnprintf(value, sizeof(value), "%d", (int)(s16)sample.raw[i] * 1000 / 256);
+  else scnprintf(value, sizeof(value), "%u", sample.raw[i] * f->scale);
+  len += sysfs_emit_at(buffer, len, "%s\"%s\":{\"reg\":%u,\"raw\":%s,\"valid\":%s,\"error\":%d,\"unit\":\"%s\",\"value\":%s}",
+   i ? "," : "", f->name, f->reg, raw, sample.error[i] ? "false" : "true", sample.error[i], f->unit, value);
+ }
+ len += sysfs_emit_at(buffer, len, "}}\n");
+ mutex_unlock(&pon->lock);
+ return len;
+}
+static DEVICE_ATTR_RO(transmitter_status);
+
 static ssize_t calibration_write(struct file *file, struct kobject *kobj,
 				 const struct bin_attribute *attr, char *buffer,
 				 loff_t offset, size_t count)
@@ -737,7 +772,7 @@ static BIN_ATTR_WO(calibration, 513);
 
 static struct attribute *pon_attributes[] = {
 	&dev_attr_operation.attr, &dev_attr_status.attr,
-	&dev_attr_receiver_status.attr, NULL,
+	&dev_attr_receiver_status.attr, &dev_attr_transmitter_status.attr, NULL,
 };
 static const struct bin_attribute *const pon_bin_attributes[] = {
 	&bin_attr_calibration, NULL,

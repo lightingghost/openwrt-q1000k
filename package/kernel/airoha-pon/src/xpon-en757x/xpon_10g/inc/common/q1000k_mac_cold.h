@@ -14,6 +14,8 @@ int q1000k_mac_cold_interrupts(u32 enables);
 int q1000k_mac_profiles_invalidate(void);
 int q1000k_mac_ranging_install(u32 delay);
 int q1000k_mac_ranging_ready(void);
+u32 q1000k_mac_generation(void);
+int q1000k_mac_profile_matches(u8 index, u8 version, u16 length);
 int q1000k_mac_profile_install(u8 index, u8 version, u16 length);
 /* Protocol-owner state publication. Unsupported NG-PON2/fast-resume states
  * are rejected. The caller publishes software state only after success.

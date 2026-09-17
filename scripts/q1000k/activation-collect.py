@@ -171,9 +171,9 @@ def guards(pin, idle=True):
 def ssh(script, payload=None, timeout=120):
     command = SSH + (['sh', '-s'] if payload is None else [script])
     result = subprocess.run(command, input=script.encode() if payload is None else payload,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if result.returncode:
-        raise RuntimeError('Device command failed: ' + result.stdout.decode(errors='replace')[-4000:])
+        raise RuntimeError('Device command failed: ' + (result.stdout + result.stderr).decode(errors='replace')[-4000:])
     return result.stdout.decode(errors='replace')
 
 
@@ -201,6 +201,17 @@ def discovery_plan(args):
     if args.physical_only and args.skip_physical:
         raise ValueError('--physical-only cannot be combined with --skip-physical')
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'tx' and not args.physical_only:
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            cases += [dict(name='activation-tx-'+name, mode='activate', samples=600,
+                           ids=['T01','T02','T03','T04','T05','T06','D01','D02','D03','D04','D05','D06'])
+                      for name in ('baseline','coalesced','repeat','quiet')]
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown TX suite case; use --suite legacy for recovery cases')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     cases = []
     if not args.physical_only:
         cases = [dict(name=n, mode='rx', samples=30, ids=['B02']) for n in
@@ -236,6 +247,11 @@ def discovery_plan(args):
 def trace_summary(records):
     retained = [r for r in records if isinstance(r,dict) and r.get('trace_version') == 1]
     events = [r for r in retained if not r.get('first')]
+    critical = [r for r in records if isinstance(r,dict) and r.get('critical_version') == 1]
+    retained += critical
+    positions = {}
+    for r in critical: positions.setdefault(r.get('stack_generation',1), set()).add(r['position'])
+    critical_gaps = sum((min(v)-1 + sum(b-a-1 for a,b in zip(sorted(v),sorted(v)[1:]))) for v in positions.values() if v)
     counts = {}; per_stack = {}
     for r in records:
         if isinstance(r,dict) and r.get('trace_count') == 1:
@@ -254,12 +270,15 @@ def trace_summary(records):
     def counter(event, ident):
         return counts.get(f'{event}:{ident}', {}).get('count',0)
     milestones = dict(profile_verified=counter(10,1)-counts.get('10:1',{}).get('errors',0),
+        profiles_coalesced=sum(counter(24,i) for i in range(4)),
         profile_commit_observed=any(r['event']==14 and r['id']==1 and r['b'] and r['c'] for r in retained),
         sn_request_interrupts=counter(8,2),sn_sent_interrupts=counter(8,3),
         ranging_request_interrupts=counter(8,4),registration_sent_interrupts=counter(8,5),
         local_assignment_observed=any(r['event']==15 and r['a']==1 for r in retained),
         ranging_accepted=counter(11,4)-counts.get('11:4',{}).get('errors',0))
-    return dict(milestones=milestones, events=sum(map(len,groups.values())), counters=counts, internal_sequence_gaps=gaps,
+    return dict(critical_records=sum(map(len,positions.values())), critical_sequence_gaps=critical_gaps,
+                critical_concurrent_wrap=any(isinstance(r,dict) and 'critical_gap' in r for r in records),
+                milestones=milestones, events=sum(map(len,groups.values())), counters=counts, internal_sequence_gaps=gaps,
                 concurrent_wrap=any(isinstance(r,dict) and 'trace_gap' in r for r in records),
                 sn_threshold_reset=bool(counter(16,1)) or any(r['event']==16 and r['id']==1 for r in retained),
                 first_reset=min((r for r in retained if r['event']==16), key=lambda r:r['ns'], default=None),
@@ -275,6 +294,12 @@ def test_outcomes(case, result, text):
         if ident in ('B02','B03'): outcome[ident] = result['status']
         elif ident in ('A01','A02','A03','D01') and 'activation' in stages:
             outcome[ident] = stages['activation']
+        elif ident.startswith('T'):
+            if ident == 'T01': outcome[ident] = 'internal-observations' if result.get('tx',{}).get('samples') else 'not-run'
+            elif ident in ('T02','T03'): outcome[ident] = 'register-observations' if result.get('tx',{}).get('mac_samples') else 'not-run'
+            elif ident == 'T04': outcome[ident] = 'coalescing-observed' if result.get('trace',{}).get('milestones',{}).get('profiles_coalesced') else 'baseline-or-no-eligible-profile'
+            elif ident == 'T05': outcome[ident] = 'critical-events-retained' if result.get('trace',{}).get('critical_records') else 'not-run'
+            elif ident == 'T06': outcome[ident] = 'observed; compare matched sessions'
         elif ident == 'A04':
             outcome[ident] = 'profile-observed' if result.get('trace',{}).get('milestones',{}).get('profile_verified') else 'no-verified-profile-observed'
         elif ident == 'D02' and 'provisioning' in stages: outcome[ident] = stages['provisioning']
@@ -325,6 +350,24 @@ def json_records(text):
     return values
 
 
+def burst_segments(mac):
+    segments = []
+    for row in mac:
+        value = row.get('registers',{}).get('5944')
+        generation = row.get('hardware_generation')
+        if type(value) is not int or type(generation) is not int: continue
+        stack = row.get('stack_generation',1)
+        if not segments or (segments[-1]['stack_generation'],segments[-1]['hardware_generation']) != (stack,generation):
+            segments.append(dict(stack_generation=stack, hardware_generation=generation, first=value, last=value,
+                samples=1, delta_modulo_32=0, decreases=0, begin_ns=row.get('begin_ns'), end_ns=row.get('end_ns')))
+        else:
+            s = segments[-1]
+            s['delta_modulo_32'] += (value - s['last']) & 0xffffffff
+            s['decreases'] += value < s['last']
+            s.update(last=value, samples=s['samples']+1, end_ns=row.get('end_ns'))
+    return segments
+
+
 def summarize(text, returncode=0, events=None):
     records = json_records(text)
     live_records = json_records(re.sub(r'postmortem_begin.*?postmortem_end', '', text, flags=re.S))
@@ -361,6 +404,28 @@ def summarize(text, returncode=0, events=None):
                   encryption_note='Key state and traffic are separate evidence; encrypted GEM counter attribution is not exposed.',
                   throughput={direction: int(code) == 0 for direction, code in re.findall(
                       r'^throughput_result direction=(\S+) rc=(\d+)$', text, re.M)})
+    tx_records = [r for r in records if isinstance(r,dict) and r.get('transmitter_version') == 1]
+    mac = [r for r in live_records if isinstance(r,dict) and r.get('mac_version') == 2]
+    phases = {}
+    for phase, raw in re.findall(r'^tx_observation phase=(\S+)\n(\{[^\n]+\})', text, re.M):
+        sample = json.loads(raw)
+        if sample.get('transmitter_version') == 1: phases.setdefault(phase, []).append(sample)
+    tx_fields = {}
+    for phase, rows in phases.items():
+        tx_fields[phase] = {}
+        for name in ('bias','modulation','tx_power','bias_code','modulation_code','tx_control','ben_status','ocp_status'):
+            values = [r['fields'][name]['value'] for r in rows if r['fields'].get(name,{}).get('valid') is True]
+            tx_fields[phase][name] = dict(valid_samples=len(values), unavailable_samples=len(rows)-len(values),
+                minimum=min(values) if values else None, maximum=max(values) if values else None,
+                changed=len(set(values))>1)
+    result['tx'] = dict(samples=len(tx_records), mac_samples=len(mac), by_phase=tx_fields,
+        burst_segments=burst_segments(mac),
+        burst_counter_first=mac[0]['registers'].get('5944') if mac else None,
+        burst_counter_last=mac[-1]['registers'].get('5944') if mac else None,
+        unavailable_records=sum(isinstance(r,dict) and r.get('transmitter_unavailable') is True for r in records),
+        fast_transition_unavailable=sum(isinstance(r,dict) and r.get('fast_version') == 2 and r.get('available') is False for r in records),
+        connector_emission_verified=False, sensor_refresh_verified=False,
+        note='Internal DDMI/drive observations only. Constant or zero values do not establish no light; bursts can be missed and MCU sensor age is unknown. Counter resets must be separated before computing deltas.')
     if events is not None:
         disconnect = next((e['sampled_ms'] for e in events if e['action'] == 'DISCONNECTED'), None)
         reconnect = next((e['sampled_ms'] for e in events if e['action'] == 'RECONNECTED'), None)
@@ -461,11 +526,14 @@ def capture(pin, case, iperf, directory, redact):
                         elif line.strip() == 'postmortem_end': in_postmortem = False
                         try: record = json.loads(line)
                         except ValueError: record = None
-                        if isinstance(record, dict) and any(k.startswith('trace_') for k in record):
+                        if isinstance(record, dict) and record.get('mac_version') == 2:
                             record['stack_generation'] = stack_generation
                             line = json.dumps(record)+'\n'
-                        if isinstance(record, dict) and record.get('trace_version') == 1:
-                            key = (stack_generation, record['seq'], record.get('first',False))
+                        if isinstance(record, dict) and any(k.startswith(('trace_','critical_')) for k in record):
+                            record['stack_generation'] = stack_generation
+                            line = json.dumps(record)+'\n'
+                        if isinstance(record, dict) and (record.get('trace_version') == 1 or record.get('critical_version') == 1):
+                            key = (stack_generation, record['seq'], record.get('first',False), record.get('critical_version',0))
                             if key in trace_seen: continue
                             trace_seen.add(key)
                             record['stack_generation'] = stack_generation
@@ -547,7 +615,7 @@ def execute(args, pin):
     redact = redactor(identity)
     record = dict(schema_version=1, artifact={k:v for k,v in pin.items() if k != 'runtime'},
                   started=time.time(), cases=cases, results=[], status='running',
-                  activation_requested=not rx_only, physical_skipped=args.skip_physical,
+                  activation_requested=not rx_only, physical_skipped=not any(c['name'] in PHYSICAL for c in cases),
                   physical_only=args.physical_only,
                   registration_source=('explicit' if supplied_identity.get('registration_id') else 'zero-default') if not rx_only else 'unused',
                   private_payloads_included=False, hardware_service_verified=False)
@@ -648,6 +716,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
+    parser.add_argument('--suite', choices=('tx','legacy'), default='tx', help='TX measurements and baseline/coalesced/repeat/quiet comparison; legacy exposes the earlier physical recovery suite')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

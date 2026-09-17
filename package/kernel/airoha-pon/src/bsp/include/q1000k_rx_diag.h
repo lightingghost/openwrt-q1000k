@@ -64,5 +64,18 @@
 	X(fll_adc_raw1, EN7581_XPON_PMA_RO_FLL_ADC_1) \
 	X(fll_adc_raw2, EN7581_XPON_PMA_RO_FLL_ADC_2) \
 	X(fll_adc_raw3, EN7581_XPON_PMA_RO_FLL_ADC_3) \
-	X(fll_adc_raw4, EN7581_XPON_PMA_RO_FLL_ADC_4)
+	X(fll_adc_raw4, EN7581_XPON_PMA_RO_FLL_ADC_4) \
+ /* TX ordinary control readbacks; existing frequency results above remain passive. */ \
+ X(tx_burst_adjust, EN7581_XGPON_PHY_TX_BURST_ADJUST) \
+ X(tx_idle_control, EN7581_XGPON_PHY_XG_TX_IDLE_CTRL) \
+ X(tx_fec_control, EN7581_XGPON_PHY_XG_TX_FEC_EN_CTRL) \
+ X(tx_reset, EN7581_XPON_PMA_SS_TX_RST_B) \
+ X(tx_delay_control, EN7581_XPON_PMA_TX_DLY_CTRL) \
+ X(tx_pre_ben, EN7581_XPON_PMA_RG_PRE_BEN_DATA) \
+ X(tx_ext_ben, EN7581_XPON_PMA_RG_EXT_BEN_DATA) \
+ X(tx_ben_off, EN7581_XPON_PMA_BENOFF_CTRL) \
+ X(tx_serializer, EN7581_XPON_ANA_RG_PXP_TX_SER_LOADSEL) \
+ X(tx_clock_monitor, EN7581_XPON_ANA_RG_PXP_TX_CKMON_SEL) \
+ X(tx_clock_power, EN7581_XPON_ANA_RG_PXP_TX_CKLDO_EN) \
+ X(tx_pll_clock, EN7581_XPON_ANA_RG_PXP_TXPLL_PHY_CK1_EN)
 #endif

@@ -59,6 +59,7 @@ int main(void) {
  q1000k_trace_generation(1);
  q1000k_trace(QT_FAULT,1,-5,123,0,0,0);
  for(int i=0;i<5000;i++) q1000k_trace(QT_PLOAM_DISPATCH,1,i%2?-95:0,0,0,0,0);
+ assert(qt_critical_seq==1 && qt_critical[0].record.event==QT_FAULT);
  assert(sizeof(struct qt_record)<=96);
  assert(qt_seq==5002 && qt_first[QT_FAULT].seq==2 && qt_first[QT_FAULT].a==123);
  assert(qt_count[QT_PLOAM_DISPATCH][1]==5000 && qt_errors[QT_PLOAM_DISPATCH][1]==2500);
@@ -252,3 +253,48 @@ while True: time.sleep(1)
         self.assertEqual(C.test_outcomes(case,result,'')['R08'],'independent-recovery-observed')
 
 if __name__=='__main__': unittest.main()
+
+class TxDiscoveryTests(unittest.TestCase):
+    def test_default_tx_comparison_uses_no_physical_actions(self):
+        args=argparse.Namespace(suite='tx',identity=Path('private.json'),rx_only=False,physical_only=False,skip_physical=False,cases=None)
+        plan=C.discovery_plan(args)
+        self.assertEqual([c['name'] for c in plan], ['rx-startup','activation-tx-baseline','activation-tx-coalesced','activation-tx-repeat','activation-tx-quiet'])
+        self.assertFalse(any(c['name'] in C.PHYSICAL for c in plan))
+        self.assertTrue(all(c['samples']==600 for c in plan[1:]))
+        args.identity=None
+        self.assertEqual(len(C.discovery_plan(args)),1)
+
+    def test_counter_wrap_is_separate_from_mac_reset(self):
+        rows=[dict(hardware_generation=g,registers={'5944':n},begin_ns=i,end_ns=i+1)
+              for i,(g,n) in enumerate([(1,0xfffffffe),(1,3),(2,0),(2,7)])]
+        segments=C.burst_segments(rows)
+        self.assertEqual([s['delta_modulo_32'] for s in segments],[5,7])
+        self.assertEqual([s['decreases'] for s in segments],[1,0])
+        self.assertEqual(C.burst_segments([dict(registers={'5944':5})]),[])
+
+    def test_critical_stream_does_not_hide_ordinary_loss(self):
+        ordinary=dict(trace_version=1,first=False,seq=5000,ns=1,generation=1,event=8,id=3,result=0,a=0,b=0,c=0,d=0)
+        critical=dict(critical_version=1,position=1,seq=2,ns=0,generation=1,event=15,id=0,result=0,a=1,b=0,c=0,d=0)
+        result=C.trace_summary([ordinary,critical])
+        self.assertEqual(result['internal_sequence_gaps'],4999)
+        self.assertEqual(result['critical_sequence_gaps'],0)
+        self.assertTrue(result['milestones']['local_assignment_observed'])
+        critical['position']=8
+        self.assertEqual(C.trace_summary([critical])['critical_sequence_gaps'],7)
+
+    def test_zero_internal_power_is_preserved_without_emission_claim(self):
+        fields={n:dict(valid=True,value=0) for n in ('bias','modulation','tx_power','bias_code','modulation_code','tx_control','ben_status','ocp_status')}
+        row=dict(transmitter_version=1,fields=fields)
+        text='tx_observation phase=live\n'+json.dumps(row)+'\n'
+        result=C.summarize(text)
+        power=result['tx']['by_phase']['live']['tx_power']
+        self.assertEqual(power['minimum'],0)
+        self.assertEqual(power['valid_samples'],1)
+        self.assertFalse(result['tx']['connector_emission_verified'])
+        self.assertFalse(result['tx']['sensor_refresh_verified'])
+
+    def test_ssh_warning_cannot_contaminate_boot_id(self):
+        completed=C.subprocess.CompletedProcess([],0,b'fixture-uuid\n',b'Warning: diagnostic text\n')
+        with mock.patch.object(C.subprocess,'run',return_value=completed) as run:
+            self.assertEqual(C.ssh('cat /proc/sys/kernel/random/boot_id'),'fixture-uuid\n')
+            self.assertEqual(run.call_args.kwargs['stderr'],C.subprocess.PIPE)

@@ -46,6 +46,18 @@ cleanup() {
 	if [ "$failed" = 0 ]; then event cleanup passed; else event cleanup failed; result=1; fi
 	exit "$result"
 }
+tx_observe() {
+ local data
+ [ -n "$controller" ] || return 0
+ printf 'tx_observation phase=%s\n' "$1"
+ if data=$(cat "$controller/transmitter_status"); then
+  printf '%s\n' "$data"
+ else
+  # Cleanup always proceeds even if a diagnostic read fails.
+  printf '{"transmitter_unavailable":true,"phase":"%s"}\n' "$1"
+  return 1
+ fi
+}
 stop_stack() {
 	local module failed=0
 	for module in $owned_modules; do
@@ -57,6 +69,16 @@ stop_stack() {
 			failed=1
 			break
 		fi
+  if [ "$module" = xpon_10g ] && [ -n "$controller" ]; then
+   # MAC is drained, PHY retains the controller lease and TX is disabled.
+   # Read before PHY removal powers the controller off. Diagnostic failures
+   # are evidence, never a reason to retain a running dependency.
+   tx_observe after-mac-stop || :
+   sleep 1
+   tx_observe after-mac-stop-1s || :
+   sleep 1
+   tx_observe after-mac-stop-2s || :
+  fi
 	done
 	if [ "$failed" = 0 ] && [ "$lower_owned" = 1 ]; then
 		ip link set dev ponraw down || failed=1
@@ -99,12 +121,17 @@ controller_check() {
 snapshot() {
 	local pair rx diag current_ms frames synced power_valid n retries=0
 	controller_check xgspon || fail 'Controller health/TX policy changed.'
-	while ! pair=$(cat /proc/q1000k-pon-snapshot); do
-		retries=$((retries+1))
-		[ "$retries" -lt 5 ] || fail 'Coherent PHY snapshot failed after bounded transition retries.'
-		printf 'snapshot_retry=%s\n' "$retries"
-		sleep 1
-	done
+ while :; do
+  pair=$(cat /proc/q1000k-pon-snapshot) || fail 'Coherent PHY snapshot fault.'
+  # Only the explicit transition-unavailable record is retryable. A hard
+  # controller/PHY/transport error is never turned into a timing retry.
+  if json_load "$pair" 2>/dev/null && field snapshot_available boolean && [ "$value" = 0 ]; then
+   printf '%s\n' "$pair"
+   retries=$((retries+1))
+   [ "$retries" -lt 5 ] || fail 'PHY transition unavailable for five attempts.'
+   sleep 1
+  else break; fi
+ done
 	[ "$(printf '%s\n' "$pair" | wc -l)" = 2 ] || fail 'Snapshot is incomplete.'
 	rx=$(printf '%s\n' "$pair" | sed -n '1p')
 	diag=$(printf '%s\n' "$pair" | sed -n '2p')
@@ -147,6 +174,7 @@ snapshot() {
 	data=$(cat "$controller/receiver_status") && json_load "$data" || fail 'Receiver control unavailable.'
 	[ "$phase" != activation-quiet ] || [ "$((count % 5))" = 0 ] && printf '%s\n' "$data"
 	field oem_post_saved boolean && [ "$value" = 1 ] || fail 'Automatic OEM startup was not applied.'
+	tx_observe live || fail 'Transmitter capture unavailable.'
 	cat /proc/q1000k-pon-mac || fail 'MAC diagnostic snapshot unavailable.'
 	{ [ "$((count % 5))" != 0 ] && [ "$phase" != activation-quiet ]; } || history
 	cat /proc/xgpon/status || fail 'MAC status unavailable.'
@@ -204,14 +232,17 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
 	1|2|3|4|5|6|7|1,2,3,4,5,6,7) ;;
 	*) fail 'Select the fixed recovery ladder or one action 1..7.' ;;
 esac
-sn_limit=20; [ "$phase" != activation-long-sn ] || sn_limit=40
+sn_limit=20; coalesce=0
+case "$phase" in activation-long-sn|activation-tx-*) sn_limit=40 ;; esac
+[ "$phase" != activation-tx-coalesced ] || coalesce=1
+printf 'tx_comparison coalesce=%s sn_limit=%s phase=%s\n' "$coalesce" "$sn_limit" "$phase"
 preflight
 case "$calibration" in /tmp/*) ;; *) fail 'Calibration must be staged in RAM.' ;; esac
 [ -f "$calibration" ] && [ ! -L "$calibration" ] && [ "$(wc -c < "$calibration")" = 513 ] || fail 'Invalid calibration size/type.'
@@ -249,11 +280,12 @@ controller_check off || fail 'Wrong detected controller state.'
 cat "$calibration" > "$controller/calibration" || fail 'Cannot stage calibration.'
 printf 'initialize\n' > "$controller/operation" || fail 'Controller initialization failed.'
 controller_check xgspon || fail 'Controller initialization check failed.'
+tx_observe initialized-tx-off || fail 'TX-off reference capture failed.'
 ip link set dev ponraw up || fail 'Cannot open DMA endpoint.'
 lower_owned=1
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do load_module "$module"; done
 # Only fixed names and validated hexadecimal/scalar module values are expanded.
-load_module xpon_10g bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
+load_module xpon_10g bench_profile_coalesce="$coalesce" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
 }
 start_stack
 last_ms=-1 previous_frames=-1 stable=0 state=0 authenticated=0 operational=0 rules=0 objects=0
@@ -332,7 +364,7 @@ while [ "$count" -lt "$limit" ] && [ "$(now)" -lt "$deadline" ]; do
 	snapshot
 	if [ "$state" = 5 ] && [ "$authenticated" = 1 ]; then o5_stable=$((o5_stable+1)); else o5_stable=0; fi
 	[ "$o5_stable" -lt 5 ] || break
-	count=$((count+1)); if [ "$phase" = activation-quiet ]; then sleep 4; else sleep 1; fi
+	count=$((count+1)); if [ "$phase" = activation-quiet ] || [ "$phase" = activation-tx-quiet ]; then sleep 4; else sleep 1; fi
 done
 [ "$o5_stable" -ge 5 ] || { event activation timeout; negative; }
 event activation passed

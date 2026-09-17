@@ -30,7 +30,10 @@ static bool of_property_read_bool(struct device_node *node,const char *name) { a
 static void of_node_put(struct device_node *node) { assert(node==&root); refs--; }
 static int q1000k_protocol_status(void) { return protocol_error; }
 static bool q1000k_transport_running(void) { return running; }
-static u32 get_xpon_data(u32 reg) { assert(reg==0x5040); mac_reads++; return mac_mask; }
+static u32 get_xpon_data(u32 reg) { assert(reg!=0x5958 && reg!=0x595c && reg!=0x5044); mac_reads++; return reg==0x5040 ? mac_mask : reg; }
+static bool q1000k_protocol_owned(void) { return !protocol_error; }
+static int fast_error;
+static u32 q1000k_mac_generation(void) { return 3; }
 static int an7581_xpon_status(void) { return provider_error; }
 struct seq_file { char out[8192]; };
 struct proc_dir_entry { int unused; };
@@ -58,7 +61,7 @@ void q1000k_snapshot_exit(void);
 int q1000k_phy_last_snapshot(struct q1000k_rx_sample *s,struct q1000k_rx_diagnostics *d,int *f)
 { return -ENODATA; }
 int q1000k_phy_bench_recover(unsigned int action) { return 0; }
-int q1000k_phy_fast_sample(u32 *sfp,u32 *sync,u32 *frames) { *sfp=*sync=*frames=0; return 0; }
+int q1000k_phy_fast_sample(u32 *sfp,u32 *sync,u32 *frames) { *sfp=*sync=*frames=0; return fast_error; }
 
 int q1000k_phy_set_rx_bench(bool enabled, bool reacquire, bool restore_pll, bool restore_gain) {
     preparations++; if(!phy_error) { phy_mode=enabled; phy_reacquire=reacquire; phy_restore_pll=restore_pll; phy_restore_gain=restore_gain; } return phy_error;
@@ -170,6 +173,17 @@ int main(void) {
     seq.out[0]=0; sample_error=-EIO;
     assert(qrx_snapshot_show(&seq,NULL)==-EIO && !seq.out[0]); sample_error=0;
     alloc_error=1; assert(qrx_snapshot_show(&seq,NULL)==-ENOMEM && !seq.out[0]); alloc_error=0;
+    seq.out[0]=0; sample_error=-EAGAIN;
+    assert(!qrx_snapshot_show(&seq,NULL) && strstr(seq.out,"\"snapshot_available\":false"));
+    sample_error=0; seq.out[0]=0; fast_error=-EAGAIN;
+    assert(!qrx_fast_show(&seq,NULL) && strstr(seq.out,"\"available\":false") && !strstr(seq.out,"\"frames\""));
+    seq.out[0]=0; fast_error=-EIO;
+    assert(qrx_fast_show(&seq,NULL)==-EIO && !seq.out[0]);
+    fast_error=0; assert(!qrx_fast_show(&seq,NULL) && strstr(seq.out,"\"available\":true"));
+    seq.out[0]=0; assert(!qrx_mac_show(&seq,NULL));
+    assert(strstr(seq.out,"\"5944\":") && strstr(seq.out,"\"5968\":") && strstr(seq.out,"\"509c\":"));
+    assert(!strstr(seq.out,"5958") && !strstr(seq.out,"595c"));
+    q1000k_discovery_snapshot(12);
     q1000k_snapshot_exit(); q1000k_snapshot_exit(); assert(proc_removed==4);
     return 0;
 }

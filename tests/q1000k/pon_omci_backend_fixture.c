@@ -13,6 +13,8 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int32_t s32;
+#define module_param(...)
+#define MODULE_PARM_DESC(...)
 #define BIT(n) (UINT32_C(1)<<(n))
 #define U64_MAX UINT64_MAX
 #define OMCI_OLT_VENDOR_ID_LEN 4
@@ -300,6 +302,11 @@ int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u
     assert(!owned && !auth_held && reg[35]==2 && sn[7]==1); derivations++; int ret=step(); if(ret) return ret;
     memset(keys,0,sizeof(*keys)); memcpy(keys->pon_tag,tag,8); memset(keys->bank[0].omci,0x30,16); memset(keys->bank[1].omci,0x31,16); return 0;
 }
+static int phy_match=1, mac_match=1, match_reads;
+int q1000k_phy_profile_matches(const struct q1000k_pon_profile *p)
+{ assert(owned && p); match_reads++; return phy_match; }
+int q1000k_mac_profile_matches(u8 index,u8 version,u16 length)
+{ assert(owned && index<4 && version<16 && length); match_reads++; return mac_match; }
 int q1000k_mac_profiles_invalidate(void) { assert(owned && install_phase); int ret=step(); if(!ret) installed_profiles=0; return ret; }
 int q1000k_phy_profile_set(const struct q1000k_pon_profile *p) { assert(owned && install_phase && q1000k_pon_profile_valid(p)); int ret=step(); if(!ret) profile_version[p->index]=p->version; return ret; }
 int q1000k_mac_profile_install(u8 index,u8 version,u16 length) {
@@ -622,5 +629,41 @@ int main(void)
     assert(!memcmp(identity_seen.version,identity_override.version,sizeof(identity_seen.version)));
     assert(!memcmp(identity_seen.equipment_id,identity_override.equipment_id,sizeof(identity_seen.equipment_id)));
     q1000k_omci_backend_cleanup();
+    /* Coalescing is independent of the remembered version: current PHY and
+     * MAC readbacks must match. ACKs and queued/reset work never disappear. */
+    for (int trial=0; trial<11; trial++) {
+        startup(); b=qomci_current;
+        struct q1000k_pon_profile p={.repeat=2,.preamble_len=8,.delimiter_len=8,.version=1};
+        u8 tag[8]={1,2,3};
+        token=q1000k_protocol_enter();
+        assert(!q1000k_omci_burst_profile(&p,tag,1,false));
+        q1000k_protocol_leave(token); q1000k_omci_control(); assert(!fault);
+        bench_profile_coalesce=trial!=0; phy_match=mac_match=1; match_reads=0;
+        hw_ploam_index=hw_omci_index=b->index;
+        if(trial==10) hw_ploam_index^=1;
+        if(trial==2) phy_match=0;
+        if(trial==3) mac_match=0;
+        if(trial==4) p.preamble[0]=1;
+        if(trial==5) tag[0]=9;
+        if(trial==7) b->request.reset=true;
+        if(trial==8) b->request.burst_mask=1;
+        if(trial==9) phy_match=-EIO;
+        u64 generation=b->request.generation;
+        int refreshes=refresh_count;
+        token=q1000k_protocol_enter();
+        int ret=q1000k_omci_burst_profile(&p,tag,2,trial==6);
+        if(trial==1) {
+            assert(!ret && match_reads==2 && b->request.generation==generation && !b->request.burst_mask && !b->request.acks);
+            assert(refresh_count==refreshes);
+        } else if(trial==7) assert(ret==-EAGAIN && !match_reads);
+        else if(trial==9) assert(ret==-EIO && fault==-EIO && b->request.generation==generation);
+        else {
+            assert(!ret && b->request.generation>generation && b->request.burst_mask);
+            if(trial==6) assert(b->request.acks==1);
+        }
+        q1000k_protocol_leave(token);
+        if(trial==6) { int acks=ack_count; q1000k_omci_control(); assert(!fault && ack_count==acks+1); }
+        q1000k_omci_backend_cleanup(); bench_profile_coalesce=false;
+    }
     assert(!live_skb); return 0;
 }

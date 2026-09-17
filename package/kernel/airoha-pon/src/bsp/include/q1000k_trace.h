@@ -10,10 +10,11 @@ enum q1000k_event {
 	QT_TX, QT_RECOVERY, QT_MAC_IRQ, QT_MAC_ERROR, QT_PLOAM_VERIFY,
 	QT_PLOAM_DISPATCH, QT_PROFILE, QT_PROFILE_QUEUE, QT_PROFILE_APPLY,
 	QT_ASSIGN, QT_RESET, QT_STATE, QT_JOB_QUEUE, QT_JOB_RUN, QT_MAC_CONFIG,
-	QT_MAC_PROFILE, QT_OMCI, QT_RECOVERY_PHASE, QT_EVENT_COUNT
+	QT_MAC_PROFILE, QT_OMCI, QT_RECOVERY_PHASE, QT_PROFILE_SKIP, QT_DISCOVERY, QT_EVENT_COUNT
 };
 void q1000k_trace(unsigned int event, unsigned int id, int result,
 		   u32 a, u32 b, u32 c, u32 d);
+void q1000k_discovery_snapshot(u32 interrupts);
 void q1000k_trace_generation(unsigned int reason);
 int q1000k_trace_init(void);
 void q1000k_trace_exit(void);

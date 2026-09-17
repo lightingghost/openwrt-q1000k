@@ -27,6 +27,7 @@ class ActivationTests(unittest.TestCase):
         fixture.write(fixture.dt+'quantum,xgspon-activation-bench', '')
         fixture.write('proc/uptime','0.00 0.00\n')
         fixture.write('proc/q1000k-pon-mac','{"mac_version":1}\n')
+        fixture.write(str(fixture.controller.relative_to(self.root))+'/transmitter_status', '{"transmitter_version":1,"fields":{}}\n')
         fixture.write(str(fixture.controller.relative_to(self.root))+'/receiver_status', '{"oem_post_saved":true}\n')
         self.identity = self.root/'tmp/private'
         self.identity.mkdir(); (self.identity/'identity.json').write_text(json.dumps(IDENTITY))

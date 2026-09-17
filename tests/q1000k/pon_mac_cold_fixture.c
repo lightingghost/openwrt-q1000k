@@ -110,6 +110,13 @@ int main(void) {
     assert(!q1000k_mac_profiles_invalidate() && regs[0x511c/4]==0xf0f0f0f0);
     for(unsigned int i=0;i<4;i++) {
         assert(!q1000k_mac_profile_install(i,i+1,100+i));
+        owned=true;
+        int before=writes;
+        assert(q1000k_mac_profile_matches(i,i+1,100+i)==1 && writes==before);
+        assert(q1000k_mac_profile_matches(i,i+1,101+i)==0);
+        regs[0x511c/4]^=1U<<(8*i);
+        assert(q1000k_mac_profile_matches(i,i+1,100+i)==0);
+        regs[0x511c/4]^=1U<<(8*i);
         assert(((regs[0x511c/4]>>(8*i))&0xf1)==((i+1)*16+1));
         assert(((regs[(0x5120+4*(i/2))/4]>>(16*(i&1)))&0xffff)==100+i);
     }

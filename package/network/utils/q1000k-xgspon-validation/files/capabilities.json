@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "bench": "discovery-recovery",
+  "bench": "tx-discovery",
   "hardware_acceptance": false,
   "trace": {
     "version": 1,
@@ -11,13 +11,17 @@
     "path": "/proc/q1000k-pon-events",
     "host_drain_seconds_approx": 5,
     "overflow_is_inconclusive": true,
-    "counter_errno_counts": true
+    "counter_errno_counts": true,
+    "critical_capacity": 1024,
+    "critical_stream_version": 1,
+    "critical_positions_independent": true
   },
   "interfaces": [
     "/proc/q1000k-pon-snapshot",
     "/proc/q1000k-pon-last-snapshot",
     "/proc/q1000k-pon-mac",
-    "/proc/q1000k-pon-fast"
+    "/proc/q1000k-pon-fast",
+    "controller-sysfs/transmitter_status"
   ],
   "control": "/sys/module/xpon_10g/parameters/bench_recover",
   "recovery_actions": [
@@ -40,19 +44,21 @@
   "host_full_stack_action": 7,
   "rx_schema": 5,
   "diagnostics_schema": 5,
-  "mac_schema": 1,
-  "fast_schema": 1,
+  "mac_schema": 2,
+  "fast_schema": 2,
   "sn_thresholds": [
     20,
     40
   ],
-  "activation_wall_deadline_seconds": 240,
+  "activation_wall_deadline_seconds": 600,
   "unavailable": [
     "Optical burst quality/OLT receive trace",
     "Per-encrypted-GEM traffic attribution",
-    "Verified optical TX power/bias sensor",
     "Dynamic kprobes/ftrace fallback",
-    "Active interface-bound DNS query; lease DNS servers are recorded"
+    "Active interface-bound DNS query; lease DNS servers are recorded",
+    "Internal DDMI sensor age/calibration validity not hardware verified",
+    "Optical emission at connector; no external meter available",
+    "OEM live-register baseline; OEM RAM boot not executed"
   ],
   "tests": [
     {
@@ -254,6 +260,54 @@
       "hypothesis": "H8",
       "implemented": true,
       "hardware_run": false
+    },
+    {
+      "id": "T01",
+      "test": "22 controller fields before/during/after TX; raw, units, validity and age limits",
+      "selection": "All cases",
+      "hypothesis": "TX1",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "T02",
+      "test": "TX burst count, 12 PHY TX controls, gate/loop status and owned TX errors",
+      "selection": "All activation snapshots and discovery IRQs",
+      "hypothesis": "TX2",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "T03",
+      "test": "Hardware reply capability, delays, profile state and integrity-bank indices; private identity exact-write result",
+      "selection": "All activation cases",
+      "hypothesis": "TX3",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "T04",
+      "test": "Current PHY/MAC verified unchanged-profile coalescing, baseline/coalesced/baseline",
+      "selection": "activation-tx-baseline,activation-tx-coalesced,activation-tx-repeat",
+      "hypothesis": "TX4",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "T05",
+      "test": "Independent critical ring for assignment/reset/state/discovery and exact PLOAM counters",
+      "selection": "All cases",
+      "hypothesis": "TX5",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "T06",
+      "test": "Fixed threshold 40 with normal versus sparse diagnostics; transition EAGAIN records",
+      "selection": "activation-tx-baseline,activation-tx-quiet; optional legacy reconnect",
+      "hypothesis": "TX6",
+      "implemented": true,
+      "hardware_run": false
     }
   ],
   "event_names": {
@@ -279,12 +333,40 @@
     "20": "mac_config",
     "21": "mac_profile",
     "22": "omci",
-    "23": "recovery_phase"
+    "23": "recovery_phase",
+    "24": "profile_skip: id 0..3 actual skip; 4..7 mismatch/read error; a=skipped,b=request generation,c=version",
+    "25": "discovery_register: a=address,b=raw,c=IRQ flags,d=MAC cold generation"
   },
   "discovery_irq_bits": {
     "2": "SN request received",
     "3": "SN sent",
     "4": "Ranging request received",
     "5": "Registration sent"
+  },
+  "transmitter_schema": 1,
+  "default_suite": "tx",
+  "default_physical_actions": 0,
+  "mac_registers": {
+    "509c": "US_RATE_CAP",
+    "5100": "ACTIVATION_CTRL",
+    "5104": "ACTIVATION_STATE",
+    "5108": "RSP_TIME",
+    "510c": "RDM_DLY",
+    "511c": "BURST_PROFILE_VALID_VERSION",
+    "5120": "PSBU_LENGTH_01",
+    "5124": "PSBU_LENGTH_23",
+    "5128": "EXT_RDM_DLY",
+    "5318": "INTEGRITY_KEY_INDICES",
+    "5284": "PLOAM_FILTER_CONTROL",
+    "52f0": "PLOAM_MIC_CONTROL",
+    "5920": "RX_HEC_ERROR",
+    "5944": "TX_BST_CNT_INTERNAL_MPI_SOF",
+    "5950": "RX_PLOAM",
+    "5954": "TX_PLOAM",
+    "5960": "RX_OMCI",
+    "5964": "TX_OMCI",
+    "5968": "RX_XGEM",
+    "596c": "TX_XGEM",
+    "5984": "EXISTING_DEBUG_COUNTER_RAW"
   }
 }

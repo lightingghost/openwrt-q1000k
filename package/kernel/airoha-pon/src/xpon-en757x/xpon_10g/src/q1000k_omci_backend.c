@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Software-authenticated OMCI transport and ordered XGS registration owner. */
 #include <linux/seq_file.h>
+#include <linux/module.h>
 #include <crypto/skcipher.h>
 #include <an7581_xpon.h>
 #include <q1000k_phy_api.h>
@@ -27,6 +28,11 @@
 #include "gpon/gpon_act.h"
 #include "gpon/gpon_ploam.h"
 
+/* Immutable per load; collector runs baseline / coalesced / baseline.
+ * Only unacknowledged, unchanged O2/3 broadcasts may bypass a transaction. */
+static bool bench_profile_coalesce;
+module_param(bench_profile_coalesce, bool, 0400);
+MODULE_PARM_DESC(bench_profile_coalesce, "Compare discovery with checked unchanged-profile coalescing");
 #define QOMCI_ACKS 64
 extern int snSendInO23Cnt;
 struct qomci_key_request {
@@ -417,6 +423,22 @@ int q1000k_omci_burst_profile(const struct q1000k_pon_profile *p,
 		return -ENODEV;
 	if (!q1000k_pon_profile_valid(p) || !tag)
 		return -EINVAL;
+ if (bench_profile_coalesce && !acknowledge && b->cold_started && b->keys_valid &&
+     GPON_CURR_STATE == GPON_10G_STATE_O2_3 && !q1000k_protocol_status() &&
+     !b->request.reset && !b->request.profile && !b->request.assign &&
+     !b->request.ranging && !b->request.data.pending && !b->request.acks &&
+     !b->request.burst_mask && (b->burst_mask & BIT(p->index)) &&
+     !memcmp(tag, b->keys.pon_tag, 8) && !memcmp(p, &b->burst[p->index], sizeof(*p))) {
+  u8 ploam, omci;
+  ret = q1000k_mac_key_indices(&ploam, &omci);
+  if (!ret) ret = ploam == b->index && omci == b->index ? q1000k_phy_profile_matches(p) : 0;
+  if (ret == 1) ret = q1000k_mac_profile_matches(p->index, p->version,
+    (u16)p->preamble_len * p->repeat + p->delimiter_len);
+  q1000k_trace(QT_PROFILE_SKIP, p->index + (ret == 1 ? 0 : 4), ret < 0 ? ret : 0,
+   ret == 1, b->request.generation, p->version, 0);
+  if (ret < 0) { q1000k_protocol_fail(ret); return ret; }
+  if (ret == 1) return 0;
+ }
 	if ((b->request.burst_mask & BIT(p->index)) && b->request.acks &&
 	    memcmp(p, &b->request.burst[p->index], sizeof(*p)))
 		return -EBUSY;

@@ -35,6 +35,53 @@ static u32 get_le32(const u8 *p)
 	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
 
+/* Q1000K OEM bob_info and EN7572 public controller. Deliberately exclude
+ * ddmi_tx/mpd_current command sequences: they alter TX, ADC muxes and gain.
+ * No read-clear alarms, FIFO ports, calibration mailboxes or measurement
+ * triggers. CSR words are LE32; the six published DDMI words are BE16.
+ */
+const struct en7573_tx_field en7573_tx_fields[EN7573_TX_FIELDS] = {
+ { "temperature", "mC", 0x60, 2, 0 },
+ { "supply", "uV", 0x62, 2, 100 },
+ { "bias", "uA", 0x64, 2, 2 },
+ { "tx_power", "nW", 0x66, 2, 100 },
+ { "rx_power", "nW", 0x68, 2, 100 },
+ { "modulation", "uA", 0x6a, 2, 2 },
+ { "ben_control", "raw", 0x100, 4, 1 },
+ { "tx_peak", "raw", 0x108, 4, 1 },
+ { "apc_dac", "raw", 0x124, 4, 1 },
+ { "erc_control", "raw", 0x128, 4, 1 },
+ { "monitor_tia", "raw", 0x130, 4, 1 },
+ { "monitor_pga", "raw", 0x13c, 4, 1 },
+ { "loop_control", "raw", 0x208, 4, 1 },
+ { "current_force", "raw", 0x210, 4, 1 },
+ { "bias_limit", "raw", 0x214, 4, 1 },
+ { "modulation_limit", "raw", 0x248, 4, 1 },
+ { "bias_code", "raw", 0x3c4, 4, 1 },
+ { "modulation_code", "raw", 0x3c8, 4, 1 },
+ { "tx_control", "raw", 0x3e0, 4, 1 },
+ { "ocp_status", "raw", 0x3e4, 4, 1 },
+ { "ben_status", "raw", 0x488, 4, 1 },
+ { "host_function_flags", "raw", 0xe8, 4, 1 },
+};
+int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *sample)
+{
+ unsigned int i;
+ if (!io || !io->read || !sample) return -EINVAL;
+ memset(sample, 0, sizeof(*sample));
+ for (i = 0; i < EN7573_TX_FIELDS; i++) {
+  const struct en7573_tx_field *f = &en7573_tx_fields[i];
+  u8 data[4];
+  int ret = io->read(io->ctx, EN7573_CONTROL, f->reg, data, f->width);
+  sample->error[i] = ret;
+  if (ret) continue;
+  sample->raw[i] = f->width == 2 ? (u32)data[0] << 8 | data[1] : get_le32(data);
+  if (sample->raw[i] == (f->width == 2 ? 0xffff : ~0U))
+   sample->error[i] = -ENODATA;
+ }
+ return 0;
+}
+
 static u8 control_device(struct en7573_io *io, u16 reg)
 {
 	/* OEM QKX001-06.00.44.00 uses A0 for these MD32 words. The

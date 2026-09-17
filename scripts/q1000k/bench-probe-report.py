@@ -13,7 +13,8 @@ PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-lo
           'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun',
           'eye-current', 'oem-analog', 'oem-full-reset', 'oem-cal-reset', 'oem-cal-auto', 'oem-eye-0', 'oem-eye-1', 'oem-eye-2', 'oem-eye-3', 'oem-eye-4', 'oem-eye-5', 'oem-eye-6', 'oem-eye-7', 'oem-post-init', 'oem-post-cal', 'oem-reset-repeat')
 HEADER = Path(__file__).resolve().parents[2] / 'package/kernel/airoha-pon/src/bsp/include/q1000k_rx_diag.h'
-FIELDS = tuple(re.findall(r'X\((\w+),', HEADER.read_text()))
+# Additive TX readbacks belong to the activation collector; freeze old RX schemas.
+FIELDS = tuple(k for k in re.findall(r'X\((\w+),', HEADER.read_text()) if not k.startswith('tx_'))
 V2_FIELDS = ('tdc_ncpo', 'fifo_clock_status')
 V3_FIELDS = ('cdr_injection', 'cdr_lpf_override', 'fll_idac', 'fll_load',
              'eye_reset_force', 'eye_reset_mode', 'eye_pi_ready', 'eye_pi_mode',

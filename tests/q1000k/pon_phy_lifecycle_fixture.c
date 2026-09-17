@@ -875,6 +875,26 @@ int main(void)
         initialized(); fail_read=n;
         assert(q1000k_phy_profile_set(&profile)==-EIO && qphy_fault && !controller.tx);
     }
+    for(int index=0;index<4;index++) {
+        initialized(); profile.index=index; assert(!q1000k_phy_profile_set(&profile));
+        unsigned int before=writes;
+        assert(q1000k_phy_profile_matches(&profile)==1 && writes==before);
+        for(int field=0;field<6;field++) {
+            const u32 r[]={EN7581_XGPON_PHY_PREAMBLE1_UPPER+8*index,
+              EN7581_XGPON_PHY_PREAMBLE1_LOWER+8*index,EN7581_XGPON_PHY_DELIMITER1_UPPER+8*index,
+              EN7581_XGPON_PHY_DELIMITER1_LOWER+8*index,EN7581_XGPON_PHY_PSBU_INFO1+4*index,
+              EN7581_XGPON_PHY_XG_TX_FEC_EN_CTRL};
+            u32 mask=field==5 ? 1U<<(8*index) : 1;
+            regs[(r[field]&0x1ffff)/4]^=mask;
+            assert(q1000k_phy_profile_matches(&profile)==0 && writes==before);
+            regs[(r[field]&0x1ffff)/4]^=mask;
+        }
+        for(unsigned int field=1;field<=6;field++) {
+            fail_read=reads+field;
+            assert(q1000k_phy_profile_matches(&profile)==-EIO && writes==before);
+            fail_read=0;
+        }
+    }
     initialized(); profile.index=4;
     assert(q1000k_phy_profile_set(&profile)==-EINVAL && !writes);
     profile.index=0; profile.preamble_len=9;

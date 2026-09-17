@@ -435,8 +435,42 @@ static void test_rx_output(void)
 	assert(!en7573_restore_rx_output(&io,&original));
 }
 
+static unsigned int tx_reads, tx_fail, tx_saturated;
+static int tx_read(void *ctx, u8 device, u16 reg, u8 *data, size_t length)
+{
+ unsigned int i = tx_reads++;
+ const struct en7573_tx_field *f = &en7573_tx_fields[i];
+ assert(device == 0x51 && reg == f->reg && length == f->width);
+ if (tx_fail == i + 1) return -EREMOTEIO;
+ if (tx_saturated == i + 1) { memset(data, 0xff, length); return 0; }
+ if (length == 2) { data[0] = 0x12; data[1] = 0x34; }
+ else { data[0] = 0x78; data[1] = 0x56; data[2] = 0x34; data[3] = 0x12; }
+ if (!i) memset(data, 0, length); /* Zero must not become unavailable. */
+ return 0;
+}
+static void test_transmitter(void)
+{
+ struct en7573_io io = { .read = tx_read }; /* No write or delay callback. */
+ struct en7573_transmitter s;
+ for (unsigned int fail = 0; fail <= EN7573_TX_FIELDS; fail++) {
+  tx_reads=0; tx_fail=fail; tx_saturated=0;
+  assert(!en7573_sample_transmitter(&io,&s) && tx_reads==EN7573_TX_FIELDS);
+  for (unsigned int i=0; i<EN7573_TX_FIELDS; i++) {
+   assert(s.error[i] == (fail==i+1 ? -EREMOTEIO : 0));
+   if (fail!=i+1) assert(s.raw[i] == (!i ? 0 : i<6 ? 0x1234 : 0x12345678));
+  }
+ }
+ tx_fail=0;
+ for (unsigned int i=0; i<EN7573_TX_FIELDS; i++) {
+  tx_reads=0; tx_saturated=i+1;
+  assert(!en7573_sample_transmitter(&io,&s));
+  assert(s.error[i]==-ENODATA && s.raw[i]==(i<6 ? 0xffff : ~0U));
+ }
+ assert(en7573_sample_transmitter(NULL,&s)==-EINVAL);
+}
 int main(void)
 {
+	test_transmitter();
 	test_loader(false); test_loader(true);
 	test_rx_power(); test_read_only_state(); test_tx_control();
 	test_control_failure_diagnostics();

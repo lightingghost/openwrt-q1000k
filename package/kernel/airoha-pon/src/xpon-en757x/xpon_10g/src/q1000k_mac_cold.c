@@ -11,6 +11,11 @@
 #include "common/q1000k_pipeline.h"
 #include "common/q1000k_protocol.h"
 
+/* Serialized by the protocol executor. Each cold install follows a MAC
+ * reset; profile refreshes retain this counter epoch. */
+static u32 qcold_generation;
+u32 q1000k_mac_generation(void) { return qcold_generation; }
+
 /* Do not echo read-only status or command bits back into mixed registers.
  * readback_mask excludes only unrelated fields that hardware may change.
  */
@@ -121,6 +126,7 @@ int q1000k_mac_cold_install(const u8 serial[8], const u8 registration[36], bool 
 	ret = an7581_xpon_status();
 	if (ret)
 		return ret;
+	qcold_generation++;
 	/* All-ones can be legitimate identity data; exact readback is required. */
 	ret = qcold_write(0x500c, get_unaligned_be32(serial), ~0U);
 	if (!ret)
@@ -196,6 +202,20 @@ int q1000k_mac_profiles_invalidate(void)
 	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
 
 	return ret ?: qcold_update(0x511c, 0x01010101, 0, 0);
+}
+
+int q1000k_mac_profile_matches(u8 index, u8 version, u16 length)
+{
+ u32 info, size;
+ int ret;
+ if (!q1000k_protocol_owned()) return -EPERM;
+ if (index > 3 || version > 15 || !length) return -EINVAL;
+ info = get_xpon_data(0x511c);
+ size = get_xpon_data(0x5120 + 4 * (index / 2));
+ ret = an7581_xpon_status();
+ if (ret || info == ~0U || size == ~0U) return ret ?: -EIO;
+ return ((info >> (index * 8)) & 0xf1) == ((u32)version << 4 | 1) &&
+  ((size >> ((index & 1) * 16)) & 0xffff) == length;
 }
 
 int q1000k_mac_profile_install(u8 index, u8 version, u16 length)

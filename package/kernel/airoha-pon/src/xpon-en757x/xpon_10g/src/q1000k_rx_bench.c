@@ -4,6 +4,7 @@
 #include <linux/ktime.h>
 #include <q1000k_trace.h>
 #include "common/q1000k_gwan.h"
+#include "common/q1000k_mac_cold.h"
 #include <linux/of.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -199,6 +200,13 @@ module_param_cb(rx_bench_diagnostics, &qrx_diagnostics_ops, NULL, 0400);
  * No cache or reader can replace the diagnostic half of another reader's pair.
  */
 static struct proc_dir_entry *qrx_snapshot_entry;
+static int qrx_snapshot_unavailable(struct seq_file *seq, int error)
+{
+ if (error != -EAGAIN) return error;
+ seq_printf(seq, "{\"snapshot_available\":false,\"error\":%d,\"sampled_ns\":%llu}\n",
+  error, ktime_get_boottime_ns());
+ return 0;
+}
 static int qrx_snapshot_show(struct seq_file *seq, void *unused)
 {
 	struct q1000k_rx_sample rx;
@@ -207,10 +215,10 @@ static int qrx_snapshot_show(struct seq_file *seq, void *unused)
 	u32 mask;
 	int ret = q1000k_protocol_status();
 
-	if (ret) return ret;
-	if (!q1000k_transport_running()) return -EAGAIN;
+	if (ret) return qrx_snapshot_unavailable(seq, ret);
+	if (!q1000k_transport_running()) return qrx_snapshot_unavailable(seq, -EAGAIN);
 	ret = q1000k_phy_snapshot(&rx, &diag);
-	if (ret) return ret;
+	if (ret) return qrx_snapshot_unavailable(seq, ret);
 	mask = get_xpon_data(0x5040);
 	ret = an7581_xpon_status();
 	if (ret || mask == ~0U || (rx.rx_bench && mask)) return ret ?: -EIO;
@@ -245,8 +253,13 @@ static int qrx_fast_show(struct seq_file *seq, void *unused)
 	u32 sfp, sync, frames;
 	u64 begin = ktime_get_boottime_ns();
 	int ret = q1000k_phy_fast_sample(&sfp, &sync, &frames);
-	if (ret) return ret;
-	seq_printf(seq, "{\"fast_version\":1,\"begin_ns\":%llu,\"end_ns\":%llu,\"sfp\":%u,\"sync\":%u,\"frames\":%u}\n",
+	if (ret == -EAGAIN) {
+  seq_printf(seq, "{\"fast_version\":2,\"available\":false,\"error\":%d,\"begin_ns\":%llu,\"end_ns\":%llu}\n",
+   ret, begin, ktime_get_boottime_ns());
+  return 0;
+ }
+ if (ret) return ret;
+ seq_printf(seq, "{\"fast_version\":2,\"available\":true,\"begin_ns\":%llu,\"end_ns\":%llu,\"sfp\":%u,\"sync\":%u,\"frames\":%u}\n",
 		begin, ktime_get_boottime_ns(), sfp, sync, frames);
 	return 0;
 }
@@ -257,8 +270,9 @@ static int qrx_fast_show(struct seq_file *seq, void *unused)
 static int qrx_mac_show(struct seq_file *seq, void *unused)
 {
 	static const u32 regs[] = { 0x5100, 0x5104, 0x5108, 0x511c, 0x5120, 0x5124,
-		0x5920, 0x5950, 0x5954, 0x5958, 0x595c, 0x5960, 0x5964, 0x5984 };
-	u32 values[ARRAY_SIZE(regs)];
+		0x509c, 0x510c, 0x5128, 0x5318, 0x5284, 0x52f0,
+  0x5920, 0x5944, 0x5950, 0x5954, 0x5960, 0x5964, 0x5968, 0x596c, 0x5984 };
+	u32 values[ARRAY_SIZE(regs)], generation;
 	u64 begin = ktime_get_boottime_ns();
 	unsigned int i;
 	int token = q1000k_protocol_enter(), ret;
@@ -267,16 +281,34 @@ static int qrx_mac_show(struct seq_file *seq, void *unused)
 	for (i = 0; !ret && i < ARRAY_SIZE(regs); i++) {
 		values[i] = get_xpon_data(regs[i]);
 		ret = an7581_xpon_status();
-		if (!ret && i < 6 && values[i] == ~0U) ret = -EIO;
+		if (!ret && i < 12 && values[i] == ~0U) ret = -EIO;
 	}
+	generation = q1000k_mac_generation();
 	q1000k_protocol_leave(token);
 	if (ret) return ret;
-	seq_printf(seq, "{\"mac_version\":1,\"begin_ns\":%llu,\"end_ns\":%llu,\"registers\":{",
-		begin, ktime_get_boottime_ns());
+	seq_printf(seq, "{\"hardware_generation\":%u,\"mac_version\":2,\"begin_ns\":%llu,\"end_ns\":%llu,\"registers\":{",
+		generation, begin, ktime_get_boottime_ns());
 	for (i = 0; i < ARRAY_SIZE(regs); i++)
 		seq_printf(seq, "%s\"%04x\":%u", i ? "," : "", regs[i], values[i]);
 	seq_puts(seq, "}}\n");
 	return 0;
+}
+
+/* Called by the serialized MAC IRQ worker at discovery interrupts; never
+ * I2C, FIFO reads, W1C ACKs, key/identity words, or measurement triggers. */
+void q1000k_discovery_snapshot(u32 interrupts)
+{
+ static const u32 regs[] = { 0x509c, 0x5100, 0x5104, 0x5108, 0x510c,
+  0x511c, 0x5120, 0x5124, 0x5128, 0x5318, 0x5944, 0x5954, 0x5284, 0x52f0 };
+ unsigned int i;
+ if (!q1000k_protocol_owned()) return;
+ for (i = 0; i < ARRAY_SIZE(regs); i++) {
+  u32 value = get_xpon_data(regs[i]);
+  int ret = an7581_xpon_status();
+  if (!ret && i != 10 && i != 11 && value == ~0U) ret = -EIO;
+  q1000k_trace(QT_DISCOVERY, i, ret, regs[i], value, interrupts, q1000k_mac_generation());
+  if (ret) break;
+ }
 }
 
 static int qrx_recover_drained(void *arg)

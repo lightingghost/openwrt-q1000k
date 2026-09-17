@@ -76,6 +76,15 @@ int en7573_apply_rx_output(struct en7573_io *io, unsigned int profile,
 			  struct en7573_rx_output *original);
 int en7573_restore_rx_output(struct en7573_io *io,
 			    struct en7573_rx_output *original);
+/* Read-only OEM DDMI and ordinary TX control/status allowlist. A valid zero
+ * remains zero; bus failures and all-ones are per-field unavailable. The MCU
+ * publishes DDMI asynchronously: a fresh bus read does not prove sensor age.
+ */
+#define EN7573_TX_FIELDS 22
+struct en7573_tx_field { const char *name, *unit; u16 reg; u8 width; u32 scale; };
+struct en7573_transmitter { u32 raw[EN7573_TX_FIELDS]; int error[EN7573_TX_FIELDS]; };
+extern const struct en7573_tx_field en7573_tx_fields[EN7573_TX_FIELDS];
+int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *sample);
 int en7573_sample_receiver(struct en7573_io *io, struct en7573_receiver *sample);
 /* Published RX power: 0x51:0x0068, BE16 in 0.1 uW units. Zero/saturated
  * words are unavailable (-ENODATA); errors leave the output unchanged.

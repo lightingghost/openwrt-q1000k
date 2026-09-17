@@ -180,6 +180,7 @@ int q1000k_phy_get_tx(bool *enabled);
  */
 int q1000k_phy_get_rx_power(u32 *nanowatts);
 /* The physical pipeline must have quiesced PHY callbacks and TX first. */
+int q1000k_phy_profile_matches(const struct q1000k_pon_profile *profile);
 int q1000k_phy_profile_set(const struct q1000k_pon_profile *profile);
 int q1000k_phy_call(struct xpon_phy_api_data_s *data);
 /* Timer callback only queues work; PHY polling runs in process context. */

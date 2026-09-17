@@ -1,8 +1,9 @@
 # Q1000K upstream discovery: analysis and next bench specification
 
 Prepared 2026-09-16 after normal internet recovery. Branch `q1000k-xgspon`.
-Status: **source audit and test specification prepared; these new tests are
-not yet implemented, built or run**. The running image remains `be8e34c5f6`.
+Status: **internal measurements and the controlled profile comparison are implemented;
+hardware validation is pending**. See [implemented bench cases](XGSPON-TX-BENCH.q1000k.md).
+The earlier captures remain tied to image `be8e34c5f6`.
 Use one next RAM image and one portable collector. Preserve the working
 receiver, exact unit MCU/DSD inputs, subscriber identity and 36-zero-byte
 registration default. Normal optical TX is already authorized.
