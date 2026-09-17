@@ -56,6 +56,14 @@ static int __skb_vlan_pop(struct sk_buff *skb,u16 *tci) {
 }
 static bool fixture_fix_vlans;
 static int q1000k_pon_fix_vlans(void) { return fixture_fix_vlans; }
+#undef q1000k_trace
+#define QT_OMCI_GEM 28
+static struct { int error; u32 a,b,c,d; } gem_trace[2];
+static void fixture_gem_trace(unsigned int event,unsigned int id,int error,u32 a,u32 b,u32 c,u32 d) {
+    assert(event==28 && id>=1 && id<=2);
+    gem_trace[id-1]=(typeof(gem_trace[0])){error,a,b,c,d};
+}
+#define q1000k_trace(...) fixture_gem_trace(__VA_ARGS__)
 /* SERVICES */
 static void make_tag(struct sk_buff *skb,u16 vid,u8 pcp)
 {
@@ -64,6 +72,64 @@ static void make_tag(struct sk_buff *skb,u16 vid,u8 pcp)
     u16 tci=vid|((u16)pcp<<13); skb->data[14]=tci>>8; skb->data[15]=tci;
     skb->data[16]=8;
 }
+static void test_deferred_gem(void)
+{
+    struct omci_gem_port_config down={.port_id=550,.tcont_entity_id=0xffff,.direction=2,
+        .qos={.upstream_queue=0x1234,.upstream_descriptor=0x4567,
+              .downstream_queue=0xffff,.downstream_descriptor=0xffff}};
+    struct omci_gem_port_config up={.port_id=600,.tcont_entity_id=0x8000,.direction=3,
+        .qos={.upstream_queue=0x8003}};
+    struct q1000k_gwan_binding binding;
+    struct q1000k_gwan_table before,after;
+    struct sk_buff skb;
+    reset_model(); q1000k_services_init();
+    assert(!q1000k_services_gem_config(NULL,99,&down,true));
+    assert(hardware[550] && qs_alloc[0]==0xffff);
+    assert(!q1000k_gwan_snapshot(&before));
+    assert(before.gem[0].alloc_id==0xffff && before.gem[0].channel==33);
+    assert(q1000k_gwan_binding(550,true,&binding)==-ENODATA);
+    assert(q1000k_gwan_binding(550,false,&binding)==-ENODATA);
+    /* Upstream-only fields are ignored in direction 2; downstream QoS and
+     * unsupported broadcast key rings are still rejected without changes. */
+    down.qos.downstream_queue=1;
+    assert(q1000k_services_gem_config(NULL,99,&down,true)==-EOPNOTSUPP);
+    down.qos.downstream_queue=0xffff; down.encryption_key_ring=2;
+    assert(q1000k_services_gem_config(NULL,99,&down,true)==-EOPNOTSUPP);
+    down.encryption_key_ring=0;
+    assert(!q1000k_gwan_snapshot(&after) && !memcmp(&before,&after,sizeof(before)));
+    /* No allocation: creation succeeds, but never opens an upstream queue. */
+    assert(!q1000k_services_gem_config(NULL,100,&up,true));
+    assert(gem_trace[0].a==((100U<<16)|600) && gem_trace[0].b==((0x8000U<<16)|0x300));
+    assert(gem_trace[0].c==0xffff && gem_trace[0].d==3);
+    assert(gem_trace[1].b==0x80030000 && !gem_trace[1].error);
+    assert(hardware[600] && qs_alloc[0]==0xffff);
+    assert(q1000k_gwan_binding(600,true,&binding)==-ENODATA);
+    assert(!q1000k_gwan_snapshot(&before)); after=before;
+    after.gem[1].channel=1;
+    int ops=physical_ops;
+    assert(q1000k_gwan_apply(&before,&after)==-EINVAL && physical_ops==ops);
+    assert(q1000k_services_gem(NULL,101,601,0xffff,3,true,0)==-EINVAL);
+    /* OMCI allocation followed by PLOAM assignment completes the binding. */
+    assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+    assert(q1000k_gwan_binding(600,true,&binding)==-ENODATA);
+    assert(!gwan_create_new_tcont(200));
+    assert(!q1000k_gwan_binding(600,true,&binding) && binding.alloc_id==200 && binding.channel==1);
+    assert(q1000k_gwan_binding(550,true,&binding)==-ENODATA);
+    assert(!q1000k_services_replace(NULL,NULL,0));
+    q1000k_services_enable(true); make_tag(&skb,1894,0);
+    assert(q1000k_services_tx(&skb)==-ENOENT && queue_model[1]==255);
+    /* Deallocation retains the GEM, revokes binding, and permits rebinding. */
+    assert(!q1000k_services_tcont(NULL,0x8000,0xffff,true));
+    assert(hardware[600] && q1000k_gwan_binding(600,true,&binding)==-ENODATA);
+    assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+    assert(!q1000k_gwan_binding(600,true,&binding) && binding.channel==1);
+    assert(!q1000k_services_gem_config(NULL,100,&up,false));
+    assert(gem_trace[0].c==200 && gem_trace[0].d==2);
+    assert(!q1000k_services_gem_config(NULL,99,&down,false));
+    assert(!hardware[600] && !hardware[550]);
+    int token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+}
+
 int main(void)
 {
     struct omci_priority_queue_config q={.configuration=1,.maximum_size=0xffff,
@@ -76,6 +142,7 @@ int main(void)
         .gem_port_id=500,.tcont_entity_id=0x8000,.alloc_id=200,.vlan_id=1894,
         .vlan_valid=true,.queue=3,.direction=3};
     struct omci_service_config rules[2];
+    test_deferred_gem();
     reset_model(); q1000k_services_init();
     assert(!q1000k_services_topology(NULL,&topology) && topology.tcont_count==31 && topology.queues_per_tcont==8);
     assert(q1000k_services_tcont(NULL,0x7fff,200,true)==-EINVAL);
@@ -349,7 +416,10 @@ int main(void)
     assert(q1000k_services_replace(NULL,&s,1)==-ETIMEDOUT && !qs_changing);
     physical_fail=0;
     assert(!q1000k_services_tx(&skb));
-    assert(q1000k_services_tcont(NULL,0x8000,0xffff,true)==-EBUSY);
+    assert(!q1000k_services_tcont(NULL,0x8000,0xffff,true));
+    assert(hardware[500] && q1000k_gwan_binding(500,true,&dormant)==-ENODATA);
+    assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+    assert(!q1000k_services_replace(NULL,rules,2));
     assert(!q1000k_services_uni(NULL,1,false));
     assert(q1000k_services_tx(&skb)==-ENOENT && q1000k_services_rx(&skb,500)==-ENOENT);
     assert(!q1000k_services_uni(NULL,1,true));

@@ -1359,15 +1359,6 @@ omci_agent_seed_nokia_locked(struct omci_device *odev, u8 profile)
 		if (ret)
 			return ret;
 
-		/* Class 131 (OLT-G): pre-seed the Nokia/ALCL OLT identity. */
-		memset(data, 0, sizeof(data));
-		memcpy(data, "ALCL", 4);
-		memcpy(data + 4, "ISAM                ", 20);
-		ret = omci_mib_add_default_profile_mask(agent, profile,
-				OMCI_CLASS_OLT_G, 0,
-				GENMASK(15, 14), data, sizeof(data));
-		if (ret)
-			return ret;
 	}
 
 	return 0;
@@ -1775,6 +1766,15 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 	if (ret)
 		return ret;
 
+	/* ONU-created instance, present before the OLT's first Get/Set. The OLT
+	 * supplies its identity later; spaces match the 8311 startup MIB.
+	 */
+	memset(data, ' ', 38);
+	ret = omci_mib_add_default_mask(agent, OMCI_CLASS_OLT_G, 0,
+					GENMASK(15, 12), data, 52);
+	if (ret)
+		return ret;
+
 	for (i = 0; i < ARRAY_SIZE(agent->config.software_version); i++) {
 		memset(data, 0, sizeof(data));
 		memcpy(data, agent->config.software_version[i],
@@ -1830,6 +1830,14 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 		data[4] = 0; /* Administrative state unlocked. */
 		ret = omci_mib_add_default(agent, OMCI_CLASS_PPTP_ETHERNET_UNI,
 					   entity_id, data, sizeof(data));
+		if (ret)
+			return ret;
+
+		/* Same entity as the Ethernet UNI. Only disabled authentication is
+		 * supported: enabling an absent authenticator must fail explicitly.
+		 */
+		ret = omci_mib_add_default_mask(agent, OMCI_CLASS_DOT1X_PORT_EXTENSION,
+						entity_id, BIT(15), data, 1);
 		if (ret)
 			return ret;
 
@@ -2817,6 +2825,14 @@ static int omci_agent_hw_update_apply(struct omci_device *odev,
 	}
 }
 
+static void omci_agent_operation_error(struct omci_agent *agent, u8 stage, int error)
+{
+	if (error && !agent->operation_error) {
+		agent->operation_error = error;
+		agent->operation_stage = stage;
+	}
+}
+
 static int omci_agent_hw_update(struct omci_device *odev,
 				struct omci_mib_object *object,
 				u8 action, const u8 *content)
@@ -2826,6 +2842,7 @@ static int omci_agent_hw_update(struct omci_device *odev,
 	if (odev->agent.service_error)
 		return odev->agent.service_error;
 	ret = omci_agent_hw_update_apply(odev, object, action, content);
+	omci_agent_operation_error(&odev->agent, OMCI_OPERATION_HARDWARE, ret);
 
 	if (ret == -EUCLEAN)
 		omci_agent_service_fault_locked(odev);
@@ -3448,6 +3465,7 @@ static u8 omci_agent_create_locked(struct omci_device *odev,
 	hardware_applied = true;
 	ret = omci_mib_store_locked(agent, object);
 	if (ret) {
+		omci_agent_operation_error(agent, OMCI_OPERATION_STORE, ret);
 		result = OMCI_RESULT_DEVICE_BUSY;
 		goto rollback;
 	}
@@ -3455,6 +3473,7 @@ static u8 omci_agent_create_locked(struct omci_device *odev,
 	if (omci_agent_datapath_class(agent, class_id)) {
 		ret = omci_agent_reconcile_services_locked(odev);
 		if (ret) {
+			omci_agent_operation_error(agent, OMCI_OPERATION_RECONCILE, ret);
 			result = OMCI_RESULT_PROCESSING_ERROR;
 			goto rollback;
 		}
@@ -3555,6 +3574,10 @@ static u8 omci_agent_set_locked(struct omci_device *odev, u16 class_id,
 		goto rollback_parameter;
 	if (class_id == OMCI_CLASS_GEM_PORT_CTP && object->data[15] > 3)
 		goto rollback_parameter;
+	if (class_id == OMCI_CLASS_DOT1X_PORT_EXTENSION && object->data[0]) {
+		ret = object->data[0] == 1 ? -EOPNOTSUPP : -EINVAL;
+		goto rollback_parameter;
+	}
 
 	/* Keep ONU-created instances across a subsequent MIB reset. */
 	if (!existed)
@@ -3571,14 +3594,17 @@ static u8 omci_agent_set_locked(struct omci_device *odev, u16 class_id,
 	hardware_applied = true;
 	if (omci_agent_datapath_class(agent, class_id)) {
 		ret = omci_agent_reconcile_services_locked(odev);
-		if (ret)
+		if (ret) {
+			omci_agent_operation_error(agent, OMCI_OPERATION_RECONCILE, ret);
 			goto rollback_processing;
+		}
 	}
 	omci_agent_increment_mib_sync_locked(agent);
 	ret = OMCI_RESULT_SUCCESS;
 	goto out_free_previous;
 
 rollback_parameter:
+	omci_agent_operation_error(agent, OMCI_OPERATION_VALIDATE, ret ?: -EINVAL);
 	if (existed) {
 		*object = *previous;
 	} else {
@@ -3586,7 +3612,7 @@ rollback_parameter:
 		kfree(object);
 	}
 	ret = ret == -ENOSPC ? OMCI_RESULT_DEVICE_BUSY :
-				     OMCI_RESULT_PARAMETER_ERROR;
+		ret == -EOPNOTSUPP ? OMCI_RESULT_NOT_SUPPORTED : OMCI_RESULT_PARAMETER_ERROR;
 	goto out_free_previous;
 
 rollback_processing:
@@ -4401,6 +4427,7 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 {
 	struct omci_agent *agent = &odev->agent;
 	struct omci_wire_request request;
+	struct omci_diagnostic diagnostic = {};
 	u8 *response = NULL;
 	u8 *content = NULL;
 	size_t response_len = 0;
@@ -4418,7 +4445,8 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 
 	ret = omci_wire_decode(skb->data, skb->len, &request);
 	if (ret) {
-		if (odev->ops->diagnostic) odev->ops->diagnostic(odev, 0, 0, ret, 0, 0);
+		diagnostic.error = ret;
+		if (odev->ops->diagnostic) odev->ops->diagnostic(odev, &diagnostic);
 		return;
 	}
 	omci_agent_log_wire(odev, "RX", skb->data, skb->len);
@@ -4446,9 +4474,13 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 		fake = agent->last_response_fake;
 		duplicate = true;
 	} else {
+		agent->operation_error = 0;
+		agent->operation_stage = OMCI_OPERATION_NONE;
 		ret = omci_agent_build_response_locked(
 			odev, &request, content, content_capacity, &content_len,
 			&unsupported, &fake, &profile_changed);
+		diagnostic.operation_error = agent->operation_error;
+		diagnostic.stage = agent->operation_stage;
 		if (!ret)
 			ret = omci_wire_encode_response(
 				&request, request.message_type & 0x1f,
@@ -4513,7 +4545,25 @@ out:
 			unsigned int off = request.device_id == OMCI_BASELINE_DEV_ID ? 8 : 10;
 			if (response_len > off) { result = response[off]; flags |= 16; }
 		}
-		odev->ops->diagnostic(odev, request.class_id, op, ret, flags, result);
+		diagnostic.class_id = request.class_id;
+		diagnostic.entity_id = request.entity_id;
+		diagnostic.transaction_id = request.transaction_id;
+		diagnostic.opcode = op;
+		diagnostic.error = ret;
+		diagnostic.result = result;
+		/* These request opcodes start with a mask. Create starts directly
+		 * with attributes and must not be misread as a mask.
+		 */
+		if ((op == 8 || op == 9 || op == 26 || op == 28 || op == 29) &&
+		    request.payload_len >= 2)
+			diagnostic.attribute_mask = get_unaligned_be16(request.payload);
+		if (request.class_id == OMCI_CLASS_DOT1X_PORT_EXTENSION && op == 8 &&
+		    (diagnostic.attribute_mask & BIT(15)) && request.payload_len >= 3) {
+			diagnostic.dot1x_enable = request.payload[2];
+			flags |= 32;
+		}
+		diagnostic.flags = flags;
+		odev->ops->diagnostic(odev, &diagnostic);
 	}
 	kfree(content);
 	kfree(response);

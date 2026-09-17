@@ -96,7 +96,13 @@ static int q1000k_gwan_validate(struct q1000k_gwan_transaction *tx)
 			return -EOPNOTSUPP;
 		if (e->encrypted && !e->rx_encrypted)
 			return -EINVAL; /* G.988 has no upstream-only encryption ring. */
-		if (e->alloc_id > Q1000K_ALLOC_ID_MAX ||
+		/* A GEM exists independently of an upstream allocation. A missing
+		 * allocation is legal only with the unusable channel sentinel; the
+		 * native binding guard keeps RX/TX closed until a service is ready.
+		 */
+		if ((e->alloc_id > Q1000K_ALLOC_ID_MAX &&
+		     !(e->alloc_id == Q1000K_GWAN_UNASSIGNED &&
+		       e->channel == Q1000K_GWAN_UNKNOWN_CHANNEL)) ||
 		    (e->channel >= Q1000K_GWAN_CHANNELS &&
 		     e->channel != Q1000K_GWAN_UNKNOWN_CHANNEL))
 			return -EINVAL;

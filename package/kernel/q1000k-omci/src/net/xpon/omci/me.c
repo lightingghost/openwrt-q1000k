@@ -352,6 +352,20 @@ static const struct omci_attr_desc omci_software_image_attrs[] = {
 	OMCI_ATTR(12, 16, 1, OMCI_R),
 };
 
+static const struct omci_attr_desc omci_olt_g_attrs[] = {
+	OMCI_ATTR(15, 0, 4, OMCI_RW),
+	OMCI_ATTR(14, 4, 20, OMCI_RW),
+	OMCI_ATTR(13, 24, 14, OMCI_RW),
+	OMCI_ATTR(12, 38, 14, OMCI_RW),
+};
+
+/* A transparent UNI supports the disabled control. An authenticator and its
+ * state/action attributes are not implemented; do not advertise fake states.
+ */
+static const struct omci_attr_desc omci_dot1x_port_attrs[] = {
+	OMCI_ATTR(15, 0, 1, OMCI_RW),
+};
+
 static const struct omci_attr_desc omci_cardholder_attrs[] = {
 	OMCI_ATTR(15, 0, 1, OMCI_R),
 	OMCI_ATTR(14, 1, 1, OMCI_RW),
@@ -656,6 +670,14 @@ static const struct omci_me_desc omci_me_descs[] = {
 		      GENMASK(15, 1), GENMASK(15, 1), 17,
 		      OMCI_CLASS_CATEGORY_UNI, OMCI_CLASS_SUPPORT_PROVISIONED,
 		      omci_pptp_ethernet_uni_attrs),
+	STANDARD_DESC(OMCI_CLASS_OLT_G, "OLT-G", STANDARD_ACTIONS,
+		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 12), GENMASK(15, 12),
+		      52, OMCI_CLASS_CATEGORY_MANAGEMENT, OMCI_CLASS_SUPPORT_NATIVE,
+		      omci_olt_g_attrs),
+	STANDARD_DESC(OMCI_CLASS_DOT1X_PORT_EXTENSION, "Dot1X port extension package",
+		      STANDARD_ACTIONS, OMCI_ME_F_ONU_CREATED, BIT(15), BIT(15),
+		      1, OMCI_CLASS_CATEGORY_UNI, OMCI_CLASS_SUPPORT_NATIVE,
+		      omci_dot1x_port_attrs),
 	STANDARD_DESC(OMCI_CLASS_MAC_BRIDGE_PORT_CONFIG_DATA,
 		      "MAC bridge port configuration data", OLT_CREATED_ACTIONS,
 		      OMCI_ME_F_DATAPATH, GENMASK(15, 3), GENMASK(15, 3), 24,

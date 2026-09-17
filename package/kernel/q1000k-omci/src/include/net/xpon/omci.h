@@ -361,6 +361,20 @@ struct omci_traffic_scheduler_config {
 	u8 policy, priority;
 };
 
+enum omci_operation_stage {
+	OMCI_OPERATION_NONE, OMCI_OPERATION_VALIDATE, OMCI_OPERATION_HARDWARE,
+	OMCI_OPERATION_RECONCILE, OMCI_OPERATION_STORE,
+};
+
+struct omci_diagnostic {
+	u16 class_id, entity_id, transaction_id, attribute_mask;
+	u8 opcode, stage;
+	int error, operation_error;
+	u32 flags, result;
+	/* Only the public Dot1X enable control; valid when flags bit 5 is set. */
+	u8 dot1x_enable;
+};
+
 /**
  * struct omci_device_ops - hardware transport and provisioning operations
  * @start: acquire and start the OMCI transport independently of netdev state
@@ -391,8 +405,7 @@ struct omci_traffic_scheduler_config {
 struct omci_device_ops {
 	/* Optional observational callback. No payload/identity/key bytes. Called
 	 * outside agent locks; provider must not re-enter OMCI lifecycle APIs. */
-	void (*diagnostic)(struct omci_device *odev, u16 class_id, u8 opcode,
-			   int error, u32 flags, u32 result);
+	void (*diagnostic)(struct omci_device *odev, const struct omci_diagnostic *event);
 	/* Nonzero values pin the physical UNI model before the first MIB. */
 	u8 onu_type, uni_count;
 	int (*start)(struct omci_device *odev);

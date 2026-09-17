@@ -657,6 +657,53 @@ def registration_summary(records):
         note='Enqueue, hardware counts and register comparisons are distinct from OLT acceptance; sparse/averaged optical readings cannot certify individual bursts.')
 
 
+def omci_provisioning_summary(events):
+    """Decode only typed public metadata, preserving independent failure stages.
+
+    Caller supplies deduplicated events. Legacy event 22 has no entity/mask;
+    bit 6 distinguishes new metadata from an actual entity zero/mask zero.
+    GEM and QoS records remain separate when one may have been lost.
+    """
+    responses, operations, gems, qos, counts = [], [], [], [], {}
+    for e in events:
+        base = dict(seq=e['seq'], stack_generation=e.get('stack_generation', 1))
+        if e['event'] == 22:
+            metadata = bool(e['b'] & 64)
+            row = dict(base, opcode=e['id'], class_id=e['a'],
+                entity_id=e['d'] >> 16 if metadata else None,
+                attribute_mask=e['d'] & 0xffff if metadata else None,
+                transaction_id=e['b'] >> 16 if metadata else None,
+                result=e['c'] if e['b'] & 16 else None,
+                transport_error=e['result'], duplicate=bool(e['b'] & 1))
+            if row['result'] or row['transport_error']:
+                responses.append(row)
+            if row['result'] is not None:
+                key = tuple(row[k] for k in ('class_id','entity_id','opcode','attribute_mask','result'))
+                if key not in counts:
+                    counts[key] = {k: row[k] for k in ('class_id','entity_id','opcode','attribute_mask','result')}
+                    counts[key].update(count=0, duplicates=0)
+                counts[key]['count'] += 1
+                counts[key]['duplicates'] += row['duplicate']
+        elif e['event'] == 28 and e['id'] == 1:
+            gems.append(dict(base, entity_id=e['a'] >> 16, port_id=e['a'] & 0xffff,
+                tcont=e['b'] >> 16, direction=(e['b'] >> 8) & 255, key_ring=e['b'] & 255,
+                alloc_id=e['c'] & 0xffff, traffic_management=(e['c'] >> 16) & 255,
+                valid=bool(e['d'] & 1), allocation_sampled=bool(e['d'] & 2), error=e['result']))
+        elif e['event'] == 28 and e['id'] == 2:
+            qos.append(dict(base, entity_id=e['a'] >> 16, port_id=e['a'] & 0xffff,
+                upstream_queue=e['b'] >> 16, upstream_descriptor=e['b'] & 0xffff,
+                downstream_queue=e['c'] >> 16, downstream_descriptor=e['c'] & 0xffff,
+                valid=bool(e['d']), error=e['result']))
+        elif e['event'] == 29:
+            operations.append(dict(base, class_id=e['a'] >> 16, entity_id=e['a'] & 0xffff,
+                transaction_id=e['b'] >> 16, attribute_mask=e['b'] & 0xffff, opcode=e['c'],
+                stage={0:'none',1:'validation',2:'hardware',3:'reconciliation',4:'MIB storage'}.get(e['id'], 'unknown'),
+                error=e['result'], dot1x_enable=e['d'] & 255 if e['d'] & 256 else None))
+    return dict(response_results=list(counts.values()), response_errors=responses,
+        operations=operations, gem_configurations=gems, gem_qos=qos,
+        note='Retained records only. Check critical evidence completeness; a successful ME operation does not prove a working data service.')
+
+
 def omci_summary(records):
     """Deduplicate polling snapshots; never infer OLT receipt from local TX."""
     unique = {}
@@ -668,6 +715,7 @@ def omci_summary(records):
     def count(ident, predicate=lambda e: True):
         return sum(e['id'] == ident and predicate(e) for e in control)
     return dict(
+        provisioning=omci_provisioning_summary(events),
         ethernet_runt_omci_delivered=count(30, lambda e: bool(e['a'] & (1 << 12))),
         rx_descriptor_words=sorted({f"0x{e['a']:08x}" for e in control if e['id'] == 30}),
         rx_guard_rejected=count(31, lambda e: e['result'] != 0),
@@ -1076,6 +1124,15 @@ def execute(args, pin):
                     o = result.get('omci_experiment', {})
                     report.append(f"| {result['name']} | {o.get('ethernet_runt_omci_delivered',0)} | {o.get('authenticated_rx',0)} | {o.get('replies_queued',0)} | {o.get('tx_auth_rejected',0)} | {o.get('allocations_kept_session',0)} | {o.get('replies_deferred',0)} / {o.get('deferred_native_consumed',0)} | {o.get('reply_drops',0)} | {o.get('critical_evidence_complete',False)} |")
                 report += ['', 'Native consumption does not prove upstream optical delivery. An unobserved allocation/pause is an untested condition; use the raw logs and collection.json to distinguish it from success.']
+                report += ['', '## Managed-entity responses', '',
+                    'Counts include duplicate replies and are limited to retained evidence. Details and provider errno/stage are in collection.json.', '',
+                    '| Case | Class | Entity | Opcode | Mask | Result | Count | Duplicates |',
+                    '|---|---:|---|---:|---|---:|---:|---:|']
+                for result in record['results']:
+                    for row in result.get('omci_experiment', {}).get('provisioning', {}).get('response_results', []):
+                        entity = 'unknown' if row['entity_id'] is None else f"0x{row['entity_id']:04x}"
+                        mask = 'unknown' if row['attribute_mask'] is None else f"0x{row['attribute_mask']:04x}"
+                        report.append(f"| {result['name']} | {row['class_id']} | {entity} | {row['opcode']} | {mask} | {row['result']} | {row['count']} | {row['duplicates']} |")
                 (args.output/'omci-summary.md').write_text('\n'.join(report)+'\n')
             if getattr(args, 'suite', 'legacy') == 'registration':
                 report = ['# Registration hypotheses 1–5', '',

@@ -88,6 +88,9 @@ struct omci_agent {
 	struct xarray *services;
 	int service_error;
 	int reconcile_error;
+	/* First failure in the current request, before any rollback overwrites it. */
+	int operation_error;
+	u8 operation_stage;
 	bool resetting_registration;
 	struct omci_agent_config config;
 	u32 upload_index;

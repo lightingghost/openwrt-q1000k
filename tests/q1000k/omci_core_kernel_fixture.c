@@ -10,6 +10,12 @@
 #endif
 
 static unsigned int fixture_tx, fixture_stops, fixture_batch_calls;
+static struct omci_diagnostic fixture_diagnostic;
+static u8 fixture_response[44];
+static void fixture_observe(struct omci_device *odev, const struct omci_diagnostic *event)
+{
+	fixture_diagnostic = *event;
+}
 static int fixture_batch_error, fixture_start_error;
 static u8 fixture_key_ring;
 static int fixture_gem_mode, fixture_gem_read_error;
@@ -93,6 +99,7 @@ static int fixture_xmit(struct omci_device *odev, struct sk_buff *skb, u16 gem, 
 		complete(&fixture_tx_entered);
 		wait_for_completion(&fixture_tx_release);
 	}
+	memcpy(fixture_response, skb->data, sizeof(fixture_response));
 	fixture_tx++;
 	kfree_skb(skb);
 	return 0;
@@ -180,6 +187,7 @@ static void fixture_service_fault(struct omci_device *odev, int error)
 }
 
 static const struct omci_device_ops fixture_ops = {
+	.diagnostic = fixture_observe,
 	.onu_type = OMCI_ONU_TYPE_SFU, .uni_count = 1,
 	.start = fixture_start, .stop = fixture_stop, .xmit = fixture_xmit,
 	.get_ani_topology = fixture_topology, .set_tcont = fixture_tcont,
@@ -200,6 +208,103 @@ static int fixture_stop_thread(void *arg)
 	ret = -EINVAL; goto out; } } while (0)
 
 int q1000k_omci_telemetry_test(void);
+
+static int fixture_provisioning(struct omci_device *odev)
+{
+	u8 request[32] = {}, answer[64] = {};
+	size_t written;
+	bool changed = false;
+	struct omci_mib_object *olt;
+	struct sk_buff *skb;
+	unsigned int i, calls;
+	int ret = 0;
+	static const u8 gem_create[] = {0x02, 0x58, 0x80, 0, 3, 0x80, 3,
+		0, 0, 0, 0, 0, 0, 0};
+
+	/* ONU-created instances exist before provisioning. Partial Set preserves
+	 * the other OLT attributes, and an unsupported authenticator stays off.
+	 */
+	put_unaligned_be16(BIT(15), request);
+	CHECK(omci_agent_get_locked(odev, OMCI_CLASS_OLT_G, 0, request, 2,
+		answer, sizeof(answer), &written) == OMCI_RESULT_SUCCESS);
+	CHECK(written == 7 && !memcmp(answer + 3, "    ", 4));
+	CHECK(omci_agent_get_locked(odev, OMCI_CLASS_OLT_G, 1, request, 2,
+		answer, sizeof(answer), &written) == OMCI_RESULT_UNKNOWN_INSTANCE);
+	put_unaligned_be16(BIT(14), request);
+	memcpy(request + 2, "OLT-equipment-test20", 20);
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_OLT_G, 0, OMCI_MSG_TYPE_SET,
+		request, 22, &changed) == OMCI_RESULT_SUCCESS);
+	put_unaligned_be16(BIT(15), request); memcpy(request + 2, "TEST", 4);
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_OLT_G, 0, OMCI_MSG_TYPE_SET,
+		request, 6, &changed) == OMCI_RESULT_SUCCESS);
+	olt = omci_mib_lookup(&odev->agent, OMCI_CLASS_OLT_G, 0);
+	CHECK(olt && olt->origin == OMCI_MIB_ORIGIN_DEFAULT && olt->olt_g.valid);
+	CHECK(!memcmp(olt->data + 4, "OLT-equipment-test20", 20));
+	CHECK(omci_agent_delete_locked(odev, OMCI_CLASS_OLT_G, 0, &changed) == OMCI_RESULT_NOT_SUPPORTED);
+	request[2] = 0;
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		OMCI_MSG_TYPE_SET, request, 3, &changed) == OMCI_RESULT_SUCCESS);
+	request[2] = 1;
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		OMCI_MSG_TYPE_SET, request, 3, &changed) == OMCI_RESULT_NOT_SUPPORTED);
+	request[2] = 2;
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		OMCI_MSG_TYPE_SET, request, 3, &changed) == OMCI_RESULT_PARAMETER_ERROR);
+	CHECK(omci_agent_get_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		request, 2, answer, sizeof(answer), &written) == OMCI_RESULT_SUCCESS);
+	CHECK(written == 4 && answer[3] == 0);
+	CHECK(omci_agent_get_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x102,
+		request, 2, answer, sizeof(answer), &written) == OMCI_RESULT_UNKNOWN_INSTANCE);
+	put_unaligned_be16(BIT(14), request);
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		OMCI_MSG_TYPE_SET, request, 3, &changed) == OMCI_RESULT_PARAMETER_ERROR);
+	CHECK(!omci_agent_mib_reset(odev, false));
+	olt = omci_mib_lookup(&odev->agent, OMCI_CLASS_OLT_G, 0);
+	CHECK(olt && !olt->olt_g.valid && !memcmp(olt->data, "    ", 4));
+	CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101));
+
+	/* Real authenticated receive/reply path, including duplicate failure.
+	 * Create has no mask; the port ID must never be diagnosed as one.
+	 */
+	fixture_gem_error = -ENODATA; calls = fixture_gem_calls;
+	for (i = 0; i < 2; i++) {
+		skb = fixture_packet(9001, false); CHECK(skb);
+		skb->data[2] = 0x44;
+		put_unaligned_be16(OMCI_CLASS_GEM_PORT_CTP, skb->data + 4);
+		put_unaligned_be16(0x222, skb->data + 6);
+		memcpy(skb->data + 8, gem_create, sizeof(gem_create));
+		omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
+		flush_work(&odev->rx_work);
+		CHECK(fixture_response[8] == OMCI_RESULT_PROCESSING_ERROR);
+		CHECK(fixture_diagnostic.class_id == OMCI_CLASS_GEM_PORT_CTP);
+		CHECK(fixture_diagnostic.entity_id == 0x222 && fixture_diagnostic.transaction_id == 9001);
+		CHECK(!fixture_diagnostic.attribute_mask && !fixture_diagnostic.error);
+		CHECK(fixture_diagnostic.result == OMCI_RESULT_PROCESSING_ERROR);
+		CHECK(fixture_gem_calls == calls + 1);
+		if (!i) {
+			CHECK(fixture_diagnostic.operation_error == -ENODATA);
+			CHECK(fixture_diagnostic.stage == OMCI_OPERATION_HARDWARE);
+		} else {
+			CHECK((fixture_diagnostic.flags & 1) && !fixture_diagnostic.operation_error);
+		}
+	}
+	CHECK(!omci_mib_lookup(&odev->agent, OMCI_CLASS_GEM_PORT_CTP, 0x222));
+	fixture_gem_error = -EOPNOTSUPP;
+	skb = fixture_packet(9002, false); CHECK(skb);
+	skb->data[2] = 0x48;
+	put_unaligned_be16(OMCI_CLASS_DOT1X_PORT_EXTENSION, skb->data + 4);
+	put_unaligned_be16(0x101, skb->data + 6);
+	skb->data[10] = 1;
+	omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
+	flush_work(&odev->rx_work);
+	CHECK(fixture_response[8] == OMCI_RESULT_NOT_SUPPORTED);
+	CHECK(fixture_diagnostic.attribute_mask == BIT(15) && fixture_diagnostic.dot1x_enable == 1);
+	CHECK((fixture_diagnostic.flags & 32) && fixture_diagnostic.operation_error == -EOPNOTSUPP);
+	CHECK(fixture_diagnostic.stage == OMCI_OPERATION_VALIDATE);
+out:
+	fixture_gem_error = -EOPNOTSUPP;
+	return ret;
+}
 
 int q1000k_omci_core_test(void)
 {
@@ -357,6 +462,8 @@ int q1000k_omci_core_test(void)
 	omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
 	flush_work(&odev->rx_work);
 	CHECK(fixture_tx == before);
+	CHECK(!fixture_provisioning(odev));
+	before = fixture_tx;
 
 	for (i = 0; i < 20; i++) {
 		unsigned int n;

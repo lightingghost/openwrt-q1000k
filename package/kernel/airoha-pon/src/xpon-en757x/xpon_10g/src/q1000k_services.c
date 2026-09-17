@@ -5,6 +5,7 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
+#include <q1000k_trace.h>
 #include "common/q1000k_services.h"
 #include "common/q1000k_vlan.h"
 #include "common/q1000k_identity.h"
@@ -98,6 +99,8 @@ static int qs_channel(const struct q1000k_gwan_table *t, u16 alloc)
 {
 	unsigned int i;
 
+	if (alloc == Q1000K_GWAN_UNASSIGNED)
+		return Q1000K_GWAN_UNKNOWN_CHANNEL;
 	for (i = 1; i < Q1000K_GWAN_CHANNELS; i++)
 		if (t->alloc_id[i] == alloc)
 			return i;
@@ -149,9 +152,9 @@ int q1000k_services_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool 
 	for (i = 0; i < QS_MAX; i++) {
 		int n;
 
-		if (!qs_gems[i].valid || qs_gems[i].tcont != entity)
+		if (!qs_gems[i].valid || qs_gems[i].tcont != entity ||
+		    qs_gems[i].direction == OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
 			continue;
-		if (alloc == 0xffff) { ret = -EBUSY; goto free; }
 		n = qs_record(&tables[1], qs_gems[i].gem);
 		if (n < 0) { ret = -ESTALE; goto free; }
 		tables[1].gem[n].alloc_id = alloc;
@@ -184,7 +187,8 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 	u16 alloc = 0xffff;
 
 	if (valid && (!gem || direction < 1 || direction > 3 ||
-		      tcont < QS_TCONT_BASE || tcont >= QS_TCONT_BASE + QS_TCONTS))
+		      (direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI &&
+		       (tcont < QS_TCONT_BASE || tcont >= QS_TCONT_BASE + QS_TCONTS))))
 		return -EINVAL;
 	if (key_ring > 3) return -EINVAL;
 	if (key_ring == 2) return -EOPNOTSUPP;
@@ -200,8 +204,12 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 		goto leave;
 	if (!valid && !qs_gems[slot].valid) { ret = 0; goto leave; }
 	if (valid) {
-		alloc = qs_alloc[tcont - QS_TCONT_BASE];
-		if (alloc == 0xffff) { ret = -ENODATA; goto leave; }
+		/* GEM creation can precede OMCI T-CONT allocation and PLOAM channel
+		 * assignment. Keep its hardware entry with no usable TX binding until
+		 * both arrive. A downstream-only GEM has no upstream T-CONT at all.
+		 */
+		if (direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
+			alloc = qs_alloc[tcont - QS_TCONT_BASE];
 		for (i = 0; i < QS_MAX; i++)
 			if ((int)i != slot && qs_gems[i].valid && qs_gems[i].gem == gem) {
 				ret = -EEXIST; goto leave;
@@ -238,7 +246,7 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 			.valid = valid, .entity = entity, .gem = gem, .tcont = tcont, .direction = direction,
 			.key_ring = key_ring,
 		};
-		if (valid)
+		if (valid && direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
 			qs_seeded_alloc[tcont - QS_TCONT_BASE] = false;
 	}
 	if (ret && ret != -EUCLEAN)
@@ -274,15 +282,49 @@ static int qs_gem_qos(u16 tcont, const struct omci_gem_qos *qos)
 int q1000k_services_gem_config(struct omci_device *odev, u16 entity,
 		const struct omci_gem_port_config *config, bool valid)
 {
-	int ret;
+	int ret = 0, token;
+	u16 alloc = 0xffff;
+	bool allocation_sampled = false;
 
 	if (!config) return -EINVAL;
+	token = q1000k_protocol_enter();
+	if (token < 0) { ret = token; goto trace; }
 	if (valid) {
-		ret = qs_gem_qos(config->tcont_entity_id, &config->qos);
-		if (ret) return ret;
+		if (config->direction == OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI) {
+			/* The factory direction-2 path bypasses the upstream T-CONT
+			 * and queue checks. Downstream QoS is still validated.
+			 */
+			if (qs_pointer(config->qos.downstream_descriptor) ||
+			    qs_pointer(config->qos.downstream_queue))
+				ret = -EOPNOTSUPP;
+		} else {
+			ret = qs_gem_qos(config->tcont_entity_id, &config->qos);
+		}
 	}
-	return q1000k_services_gem(odev, entity, config->port_id,
-		config->tcont_entity_id, config->direction, valid, config->encryption_key_ring);
+	if (!ret)
+		ret = q1000k_services_gem(odev, entity, config->port_id,
+			config->tcont_entity_id, config->direction, valid,
+			config->encryption_key_ring);
+	/* Called under the OMCI executor: inspect only this immutable candidate
+	 * and the serialized allocation state. No packet, identity or key bytes.
+	 */
+	if (config->direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI &&
+	    config->tcont_entity_id >= QS_TCONT_BASE &&
+	    config->tcont_entity_id < QS_TCONT_BASE + QS_TCONTS) {
+		alloc = qs_alloc[config->tcont_entity_id - QS_TCONT_BASE];
+		allocation_sampled = true;
+	}
+trace:
+	q1000k_trace(QT_OMCI_GEM, 1, ret, (u32)entity << 16 | config->port_id,
+		(u32)config->tcont_entity_id << 16 | config->direction << 8 |
+		config->encryption_key_ring, (u32)config->qos.traffic_management_option << 16 |
+		alloc, valid | allocation_sampled << 1);
+	q1000k_trace(QT_OMCI_GEM, 2, ret, (u32)entity << 16 | config->port_id,
+		(u32)config->qos.upstream_queue << 16 | config->qos.upstream_descriptor,
+		(u32)config->qos.downstream_queue << 16 | config->qos.downstream_descriptor, valid);
+	if (token >= 0)
+		q1000k_protocol_leave(token);
+	return ret;
 }
 
 int q1000k_services_gem_key_ring(u16 entity, u8 *key_ring)

@@ -375,10 +375,16 @@ out:
 	return ret;
 }
 
-static void qomci_diagnostic(struct omci_device *odev, u16 class_id, u8 opcode,
-			     int error, u32 flags, u32 result)
+static void qomci_diagnostic(struct omci_device *odev, const struct omci_diagnostic *e)
 {
-	q1000k_trace(QT_OMCI, opcode, error, class_id, flags, result, 0);
+	q1000k_trace(QT_OMCI, e->opcode, e->error, e->class_id,
+		e->flags | 64 | (u32)e->transaction_id << 16, e->result,
+		(u32)e->entity_id << 16 | e->attribute_mask);
+	if (e->operation_error || (e->flags & 32))
+		q1000k_trace(QT_OMCI_OPERATION, e->stage, e->operation_error,
+			(u32)e->class_id << 16 | e->entity_id,
+			(u32)e->transaction_id << 16 | e->attribute_mask,
+			e->opcode, e->flags & 32 ? 0x100 | e->dot1x_enable : 0);
 }
 
 static const struct omci_device_ops qomci_ops = {

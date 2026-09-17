@@ -5,6 +5,34 @@ from test_pon_discovery import C
 
 
 class OmciBenchTests(unittest.TestCase):
+    def test_typed_provisioning_metadata_and_legacy_unknowns(self):
+        records=[]
+        for event,ident,result,a,b,c,d in [
+                (22,4,0,268,64|16|(99<<16),1,0x222<<16),
+                (29,2,-61,(268<<16)|0x222,99<<16,4,0),
+                (28,1,-61,(0x222<<16)|600,(0x8000<<16)|(3<<8),0xffff,1),
+                (28,2,-61,(0x222<<16)|600,0x80030000,0xffff0000,1),
+                (22,9,0,131,16,5,0),
+                (29,1,-95,(290<<16)|0x101,(100<<16)|0x8000,8,0x101),
+                (22,4,0,268,64|16|1|(99<<16),1,0x222<<16)]:
+            records.append(dict(critical_version=1,position=len(records)+1,seq=len(records)+1,
+                ns=len(records)+1,generation=1,event=event,id=ident,result=result,a=a,b=b,c=c,d=d))
+        p=C.omci_summary(records+records)['provisioning']
+        self.assertEqual(len(p['response_errors']),3)
+        self.assertEqual(p['response_results'][0]['count'],2)
+        self.assertEqual(p['response_results'][0]['duplicates'],1)
+        self.assertEqual(p['response_errors'][0]['attribute_mask'],0)
+        self.assertIsNone(p['response_errors'][1]['entity_id'])
+        self.assertIsNone(p['response_errors'][1]['attribute_mask'])
+        self.assertEqual(p['operations'][0]['stage'],'hardware')
+        self.assertEqual(p['operations'][0]['error'],-61)
+        self.assertEqual(p['operations'][1]['dot1x_enable'],1)
+        self.assertEqual(p['gem_configurations'][0]['direction'],3)
+        self.assertEqual(p['gem_configurations'][0]['alloc_id'],0xffff)
+        self.assertEqual(p['gem_qos'][0]['upstream_queue'],0x8003)
+        self.assertEqual(p['gem_qos'][0]['downstream_queue'],0xffff)
+        self.assertEqual(C.omci_summary([])['provisioning']['response_results'],[])
+
     def test_matrix_has_control_comparisons_and_no_physical_actions(self):
         args=argparse.Namespace(suite='omci', physical_only=False, skip_physical=False,
                                rx_only=False, identity='private.json', cases=None)
