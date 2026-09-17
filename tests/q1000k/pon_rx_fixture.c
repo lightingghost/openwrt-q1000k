@@ -161,9 +161,20 @@ int main(void) {
     setup(); packet(0,0,48,true); packet(1,0,16,false); q->desc[1].msg0=0;
     assert(airoha_qdma_rx_process(q,8)==1 && pon_calls==1 && delivered_len==64);
     assert(delivered_words[0]==0x40154108); pages_freed(2);
-    for(int bit=11;bit<=13;bit++) {
-        setup(); packet(0,0,48,true); packet(1,0,16,false); q->desc[1].msg0|=1u<<bit;
+    for(int bit=11;bit<=13;bit+=2) {
+        setup(); packet(0,0,32,true); packet(1,0,16,false);
+        q->desc[1].msg0|=BIT(bit)|BIT(12); /* CRC/oversize still dominate OMCI runt. */
         assert(airoha_qdma_rx_process(q,8)==1 && !pon_calls && pon_drops==1); pages_freed(2);
+    }
+    /* Error bits from a tail descriptor must survive scatter assembly.
+     * OMCI can pass a runt mark to its authenticated parser; data cannot. */
+    for(int omci=0;omci<2;omci++) {
+        setup(); packet(0,0,32,true); packet(1,0,16,false);
+        if(!omci) { q->desc[0].msg0&=~BIT(8); q->desc[1].msg0&=~BIT(8); }
+        q->desc[1].msg0|=BIT(12);
+        assert(airoha_qdma_rx_process(q,8)==1 && pon_calls==omci && pon_drops==!omci);
+        if(omci) assert(delivered_len==48 && (delivered_words[0]&BIT(12)));
+        pages_freed(2);
     }
     for(int error=0;error<6;error++) {
         setup(); packet(0,0,48,true); packet(1,0,16,true); packet(2,0,16,false); packet(3,0,48,false);
