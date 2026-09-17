@@ -2,6 +2,7 @@
 #ifndef _Q1000K_PON_CONTROL_H
 #define _Q1000K_PON_CONTROL_H
 #include <linux/types.h>
+#include "en7573_mpd.h"
 
 struct q1000k_pon;
 #ifndef Q1000K_EN7573_H
@@ -10,6 +11,9 @@ struct en7573_tx_recipe { u32 words[EN7573_TX_SAVED]; unsigned int count; };
 #endif
 int q1000k_pon_tx_recipe(struct q1000k_pon *pon, unsigned int recipe,
                         struct en7573_tx_recipe *saved, bool restore);
+/* Caller owns a quiescent, disconnected isolated PHY lifetime. */
+int q1000k_pon_measure_mpd(struct q1000k_pon *pon, bool active,
+                         struct en7573_mpd *sample);
 
 /* Process context only. Acquisition requires verified firmware/calibration
  * already loaded and TX disabled. Exactly one consumer owns the controller.

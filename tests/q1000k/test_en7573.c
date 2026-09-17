@@ -443,7 +443,8 @@ static int tx_read(void *ctx, u8 device, u16 reg, u8 *data, size_t length)
  assert(device == 0x51 && reg == f->reg && length == f->width);
  if (tx_fail == i + 1) return -EREMOTEIO;
  if (tx_saturated == i + 1) { memset(data, 0xff, length); return 0; }
- if (length == 2) { data[0] = 0x12; data[1] = 0x34; }
+ if (length == 1) { data[0] = 0x78; }
+ else if (length == 2) { data[0] = 0x12; data[1] = 0x34; }
  else { data[0] = 0x78; data[1] = 0x56; data[2] = 0x34; data[3] = 0x12; }
  if (!i) memset(data, 0, length); /* Zero must not become unavailable. */
  return 0;
@@ -457,14 +458,14 @@ static void test_transmitter(void)
   assert(!en7573_sample_transmitter(&io,&s) && tx_reads==EN7573_TX_FIELDS);
   for (unsigned int i=0; i<EN7573_TX_FIELDS; i++) {
    assert(s.error[i] == (fail==i+1 ? -EREMOTEIO : 0));
-   if (fail!=i+1) assert(s.raw[i] == (!i ? 0 : i<6 ? 0x1234 : 0x12345678));
+   if (fail!=i+1) assert(s.raw[i] == (!i ? 0 : i<6 ? 0x1234 : i==21 ? 0x78 : 0x12345678));
   }
  }
  tx_fail=0;
  for (unsigned int i=0; i<EN7573_TX_FIELDS; i++) {
   tx_reads=0; tx_saturated=i+1;
   assert(!en7573_sample_transmitter(&io,&s));
-  assert(s.error[i]==-ENODATA && s.raw[i]==(i<6 ? 0xffff : ~0U));
+  assert(s.error[i]==(i==21 ? 0 : -ENODATA) && s.raw[i]==(i<6 ? 0xffff : i==21 ? 0xff : ~0U));
  }
  assert(en7573_sample_transmitter(NULL,&s)==-EINVAL);
 }

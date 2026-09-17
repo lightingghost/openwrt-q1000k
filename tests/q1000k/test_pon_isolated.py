@@ -23,6 +23,7 @@ class IsolatedTests(unittest.TestCase):
         source+='\n'+isolated
         fixture=Path(__file__).with_name('pon_phy_lifecycle_fixture.c').read_text()
         extra=r"""
+#include "en7573_mpd.h"
 #define PAGE_SIZE 4096
 #define scnprintf snprintf
 #define module_param(a,b,c)
@@ -38,6 +39,13 @@ static unsigned int slept, light_after, clock_calls;
 static void msleep(unsigned int ms) { slept+=ms; jiffies+=ms; if(light_after && slept>=light_after) controller_los=false; }
 static void fiber_plug_reset(int what, int mode) { assert(!controller.tx); assert(what==FIRST_PLUG_IN || what==PLUG_OUT); clock_calls++; }
 struct en7573_tx_recipe { u32 words[8]; unsigned int count; };
+static int mpd_calls, mpd_fail;
+static int q1000k_pon_measure_mpd(struct q1000k_pon *p, bool active, struct en7573_mpd *s) {
+ assert(p->held && !controller_inhibit && controller_los); mpd_calls++;
+ memset(s,0,sizeof(*s)); s->active=active; s->restored=true;
+ if(active) { msleep(50); msleep(5); } else msleep(1);
+ return mpd_calls==mpd_fail ? -EIO : 0;
+}
 static int recipe_error, recipe_calls, last_recipe;
 static int q1000k_pon_tx_recipe(struct q1000k_pon *p, unsigned int id, struct en7573_tx_recipe *s, bool restore)
 { assert(p->held && !p->tx); if(controller_inhibit) return -EACCES;
@@ -49,7 +57,7 @@ static int q1000k_pon_tx_recipe(struct q1000k_pon *p, unsigned int id, struct en
         fixture=fixture.replace('int main(void)', 'int original_main(void)',1)
         fixture+=r"""
 static void fresh_isolated(void) {
- reset(); isolated_tx_bench=true; memset(&qiso,0,sizeof(qiso));
+ reset(); isolated_tx_bench=true; memset(&qiso,0,sizeof(qiso)); memset(&qiso_mpd,0,sizeof(qiso_mpd)); mpd_calls=mpd_fail=0;
  controller_inhibit=false; controller_los=true; slept=light_after=clock_calls=0;
  recipe_error=recipe_calls=last_recipe=0;
  assert(!q1000k_phy_init());
@@ -87,11 +95,24 @@ int main(void) {
  for(unsigned int i=1;i<=nw;i++) {
   fresh_isolated(); fail_write=i; assert(qiso_run(9)<0 && !controller.tx);
  }
+ for(unsigned int id=19;id<=31;id++) {
+  fresh_isolated(); assert(!qiso_run(id));
+  assert(qiso.restored && qiso.tx_off && !controller.tx && mpd_calls==3);
+  assert((id==20)==(qiso.enabled_ns==0));
+  assert(qiso_mpd.count==3 && qiso_mpd.begin[0]<qiso.window_ns && qiso_mpd.begin[1]>=qiso.window_ns);
+  assert(qiso_mpd.end[1]<=qiso.disabled_ns && qiso_mpd.begin[2]>=qiso.disabled_ns);
+  if(id!=20) assert(qiso.disabled_ns-qiso.enabled_ns==5000000000ULL);
+  /* Largest u32 values must still fit the sysfs page. */
+  for(int p=0;p<3;p++) { memset(qiso_mpd.sample[p].values,0xff,sizeof(qiso_mpd.sample[p].values));
+    for(int i=0;i<3;i++) qiso_mpd.sample[p].saved[i]=qiso_mpd.sample[p].selected[i]=~0U; }
+  int n=qiso_mpd_get(buffer,NULL); assert(n>0 && n<PAGE_SIZE && strstr(buffer,"\"mpd_version\":1"));
+ }
+ for(int i=1;i<=3;i++) { fresh_isolated(); mpd_fail=i; assert(qiso_run(21)==-EIO && !controller.tx && qiso.tx_off); }
  reset(); isolated_tx_bench=false;
  puts("Isolated TX: 18 recipes, finite window, LOS guards, disabled callbacks and all MMIO failures passed");
  return 0;
 }
 """
-        run_c(fixture, flags=['-Wno-sign-compare', '-Wno-misleading-indentation','-I',str(BSP/'include')])
+        run_c(fixture, flags=['-Wno-sign-compare', '-Wno-misleading-indentation','-I',str(BSP/'include'), '-I',str(Path(__file__).resolve().parents[2]/'package/kernel/q1000k-pon-control/src')])
 
 if __name__=='__main__': unittest.main()

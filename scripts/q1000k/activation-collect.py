@@ -204,17 +204,59 @@ ISOLATED_TESTS = [
  'loop-restart', 'in-timeslot-no-grants', 'generator-tx-disabled', 'prbs7-repeat',
 ]
 
+MEASUREMENT_TESTS = [
+ 'passive-prbs7', 'mpd-tx-disabled', 'mpd-prbs7', 'mpd-ben-off',
+ 'mpd-ben-inverted', 'mpd-oem-eye0', 'mpd-sir-eye0', 'mpd-loop-restart',
+ 'mpd-all-one', 'mpd-all-zero', 'mpd-alternating', 'mpd-existing-clock', 'mpd-repeat',
+]
+
+def monitor_result(rows, test_id):
+    records = [r for r in rows if isinstance(r, dict) and r.get('mpd_version') == 1]
+    if len(records) != 1 or records[0].get('id') != test_id:
+        return {}, 'containment-failure'
+    record = records[0]
+    probes = record.get('probes', [])
+    if len(probes) != 3 or [p.get('phase') for p in probes] != [0, 1, 2]:
+        return record, 'containment-failure'
+    for p in probes:
+        if (p.get('error') != 0 or p.get('restore_error') != 0 or p.get('restored') is not True
+                or p.get('active') is not (test_id != 19)
+                or p.get('end_ns', 0) <= p.get('begin_ns', 0)
+                or p.get('sample_error') != [0, 0, 0]
+                or len(p.get('values', [])) != 3 or any(len(v) != 9 for v in p['values'])
+                or len(p.get('valid', [])) != 3):
+            return record, 'containment-failure'
+        if test_id != 19 and p.get('selected_valid') != 7:
+            return record, 'containment-failure'
+    selected_row = 0 if test_id == 19 else 1
+    record['tx_enabled_by_phase'] = [not bool(p['values'][selected_row][7] & 512)
+        if p['valid'][selected_row] & 128 else None for p in probes]
+    if record['tx_enabled_by_phase'] != [False, test_id != 20, False]:
+        return record, 'containment-failure'
+    record['raw_monitor_by_phase'] = [p['values'][selected_row][0]
+        if p['valid'][selected_row] & 1 else None for p in probes]
+    record['raw_tssi_by_phase'] = [p['values'][selected_row][1]
+        if p['valid'][selected_row] & 2 else None for p in probes]
+    # A read response is not a conversion-completion indication.
+    record['conversion_ready_verified'] = False
+    record['monitor_changed_between_tx_phases'] = (len(set(record['raw_monitor_by_phase'])) > 1
+        if all(v is not None for v in record['raw_monitor_by_phase']) else None)
+    return record, ('measured-response' if record['monitor_changed_between_tx_phases'] else
+                    'measured-flat' if record['monitor_changed_between_tx_phases'] is False else 'measurement-unavailable')
+
+
 def discovery_plan(args):
     if args.physical_only and args.skip_physical:
         raise ValueError('--physical-only cannot be combined with --skip-physical')
-    if getattr(args, 'suite', 'legacy') == 'isolated':
+    if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement'):
         if args.physical_only or args.identity:
             raise ValueError('Isolated suite requires disconnected fiber and no subscriber identity')
         if args.rx_only:
             raise ValueError('Isolated suite emits bounded test patterns; use --suite legacy --rx-only for RX-only work')
         cases = [dict(name=f'isolated-{i}', label=label, mode='isolated', samples=30,
                       ids=[f'I{i:02d}'])
-                 for i,label in enumerate(ISOLATED_TESTS, 1)]
+                 for i,label in enumerate(MEASUREMENT_TESTS if args.suite == 'measurement' else ISOLATED_TESTS,
+                                          19 if args.suite == 'measurement' else 1)]
         if getattr(args, 'cases', None):
             selected = set(args.cases.split(','))
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown isolated case')
@@ -638,6 +680,13 @@ def capture(pin, case, iperf, directory, redact):
                 values = [r['fields'][field]['value'] for r in aligned if r['fields'].get(field,{}).get('valid') is True]
                 result['tx']['by_window'][phase][field] = dict(samples=len(values), minimum=min(values) if values else None,
                     maximum=max(values) if values else None, changed=len(set(values)) > 1)
+        if int(name.split('-')[1]) >= 19:
+            result['mpd'], result['measurement_outcome'] = monitor_result(
+                [json.loads(line) for line in lines if line.startswith('{"mpd_version":')], int(name.split('-')[1]))
+            if result['measurement_outcome'] == 'containment-failure': result['status'] = 'containment-failure'
+            # Retain monitor intervals so downstream analysis can exclude perturbations.
+            result['tx']['active_monitor_intervals_ns'] = [
+                [p['begin_ns'], p['end_ns']] for p in result['mpd'].get('probes', []) if p.get('active')]
         return result
     if result['rx_samples'] < 15 and result['status'] != 'containment-failure': result['status'] = 'inconclusive'
     result['planned_ids'] = case.get('ids', [])
@@ -738,7 +787,7 @@ def execute(args, pin):
             record['not_run'] = [c['name'] for c in cases if c['name'] not in {r['name'] for r in record['results']}]
             if args.physical_only:
                 record['not_run'] += ['rx-startup', 'rx-repeat-1', 'rx-repeat-2', 'rx-soak']
-            if getattr(args, 'suite', 'legacy') == 'isolated':
+            if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement'):
                 record['not_run'] += ['OLT discovery', 'serial acceptance', 'ranging', 'O5', 'OMCI provisioning', 'WAN traffic']
                 record['identity_note'] = 'Disconnected PHY-only suite; no identity programmed and no registration executor loaded.'
             elif rx_only:
@@ -753,7 +802,7 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') == 'isolated':
+            if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement'):
                 report = ['# Disconnected transmitter observations', '',
                     'Internal sensor readings; connector emission and O5 remain unverified.', '',
                     '| Case | Result | Internal TX nW before / active / after | Bias uA before / active / after | TX off / restored |',
@@ -767,6 +816,14 @@ def execute(args, pin):
                 for result in record['results']:
                     iso=result.get('isolated',{})
                     report.append(f"| {result['name']} {result.get('test_label','')} | {result['status']} | {ranges(result,'tx_power')} | {ranges(result,'bias')} | {iso.get('tx_off')} / {iso.get('restored')} |")
+                if args.suite == 'measurement':
+                    report += ['', '## OEM monitor observations', '',
+                        'Raw ADC/TSSI codes, with TX off / test active / restored. Conversion freshness and connector emission remain unverified.', '',
+                        '| Case | Measurement result | Raw monitor by TX phase | Raw TSSI by TX phase |',
+                        '|---|---|---|---|']
+                    for result in record['results']:
+                        m = result.get('mpd', {})
+                        report.append(f"| {result['name']} {result.get('test_label','')} | {result.get('measurement_outcome','missing')} | {m.get('raw_monitor_by_phase')} | {m.get('raw_tssi_by_phase')} |")
                 (args.output/'isolated-summary.md').write_text('\n'.join(report)+'\n')
             files = sorted(p for p in args.output.iterdir() if p.is_file())
             (args.output/'sha256sums').write_text(''.join(f'{digest(p.read_bytes())}  {p.name}\n' for p in files))
@@ -789,7 +846,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('isolated','tx','legacy'), default='isolated', help='Default: disconnected PHY-only transmitter tests. tx selects connected-fiber discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('measurement','isolated','tx','legacy'), default='measurement', help='Default: disconnected TX monitor measurements; isolated selects the original pattern suite. tx selects connected-fiber discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

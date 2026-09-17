@@ -31,6 +31,12 @@ static struct {
  u64 enabled_ns, disabled_ns, window_ns;
  u32 words[3][ARRAY_SIZE(qiso_regs)];
 } qiso;
+static struct {
+ struct en7573_mpd sample[3];
+ u64 begin[3], end[3];
+ int error[3];
+ unsigned int count;
+} qiso_mpd;
 
 static int qiso_dark(void)
 {
@@ -58,16 +64,32 @@ static int qiso_sample(unsigned int phase)
  return 0;
 }
 
+static int qiso_probe(unsigned int phase, bool active)
+{
+ int ret = qiso_dark();
+ if (ret) return ret;
+ qiso_mpd.begin[phase] = ktime_get_boottime_ns();
+ ret = q1000k_pon_measure_mpd(qphy_controller, active, &qiso_mpd.sample[phase]);
+ qiso_mpd.end[phase] = ktime_get_boottime_ns();
+ qiso_mpd.error[phase] = ret;
+ qiso_mpd.count = phase + 1;
+ return ret ?: qiso_dark();
+}
+
 static int qiso_run(unsigned int id)
 {
  struct en7573_tx_recipe saved = { 0 };
  bool enabled = true;
- unsigned int tick, recipe = 0, i;
+ /* 19 passive reference, then paired OEM MPD measurements. */
+ static const unsigned int options[] = { 3, 17, 3, 14, 9, 10, 12, 15, 7, 6, 8, 2, 3 };
+ unsigned int option, tick, recipe = 0, i;
+ bool measurement = id >= 19;
  u32 pattern = 0, data = 0, control = 0;
  u64 window_start = 0;
  int ret, restore = 0, next;
  if (!isolated_tx_bench) return -EPERM;
- if (id < 1 || id > 18) return -EINVAL;
+ if (id < 1 || id > 31) return -EINVAL;
+ option = measurement ? options[id - 19] : id;
  if (qiso.used) return -EALREADY;
  if (qphy_context()) return -EWOULDBLOCK;
  /* Acquisition/configuration uses the same checked sleepable lifecycle as
@@ -90,7 +112,7 @@ static int qiso_run(unsigned int id)
  if (ret) goto finish;
  /* Refuse an already enabled generator; cleanup must return to normal. */
  if (qiso.words[0][0] & 1) { ret = -EBUSY; goto finish; }
- if (id >= 3) {
+ if (option >= 3) {
   /* Native AN7581 no-downstream PRBS preparation, also used in the vendor
    * PHY: FIRST_PLUG_IN -> PLUG_OUT -> 350ms. No fake RX lock or IRQ. */
   fiber_plug_reset(FIRST_PLUG_IN, gpPhyPriv->wan_sel);
@@ -102,22 +124,22 @@ static int qiso_run(unsigned int id)
   if (ret) goto finish;
   msleep(350);
  }
- if (id >= 10 && id <= 13) recipe = id - 8; /* OEM0/1, Sir0/1 */
- if (id == 14) recipe = 6; /* BEN forced-off negative control */
- if (id == 15) recipe = 1; /* loop restart alone */
+ if (option >= 10 && option <= 13) recipe = option - 8; /* OEM0/1, Sir0/1 */
+ if (option == 14) recipe = 6; /* BEN forced-off negative control */
+ if (option == 15) recipe = 1; /* loop restart alone */
  if (recipe) {
   ret = q1000k_pon_tx_recipe(qphy_controller, recipe, &saved, false);
   if (ret) goto finish;
  }
- if (id == 9) {
+ if (option == 9) {
   ret = qphy_reg_write(qiso_regs[3], qiso.words[0][3] ^ BIT(8));
   if (ret) goto finish;
  }
- if (id == 4) pattern = 1; /* PRBS23 */
- if (id == 5) pattern = 2; /* PRBS31 */
- if (id >= 6 && id <= 8) {
+ if (option == 4) pattern = 1; /* PRBS23 */
+ if (option == 5) pattern = 2; /* PRBS31 */
+ if (option >= 6 && option <= 8) {
   pattern = 3;
-  data = id == 7 ? ~0U : id == 8 ? 0xaaaaaaaa : 0;
+  data = option == 7 ? ~0U : option == 8 ? 0xaaaaaaaa : 0;
   ret = qphy_reg_write(qiso_regs[1], data);
   if (!ret) ret = qphy_reg_write(qiso_regs[2], data);
   if (ret) goto finish;
@@ -125,10 +147,11 @@ static int qiso_run(unsigned int id)
  /* #1: controller enable with normal MAC gating and no packet producer.
   * #16: native in-timeslot mode (no OLT grants). #17: generator/TX-off.
   */
- if (id != 1) control = 1 | (pattern << 8) | (id == 16 ? 0 : BIT(16));
+ if (option != 1) control = 1 | (pattern << 8) | (option == 16 ? 0 : BIT(16));
  ret = qphy_reg_write(qiso_regs[0], control);
  if (!ret) ret = qiso_dark();
- if (!ret && id != 17) {
+ if (!ret && measurement) ret = qiso_probe(0, id != 19);
+ if (!ret && option != 17) {
   ret = q1000k_pon_set_tx(qphy_controller, true);
   if (!ret) qiso.enabled_ns = ktime_get_boottime_ns();
  }
@@ -136,6 +159,10 @@ static int qiso_run(unsigned int id)
  qiso.window_ns = window_start;
  if (!ret) ret = qiso_sample(1);
  for (tick = 0; !ret && tick < 20; tick++) {
+  if (measurement && tick == 4) {
+   ret = qiso_probe(1, id != 19);
+   if (ret) break;
+  }
   u64 elapsed = ktime_get_boottime_ns() - window_start;
   unsigned int remaining;
   if (elapsed >= 5000000000ULL) break;
@@ -172,6 +199,10 @@ finish:
  }
  next = qiso_sample(2);
  if (next && !restore) restore = next;
+ if (measurement && !ret && !restore) {
+  next = qiso_probe(2, id != 19);
+  if (next) ret = next;
+ }
  qiso.restore_error = restore;
  qiso.restored = !restore && !saved.count && (qiso.valid & 1);
  if (restore && !ret) ret = restore;
@@ -216,3 +247,37 @@ static int qiso_get(char *buffer, const struct kernel_param *kp)
 }
 static const struct kernel_param_ops qiso_ops = { .set = qiso_set, .get = qiso_get };
 module_param_cb(isolated_tx_test, &qiso_ops, NULL, 0600);
+
+/* Cached evidence only: reading this parameter never runs a probe. */
+static int qiso_mpd_get(char *buffer, const struct kernel_param *kp)
+{
+ unsigned int p, r, i;
+ int len;
+ mutex_lock(&qphy_control);
+ len = scnprintf(buffer, PAGE_SIZE,
+  "{\"mpd_version\":1,\"id\":%u,\"conversion_ready_verified\":false,"
+  "\"registers\":[828,240,102,100,106,964,968,992,1160],\"probes\":[", qiso.id);
+ for (p = 0; p < qiso_mpd.count; p++) {
+  struct en7573_mpd *v = &qiso_mpd.sample[p];
+  len += scnprintf(buffer+len, PAGE_SIZE-len,
+   "%s{\"phase\":%u,\"begin_ns\":%llu,\"end_ns\":%llu,\"active\":%s,\"error\":%d,"
+   "\"restored\":%s,\"restore_error\":%d,\"selected_valid\":%u,\"saved\":[%u,%u,%u],"
+   "\"selected\":[%u,%u,%u],\"valid\":[%u,%u,%u],\"sample_error\":[%d,%d,%d],\"values\":[",
+   p ? "," : "", p, (unsigned long long)qiso_mpd.begin[p], (unsigned long long)qiso_mpd.end[p],
+   v->active ? "true" : "false", qiso_mpd.error[p], v->restored ? "true" : "false", v->restore_error,
+   v->selected_valid, v->saved[0], v->saved[1], v->saved[2], v->selected[0], v->selected[1], v->selected[2],
+   v->valid[0], v->valid[1], v->valid[2], v->sample_error[0], v->sample_error[1], v->sample_error[2]);
+  for (r = 0; r < 3; r++) {
+   len += scnprintf(buffer+len, PAGE_SIZE-len, "%s[", r ? "," : "");
+   for (i = 0; i < EN7573_MPD_FIELDS; i++)
+    len += scnprintf(buffer+len, PAGE_SIZE-len, "%s%u", i ? "," : "", v->values[r][i]);
+   len += scnprintf(buffer+len, PAGE_SIZE-len, "]");
+  }
+  len += scnprintf(buffer+len, PAGE_SIZE-len, "]}");
+ }
+ len += scnprintf(buffer+len, PAGE_SIZE-len, "]}\n");
+ mutex_unlock(&qphy_control);
+ return len;
+}
+static const struct kernel_param_ops qiso_mpd_ops = { .get = qiso_mpd_get };
+module_param_cb(isolated_mpd, &qiso_mpd_ops, NULL, 0400);

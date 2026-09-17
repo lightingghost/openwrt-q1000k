@@ -235,7 +235,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -316,6 +316,9 @@ if [ "$mode" = isolated ]; then
  printf 'isolated_writer_rc=%s\n' "$test_rc"
  data=$(cat /sys/module/phy_10g/parameters/isolated_tx_test) || fail 'Missing isolated result.'
  printf '%s\n' "$data"
+ if [ "$test_id" -ge 19 ]; then
+  cat /sys/module/phy_10g/parameters/isolated_mpd || fail 'Missing monitor probe evidence.'
+ fi
  json_load "$data" || fail 'Invalid isolated result.'
  field id int && [ "$value" = "$test_id" ] || fail 'Isolated test did not start.'
  field restored boolean && [ "$value" = 1 ] || fail 'TX controls were not restored.'

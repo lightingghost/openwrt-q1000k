@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "bench": "isolated-tx-and-discovery",
+  "bench": "tx-monitor-and-discovery",
   "hardware_acceptance": false,
   "trace": {
     "version": 1,
@@ -345,7 +345,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "isolated",
+  "default_suite": "measurement",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -481,5 +481,84 @@
       "eye1": "out-of-range; expect unavailable-calibration"
     },
     "optical_waveform_measured": false
+  },
+  "tx_measurement": {
+    "version": 1,
+    "fiber": "disconnected",
+    "identity_required": false,
+    "probe": "OEM mpd_current raw monitor, 50 ms + 5 ms waits",
+    "conversion_ready_verified": false,
+    "calibration_command_executed": false,
+    "control_registers": [
+      304,
+      520,
+      288
+    ],
+    "raw_registers": [
+      828,
+      240,
+      102,
+      100,
+      106,
+      964,
+      968,
+      992,
+      1160
+    ],
+    "host_function_flags_width": 1,
+    "cases": [
+      {
+        "name": "isolated-19",
+        "label": "passive-prbs7"
+      },
+      {
+        "name": "isolated-20",
+        "label": "mpd-tx-disabled"
+      },
+      {
+        "name": "isolated-21",
+        "label": "mpd-prbs7"
+      },
+      {
+        "name": "isolated-22",
+        "label": "mpd-ben-off"
+      },
+      {
+        "name": "isolated-23",
+        "label": "mpd-ben-inverted"
+      },
+      {
+        "name": "isolated-24",
+        "label": "mpd-oem-eye0"
+      },
+      {
+        "name": "isolated-25",
+        "label": "mpd-sir-eye0"
+      },
+      {
+        "name": "isolated-26",
+        "label": "mpd-loop-restart"
+      },
+      {
+        "name": "isolated-27",
+        "label": "mpd-all-one"
+      },
+      {
+        "name": "isolated-28",
+        "label": "mpd-all-zero"
+      },
+      {
+        "name": "isolated-29",
+        "label": "mpd-alternating"
+      },
+      {
+        "name": "isolated-30",
+        "label": "mpd-existing-clock"
+      },
+      {
+        "name": "isolated-31",
+        "label": "mpd-repeat"
+      }
+    ]
   }
 }

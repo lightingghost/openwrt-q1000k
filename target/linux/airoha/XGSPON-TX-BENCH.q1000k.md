@@ -6,9 +6,93 @@ meter is available. No NAND writes or extra fiber outages are needed for the
 default suite. Use the existing private unit MCU/DSD archive. Subscriber identity
 is required only for the optional connected-fiber activation suite.
 
-## Default: disconnected-fiber experiments
+## Default: TX measurement experiments (`--suite measurement`)
 
-The portable collector defaults to `--suite isolated`. Keep fiber disconnected
+One image retains all earlier suites. The default now runs 13 disconnected
+cases, `isolated-19` through `isolated-31`. Every case uses a fresh PHY/controller
+lifetime and this unit's verified MCU/DSD. No subscriber identity is required.
+
+### Source findings
+
+The static OEM reference is QKX001-06.00.44.00 `en7572.ko`, SHA-256
+`86b8af889dab8f54b96ccaca0cb2b4973d5bafe28b9f5ecda0e8efed5a831a02`.
+This is disassembly evidence, not a claim of running OEM firmware on the bench.
+
+* OEM `ddmi_tx` at `0x1ff0` reads LE16 `0xf0`, stores calibration points at
+  `0xb4/0xb6`, disables TX, waits, and stores a zero-power point at `0xb8/0xba`
+  before enabling TX again. Its input is a supplied calibration power. It is
+  **not** a refresh command. Without a measured reference power, do not execute
+  it or substitute a guessed calibration value. The bench observes `0xf0` and
+  preserves the existing calibration.
+* OEM `mpd_current` at `0x4d10` saves `0x130[13:8]` and `0x208[6:4]`, sets
+  `0x208[6:4]=4`, sets `0x130[13:8]=0x24`, waits **50 ms**, sets `0x120[26]=1`,
+  waits **5 ms**, and reads `0x33c`. It restores monitor gain, clears the
+  selection bit, and restores the loop mux. OEM translates `256-(raw>>7)`
+  through a lookup table. This bench retains raw values and does not invent
+  optical-power or current units. No conversion-ready flag was established.
+* Sirherobrine's EN7572 `en7572_ddmi.c` reads MCU-maintained BE16 words at
+  `0x60..0x6a`; its refresh functions update the host cache and do not trigger
+  a conversion. `en7572_loop.c` reloads a calibrated eye and four TSSI bytes at
+  `0xb4`, then restarts the loop. Neither is an EN7572 `mpd_current` equivalent.
+  The older EN7570/EN7571 host ADC algorithms are different chip paths.
+* OEM `bob_debug` at `0x5040` reads feature flags with **one-byte**
+  `read1Byte(0xe8)`. The earlier four-byte diagnostic was incorrect; the new
+  image reads one byte and preserves all bit patterns, including `0xff`.
+
+Local audited public-source content hashes:
+`en7572_ddmi.c`: `cfab2dc8426e8ed4c3dc54e5ec164f72a9be93f684491d9ab9cd2693a2a7ecab`;
+`en7572_loop.c`: `d7d8b0e0291840cb76fac3d39febee87a23b70951a742b3cdeb9042fafdaec72`.
+Public reference: [Sirherobrine EN7572 driver](https://github.com/Sirherobrine23/airoha_kernel/tree/2e2cf91fe84467d77649efebd99a28284f2124b3/drivers/net/optical/airoha),
+revision `2e2cf91fe84467d77649efebd99a28284f2124b3`. Both local source blobs
+match the cached Git tree.
+The build uses the audited local source behavior; no live branch update is assumed.
+
+### Experiment table
+
+| Case | Transmit condition | Measurement / hypothesis |
+|---|---|---|
+| 19 | PRBS7, TX enabled | Passive monitor/DDMI reference; no monitor writes |
+| 20 | PRBS7, TX disabled | OEM MPD probe with the independent laser gate off |
+| 21 | PRBS7, TX enabled | Main active comparison against 19 and 20 |
+| 22 | PRBS7, TX enabled, BEN forced off | Does the monitor response depend on burst gating? |
+| 23 | PRBS7, TX enabled, PMA BEN polarity inverted | Is polarity preventing drive? |
+| 24 | PRBS7, TX enabled, OEM eye 0 | Calibrated drive/monitor initialization |
+| 25 | PRBS7, TX enabled, Sirherobrine eye 0 and TSSI reload | Calibration and DDMI conversion dependence |
+| 26 | PRBS7, TX enabled, loop restart | Stalled loop versus missing data/gating |
+| 27 | All-one pattern, TX enabled | Data-pattern dependence |
+| 28 | All-zero pattern, TX enabled | Data-pattern dependence |
+| 29 | Alternating pattern, TX enabled | Balanced-data comparison |
+| 30 | PRBS7, TX enabled, existing clock state | Compare additional no-downstream clock preparation |
+| 31 | Repeat case 21 | Reproducibility and drift |
+
+Except case 30, these use the existing native no-downstream clock preparation.
+Cases 19 and 21 differ only in whether the monitor probe actively selects its
+measurement path. All cases sample three TX phases: before enable, about one
+second into the five-second target window, and after disable/restoration.
+An active probe separately captures before selection, after the OEM waits, and
+after monitor restoration. Continuous passive DDMI sampling also remains enabled.
+The script records actual timing; bus and scheduler latency can extend waits.
+
+Each probe captures raw `0x33c`, LE16 `0xf0`, BE16 power/bias/modulation,
+live bias/modulation codes, TX-control and BEN status. It records the saved
+and selected monitor/loop settings, per-field valid masks, bus errors, and
+restoration status. The getter only reads cached evidence. Missing evidence or
+failed restoration stops collection; saturation is retained as unavailable.
+The summary labels the raw monitor result `measured-response`, `measured-flat`,
+or `measurement-unavailable`; none establishes conversion freshness or connector
+emission. Compare the TX-disabled case before attributing a response to light.
+
+The probe serializes controller access, verifies the lease and dark state,
+and changes only the three audited masked fields. It preserves unrelated bits,
+refuses an already active monitor selection, and attempts every restoration
+on failure. It does not write TX enable, drive current or calibration itself;
+the finite PHY experiment separately owns the authorized TX window. Dual LOS
+checks surround each probe and continue during the test window. No MCU pause,
+ADC algorithm from another chip, or factory calibration rewrite is introduced.
+
+## Original disconnected-fiber pattern suite (`--suite isolated`)
+
+Select `--suite isolated` to repeat the original 18 cases. Keep fiber disconnected
 for the entire run. No physical actions or subscriber identity are needed. Each
 case loads only the controller, provider modules and PHY. `ponraw` stays down;
 MAC, registration and OMCI executors remain unloaded. An immutable PHY mode
@@ -114,8 +198,9 @@ outage; it is not part of the default TX suite.
 | T06 / TX6 | Reset threshold or observer overhead | Fixed threshold 40, explicit reset events, sparse-sampling comparison, retry only explicit EAGAIN transition records. | Real controller/PHY faults still stop the run. Cached snapshots remain postmortem evidence. |
 
 `transmitter_status` serializes 22 reads under the controller lock. DDMI words
-are BE16; CSR words are LE32. Every field includes register, raw, value, unit,
-validity and errno. Zero is retained; all-ones is unavailable with its sentinel
+are BE16; CSR words are LE32; the feature bitmap at `0xe8` is one byte
+(as in OEM `read1Byte`). `0xff` is retained as a valid feature bitmap. Every field includes register, raw, value, unit,
+validity and errno. Zero is retained; all-ones in multi-byte fields is unavailable with its sentinel
 retained; failed transfers have no raw value. Whole-read begin/end timestamps
 bound observation age but cannot establish the MCU's internal sensor age.
 Read at initialized TX-off, during live snapshots, and after MAC stop at 0/1/2 s

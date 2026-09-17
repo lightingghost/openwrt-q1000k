@@ -62,7 +62,8 @@ const struct en7573_tx_field en7573_tx_fields[EN7573_TX_FIELDS] = {
  { "tx_control", "raw", 0x3e0, 4, 1 },
  { "ocp_status", "raw", 0x3e4, 4, 1 },
  { "ben_status", "raw", 0x488, 4, 1 },
- { "host_function_flags", "raw", 0xe8, 4, 1 },
+ /* OEM read1Byte(0xe8); 0xff is a valid eight-bit feature bitmap. */
+ { "host_function_flags", "raw", 0xe8, 1, 1 },
 };
 int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *sample)
 {
@@ -75,8 +76,8 @@ int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *s
   int ret = io->read(io->ctx, EN7573_CONTROL, f->reg, data, f->width);
   sample->error[i] = ret;
   if (ret) continue;
-  sample->raw[i] = f->width == 2 ? (u32)data[0] << 8 | data[1] : get_le32(data);
-  if (sample->raw[i] == (f->width == 2 ? 0xffff : ~0U))
+  sample->raw[i] = f->width == 1 ? data[0] : f->width == 2 ? (u32)data[0] << 8 | data[1] : get_le32(data);
+  if (f->width != 1 && sample->raw[i] == (f->width == 2 ? 0xffff : ~0U))
    sample->error[i] = -ENODATA;
  }
  return 0;
@@ -193,6 +194,96 @@ static int rx_output_guard(struct en7573_io *io)
 	int ret = en7573_sample_state(io, &state);
 
 	return ret ? ret : !state.md32_enabled || !state.tx_disabled ? -EACCES : 0;
+}
+
+static int mpd_update(struct en7573_io *io, u16 reg, u32 mask, u32 value)
+{
+	u32 old, actual;
+	int ret = en7573_read_control(io, reg, &old);
+	if (ret || old == ~0U) return ret ?: -EIO;
+	value = (old & ~mask) | (value & mask);
+	ret = write_control(io, reg, value);
+	if (!ret) ret = en7573_read_control(io, reg, &actual);
+	return ret ?: (actual != ~0U && (actual & mask) == (value & mask) ? 0 : -EIO);
+}
+
+static int mpd_observe(struct en7573_io *io, struct en7573_mpd *s, unsigned int row)
+{
+	static const u16 regs[] = { 0x33c, 0xf0, 0x66, 0x64, 0x6a, 0x3c4, 0x3c8, 0x3e0, 0x488 };
+	unsigned int i;
+	int first = 0;
+	for (i = 0; i < EN7573_MPD_FIELDS; i++) {
+		u8 data[4];
+		unsigned int width = i >= 1 && i <= 4 ? 2 : 4;
+		int ret = io->read(io->ctx, EN7573_CONTROL, regs[i], data, width);
+		if (ret) { if (!first) first = ret; continue; }
+		s->values[row][i] = width == 4 ? get_le32(data) : i == 1 ?
+			(u32)data[0] | (u32)data[1] << 8 : (u32)data[0] << 8 | data[1];
+		/* Preserve raw saturation, but do not call it a valid conversion. */
+		if (s->values[row][i] != (width == 2 ? 0xffff : ~0U))
+			s->valid[row] |= 1U << i;
+	}
+	s->sample_error[row] = first;
+	return first;
+}
+
+int en7573_measure_mpd(struct en7573_io *io, bool active, struct en7573_mpd *s)
+{
+	/* OEM QKX001-06.00.44.00 en7572.ko mpd_current @ 0x4d10.
+	 * The OEM maps 256-(33c>>7) through a table. Keep raw values here:
+	 * neither that table nor this monitor selection establishes optical mW.
+	 * No exposed conversion-ready flag: the 50+5 ms waits are OEM timing,
+	 * not proof of a fresh conversion. Never invoke ddmi_tx: it recalibrates.
+	 */
+	static const u16 regs[] = { 0x130, 0x208, 0x120 };
+	static const u32 masks[] = { 0x3f00, 0x70, 1U << 26 };
+	unsigned int i;
+	bool touched = false;
+	int ret, next;
+	if (!io || !io->read || !s || (active && (!io->write || !io->delay_ms)))
+		return -EINVAL;
+	memset(s, 0, sizeof(*s));
+	s->active = active;
+	s->restored = true;
+	for (i = 0; i < 3; i++) {
+		ret = en7573_read_control(io, regs[i], &s->saved[i]);
+		if (ret || s->saved[i] == ~0U) return ret ?: -EIO;
+	}
+	ret = mpd_observe(io, s, 0);
+	if (ret || !active) return ret;
+	/* Do not take over an already selected OEM measurement. */
+	if (s->saved[2] & masks[2]) return -EBUSY;
+	touched = true;
+	s->restored = false;
+	ret = mpd_update(io, 0x208, masks[1], 4U << 4);
+	if (!ret) ret = mpd_update(io, 0x130, masks[0], 0x24U << 8);
+	if (!ret) {
+		io->delay_ms(io->ctx, 50);
+		ret = mpd_update(io, 0x120, masks[2], masks[2]);
+	}
+	if (!ret) {
+		io->delay_ms(io->ctx, 5);
+		for (i = 0; i < 3; i++) {
+			ret = en7573_read_control(io, regs[i], &s->selected[i]);
+			if (ret) break;
+			s->selected_valid |= 1U << i;
+		}
+	}
+	if (!ret) ret = mpd_observe(io, s, 1);
+	/* OEM order: restore monitor gain, release selection, restore loop mux.
+	 * Continue every restoration after errors. The owner contains any failure.
+	 */
+	if (touched) {
+		static const unsigned int order[] = { 0, 2, 1 };
+		for (i = 0; i < 3; i++) {
+			unsigned int j = order[i];
+			next = mpd_update(io, regs[j], masks[j], s->saved[j]);
+			if (next && !s->restore_error) s->restore_error = next;
+		}
+		s->restored = !s->restore_error;
+	}
+	next = mpd_observe(io, s, 2);
+	return ret ?: s->restore_error ?: next;
 }
 
 static int rx_output_update(struct en7573_io *io, u16 reg, u32 mask, u32 value)

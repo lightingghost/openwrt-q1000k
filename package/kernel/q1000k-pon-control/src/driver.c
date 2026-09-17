@@ -497,6 +497,27 @@ int q1000k_pon_tx_recipe(struct q1000k_pon *pon, unsigned int recipe,
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_tx_recipe);
 
+int q1000k_pon_measure_mpd(struct q1000k_pon *pon, bool active,
+                         struct en7573_mpd *sample)
+{
+ int ret = pon_context();
+ if (ret) return ret;
+ if (IS_ERR_OR_NULL(pon) || !sample) return -EINVAL;
+ mutex_lock(&pon->lock);
+ ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+ if (!ret && (!pon->activation_bench || pon->tx_inhibited)) ret = -EACCES;
+ if (!ret) {
+  int los = gpiod_get_value_cansleep(pon->los[1]);
+  if (los <= 0) ret = los ?: -ENOLINK;
+ }
+ if (!ret) ret = en7573_measure_mpd(&pon->io, active, sample);
+ if (!ret) ret = pon_check_locked(pon);
+ if (ret && pon->leased && !pon->dead) pon_contain(pon, ret);
+ mutex_unlock(&pon->lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_measure_mpd);
+
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 {
 	const char *phase = "check";

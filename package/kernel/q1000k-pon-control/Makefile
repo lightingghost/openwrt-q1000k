@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=q1000k-pon-control
-PKG_RELEASE:=14
+PKG_RELEASE:=15
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -29,6 +29,7 @@ endef
 define Build/InstallDev
 	$(INSTALL_DIR) $(1)/usr/include/q1000k-pon $(1)/usr/share/q1000k-pon
 	$(CP) $(PKG_BUILD_DIR)/q1000k_pon.h $(1)/usr/include/q1000k-pon/
+	$(CP) $(PKG_BUILD_DIR)/en7573_mpd.h $(1)/usr/include/q1000k-pon/
 	$(CP) $(LINUX_DIR)/../symvers/$(PKG_NAME).symvers $(1)/usr/share/q1000k-pon/Module.symvers
 endef
 

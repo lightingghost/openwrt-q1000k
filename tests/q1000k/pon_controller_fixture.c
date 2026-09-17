@@ -96,6 +96,11 @@ static int en7573_tx_recipe(struct en7573_io *io, const unsigned char *cal,
                            unsigned int recipe, struct en7573_tx_recipe *saved, bool restore)
 { struct q1000k_pon *p=io->ctx; assert(p->lock.held && p->leased && !p->tx_enabled);
   recipe_calls++; if(recipe_error) return recipe_error; saved->count=restore ? 0 : 8; return 0; }
+struct en7573_mpd { int unused; };
+static int mpd_calls, mpd_error;
+static int en7573_measure_mpd(struct en7573_io *io,bool active,struct en7573_mpd *s)
+{ struct q1000k_pon *p=io->ctx; assert(p->lock.held && p->leased && p->activation_bench && !p->tx_inhibited);
+  mpd_calls++; return mpd_error; }
 /* PRODUCTION */
 static struct q1000k_pon *create(void)
 {
@@ -242,5 +247,20 @@ int main(void)
     recipe_error=-EREMOTEIO;
     assert(q1000k_pon_tx_recipe(p,2,&saved,false)==-EREMOTEIO && off==1 && !p->initialized);
     q1000k_pon_put(p); pon_unpublish(p); pon_drop_device_ref(p);
+    struct en7573_mpd m;
+    for(int kind=0;kind<5;kind++) {
+        p=create(); assert(q1000k_pon_get()==p); los_value=1; mpd_calls=mpd_error=0;
+        p->activation_bench=kind!=0; p->tx_inhibited=kind==1;
+        if(kind==2) los_value=0;
+        if(kind==3) { assert(!q1000k_pon_set_tx(p,true)); mpd_error=-EIO; }
+        int ret=q1000k_pon_measure_mpd(p,true,&m);
+        if(kind<2) assert(ret==-EACCES && !mpd_calls && off);
+        else if(kind==2) assert(ret==-ENOLINK && !mpd_calls && off);
+        else if(kind==3) assert(ret==-EIO && mpd_calls==1 && off && !p->tx_enabled);
+        else { assert(!ret && mpd_calls==1 && !off);
+               assert(!q1000k_pon_set_tx(p,true));
+               assert(!q1000k_pon_measure_mpd(p,true,&m) && mpd_calls==2 && p->tx_enabled); }
+        q1000k_pon_put(p); pon_unpublish(p); pon_drop_device_ref(p);
+    }
     return 0;
 }

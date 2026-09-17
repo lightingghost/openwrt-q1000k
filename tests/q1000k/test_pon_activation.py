@@ -46,6 +46,9 @@ if action=='cat':
     elif args==[str(root/'sys/module/phy_10g/parameters/isolated_tx_test')]:
         emit(dict(isolated_tx_version=1,id=int(pathlib.Path(args[0]).read_text()),error=0,
             restored=os.environ.get('VALIDATION_BAD')!='restore',tx_off=True))
+    elif args==[str(root/'sys/module/phy_10g/parameters/isolated_mpd')]:
+        if os.environ.get('VALIDATION_BAD')=='mpd-missing': sys.exit(1)
+        emit(dict(mpd_version=1,id=21,probes=[]))
     elif args==[str(root/'proc/q1000k-pon-snapshot')]:
         counter=root/'validation-count'; n=int(counter.read_text())+1 if counter.exists() else 1; counter.write_text(str(n)); (root/'proc/uptime').write_text(str(n)+'.00 0.00\n')
         bad=os.environ.get('VALIDATION_BAD','')
@@ -141,6 +144,16 @@ else: raise AssertionError((action,args))
         self.assertFalse(any('xpon_10g' in str(c) or 'omci' in str(c) for c in self.calls()))
         self.assertTrue(any('isolated_tx_bench=1' in c for c in self.calls()))
         self.assertFalse(any(c[0]=='ip' for c in self.calls()))
+
+    def test_monitor_capture_and_missing_evidence(self):
+        for bad in ('', 'mpd-missing'):
+            self.env['VALIDATION_BAD']=bad
+            result=subprocess.run(['busybox','ash',str(self.script),'isolated',str(self.fixture.calibration),
+                str(self.identity),'30','none','isolated-21'],env=self.env,capture_output=True,text=True,timeout=90)
+            self.assertEqual(result.returncode==0,not bad,result.stdout[-2500:]+result.stderr)
+            if not bad: self.assertIn('"mpd_version": 1',result.stdout)
+            self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+            self.assertFalse((self.root/'sys/module/phy_10g').exists())
 
     def test_rx_default_policy_automatic_init_and_cleanup(self):
         result=self.run_case()

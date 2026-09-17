@@ -13,6 +13,8 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 #endif
 
+#include "en7573_mpd.h"
+
 #define EN7573_CONTROL 0x51
 #define EN7573_MEMORY 0x50
 #define EN7573_ID 0x1388
@@ -85,6 +87,11 @@ struct en7573_tx_field { const char *name, *unit; u16 reg; u8 width; u32 scale; 
 struct en7573_transmitter { u32 raw[EN7573_TX_FIELDS]; int error[EN7573_TX_FIELDS]; };
 extern const struct en7573_tx_field en7573_tx_fields[EN7573_TX_FIELDS];
 int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *sample);
+/* Exclusive disconnected PHY owner only. Implements OEM mpd_current monitor
+ * selection and waits, preserving masked settings even on partial failure.
+ * active=false only reads. Never writes calibration, TX enable or current.
+ */
+int en7573_measure_mpd(struct en7573_io *io, bool active, struct en7573_mpd *sample);
 /* Fixed disconnected-bench recipes: 1 restart; 2/3 OEM eye0/1;
  * 4/5 same eyes with Sirherobrine TSSI refresh; 6 BEN forced off.
  * Save all affected words before any write; caller must restore with TX off.
