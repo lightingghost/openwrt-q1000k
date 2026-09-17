@@ -9,6 +9,7 @@ import tempfile
 import json
 import contextlib
 import io
+import tarfile
 from pon_test_utils import run_c
 ROOT=Path(__file__).resolve().parents[2]
 B=ROOT/'package/kernel/airoha-pon'
@@ -106,6 +107,8 @@ int main(void) {
         self.assertEqual(C.case_outcome(dict(base,stages={'cleanup':'failed'})),'containment-failure')
         self.assertEqual(C.case_outcome(dict(base,stages={'cleanup':'passed','failure':'containment'})),'containment-failure')
         self.assertEqual(C.case_outcome(dict(base,physical_control={'confirmed':False})),'inconclusive')
+        self.assertEqual(C.case_outcome(dict(base,timing_errors=1)),'inconclusive')
+        self.assertEqual(C.summarize("sleep: invalid number '0.2'\n")['timing_errors'],1)
 
     def test_runner_continues_after_o5_timeout_and_stops_on_containment(self):
         for failed, expected in [('functional-negative',2),('containment-failure',1)]:
@@ -167,6 +170,31 @@ int main(void) {
         self.assertEqual(len(cases),1)
         self.assertEqual(cases[0]['sn_comparison_selection'],'explicit')
         self.assertNotIn('requires_sn_reset',cases[0])
+
+    def test_portable_timing_helper_is_pinned_and_staged_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); helper=root/'sleep'; target=root/'collector.py'
+            elf=b'\x7fELF\x02\x01'+b'\0'*12+b'\xb7\x00'+b'fixture'
+            helper.write_bytes(elf)
+            pin=dict(revision='a'*40,image_sha256='b'*64)
+            with mock.patch.object(C,'artifact_pin',return_value=pin), contextlib.redirect_stdout(io.StringIO()):
+                C.build_single_file(root,target,helper)
+            spec=importlib.util.spec_from_file_location('timing_collector',target)
+            module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            self.assertEqual(module.TIMING_SLEEP,elf)
+            self.assertEqual(module.PIN['timing_sleep_sha256'],C.digest(elf))
+            files={name:name.encode() for name in ('cal','pm','dm')}
+            archive=root/'inputs.tar'
+            with tarfile.open(archive,'w') as out:
+                for name,data in dict(files,sha256sums=b'fixture').items():
+                    member=tarfile.TarInfo(name);member.size=len(data)
+                    out.addfile(member,io.BytesIO(data))
+            with mock.patch.object(module,'INPUTS',{n:(len(v),C.digest(v)) for n,v in files.items()}):
+                payload=module.private_inputs(archive,{})
+            with tarfile.open(fileobj=io.BytesIO(payload)) as staged:
+                self.assertEqual(staged.getmember('sleep').mode,0o700)
+                self.assertEqual(staged.extractfile('sleep').read(),elf)
+                self.assertIn((C.digest(elf)+'  sleep').encode(),staged.extractfile('sha256sums').read())
 
     def test_report_distinguishes_planned_from_executed_tests(self):
         result=dict(stages={'activation':'timeout'},status='functional-negative',

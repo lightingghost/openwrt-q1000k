@@ -25,6 +25,7 @@ import tempfile
 import time
 
 PIN = None
+TIMING_SLEEP = None
 HOST = '192.168.255.1'
 IMAGE = 'openwrt-airoha-an7581-quantum_q1000k-xgspon-activation-initramfs-bench.itb'
 MODULES = 'q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'.split()
@@ -85,13 +86,15 @@ def private_inputs(path, identity):
             if len(data) != size or digest(data) != checksum:
                 raise ValueError('Wrong firmware/calibration: ' + name)
             files[name] = data
+    if TIMING_SLEEP is not None:
+        files['sleep'] = TIMING_SLEEP
     files['identity.json'] = (json.dumps(identity) + '\n').encode()
     files['sha256sums'] = ''.join(f'{digest(data)}  {name}\n' for name, data in files.items()).encode()
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode='w') as archive:
         for name, data in files.items():
             member = tarfile.TarInfo(name)
-            member.size, member.mode = len(data), 0o600
+            member.size, member.mode = len(data), 0o700 if name == 'sleep' else 0o600
             archive.addfile(member, io.BytesIO(data))
     return out.getvalue()
 
@@ -129,14 +132,24 @@ def artifact_pin(artifact):
     return dict(schema_version=1, revision=revision, image=IMAGE, image_sha256=checksum, runtime=sums)
 
 
-def build_single_file(artifact, output):
+def build_single_file(artifact, output, timing_helper=None):
     if PIN is not None:
         raise ValueError('Generate from the source collector')
     pin = artifact_pin(artifact)
+    timing = timing_helper.read_bytes() if timing_helper else None
+    if timing is not None:
+        if len(timing) > 131072 or timing[:6] != b'\x7fELF\x02\x01' or timing[18:20] != b'\xb7\x00':
+            raise ValueError('Timing helper must be a bounded little-endian AArch64 ELF')
+        pin['timing_sleep_sha256'] = digest(timing)
     marker = 'PIN = ' + 'None\n'
     source = Path(__file__).read_text()
     if source.count(marker) != 1:
         raise ValueError('Ambiguous embedding marker')
+    if timing is not None:
+        timing_marker = 'TIMING_SLEEP = ' + 'None\n'
+        if source.count(timing_marker) != 1:
+            raise ValueError('Ambiguous timing embedding marker')
+        source = source.replace(timing_marker, 'TIMING_SLEEP = bytes.fromhex(' + repr(timing.hex()) + ')\n')
     with output.open('x') as stream:
         stream.write(source.replace(marker, 'PIN = ' + repr(pin) + '\n'))
     output.chmod(0o700)
@@ -284,6 +297,8 @@ def case_outcome(result, trace_required=True):
     # A functional negative is useful evidence; containment cannot be waived.
     if result['stages'].get('cleanup') != 'passed' or result['stages'].get('failure') == 'containment':
         return 'containment-failure'
+    if result.get('timing_errors'):
+        return 'inconclusive'
     physical = result.get('physical_control')
     if not result['diagnostics_pairs_valid'] or (physical and (not physical['confirmed'] or physical.get('dark_samples',0) < result.get('required_dark_samples',15))):
         return 'inconclusive'
@@ -331,6 +346,7 @@ def summarize(text, returncode=0, events=None):
     key_installed = any(v != 0 for v in security['data_rx_key_valid'])
     result = dict(status='observed' if returncode == 0 and stages.get('cleanup') == 'passed' and pairs_valid else 'failed',
                   returncode=returncode, stages=stages, rx_samples=len(rx), diagnostics_pairs_valid=pairs_valid,
+                  timing_errors=len(re.findall(r'^sleep: .+$', text, re.M)),
                   synchronized_samples=sum(r.get('synced') is True for r in rx),
                   rx_power_dbm_range=[round(min(power), 2), round(max(power), 2)] if power else None,
                   frames_first=rx[0].get('frames') if rx else None, frames_last=rx[-1].get('frames') if rx else None,
@@ -391,7 +407,14 @@ def redactor(identity):
 
 def capture(pin, case, iperf, directory, redact):
     name = case['name']
-    script = guards(pin) + 'exec q1000k-pon-validate ' + shlex.join([
+    timing = ''
+    if TIMING_SLEEP is not None:
+        if digest(TIMING_SLEEP) != pin.get('timing_sleep_sha256'):
+            raise ValueError('Timing helper differs from its pinned hash')
+        timing = 'test -x ' + STAGE + '/sleep\n'
+        timing += "sha256sum -c <<'TIMING_SUM'\n" + digest(TIMING_SLEEP) + '  ' + STAGE + "/sleep\nTIMING_SUM\n"
+        timing += 'PATH=' + STAGE + ':"$PATH"; export PATH\n'
+    script = guards(pin) + timing + 'exec q1000k-pon-validate ' + shlex.join([
         case['mode'], STAGE + '/xgspon-calibration.bin', STAGE, str(case['samples']), iperf, name, case.get('recovery_actions','1,2,3,4,5,6,7')]) + '\n'
     physical = name in PHYSICAL
     events, samples, lines = [], [], []
@@ -560,7 +583,7 @@ def execute(args, pin):
                 # Never remove the inputs beneath an active controller lease.
                 (args.output/'postflight.log').write_text(ssh(guards(pin)))
                 if staged:
-                    ssh(f'set -eu; rm -f {FIRMWARE}/A60993.elf.pm {FIRMWARE}/A60993.elf.dm; rmdir {FIRMWARE} 2>/dev/null || test ! -e {FIRMWARE}; rm -f ' + ' '.join(STAGE+'/'+n for n in (*INPUTS, 'identity.json', 'sha256sums')) + f'; rmdir {STAGE}')
+                    ssh(f'set -eu; rm -f {FIRMWARE}/A60993.elf.pm {FIRMWARE}/A60993.elf.dm; rmdir {FIRMWARE} 2>/dev/null || test ! -e {FIRMWARE}; rm -f ' + ' '.join(STAGE+'/'+n for n in (*INPUTS, 'identity.json', 'sha256sums', *(['sleep'] if TIMING_SLEEP is not None else []))) + f'; rmdir {STAGE}')
                 record['cleanup_verified'] = True
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 record.update(status='stopped', cleanup_verified=False, cleanup_error=redact(str(error)))
@@ -604,6 +627,7 @@ def execute(args, pin):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build-single-file', type=Path)
+    parser.add_argument('--timing-helper', type=Path, help='Embed the built AArch64 bench-sleep shim when generating a portable collector')
     parser.add_argument('--artifact', type=Path)
     parser.add_argument('--inputs', type=Path)
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
@@ -624,7 +648,9 @@ def main():
         args.iperf_server = str(ipaddress.ip_address(args.iperf_server))
     if args.build_single_file:
         if not args.artifact: parser.error('--build-single-file requires --artifact')
-        return build_single_file(args.artifact, args.build_single_file)
+        return build_single_file(args.artifact, args.build_single_file, args.timing_helper)
+    if args.timing_helper:
+        parser.error('--timing-helper requires --build-single-file')
     if args.summarize:
         print(json.dumps(summarize(args.summarize.read_text()), indent=2)); return 0
     pin = PIN if PIN is not None else artifact_pin(args.artifact) if args.artifact else None
