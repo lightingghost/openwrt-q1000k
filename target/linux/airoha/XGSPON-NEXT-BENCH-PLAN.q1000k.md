@@ -1,6 +1,12 @@
 # Q1000K next consolidated bench: discovery and receiver recovery
 
-Status: **implemented discovery/recovery bench; final image build and hardware acceptance are tracked separately**.
+Status: **implemented and built as `be8e34c5f6`; hardware discovery/recovery
+tests completed with coverage limits**. See the
+[2026-09-16 results](XGSPON-DISCOVERY-RESULTS-20260916.q1000k.md) for the two
+PMA-only recoveries, incomplete normal-callback acceptance, and reset-free
+activation timeout. The plan below preserves the pre-build rationale.
+The current follow-up specification is [TX/discovery tests and reference
+comparison](XGSPON-TX-DISCOVERY-PLAN.q1000k.md); its new tests are not yet built.
 See [implemented test map](XGSPON-DISCOVERY-BENCH.q1000k.md) and the packaged capability manifest for supported controls and explicit measurement limits.
 Prepared 2026-09-16 from image `280555a076`, its three hardware collections,
 and the source at `ec3c22c811`. Develop on `q1000k-xgspon` and produce one RAM

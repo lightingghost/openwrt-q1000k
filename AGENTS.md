@@ -18,3 +18,16 @@
   in follow-up commits; document partial imports instead of squashing them.
 - Preserve existing uncommitted work when switching branches. Do not rewrite
   or force-push remote branches without explicit user authorization.
+
+## Bench-session workflow
+
+Follow the workspace `../AGENTS.md` bench-session/connectivity policy. During
+a bench session, assume slow internet and prioritize hardware observations and
+bounded experiments using the available image. Minimize reading and limit
+file reads/writes to collection, experiments, evidence preservation and explicit
+user instructions. Defer general research, source review, reports and normal
+read/write work until the user explicitly announces normal internet recovery,
+even after hardware collection ends. Minimize physical fiber actions and reuse
+outage observations. Verify cleanup, preserve captures and tell the user when
+collection ends, including any incomplete tests. This policy persists across
+future tasks and bench sessions.

@@ -1,6 +1,27 @@
 # Q1000K light-present/no-frames hypotheses and bench tests
 
-**Latest consolidated bench result, 2026-09-16:** image `280555a076`
+**Latest discovery/recovery result, 2026-09-16:** image `be8e34c5f6`
+reproduced passive RX reconnect failure and recovered it twice with the
+checked PMA out/in action alone. Normal registration callbacks also restored
+frames after reconnect for 30.452 seconds before a transient fast diagnostic
+read stopped that capture; normal reconnect acceptance remains incomplete.
+Required XGS burst profiles reach hardware and the MAC reports SN requests
+and responses, but no assigned ONU ID or O5. A fixed-40 comparison recorded
+36 SN-sent interrupts without any reset and still timed out, with no event
+sequence gaps. The 600-second extension recorded 94/94 SN IRQs and two
+fixed-40 resets, still without assignment. Prioritize physical TX output,
+burst enable/timing, hardware response content and a controlled comparison
+of repeated profile installation. TX-disable readback is not an optical
+measurement. Keep the proven receiver initialization and MCU/DSD inputs fixed.
+See [full discovery results and coverage](XGSPON-DISCOVERY-RESULTS-20260916.q1000k.md).
+
+**Next image specification:** [TX/discovery hypotheses, reference comparison
+and test map](XGSPON-TX-DISCOVERY-PLAN.q1000k.md). Prepared after normal internet
+recovery using the requested PR, both Sirherobrine23 trees, 8311 and Q1000K
+OEM disassembly. It identifies omitted TX diagnostics and separate burst
+gates; new tests are specified, not yet implemented or built.
+
+**Previous consolidated bench result, 2026-09-16:** image `280555a076`
 automatically receives frames at fresh startup: 90/90 startup/reload samples
 and 180/180 soak samples synchronized with TX inhibited. TX-enabled activation
 retained sync but timed out in O1/O2 with PLOAM rejections; it did not reach O5.
@@ -11,7 +32,7 @@ the same boot recovered sync in 30/30 samples. Registration ID now defaults to
 the test. Prioritize PLOAM rejection diagnostics and bounded LOS-clear receiver
 recovery. See [complete activation/reconnect evidence and next tests](XGSPON-ACTIVATION-RESULTS-20260916.q1000k.md).
 
-**Next image plan:** [discovery, recovery and evidence collection](XGSPON-NEXT-BENCH-PLAN.q1000k.md)
+**Implemented image plan:** [discovery, recovery and evidence collection](XGSPON-NEXT-BENCH-PLAN.q1000k.md)
 packs 25 test/control entries into one image. Follow-up comparison demotes the
 OCP value as a fault clue, finds evidence of some accepted profile processing,
 and distinguishes deliberately passive RX reconnect from normal-mode recovery.

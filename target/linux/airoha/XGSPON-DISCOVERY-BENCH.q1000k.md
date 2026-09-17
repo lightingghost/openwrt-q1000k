@@ -1,6 +1,8 @@
 # Q1000K discovery/recovery bench test map
 
-One RAM FIT and one portable Python/OpenSSH collector. Hardware outcomes remain untested until the new image is booted.
+One RAM FIT and one portable Python/OpenSSH collector. Hardware results for
+image `be8e34c5f6` are recorded in
+[the discovery/recovery results](XGSPON-DISCOVERY-RESULTS-20260916.q1000k.md).
 
 | ID | Test | Script selection | Hypothesis |
 |---|---|---|---|
@@ -25,7 +27,7 @@ One RAM FIT and one portable Python/OpenSSH collector. Hardware outcomes remain 
 | R11 | Short and long dark controls | rx-short-outage,rx-long-outage; opt in | H5-H6 |
 | D01 | Stable O5/authentication | Automatically on any successful activation | H8 |
 | D02 | OMCI opcode/class/result events, MIB and rules | Automatically after O5 | H8 |
-| D03 | Key selection/epoch and directional GEM/OMCI counters | All activation snapshots; encrypted-traffic attribution unavailable | H8 |
+| D03 | Key selection/epoch and directional OMCI counters | All activation snapshots; GEM counters and encrypted-traffic attribution unavailable in `be8e34c5f6` | H8 |
 | D04 | DHCPv4, DHCPv6 address/PD, routes and PON-bound traffic | Automatically after provisioning | H8 |
 | D05 | 1500-byte MTU, HTTPS and optional iperf | Automatically after provisioning; iperf needs numeric server | H8 |
 | D06 | Post-traffic soak and checked teardown | Automatically after traffic; all sessions check cleanup | H8 |
@@ -70,6 +72,26 @@ Private MCU/calibration and subscriber identity inputs are separate from the kit
 - `recovery`: action ID 1–6; first data field 0/1 marks before/after, then the consumed-action mask. Each action consumes its budget before hardware writes. The checked OEM recipe phase records carry sequence length and the cumulative checked-write count.
 - `omci`: ID is opcode; fields are class, flags, optional response result, zero. Flags describe duplicate/unsupported/fake/operational-change/result-byte-valid. Attribute payload, transaction secrets and credentials are absent.
 
-The MAC diagnostic register set is fixed: 5100/5104/5108 for reply mode/state/timing, 511c/5120/5124 for profile validity/version/length, 5920 for invalid-profile grants, 5950/5954 for PLOAM counts, 5958/595c for OMCI counts, 5960/5964 for GEM counts, and 5984 for ACK count. These use the existing driver's ordinary status/counter read paths. FIFO data, W1C status, key registers and subscriber identity words are excluded. Cold identity readback is exported only as a match boolean.
+The MAC diagnostic register set in `be8e34c5f6` is fixed:
+5100/5104/5108 for reply mode/state/timing, 511c/5120/5124 for profile
+validity/version/length, 5920 for invalid-profile grants, 5950/5954 for PLOAM
+counts, 5960/5964 for RX/TX OMCI counts, and 5984 for ACK count. Correction
+from the hardware audit: 5958/595c are reserved and returned `DEADBEEF`;
+exclude these values from interpretation. The earlier labels were wrong.
+Actual RX/TX XGEM counters are 5968/596c and are not collected by this image.
+See `xgpon_mac_reg_c_header.h` register-layout entries. The next image must
+remove the reserved reads and add the audited XGEM counters. FIFO data, W1C
+status, key registers and subscriber identity words are excluded. Cold
+identity readback is exported only as a match boolean.
+
+## Physical controls
+
+Minimize operator disconnect/reconnect actions. Reuse each outage for passive
+observation and the ordered recovery ladder, stopping at the first sustained
+recovery. Request another outage only when an independent repeat or a different
+callback mode is necessary to distinguish a cause. The 2026-09-16 session
+already supplied an independent PMA-only confirmation and a normal-mode
+reconnect observation; do not repeat them merely to increase sample counts.
+Dark-start and outage-duration variations remain conditional controls.
 
 Lease-provided DNS addresses are captured. An active interface-bound DNS query, optical TX sensor and per-encrypted-GEM traffic attribution are unavailable and listed in the manifest. Failed ICMP and successful HTTPS remain separate outcomes; a DHCPv6 prefix without an interface address is recorded as prefix delegation, not silently counted as a usable interface address.
