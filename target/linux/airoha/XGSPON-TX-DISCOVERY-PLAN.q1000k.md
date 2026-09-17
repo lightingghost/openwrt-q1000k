@@ -48,7 +48,7 @@ or an author's success claim is not a Q1000K hardware result.
 | Reference / revision | Concrete difference or lesson | Q1000K consequence |
 |---|---|---|
 | [Sirherobrine23 OpenWrt branch](https://github.com/openwrt/openwrt/compare/main...Sirherobrine23:openwrt:airoha_en7523), `1cf599c745d65a83f6571e1dfbc7f5aeca3198ee` | Patches restore complete EN7523 GPON burst timing, retry EN7571 transmitter rearm after timeout, and describe transceiver signal polarity. | Audit complete AN7581 TX timing/gates and recovery. GPON timing constants and another board's polarity are not Q1000K settings. |
-| [Sirherobrine23 optical driver](https://github.com/Sirherobrine23/airoha_kernel/tree/2e2cf91fe84467d77649efebd99a28284f2124b3/drivers/net/optical/airoha), `2e2cf91fe84467d77649efebd99a28284f2124b3` | EN7572 reads separate bias, modulation, TX-power and BEN status; it also has host adaptive-loop tasks. | Add passive TX observations. Compare OEM loop startup/host assistance before considering a narrowly matched change. Generic calibration signatures and MCU sizes are not a substitute for this unit's OEM layout. |
+| [Sirherobrine23 optical driver](https://github.com/Sirherobrine23/airoha_kernel/tree/2e2cf91fe84467d77649efebd99a28284f2124b3/drivers/net/optical/airoha), `2e2cf91fe84467d77649efebd99a28284f2124b3` | EN7572 exports bias, TX power and BEN status; adaptive tasks also read live modulation codes. The defined modulation DDMI word is not included in its ordinary refresh/dump. | Add passive TX observations. Compare OEM loop startup/host assistance before considering a narrowly matched change. Generic calibration signatures and MCU sizes are not a substitute for this unit's OEM layout. |
 | [OpenWrt PR 24577](https://github.com/openwrt/openwrt/pull/24577), `d7569c5e26551084e7643b0e83ecda9c31f49f11` | EN7571 experimental TX work distinguishes bias from modulation, tests monitor-photodiode on/off response, and investigates burst-envelope timing, BEN polarity and loop initialization. | A serial-number counter and even DC laser light can coexist with invalid bursts. Borrow the measurement strategy; do not copy EN7571 drive-current/GPON constants or treat all experimental comments as enabled code. |
 | [8311 WAS-110 builder](https://github.com/djGrrr/8311-was-110-firmware-builder/tree/7d89440c7d9e1f209140910bb039f5d5a24dfbed), `7d89440c7d9e1f209140910bb039f5d5a24dfbed` | Starts from vendor firmware and configures its existing PON stack. Startup sets PON serial/mode/registration and OMCI identity; optical-module type determines TX-enable mode unless overridden. | Identity settings operate on an already working vendor MAC/PHY. They do not replace Q1000K laser/serializer initialization. Check our TX control semantics and hardware response template before chasing later OMCI/VLAN settings. |
 
@@ -79,6 +79,29 @@ Downloaded public sources and SHA256 provenance are retained under
 The kernel recursive tree response is truncated; this review used the actual
 downloaded optical/MAC/PHY files and selected OpenWrt patches, not an assumed
 complete tree inventory.
+
+### Published measurements versus available diagnostic routines
+
+Sirherobrine23's Askey RTF8225VW `omcictl status` capture in the
+[PR discussion](https://github.com/openwrt/openwrt/pull/24577) reports state 5,
+ONU-ID 1, bias 15,970 µA, TX power 1,980,000 nW, RX power 11,900 nW,
+temperature 43,175 m°C, supply 3,217,800 µV and zero optical alarms. This is
+a published software-telemetry snapshot on that GPON device, not an external
+optical waveform or a Q1000K measurement.
+
+The EN7572 worker refreshes temperature, voltage, bias, TX power and RX power
+at 1 Hz. Common debugfs exports these cached words plus alarms and calibration
+load state; chip-specific diagnostics add firmware/MCU/LOS/BEN state and dBm
+views. The register map defines modulation DDMI `0x6a`, but the inspected
+ordinary refresh/dump does not export it. Keep that distinction in the test map.
+
+PR 24577 also contains active all-zero/all-one pattern tests that log power
+differences and verify the actual MMIO pattern selector. Its comments warn
+that earlier pattern/amplitude writes could target the wrong register space.
+Any Q1000K pattern experiment must first establish effective readback through
+the correct hardware owner. The PR's `Y` diagnostic calls an ADC routine that
+changes mux/conversion state despite a read-only comment. Test code and its
+log labels alone do not establish successful execution or accurate optics.
 
 ## 3. Q1000K OEM comparison and concrete gaps
 
