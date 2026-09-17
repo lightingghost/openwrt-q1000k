@@ -58,6 +58,8 @@ static int q1000k_phy_start(void);
 static int q1000k_phy_receiver_startup(void);
 static bool transmitter;
 static int q1000k_phy_set_tx(bool enable);
+#define module_param(...) /* module parameter */
+#define MODULE_PARM_DESC(...) /* description */
 /* PRODUCTION */
 static int step(void) { assert(held && !atomic_context); return ++calls==fail ? -ETIMEDOUT : 0; }
 static int containment(void) { assert(held && q1000k_pipeline.error<0); return ++containment_calls==contain_fail ? -ENODEV : 0; }

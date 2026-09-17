@@ -103,6 +103,19 @@ int main(void) {
         assert(pwan_cb_rx_packet(msg,msg_len,&skb,pkt_len)<0);
         assert(skb.freed && frees==1 && !parsers && !deliveries);
     }
+    for(int error=0;error<4;error++) {
+        setup(&skb,48,true); words[0]=BIT(8)|BIT(30)|BIT(12); words[2]=0x01000000;
+        if(error==0) assert(!q1000k_pwan_rx_prepare(&skb,words,16,48));
+        if(error==1) { words[0]|=BIT(11); assert(q1000k_pwan_rx_prepare(&skb,words,16,48)==-EBADMSG); }
+        if(error==2) { words[0]|=BIT(13); assert(q1000k_pwan_rx_prepare(&skb,words,16,48)==-EBADMSG); }
+        if(error==3) { words[2]=0x02000000; assert(q1000k_pwan_rx_prepare(&skb,words,16,48)==-EBADMSG); }
+    }
+    setup(&skb,60,false); words[0]=BIT(12); words[2]=0x01000000;
+    assert(q1000k_pwan_rx_prepare(&skb,words,16,60)==-EBADMSG);
+    setup(&skb,14,true); words[0]=BIT(8)|BIT(12)|BIT(30);
+    skb.bytes[3]=0x0b; skb.bytes[8]=skb.bytes[9]=0;
+    assert(!q1000k_pwan_rx_prepare(&skb,words,16,14));
+    skb.len=13; assert(q1000k_pwan_rx_prepare(&skb,words,16,13)==-EMSGSIZE);
     for(int mic=0;mic<2;mic++) {
         words[0]=BIT(8)|(mic?BIT(30):0); words[2]=0x01000000;
         setup(&skb,44+4*mic,true); skb.nonlinear=true;

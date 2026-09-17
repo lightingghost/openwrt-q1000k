@@ -403,9 +403,15 @@ int main(void) {
     reset_skb(&skb,&upper); assert(!airoha_pon_xmit(pon,&skb,&tx) && xmit_calls==sent+1 && skb.freed);
     assert(!airoha_pon_rx_meta(words,&meta));
     assert(meta.gem==65535 && meta.channel==31 && meta.omci && meta.no_mic && !memcmp(meta.words,words,sizeof(words)));
-    for(int bit=11;bit<=13;bit++) {
+    for(int bit=11;bit<=13;bit+=2) {
         memset(&meta,0xa5,sizeof(meta)); saved=meta; words[0]|=1u<<bit;
         assert(airoha_pon_rx_meta(words,&meta)==-EBADMSG && !memcmp(&meta,&saved,sizeof(meta))); words[0]&=~(1u<<bit);
+    }
+    words[0]|=BIT(12); assert(!airoha_pon_rx_meta(words,&meta) && meta.omci);
+    words[0]&=~BIT(8); assert(airoha_pon_rx_meta(words,&meta)==-EBADMSG);
+    words[0]|=BIT(8);
+    for(int bit=11;bit<=13;bit+=2) {
+        words[0]|=BIT(bit); assert(airoha_pon_rx_meta(words,&meta)==-EBADMSG); words[0]&=~BIT(bit);
     }
     words[2]=0x02000000; assert(airoha_pon_rx_meta(words,&meta)==-EBADMSG); words[2]=0x01000000;
     u64 generation=airoha_pon_generation(&gdm); assert(generation);

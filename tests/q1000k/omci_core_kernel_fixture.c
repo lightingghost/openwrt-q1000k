@@ -30,6 +30,13 @@ static int fixture_rekey_thread(void *arg)
 	fixture_rekey_result = omci_device_set_auth_epoch(arg, 0);
 	kthread_complete_and_exit(&fixture_rekeyed, 0);
 }
+static int fixture_reconcile_result;
+static DECLARE_COMPLETION(fixture_reconciled);
+static int fixture_reconcile_thread(void *arg)
+{
+	fixture_reconcile_result = omci_device_reconcile_services_epoch(arg, fixture_auth_epoch);
+	kthread_complete_and_exit(&fixture_reconciled, 0);
+}
 static DECLARE_COMPLETION(fixture_stopped);
 
 static struct sk_buff *fixture_packet(unsigned int id, bool fragmented)
@@ -424,6 +431,34 @@ int q1000k_omci_core_test(void)
 		flush_work(&odev->rx_work);
 		CHECK(fixture_tx == before + 1);
 		CHECK(omci_mib_count_locked(&odev->agent) == mib_count);
+	}
+	/* Allocation reconciliation waits for an accepted RX transaction and
+	 * its reply, without dropping queued requests or advancing auth epoch.
+	 */
+	{
+		u64 kept_epoch = odev->auth_epoch, kept_generation = odev->generation;
+
+		fixture_hold_tx = true;
+		reinit_completion(&fixture_tx_entered);
+		reinit_completion(&fixture_tx_release);
+		reinit_completion(&fixture_reconciled);
+		before = fixture_tx;
+		omci_device_receive(odev, fixture_packet(5000, false), 7,
+			OMCI_F_MIC_VALID, kept_epoch);
+		i = wait_for_completion_timeout(&fixture_tx_entered, HZ);
+		if (!i) { complete(&fixture_tx_release); fixture_hold_tx = false; CHECK(i); }
+		task = kthread_run(fixture_reconcile_thread, odev, "omci-alloc-reconcile");
+		if (IS_ERR(task)) { complete(&fixture_tx_release); fixture_hold_tx = false; CHECK(!IS_ERR(task)); }
+		msleep(5);
+		i = completion_done(&fixture_reconciled);
+		complete(&fixture_tx_release);
+		wait_for_completion(&fixture_reconciled);
+		fixture_hold_tx = false;
+		flush_work(&odev->rx_work);
+		CHECK(!i && fixture_tx == before + 1 && !fixture_reconcile_result);
+		CHECK(odev->auth_epoch == kept_epoch && odev->generation == kept_generation);
+		CHECK(omci_device_reconcile_services_epoch(odev, kept_epoch - 1) == -ESTALE);
+		CHECK(odev->auth_epoch == kept_epoch && odev->generation == kept_generation);
 	}
 	/* Closing authentication also waits for a provider TX already in flight. */
 	fixture_hold_tx = true;

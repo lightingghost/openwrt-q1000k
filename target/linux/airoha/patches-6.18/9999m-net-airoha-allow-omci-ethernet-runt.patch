@@ -1,0 +1,20 @@
+Subject: [PATCH] net: airoha: admit short OMCI to its authenticated parser
+
+Keep the Ethernet minimum and reject CRC, oversize and aggregation errors.
+The PON consumer validates the OMCI wire length, session, GEM and MIC.
+
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -86,7 +86,11 @@
+ static int airoha_pon_rx_meta(const u32 words[4], struct airoha_pon_rx_meta *meta)
+ {
+ 	/* Never feed an aggregated or malformed frame to a raw PON consumer. */
+-	if ((words[0] & GENMASK(13, 11)) ||
++	/* The Ethernet minimum also marks valid short OMCI as runt. Only
++	 * OMCI may pass that bit; its consumer verifies length/session/MIC.
++	 */
++	if ((words[0] & (BIT(13) | BIT(11))) ||
++	    ((words[0] & BIT(12)) && !(words[0] & BIT(8))) ||
+ 	    FIELD_GET(QDMA_ETH_RXMSG_AGG_COUNT_MASK, words[2]) > 1)
+ 		return -EBADMSG;
+ 	memcpy(meta->words, words, sizeof(meta->words));

@@ -786,5 +786,41 @@
       "xgs_multiplier": 4,
       "initial_o4_software_resync": false
     }
+  },
+  "omci_reconfiguration": {
+    "revision": 1,
+    "default_suite": "omci",
+    "runt_exception": "Both RX guards; OMCI only; exact length, GEM/session and MIC checked by authenticator",
+    "ethernet_minimum_default": 60,
+    "crc_oversize_aggregation_rejected": true,
+    "physical_actions_required": 0,
+    "pending_response_policy": "Unchanged authenticated epoch may wait above DMA admission, maximum 128 queued packets and original 1000 ms deadline. Rekey/reset still purges old work.",
+    "cases": {
+      "activation-omci-fixed": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": false
+      },
+      "activation-omci-oem": {
+        "ranging_mode": 3,
+        "min_len": 60,
+        "allocation_revokes": false
+      },
+      "activation-omci-min48": {
+        "ranging_mode": 1,
+        "min_len": 48,
+        "allocation_revokes": false
+      },
+      "activation-omci-revoke": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": true
+      },
+      "activation-omci-repeat": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": false
+      }
+    }
   }
 }

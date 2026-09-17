@@ -38,6 +38,8 @@ static int q1000k_phy_needs_configure(void);
 static int q1000k_phy_configure(u32 mode);
 static int an7581_xpon_mac_request_rx_stop(void);
 static void an7581_xpon_invalidate(void);
+#define module_param(...) /* module parameter */
+#define MODULE_PARM_DESC(...) /* description */
 /* PRODUCTION */
 static int step(void) { assert(held && !atomic_context); return ++calls==fail ? -ETIMEDOUT : 0; }
 static int containment(void) { assert(held && q1000k_pipeline.error==-ETIMEDOUT); return ++containment_calls==contain_fail ? -ENODEV : 0; }

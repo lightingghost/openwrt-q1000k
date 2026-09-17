@@ -212,6 +212,11 @@ static int omci_device_reset_registration(struct omci_device *o) {
 static void omci_device_set_onu_id(struct omci_device *o,u16 onu) { assert(!owned); o->onu=onu; }
 static void omci_device_set_channel(struct omci_device *o,u16 gem,bool up) { assert(!owned); o->gem=gem; o->channel=up; }
 static int omci_device_reconcile_services(struct omci_device *o) { assert(!owned); reconciles++; return reconcile_error; }
+static int omci_device_reconcile_services_epoch(struct omci_device *o,u64 epoch) {
+    assert(!owned && !auth_held);
+    if(!epoch || o->epoch!=epoch || !o->channel) return -ESTALE;
+    return omci_device_reconcile_services(o);
+}
 static void omci_device_set_state(struct omci_device *o,u8 state) { assert(!owned); o->state=state; }
 static struct sk_buff *packet(unsigned int n) { struct sk_buff *p=calloc(1,sizeof(*p)); assert(p); p->len=n; live_skb++; return p; }
 static void dev_kfree_skb_any(struct sk_buff *skb) { assert(live_skb>0); live_skb--; free(skb); }
@@ -702,11 +707,21 @@ int main(void)
         assert(b->epoch==epoch+(enabled ? 0 : 1));
         int owner=q1000k_protocol_enter();
         assert(!q1000k_omci_alloc_changed());
-        assert(b->request.generation!=b->completed_generation);
+        assert(b->request.generation==b->completed_generation && b->services_pending && b->active);
+        u64 kept_epoch=b->published;
+        struct sk_buff *reply=packet(44);
+        assert(!qomci_xmit(b->omci,reply,17,kept_epoch) && !live_skb);
         q1000k_protocol_leave(owner);
         refreshes=refresh_count;
         q1000k_omci_control();
-        assert(!fault && b->active && refresh_count==refreshes+1);
+        assert(!fault && b->active && refresh_count==refreshes && b->published==kept_epoch && !b->services_pending);
+        /* Comparison flag alone restores the old revoke/full-rebuild path. */
+        bench_alloc_revoke=true;
+        owner=q1000k_protocol_enter(); assert(!q1000k_omci_alloc_changed()); q1000k_protocol_leave(owner);
+        assert(!b->active); reply=packet(44);
+        assert(qomci_xmit(b->omci,reply,17,kept_epoch)==-EKEYREJECTED); dev_kfree_skb_any(reply);
+        q1000k_omci_control(); assert(b->active && b->published>kept_epoch);
+        bench_alloc_revoke=false;
         q1000k_omci_backend_cleanup(); bench_control_coalesce=false;
     }
     /* Narrow O4 updates bypass rebuilding tables only after all live

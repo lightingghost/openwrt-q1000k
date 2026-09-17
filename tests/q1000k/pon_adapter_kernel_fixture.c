@@ -36,6 +36,7 @@ static void *test_kzalloc(size_t size, gfp_t flags)
 #undef kzalloc
 #define kmalloc test_kmalloc
 #define kzalloc test_kzalloc
+#define q1000k_trace(...) ((void)0)
 /* PRODUCTION */
 #pragma pop_macro("kzalloc")
 #pragma pop_macro("kmalloc")
@@ -43,7 +44,7 @@ static void *test_kzalloc(size_t size, gfp_t flags)
 struct airoha_pon {
     const struct airoha_pon_ops *ops;
     void *priv;
-    bool connected;
+    bool connected, paused;
     u64 epoch[32];
     u8 closed[32];
     u32 retiring;
@@ -265,12 +266,23 @@ int airoha_pon_configure_port(struct airoha_pon *pon,
 }
 int airoha_pon_pause(struct airoha_pon *pon,unsigned int timeout_ms)
 {
+    int ret=fake_lifecycle(pon);
     WARN_ON(timeout_ms!=750);
-    return fake_lifecycle(pon);
+    if(!ret) {
+        spin_lock_bh(&fake_tx_lock);
+        pon->paused=true;
+        for(unsigned int c=0;c<32;c++) pon->epoch[c]++;
+        spin_unlock_bh(&fake_tx_lock);
+    }
+    return ret;
 }
 int airoha_pon_resume(struct airoha_pon *pon)
 {
-    return fake_lifecycle(pon);
+    int ret=fake_lifecycle(pon);
+    if(!ret) {
+        spin_lock_bh(&fake_tx_lock); pon->paused=false; spin_unlock_bh(&fake_tx_lock);
+    }
+    return ret;
 }
 int airoha_pon_retire_fe(struct airoha_pon *pon,u8 channel)
 {
@@ -303,7 +315,7 @@ int airoha_pon_prepare_tx(struct airoha_pon *pon,struct airoha_pon_tx_meta *meta
     int ret=0;
     if(meta->channel>31 || meta->queue>7) return -EINVAL;
     spin_lock_bh(&fake_tx_lock);
-    if(pon->closed[meta->channel] & BIT(meta->queue)) ret=-ESHUTDOWN;
+    if(pon->paused || (pon->closed[meta->channel] & BIT(meta->queue))) ret=-ESHUTDOWN;
     else meta->epoch=pon->epoch[meta->channel];
     spin_unlock_bh(&fake_tx_lock);
     return ret;
@@ -329,7 +341,7 @@ netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
         goto unlock;
     }
     spin_lock_bh(&fake_tx_lock);
-    if ((pon->closed[meta->channel] & BIT(meta->queue)) ||
+    if (pon->paused || (pon->closed[meta->channel] & BIT(meta->queue)) ||
         pon->epoch[meta->channel] != meta->epoch) {
         kfree_skb(skb);
         goto unlock_queue;
@@ -542,6 +554,7 @@ static int run_tests(void)
         CHECK(errors[i] ? !memcmp(&saved,&qos,sizeof(qos)) : qos.mode==1);
     }
     tx_channel_error=0;
+    CHECK(!q1000k_transport_resume()); /* Clear the injected pause failure after recovery. */
     CHECK(q1000k_transport_quiesce_channel(32)==-EINVAL);
     channel_quiesce_error=-EAGAIN;
     CHECK(q1000k_transport_quiesce_channel(30)==-EAGAIN);
@@ -660,6 +673,38 @@ static int run_tests(void)
     ret=q1000k_transport_xmit_omci(skb,17,1,22);
     if(ret) kfree_skb(skb);
     CHECK(!ret && !wait_empty(500));
+
+    /* A physical rebuild may invalidate DMA admission without changing the
+     * authenticated session. Preserve OMCI pending before and during pause;
+     * data frames retain their original DMA epoch and must be dropped.
+     */
+    for(unsigned int cycle=0;cycle<10;cycle++) {
+        count=atomic_read(&accepted); WRITE_ONCE(fake_busy,true);
+        skb=packet_new(22); CHECK(skb);
+        CHECK(!q1000k_transport_xmit_omci(skb,17,1,22));
+        skb=packet_new(0); CHECK(skb);
+        CHECK(!q1000k_transport_xmit(skb,test_word0,test_word1));
+        msleep(2);
+        CHECK(!q1000k_transport_pause(750));
+        skb=packet_new(22); CHECK(skb);
+        CHECK(!q1000k_transport_xmit_omci(skb,17,1,22));
+        WRITE_ONCE(fake_busy,false); msleep(5);
+        CHECK(atomic_read(&accepted)==count);
+        CHECK(!q1000k_transport_resume() && !wait_empty(500));
+        CHECK(atomic_read(&accepted)==count+2);
+    }
+    /* Rekey during a physical pause discards old authenticated packets. */
+    CHECK(!q1000k_transport_pause(750)); count=atomic_read(&accepted);
+    skb=packet_new(22); CHECK(skb); CHECK(!q1000k_transport_xmit_omci(skb,17,1,22));
+    CHECK(!q1000k_transport_set_auth_epoch(0));
+    CHECK(!q1000k_transport_set_auth_epoch(23)); expected_omci_mark=23;
+    CHECK(!q1000k_transport_resume() && !wait_empty(500));
+    CHECK(atomic_read(&accepted)==count);
+    /* A stuck pause expires OMCI as well; no resurrection at resume. */
+    CHECK(!q1000k_transport_pause(750));
+    skb=packet_new(23); CHECK(skb); CHECK(!q1000k_transport_xmit_omci(skb,17,1,23));
+    CHECK(!wait_empty(Q1000K_TX_AGE_MS+500));
+    CHECK(!q1000k_transport_resume() && atomic_read(&accepted)==count);
 
     /* Expiry bounds memory and time during a permanently full native ring. */
     fake_busy = true; count = atomic_read(&accepted);

@@ -15,6 +15,9 @@ static int q1000k_pipeline_table_context(int wanted) { return wanted==phase ? 0 
 static int an7581_xpon_status(void) { return provider_error; }
 static void set_xpon_data(u32 reg,u32 value) { assert(reg<0x6000 && !(reg&3)); writes++; registers[reg/4]=value^(writes==fail_write); }
 static u32 get_xpon_data(u32 reg) { assert(reg<0x6000 && !(reg&3)); return registers[reg/4]; }
+#define module_param(...) /* module parameter */
+#define MODULE_PARM_DESC(...) /* description */
+#define q1000k_activation_snapshot(...) ((void)0)
 /* PRODUCTION */
 int main(void)
 {

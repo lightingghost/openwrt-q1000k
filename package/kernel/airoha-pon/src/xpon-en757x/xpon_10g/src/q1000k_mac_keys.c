@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Verified XG PLOAM/OMCI integrity and key-encryption bank programming. */
+#include <linux/module.h>
+#include <q1000k_trace.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -10,6 +12,13 @@
 #include "common/q1000k_mac_keys.h"
 #include "common/q1000k_pipeline.h"
 #include "common/q1000k_protocol.h"
+
+static unsigned int bench_key_wait_us = 3000;
+static bool bench_initial_key_readback;
+module_param(bench_key_wait_us, uint, 0400);
+module_param(bench_initial_key_readback, bool, 0400);
+MODULE_PARM_DESC(bench_key_wait_us, "Bench key-switch wait, 3000..30000 polls");
+MODULE_PARM_DESC(bench_initial_key_readback, "Bench: accept initial enable only after material/control readback when switch IRQ is absent");
 
 #define QMAC_PIK0 0x5360
 #define QMAC_OIK0 0x5380
@@ -256,10 +265,11 @@ int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,
 			    const struct q1000k_mac_data_keys *next)
 {
 	u32 tx, rx, cap, status, state, stop;
-	unsigned int bank, retry;
+	unsigned int bank, retry, wait = bench_key_wait_us;
 	int ret;
 
 	if (!q1000k_protocol_owned()) return -EPERM;
+	if (wait < 3000 || wait > 30000) return -EINVAL;
 	if (!old || !next || old->tx_index > 2 || next->tx_index > 2 ||
 	    old->rx_valid > 3 || next->rx_valid > 3 ||
 	    (old->tx_index && !(old->rx_valid & BIT(old->tx_index - 1))) ||
@@ -302,13 +312,40 @@ int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,
 		if (!ret) ret = q1000k_mac_key_write(0x5200, tx);
 		if (!ret) ret = q1000k_mac_key_write(0x5200, tx | BIT(31));
 		if (ret) return ret;
-		for (retry = 0; retry < 3000; retry++) {
+		q1000k_trace(QT_CONTROL, 20, 0, old->tx_index, next->tx_index, wait, bench_initial_key_readback);
+		for (retry = 0; retry < wait; retry++) {
 			ret = qdata_read(0x5044, &status);
 			if (ret) return ret;
 			if (status & BIT(7)) break;
 			udelay(1);
 		}
-		if (retry == 3000) return -ETIMEDOUT;
+		{
+			u32 seen_tx, seen_rx, material;
+			unsigned int word;
+			ret = qdata_read(0x5200, &seen_tx);
+			if (!ret) ret = qdata_read(0x5204, &seen_rx);
+			if (ret) return ret;
+			q1000k_trace(QT_CONTROL, 21, retry == wait ? -ETIMEDOUT : 0,
+				status, seen_tx, seen_rx, retry);
+			q1000k_activation_snapshot(9, next->tx_index);
+			if (retry == wait) {
+				/* Narrow experiment: initial validity enable only. A later
+				 * switch away from an active key still requires its IRQ.
+				 */
+				if (!bench_initial_key_readback || old->tx_index ||
+				    (seen_tx & (BIT(31) | BIT(0))) !=
+				    (BIT(31) | (next->tx_index - 1)) ||
+				    (seen_rx & 3) != (old->rx_valid | next->rx_valid))
+					return -ETIMEDOUT;
+				for (word = 0; word < 4; word++) {
+					ret = qdata_read(0x5210 + 16 * (next->tx_index - 1) + 4 * word, &material);
+					if (ret) return ret;
+					if (material != get_unaligned_be32(next->key[next->tx_index - 1] + 12 - 4 * word))
+						return -EKEYREJECTED;
+				}
+				q1000k_trace(QT_CONTROL, 22, 0, old->tx_index, next->tx_index, seen_tx, seen_rx);
+			}
+		}
 		ret = qdata_ack_switch();
 	}
 	if (!ret) ret = q1000k_mac_key_write(0x5204, (rx & ~3U) | next->rx_valid);

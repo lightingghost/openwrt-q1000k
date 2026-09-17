@@ -178,6 +178,19 @@ else: raise AssertionError((action,args))
         self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
         self.assertFalse((self.root/'sys/module/xpon_10g').exists())
 
+    def test_omci_variant_loads_readback_minimum_and_session_policy(self):
+        result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+            str(self.identity),'15','none','activation-omci-min48'],env=self.env,
+            capture_output=True,text=True,timeout=90)
+        self.assertEqual(result.returncode,0,result.stdout[-2500:]+result.stderr)
+        calls=[c for c in self.calls() if c[0] in ('modprobe','insmod') and Path(c[1]).stem=='xpon_10g']
+        self.assertEqual(len(calls),1)
+        for setting in ('bench_ranging_mode=1','bench_key_inline=1','bench_activation_diag=1',
+                        'bench_initial_key_readback=1','bench_omci_min_len=48','bench_alloc_revoke=0'):
+            self.assertIn(setting,calls[0])
+        self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+        self.assertFalse((self.root/'sys/module/xpon_10g').exists())
+
     def test_output_capture_and_missing_evidence(self):
         for bad in ('', 'output-missing'):
             self.env['VALIDATION_BAD']=bad

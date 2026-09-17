@@ -476,5 +476,7 @@ int omci_device_set_auth_epoch(struct omci_device *odev, u64 auth_epoch);
 void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
 			 u16 gem_port_id, u32 flags, u64 auth_epoch);
 int omci_device_reconcile_services(struct omci_device *odev);
+/* Process-context allocation notification; preserve this authenticated session. */
+int omci_device_reconcile_services_epoch(struct omci_device *odev, u64 auth_epoch);
 
 #endif /* _NET_OMCI_H */

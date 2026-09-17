@@ -32,6 +32,9 @@ static u32 get_xpon_data(u32 reg) {
     if(phase>=3 && reg==0x5044 && switch_requested && ++polls==complete_after) registers[reg/4]|=BIT(7);
     return registers[reg/4];
 }
+#define module_param(...) /* module parameter */
+#define MODULE_PARM_DESC(...) /* description */
+#define q1000k_activation_snapshot(...) ((void)0)
 /* PRODUCTION */
 static void reset(void) {
     memset(registers,0,sizeof(registers));
@@ -149,5 +152,26 @@ int main(void)
     live_start(&old); complete_after=0;
     assert(q1000k_mac_data_keys_live(&old,&next)==-ETIMEDOUT && polls==3000);
     assert((registers[0x5204/4]&3)==3); /* Do not retire old key without switch ACK. */
+    /* Missing switch IRQ may be accepted only for the first enable, after
+     * all control/material readbacks agree. Later switches still time out. */
+    bench_initial_key_readback=true;
+    live_start(&old); complete_after=0;
+    assert(q1000k_mac_data_keys_live(&old,&next)==-ETIMEDOUT);
+    memset(&old,0,sizeof(old)); old.rx_valid=1; memset(old.key[0],0x39,16);
+    next=old; next.tx_index=1;
+    live_start(&old); complete_after=0;
+    assert(!q1000k_mac_data_keys_live(&old,&next) && polls==3000);
+    live_start(&old); complete_after=0; bench_initial_key_readback=false;
+    assert(q1000k_mac_data_keys_live(&old,&next)==-ETIMEDOUT);
+    bench_initial_key_readback=true;
+    for(int bankword=0;bankword<4;bankword++) {
+        live_start(&old); complete_after=0;
+        registers[0x5210/4+bankword]^=1;
+        assert(q1000k_mac_data_keys_live(&old,&next)==-EKEYREJECTED);
+    }
+    live_start(&old); bench_key_wait_us=2999;
+    assert(q1000k_mac_data_keys_live(&old,&next)==-EINVAL && !reads);
+    bench_key_wait_us=30001;
+    assert(q1000k_mac_data_keys_live(&old,&next)==-EINVAL && !reads);
     return 0;
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Complete physical port retirement; no service record is released here. */
 #include <linux/interrupt.h>
+#include <linux/module.h>
+#include <q1000k_trace.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
@@ -17,6 +19,9 @@
 
 static DEFINE_MUTEX(q1000k_pipeline_lock);
 static struct q1000k_pipeline_status q1000k_pipeline;
+static unsigned int bench_omci_min_len = 60;
+module_param(bench_omci_min_len, uint, 0400);
+MODULE_PARM_DESC(bench_omci_min_len, "Bench PON minimum: 60 byte Ethernet default or 48 byte baseline OMCI");
 
 static void q1000k_pipeline_contain(void)
 {
@@ -193,6 +198,8 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 
 	if (!ops || !ops->clear || !ops->install || !(channels & BIT(0)))
 		return -EINVAL;
+	if (bench_omci_min_len != 60 && bench_omci_min_len != 48)
+		return -EINVAL;
 	ret = q1000k_pipeline_shutdown();
 	if (ret)
 		return ret;
@@ -232,9 +239,10 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 	q1000k_pipeline.retired = 0;
 	q1000k_pipeline.stage = Q1000K_PIPELINE_EPOCH_READY;
 	config = old;
-	config.min_len = 60;
+	config.min_len = bench_omci_min_len;
 	config.max_len = 2000;
 	ret = q1000k_transport_configure_port(&old, &config);
+	q1000k_trace(QT_CONTROL, 36, ret, old.min_len, config.min_len, old.max_len, config.max_len);
 	if (ret)
 		goto fail;
 	q1000k_table_phase = Q1000K_TABLE_INSTALL;

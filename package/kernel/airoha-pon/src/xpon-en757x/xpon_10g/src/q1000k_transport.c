@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Q1000K packet consumer: the native Ethernet driver owns all DMA and NAPI. */
 #include <linux/bitfield.h>
+#include <q1000k_trace.h>
 #include <linux/if_vlan.h>
 #include <linux/jiffies.h>
 #include <linux/mutex.h>
@@ -22,6 +23,7 @@ struct q1000k_tx_packet {
 	struct airoha_pon_tx_meta meta;
 	u64 auth_epoch;
 	unsigned long expires;
+	bool deferred;
 };
 
 struct q1000k_transport {
@@ -35,6 +37,7 @@ struct q1000k_transport {
 	unsigned int count; /* Includes the worker's packet outside the list. */
 	bool active;
 	bool detached;
+	bool omci_paused; /* Protected by auth_lock; physical pause is not rekey. */
 };
 
 static DEFINE_MUTEX(q1000k_transport_mutex);
@@ -117,11 +120,41 @@ static void q1000k_tx_work(struct work_struct *work)
 			mutex_lock(&transport->auth_lock);
 			if (!READ_ONCE(transport->active) || !packet->auth_epoch ||
 			    packet->auth_epoch != transport->auth_epoch ||
-			    time_after_eq(jiffies, packet->expires))
+			    time_after_eq(jiffies, packet->expires)) {
+				q1000k_trace(QT_CONTROL, 43, -ESTALE, packet->auth_epoch,
+					transport->auth_epoch, packet->meta.gem,
+					time_after_eq(jiffies, packet->expires));
 				dev_kfree_skb_any(packet->skb);
-			else
-				ret = airoha_pon_xmit(transport->pon, packet->skb,
-						      &packet->meta);
+			} else {
+				/* Only authenticated OMCI can survive a physical rebuild.
+				 * Pause is serialized with prepare + submission here, and
+				 * a rekey still purges queued packets under this same lock.
+				 * Never renew the original deadline on a retry.
+				 */
+				int admission = transport->omci_paused ? -ESHUTDOWN :
+					airoha_pon_prepare_tx(transport->pon, &packet->meta);
+
+				if (admission == -ESHUTDOWN) {
+					if (!packet->deferred)
+						q1000k_trace(QT_CONTROL, 41, admission,
+							packet->auth_epoch, packet->meta.gem,
+							transport->omci_paused, 0);
+					packet->deferred = true;
+					ret = NETDEV_TX_BUSY;
+				} else if (admission) {
+					q1000k_trace(QT_CONTROL, 43, admission,
+						packet->auth_epoch, transport->auth_epoch,
+						packet->meta.gem, 0);
+					dev_kfree_skb_any(packet->skb);
+				} else {
+					ret = airoha_pon_xmit(transport->pon, packet->skb,
+							      &packet->meta);
+					if (ret != NETDEV_TX_BUSY)
+						q1000k_trace(QT_CONTROL, 42, ret,
+							packet->auth_epoch, packet->meta.epoch,
+							packet->meta.gem, packet->deferred);
+				}
+			}
 			mutex_unlock(&transport->auth_lock);
 		} else if (!active || time_after_eq(jiffies, packet->expires)) {
 			dev_kfree_skb_any(packet->skb);
@@ -308,8 +341,13 @@ int q1000k_transport_pause(unsigned int timeout_ms)
 	mutex_lock(&q1000k_transport_mutex);
 	transport = rcu_dereference_protected(q1000k_current,
 				lockdep_is_held(&q1000k_transport_mutex));
-	if (transport && READ_ONCE(transport->active))
+	if (transport && READ_ONCE(transport->active)) {
+		mutex_lock(&transport->auth_lock);
+		transport->omci_paused = true;
 		ret = airoha_pon_pause(transport->pon, timeout_ms);
+		q1000k_trace(QT_CONTROL, 44, ret, transport->auth_epoch, 1, 0, 0);
+		mutex_unlock(&transport->auth_lock);
+	}
 	mutex_unlock(&q1000k_transport_mutex);
 	return ret;
 }
@@ -388,8 +426,16 @@ int q1000k_transport_resume(void)
 	mutex_lock(&q1000k_transport_mutex);
 	transport = rcu_dereference_protected(q1000k_current,
 				lockdep_is_held(&q1000k_transport_mutex));
-	if (transport && READ_ONCE(transport->active))
+	if (transport && READ_ONCE(transport->active)) {
+		mutex_lock(&transport->auth_lock);
 		ret = airoha_pon_resume(transport->pon);
+		if (!ret)
+			transport->omci_paused = false;
+		q1000k_trace(QT_CONTROL, 44, ret, transport->auth_epoch, 0, 0, 0);
+		mutex_unlock(&transport->auth_lock);
+		if (!ret)
+			q1000k_native_wake(transport);
+	}
 	mutex_unlock(&q1000k_transport_mutex);
 	return ret;
 }
@@ -540,20 +586,22 @@ static int q1000k_transport_queue(struct sk_buff *skb, u32 word0, u32 word1,
 	packet->meta = meta;
 	packet->auth_epoch = auth_epoch;
 	packet->expires = jiffies + msecs_to_jiffies(Q1000K_TX_AGE_MS);
+	packet->deferred = false;
 	rcu_read_lock();
 	transport = rcu_dereference(q1000k_current);
 	if (!transport) {
 		ret = -ENODEV;
 		goto unlock;
 	}
-	/* Capture admission exactly once. Rechecking it on BUSY would allow a
-	 * pre-retirement frame to inherit a reused channel. Native submission
-	 * rejects stale epochs even if closure races this enqueue or its worker.
-	 * Do not take our lock before entering native admission (TX may wake us).
+	/* Data frames capture admission once: they must never inherit a reused
+	 * channel. Authenticated OMCI instead waits above native admission;
+	 * the worker verifies its immutable auth epoch before each submission.
 	 */
-	ret = airoha_pon_prepare_tx(transport->pon, &packet->meta);
-	if (ret)
-		goto unlock;
+	if (!meta.omci) {
+		ret = airoha_pon_prepare_tx(transport->pon, &packet->meta);
+		if (ret)
+			goto unlock;
+	}
 	spin_lock_bh(&transport->lock);
 	if (!transport->active)
 		ret = -ENODEV;

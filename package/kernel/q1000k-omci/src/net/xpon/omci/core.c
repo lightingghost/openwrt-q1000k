@@ -1819,6 +1819,29 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(omci_device_set_auth_epoch);
 
+int omci_device_reconcile_services_epoch(struct omci_device *odev, u64 auth_epoch)
+{
+	int ret = 0;
+
+	if (!odev || !auth_epoch)
+		return -EINVAL;
+	/* Finish an already accepted request, including its response, before
+	 * reconciling an allocation update. This does not revoke authentication
+	 * or discard queued RX. A real session transition still cancels the job.
+	 */
+	mutex_lock(&odev->session_lock);
+	spin_lock_bh(&odev->state_lock);
+	if (!odev->channel_up || odev->session_exhausted ||
+	    odev->auth_epoch != auth_epoch)
+		ret = -ESTALE;
+	spin_unlock_bh(&odev->state_lock);
+	if (!ret)
+		ret = omci_device_reconcile_services(odev);
+	mutex_unlock(&odev->session_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(omci_device_reconcile_services_epoch);
+
 void omci_device_receive(struct omci_device *odev, struct sk_buff *skb,
 			 u16 gem_port_id, u32 flags, u64 auth_epoch)
 {

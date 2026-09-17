@@ -16,7 +16,13 @@ int q1000k_pwan_rx_prepare(struct sk_buff *skb, const void *msg,
 	    packet_len > 16128 || skb->len != packet_len)
 		return -EINVAL;
 	memcpy(words, msg, sizeof(words));
-	if ((words[0] & GENMASK(13, 11)) || (words[2] >> 24) > 1)
+	/* OMCI is not Ethernet: valid baseline frames are 48 bytes and
+	 * extended frames can be shorter. Retain every other descriptor error;
+	 * the session owner still enforces exact framing, GEM and software MIC.
+	 */
+	if ((words[0] & (BIT(13) | BIT(11))) ||
+	    ((words[0] & BIT(12)) && !(words[0] & BIT(8))) ||
+	    (words[2] >> 24) > 1)
 		return -EBADMSG;
 	/* Legacy parsers dereference skb->data directly, including CMAC input. */
 	if (skb_linearize(skb))

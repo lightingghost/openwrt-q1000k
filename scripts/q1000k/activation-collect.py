@@ -368,6 +368,23 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'omci':
+        if args.physical_only:
+            raise ValueError('OMCI comparisons use connected fiber without physical cycling')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, mode, minimum, revoke, samples in [
+                    ('fixed',1,60,False,300), ('oem',3,60,False,300),
+                    ('min48',1,48,False,300), ('revoke',1,60,True,300),
+                    ('repeat',1,60,False,600)]:
+                cases.append(dict(name='activation-omci-'+name, mode='activate', samples=samples,
+                    ranging_mode=mode, key_inline=True, initial_key_readback=True,
+                    omci_min_len=minimum, alloc_revoke=revoke, ids=['O1','O2','O3','O4','O5','O6']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown OMCI case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'registration':
         if args.physical_only:
             raise ValueError('Registration comparisons use connected fiber without physical cycling')
@@ -479,6 +496,18 @@ def test_outcomes(case, result, text):
     stages = result['stages']; outcome = {}
     for ident in case.get('ids', []):
         outcome[ident] = 'not-run'
+        if ident.startswith('O'):
+            o = result.get('omci_experiment', {})
+            outcome[ident] = {
+                'O1': 'initial-enable-readback-observed' if o.get('initial_key_readback_accepted') else 'initial-readback-not-reached',
+                'O2': 'runt-omci-authenticated' if o.get('ethernet_runt_omci_delivered') and o.get('authenticated_rx') else 'no-authenticated-runt-observed',
+                'O3': 'allocation-session-preserved' if o.get('allocations_kept_session') and o.get('epoch_reconciles') else 'allocation-preservation-not-observed',
+                'O4': 'deferred-response-consumed' if o.get('deferred_native_consumed') else 'deferred-response-not-observed',
+                'O5': 'tx-auth-rejection-observed' if o.get('tx_auth_rejected') else 'no-tx-auth-rejection-observed',
+                'O6': 'provisioning-and-traffic-observed' if result.get('provisioned') and any(result.get('traffic', {}).values()) else 'service-not-verified',
+            }[ident]
+            if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
+            continue
         if ident.startswith('H'):
             a = result.get('registration', {})
             outcome[ident] = {
@@ -628,6 +657,37 @@ def registration_summary(records):
         note='Enqueue, hardware counts and register comparisons are distinct from OLT acceptance; sparse/averaged optical readings cannot certify individual bursts.')
 
 
+def omci_summary(records):
+    """Deduplicate polling snapshots; never infer OLT receipt from local TX."""
+    unique = {}
+    for row in records:
+        if isinstance(row, dict) and (row.get('trace_version') == 1 or row.get('critical_version') == 1):
+            unique[(row.get('stack_generation', 1), row['seq'])] = row
+    events = [unique[k] for k in sorted(unique)]
+    control = [e for e in events if e['event'] == 27]
+    def count(ident, predicate=lambda e: True):
+        return sum(e['id'] == ident and predicate(e) for e in control)
+    return dict(
+        ethernet_runt_omci_delivered=count(30, lambda e: bool(e['a'] & (1 << 12))),
+        rx_descriptor_words=sorted({f"0x{e['a']:08x}" for e in control if e['id'] == 30}),
+        rx_guard_rejected=count(31, lambda e: e['result'] != 0),
+        authenticated_rx=count(32, lambda e: e['result'] == 0),
+        rx_auth_rejected=count(32, lambda e: e['result'] != 0),
+        tx_auth_rejected=count(37, lambda e: e['result'] != 0),
+        replies_queued=count(39, lambda e: e['result'] == 0),
+        reply_queue_errors=count(39, lambda e: e['result'] != 0),
+        allocations_kept_session=count(40, lambda e: e['result'] == 0),
+        replies_deferred=count(41), native_consumed=count(42, lambda e: e['result'] == 0),
+        deferred_native_consumed=count(42, lambda e: e['result'] == 0 and bool(e['d'])),
+        reply_drops=count(43), reply_expired=count(43, lambda e: bool(e['d'])),
+        epoch_reconciles=count(45, lambda e: e['result'] == 0),
+        initial_key_readback_accepted=count(22),
+        minimums=sorted({e['b'] for e in control if e['id'] == 36 and e['result'] == 0}),
+        critical_evidence_complete=registration_summary(records)['critical_evidence_complete'],
+        upstream_delivery_proven=False,
+        note='Retained event counts. Native consumption is not OLT acknowledgement; gaps make totals incomplete. Full service still requires provisioning and traffic.')
+
+
 def summarize(text, returncode=0, events=None):
     records = json_records(text)
     live_records = json_records(re.sub(r'postmortem_begin.*?postmortem_end', '', text, flags=re.S))
@@ -701,6 +761,7 @@ def summarize(text, returncode=0, events=None):
             result['status'] = 'failed'
     result['trace'] = trace_summary(records)
     result['registration'] = registration_summary(records)
+    result['omci_experiment'] = omci_summary(records)
     winners = re.findall(r'^recovery_winner=([1-7])$', text, re.M)
     result['recovery_winner'] = winners[-1] if winners else None
     result['recovery_sequence'] = re.findall(r'^recovery_action=([1-7]) phase=applied$', text, re.M)
@@ -845,7 +906,7 @@ def capture(pin, case, iperf, directory, redact):
     result['name'] = name
     result['required_dark_samples'] = 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15
     result['trace_scope'] = 'activation-critical' if name.startswith('activation-reg-') else 'all-events'
-    result['status'] = case_outcome(result, critical_only=name.startswith('activation-reg-'))
+    result['status'] = case_outcome(result, critical_only=name.startswith(('activation-reg-', 'activation-omci-')))
     if case['mode'] == 'isolated':
         rows = [json.loads(line) for line in lines if line.startswith('{"isolated_tx_version":')]
         result['isolated'] = rows[-1] if rows else {}
@@ -1007,6 +1068,15 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
+            if getattr(args, 'suite', 'legacy') == 'omci':
+                report = ['# OMCI runt and reconfiguration observations', '',
+                    '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
+                    '|---|---:|---:|---:|---:|---:|---|---:|---|']
+                for result in record['results']:
+                    o = result.get('omci_experiment', {})
+                    report.append(f"| {result['name']} | {o.get('ethernet_runt_omci_delivered',0)} | {o.get('authenticated_rx',0)} | {o.get('replies_queued',0)} | {o.get('tx_auth_rejected',0)} | {o.get('allocations_kept_session',0)} | {o.get('replies_deferred',0)} / {o.get('deferred_native_consumed',0)} | {o.get('reply_drops',0)} | {o.get('critical_evidence_complete',False)} |")
+                report += ['', 'Native consumption does not prove upstream optical delivery. An unobserved allocation/pause is an untested condition; use the raw logs and collection.json to distinguish it from success.']
+                (args.output/'omci-summary.md').write_text('\n'.join(report)+'\n')
             if getattr(args, 'suite', 'legacy') == 'registration':
                 report = ['# Registration hypotheses 1–5', '',
                     'Host processing times and internal transmission evidence. Enqueue is not optical delivery or OLT acceptance.', '',
@@ -1072,7 +1142,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('registration','output','measurement','isolated','tx','legacy'), default='registration', help='Default: connected-fiber hypotheses 1–5, with one RX control and seven activation comparisons. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('omci','registration','output','measurement','isolated','tx','legacy'), default='omci', help='Default: connected-fiber OMCI runt and pending-response comparisons, with one RX control and five activation cases. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

@@ -47,6 +47,9 @@ module_param(bench_key_inline, bool, 0400);
 MODULE_PARM_DESC(bench_key_inline, "Service eligible Key_Control inline using inactive bank update");
 module_param(bench_activation_diag, bool, 0400);
 MODULE_PARM_DESC(bench_activation_diag, "Activation boundary MMIO, response/key readback and timing diagnostics");
+static bool bench_alloc_revoke;
+module_param(bench_alloc_revoke, bool, 0400);
+MODULE_PARM_DESC(bench_alloc_revoke, "Bench control: reproduce authentication revocation on an ordinary Alloc-ID update");
 #define QOMCI_ACKS 64
 extern int snSendInO23Cnt;
 struct qomci_key_request {
@@ -80,7 +83,7 @@ struct qomci_backend {
 	u16 onu;
 	u64 epoch, published, completed_generation;
 	bool keys_valid, active, started, cold_started;
-	bool ranged;
+	bool ranged, services_pending;
 	u32 delay;
 	int service_error;
 };
@@ -268,11 +271,17 @@ static int qomci_xmit(struct omci_device *odev, struct sk_buff *skb, u16 gem, u6
 	else
 		ret = q1000k_auth_omci_mic(b->cipher, b->keys.bank[index].omci,
 			copy, false, Q1000K_OMCI_UPSTREAM, mic);
+	q1000k_trace(QT_CONTROL, 37, ret, (u32)epoch, (u32)b->published,
+		(b->active ? BIT(0) : 0) | (b->keys_valid ? BIT(1) : 0) |
+		(epoch == b->published ? BIT(2) : 0) | (gem == b->onu ? BIT(3) : 0) |
+		(!q1000k_protocol_status() ? BIT(4) : 0), index);
+	q1000k_trace(QT_CONTROL, 38, ret, epoch >> 32, b->published >> 32, gem, b->onu);
 	spin_unlock_bh(&b->auth_lock);
 	if (!ret) {
 		memcpy(skb_put(copy, sizeof(mic)), mic, sizeof(mic));
 		copy->ip_summed = CHECKSUM_NONE;
 		ret = q1000k_transport_xmit_omci(copy, gem, index, epoch);
+		q1000k_trace(QT_CONTROL, 39, ret, epoch, gem, index, 0);
 	}
 	memzero_explicit(mic, sizeof(mic));
 	if (ret)
@@ -402,6 +411,7 @@ void q1000k_omci_receive(struct sk_buff *skb, u16 gem, bool crc_error)
 		}
 		spin_unlock_bh(&b->auth_lock);
 	}
+	q1000k_trace(QT_CONTROL, 32, ret, gem, b ? b->onu : 0xffff, crc_error, skb->len);
 	if (ret) {
 		dev_kfree_skb_any(skb);
 		return;
@@ -417,6 +427,7 @@ static int qomci_request(struct qomci_backend *b)
 	int ret;
 
 	qomci_close(b);
+	b->services_pending = false;
 	if (b->request.generation == U64_MAX)
 		ret = -EOVERFLOW;
 	else {
@@ -671,13 +682,42 @@ void q1000k_omci_state(void)
 	qomci_request(b);
 }
 
+/* Called with the protocol executor held. An allocation notification does
+ * not change the OMCC, keys or core authentication generation. Superseding
+ * reset/profile/key requests retain the full close-and-republish path.
+ */
+static bool qomci_session_unchanged(struct qomci_backend *b)
+{
+	const struct qomci_request *r = &b->request;
+
+	return b->cold_started && b->keys_valid && b->ranged &&
+		READ_ONCE(b->active) && b->published && b->published == b->epoch &&
+		r->state == GPON_10G_STATE_O5 && GPON_CURR_STATE == r->state &&
+		r->generation == b->completed_generation &&
+		!r->reset && !r->profile && !r->assign && !r->ranging &&
+		!r->data.pending && !r->acks && !r->burst_mask;
+}
+
 int q1000k_omci_alloc_changed(void)
 {
 	struct qomci_backend *b = rcu_access_pointer(qomci_current);
 
 	if (!q1000k_protocol_owned())
 		return -EPERM;
-	return b ? qomci_request(b) : -ENODEV;
+	if (!b)
+		return -ENODEV;
+	if (!bench_alloc_revoke && qomci_session_unchanged(b)) {
+		int ret;
+
+		b->services_pending = true;
+		ret = q1000k_protocol_control();
+		q1000k_trace(QT_CONTROL, 40, ret, b->published,
+			b->request.generation, b->onu, 0);
+		if (ret)
+			q1000k_protocol_fail(ret);
+		return ret;
+	}
+	return qomci_request(b);
 }
 
 int q1000k_omci_key_control(bool confirm, u8 index, u8 length, u8 sequence)
@@ -912,12 +952,24 @@ again:
 	/* A state callback inside this transaction can queue the control job
 	 * again. Its generation is already published when that duplicate runs.
 	 * Never suppress a new request or any pending physical work. */
-	if (bench_control_coalesce && b->cold_started && b->keys_valid && b->ranged &&
-	    READ_ONCE(b->active) && b->published && b->published == b->epoch &&
-	    request.state == GPON_10G_STATE_O5 && GPON_CURR_STATE == request.state &&
-	    request.generation == b->completed_generation &&
-	    !request.reset && !request.profile && !request.assign && !request.ranging &&
-	    !request.data.pending && !request.acks && !request.burst_mask) {
+	if (b->services_pending && qomci_session_unchanged(b)) {
+		epoch = b->published;
+		b->services_pending = false;
+		q1000k_protocol_leave(token);
+		/* Wait outside the executor for the accepted request and its reply.
+		 * The core checks this exact epoch under its session mutex before
+		 * reconciling. A superseding authentication transition cancels it.
+		 */
+		ret = omci_device_reconcile_services_epoch(b->omci, epoch);
+		q1000k_trace(QT_CONTROL, 45, ret, epoch, request.generation, 0, 0);
+		if (ret == -EUCLEAN)
+			goto failed;
+		if (ret != -ESTALE)
+			WRITE_ONCE(b->service_error, ret);
+		kfree_sensitive(install);
+		return;
+	}
+	if (bench_control_coalesce && qomci_session_unchanged(b)) {
 		q1000k_trace(QT_DISCOVERY, 69, 0, request.generation, request.state, b->index, 0);
 		q1000k_protocol_leave(token);
 		kfree_sensitive(install);
