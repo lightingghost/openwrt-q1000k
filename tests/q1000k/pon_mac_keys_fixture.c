@@ -10,6 +10,7 @@ static void *kzalloc(size_t n,int flags) { void *p=kmalloc(n,flags); if(p) memse
 static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|(u32)p[2]<<8|p[3]; }
 static u32 registers[0x6000/4];
 static int phase, writes, fail_write, provider_error;
+static bool q1000k_protocol_owned(void) { return true; }
 static int q1000k_pipeline_table_context(int wanted) { return wanted==phase ? 0 : -EPERM; }
 static int an7581_xpon_status(void) { return provider_error; }
 static void set_xpon_data(u32 reg,u32 value) { assert(reg<0x6000 && !(reg&3)); writes++; registers[reg/4]=value^(writes==fail_write); }
@@ -58,7 +59,14 @@ int main(void)
     assert(q1000k_mac_keys_install(&keys)==-EIO && !writes);
     registers[0x5800/4]=0; memset(keys.bank[0].omci,0xff,16);
     assert(!q1000k_mac_keys_install(&keys));
+    assert(q1000k_mac_keys_match(&keys)==1);
+    for(unsigned int reg=0x5360;reg<0x53c0;reg+=4) {
+        registers[reg/4]^=1;
+        assert(q1000k_mac_keys_match(&keys)==0);
+        registers[reg/4]^=1;
+    }
     provider_error=-ENODEV; writes=0;
+    assert(q1000k_mac_keys_match(&keys)==-ENODEV && !writes);
     assert(q1000k_mac_keys_install(&keys)==-ENODEV && !writes);
     assert(q1000k_mac_key_indices(&pik,&oik)==-ENODEV && pik==4 && oik==5);
     provider_error=0; registers[0x5318/4]=~0U;

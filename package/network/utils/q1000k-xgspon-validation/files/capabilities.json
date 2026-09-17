@@ -309,6 +309,46 @@
       "hypothesis": "TX6",
       "implemented": true,
       "hardware_run": false
+    },
+    {
+      "id": "H1",
+      "test": "Ranging receipt through RCU/table work to ACK enqueue; narrow versus full transaction",
+      "selection": "All activation-reg-* cases; eligibility/reached branch recorded",
+      "hypothesis": "REG1",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "H2",
+      "test": "Key_Control to inline versus deferred Generate/Confirm report, inactive-bank installation and cancellation",
+      "selection": "All activation-reg-* cases; eligibility/reached branch recorded",
+      "hypothesis": "REG2",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "H3",
+      "test": "Pre/post transaction, enqueue and pre-deactivate TX stops, FIFO, grants, profile, key and burst counters",
+      "selection": "All activation-reg-* cases; eligibility/reached branch recorded",
+      "hypothesis": "REG3",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "H4",
+      "test": "First O4 EqD: full path versus bounded TX resync clear/retain versus NAND-derived direct write; fixed x4 conversion",
+      "selection": "All activation-reg-* cases; eligibility/reached branch recorded",
+      "hypothesis": "REG4",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "H5",
+      "test": "ACK/Key_Report metadata, key bank readback and format validation; hardware emitted MIC remains unverified",
+      "selection": "All activation-reg-* cases; eligibility/reached branch recorded",
+      "hypothesis": "REG5",
+      "implemented": true,
+      "hardware_run": false
     }
   ],
   "event_names": {
@@ -336,7 +376,9 @@
     "22": "omci",
     "23": "recovery_phase",
     "24": "profile_skip: id 0..3 actual skip; 4..7 mismatch/read error; a=skipped,b=request generation,c=version",
-    "25": "discovery_register: a=address,b=raw,c=IRQ flags,d=MAC cold generation"
+    "25": "discovery_register: a=address,b=raw,c=IRQ flags,d=MAC cold generation",
+    "26": "activation boundary snapshot; header id=255, then numbered MMIO readbacks",
+    "27": "registration control, local timing and response enqueue audit"
   },
   "discovery_irq_bits": {
     "2": "SN request received",
@@ -345,7 +387,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "output",
+  "default_suite": "registration",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -606,5 +648,143 @@
       180,
       184
     ]
+  },
+  "registration": {
+    "schema_version": 1,
+    "fiber": "connected",
+    "physical_actions": 0,
+    "identity_required": true,
+    "cases": [
+      {
+        "name": "activation-reg-reference",
+        "ranging_mode": 0,
+        "key_inline": false,
+        "activation_diag": true,
+        "samples": 300
+      },
+      {
+        "name": "activation-reg-range",
+        "ranging_mode": 1,
+        "key_inline": false,
+        "activation_diag": true,
+        "samples": 300
+      },
+      {
+        "name": "activation-reg-keys",
+        "ranging_mode": 0,
+        "key_inline": true,
+        "activation_diag": true,
+        "samples": 300
+      },
+      {
+        "name": "activation-reg-combined",
+        "ranging_mode": 1,
+        "key_inline": true,
+        "activation_diag": true,
+        "samples": 300
+      },
+      {
+        "name": "activation-reg-resync-retain",
+        "ranging_mode": 2,
+        "key_inline": true,
+        "activation_diag": true,
+        "samples": 300
+      },
+      {
+        "name": "activation-reg-oem-direct",
+        "ranging_mode": 3,
+        "key_inline": true,
+        "activation_diag": true,
+        "samples": 300
+      },
+      {
+        "name": "activation-reg-repeat",
+        "ranging_mode": 1,
+        "key_inline": true,
+        "activation_diag": true,
+        "samples": 300
+      }
+    ],
+    "common_parameters": {
+      "bench_profile_coalesce": 1,
+      "bench_profile_live": 1,
+      "bench_control_coalesce": 1,
+      "bench_sn_limit": 40
+    },
+    "critical_capacity": 8192,
+    "eqd_multiplier": 4,
+    "boundary_stages": {
+      "1": "Ranging_Time callback",
+      "2": "before narrow EqD",
+      "3": "after narrow EqD",
+      "4": "accepted Key_Control",
+      "6": "before FIFO enqueue",
+      "7": "after FIFO enqueue",
+      "8": "before reset disables TX"
+    },
+    "snapshot_registers": [
+      "5004",
+      "5044",
+      "509c",
+      "5100",
+      "5104",
+      "5108",
+      "5114",
+      "511c",
+      "5120",
+      "5124",
+      "5200",
+      "5204",
+      "5284",
+      "5300",
+      "5318",
+      "5800",
+      "5814",
+      "582c",
+      "58fc",
+      "5940",
+      "5944",
+      "5950",
+      "5954",
+      "5984",
+      "5988",
+      "598c"
+    ],
+    "control_ids": {
+      "0": "latest local IRQ indication: a=ns low,b=ns high,c=stage,d=sequence",
+      "1": "ranging entry: a=OLT EqD,b=absolute|negative<<1,c=sequence,d=state",
+      "2": "control begin: a=request generation,b=ranging,c=key pending,d=ACK count",
+      "3": "control end: a=generation,b=narrow,c=ranging,d=key pending",
+      "4": "before synchronize_rcu",
+      "5": "after synchronize_rcu",
+      "6": "narrow begin: a=OLT EqD,b=EqD x4,c=mode,d=profile register",
+      "7": "narrow end: a=OLT EqD,b=readback,c=mode,d=resync register",
+      "8": "inline key begin: a=sequence,b=index,c=confirm",
+      "9": "inline key prepared/installed: a=sequence,b=changed,c=RX mask,d=TX index",
+      "10": "key accepted: a=sequence,b=index,c=confirm,d=inline selected",
+      "11": "narrow eligibility: a=readbacks agree,b=mode,c=generation",
+      "12": "inline fallback before hardware write",
+      "13": "pending key cancelled by reset",
+      "14": "TX input audit: a=message type,b=sequence,c=PIK selector,d=report type|index<<8",
+      "15": "FIFO complete: a=message type,b=sequence,c=FIFO status,d=words",
+      "16": "enqueue counters: a=type,b=sequence,c=TX PLOAM,d=TX bursts"
+    },
+    "limitations": [
+      "IRQ timestamp identifies a local deferred batch, not each optical arrival",
+      "Internal TX counters and power readings cannot certify individual optical bursts or OLT acceptance",
+      "Hardware upstream MIC cannot be captured; audits verify inputs and host vectors only",
+      "Narrow EqD and live-key modes are experimental, immutable per module load and checked before use",
+      "Missing critical evidence or incomplete register blocks remain inconclusive",
+      "Deactivate is always honored; no forced O5 or ignored OLT reset"
+    ],
+    "nand_reference": {
+      "module_sha256": "099d4ff0601c263d9a44f2f89d3604c770820936bc94041bf4763d5f10a5f1e5",
+      "initial_o4_eqd_call": "0x98c4",
+      "initial_o4_to_o5": "0x99fc",
+      "eqd_function": "0x17c00",
+      "eqd_register": "0x5114",
+      "xgs_multiplier": 4,
+      "initial_o4_software_resync": false
+    }
   }
 }

@@ -98,6 +98,68 @@ int q1000k_mac_ranging_ready(void)
 	return -ETIMEDOUT;
 }
 
+int q1000k_mac_ranging_bench(u32 delay, unsigned int mode)
+{
+	u32 profiles, state, stop, value;
+	unsigned int retry;
+	int ret;
+
+	if (!q1000k_protocol_owned()) return -EPERM;
+	if (!mode || mode > 3 || delay > (~0U >> 2)) return -EINVAL;
+	state = get_xpon_data(0x5104);
+	stop = get_xpon_data(0x5004);
+	profiles = get_xpon_data(0x511c);
+	ret = an7581_xpon_status();
+	if (ret) return ret;
+	/* This experiment never adjusts an operational link or replaces IDs,
+	 * tables or keys. The backend also verifies unchanged live profiles.
+	 */
+	if (state == ~0U || stop == ~0U || profiles == ~0U) return -EIO;
+	if ((state & 15) != 4 || (stop & 0x01010101) ||
+	    !(profiles & 0x01010101)) return -EAGAIN;
+	q1000k_trace(QT_CONTROL, 6, 0, delay, delay << 2, mode, profiles);
+	q1000k_activation_snapshot(2, mode);
+	if (mode == 3) {
+		/* NAND xpon_10g.ko: O4 handler 0x9568 -> 0x98c4 calls
+		 * gponDevSetEqdValue (0x17c00), then publishes O5 at 0x99fc.
+		 * XGS shifts by two at 0x17c78; there is no O4 SW-resync call.
+		 */
+		ret = qcold_write(0x5114, delay << 2, ~0U);
+		goto out;
+	}
+	/* The NAND resync helper pauses only upstream MBI/MPI and profiles.
+	 * Preserve downstream RX, PHY clocks, controller state and DMA epochs.
+	 * Wait for FIFO drain before stopping its output; no namespace reuse.
+	 */
+	ret = an7581_xpon_mac_stop(AN7581_XPON_MBI_TX_STOP, true);
+	if (!ret) ret = qcold_write(0x511c, profiles & ~0x01010101U, ~0U);
+	if (!ret) ret = an7581_xpon_mac_wait_tx_empty();
+	if (!ret) ret = an7581_xpon_mac_stop(AN7581_XPON_MPI_TX_STOP, true);
+	if (!ret) ret = qcold_write(0x5114, delay << 2, ~0U);
+	if (!ret) ret = qcold_modify(0x582c, BIT(8) | BIT(0), BIT(8) | BIT(0),
+		BIT(31), ~(u32)(BIT(31) | BIT(0)));
+	if (!ret) ret = an7581_xpon_mac_stop(AN7581_XPON_MPI_TX_STOP, false);
+	if (ret) goto out;
+	for (retry = 0; retry < 3000; retry++) {
+		value = get_xpon_data(0x582c);
+		ret = an7581_xpon_status();
+		if (ret || value == ~0U) { ret = ret ?: -EIO; goto out; }
+		if (value & BIT(31)) break;
+		udelay(1);
+	}
+	if (retry == 3000) { ret = -ETIMEDOUT; goto out; }
+	if (mode == 1)
+		ret = qcold_modify(0x582c, BIT(8) | BIT(0), 0, BIT(31), ~(u32)BIT(31));
+	if (!ret) ret = qcold_write(0x511c, profiles, ~0U);
+	if (!ret) ret = an7581_xpon_mac_stop(AN7581_XPON_MBI_TX_STOP, false);
+out:
+	q1000k_trace(QT_CONTROL, 7, ret, delay, get_xpon_data(0x5114), mode,
+		get_xpon_data(0x582c));
+	q1000k_activation_snapshot(3, mode);
+	/* The owner contains any error. Never reopen uncertain timing here. */
+	return ret ?: an7581_xpon_status();
+}
+
 int q1000k_mac_cold_install(const u8 serial[8], const u8 registration[36], bool emergency)
 {
 	static const struct { u32 reg, mask, value, omit; } defaults[] = {

@@ -14,6 +14,9 @@ int q1000k_mac_cold_interrupts(u32 enables);
 int q1000k_mac_profiles_invalidate(void);
 int q1000k_mac_ranging_install(u32 delay);
 int q1000k_mac_ranging_ready(void);
+/* Immutable bench selections, first O4 only: 1=TX-only resync/clear,
+ * 2=TX-only resync/retain commands, 3=NAND OEM direct EqD write. */
+int q1000k_mac_ranging_bench(u32 delay, unsigned int mode);
 u32 q1000k_mac_generation(void);
 int q1000k_mac_profile_matches(u8 index, u8 version, u16 length);
 int q1000k_mac_profile_install(u8 index, u8 version, u16 length);

@@ -105,9 +105,9 @@ static int request_during_barrier, assign_count, refresh_count;
 static bool services_enabled, install_phase, optical_tx;
 static int cold_count, data_installs, data_reports, random_calls;
 static u8 data_tx, data_rx, data_keys[2][16], last_report[44];
-static bool random_ready=true;
+static bool random_ready=true, allow_owned_crypto;
 static bool rng_is_initialized(void) { return random_ready; }
-static void get_random_bytes(void *p,size_t n) { assert(!owned && n==16 && random_ready); memset(p,++random_calls,n); }
+static void get_random_bytes(void *p,size_t n) { assert((!owned || allow_owned_crypto) && n==16 && random_ready); memset(p,++random_calls,n); }
 
 static u8 hw_ploam_index, hw_omci_index, installed_profiles, profile_version[4];
 int snSendInO23Cnt;
@@ -132,6 +132,8 @@ static void spin_unlock_bh(spinlock_t *lock) { assert(*lock && auth_held); *lock
 static int step(void) { return ++calls==fail_at ? -ETIMEDOUT : 0; }
 static int q1000k_protocol_status(void) { return fault; }
 static bool q1000k_protocol_owned(void) { return owned; }
+static u64 q1000k_protocol_irq_time(void) { return 12345; }
+static void q1000k_activation_snapshot(u32 stage,u32 seq) {}
 static int q1000k_protocol_enter(void) { if(fault) return fault; if(owned) return 1; owned=1; return 0; }
 static void q1000k_protocol_leave(int token) { assert(owned); if(!token) owned=0; }
 static void q1000k_protocol_fail(int error) { assert(error<0); if(!fault) fault=error; }
@@ -270,9 +272,13 @@ static void rcu_read_unlock(void) { }
 struct seq_file { char text[1024]; };
 static void seq_printf(struct seq_file *seq,const char *format,...)
 { va_list args; va_start(args,format); vsnprintf(seq->text,sizeof(seq->text),format,args); va_end(args); }
+static u32 get_xpon_data(u32 reg) {
+    assert(owned && (reg==0x5300 || reg==0x5954 || reg==0x5944));
+    return reg==0x5300 ? 64 : data_reports;
+}
 /* PRODUCTION */
 int q1000k_auth_key_report(struct crypto_lskcipher *tfm,const u8 kek[16],const u8 key[16],bool confirm,u8 report[32]) {
-    assert(!owned && !auth_held && tfm==(confirm ? qomci_current->cipher : qomci_current->ecb_cipher));
+    assert((!owned || bench_key_inline) && !auth_held && tfm==(confirm ? qomci_current->cipher : qomci_current->ecb_cipher));
     int ret=step(); if(ret) return ret;
     memset(report,0,32); memcpy(report,key,16); report[0]^=confirm ? 0xab : 0xef; return 0;
 }
@@ -287,7 +293,8 @@ int q1000k_mac_data_keys_ready(bool pending) {
     return pending ? step() : 0;
 }
 int q1000k_ploam_send(const u8 message[44]) {
-    assert(owned && !install_phase && !native_epoch && !qomci_current->active);
+    assert(owned && !install_phase);
+    assert(bench_key_inline || (!native_epoch && !qomci_current->active));
     assert(!message[0] && !message[1] && !message[2] && !message[3]);
     assert(message[4]==hardware_onu>>8 && message[5]==(u8)hardware_onu && message[6]==5);
     assert(message[9]==1 || message[9]==2);
@@ -298,6 +305,18 @@ int q1000k_ploam_send(const u8 message[44]) {
 }
 int q1000k_mac_ranging_install(u32 delay) { assert(owned && install_phase && !installed_profiles && delay<=0x3fffffff); return step(); }
 int q1000k_mac_ranging_ready(void) { assert(owned && !install_phase); return step(); }
+static int narrow_ranges, live_keys, live_error, key_match=1;
+int q1000k_mac_ranging_bench(u32 delay,unsigned int mode) {
+    assert(owned && !install_phase && vendor.state==4 && mode>=1 && mode<=3);
+    narrow_ranges++; return step();
+}
+int q1000k_mac_keys_match(const struct q1000k_mac_keys *keys) { assert(owned); return key_match; }
+int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,const struct q1000k_mac_data_keys *next) {
+    assert(owned && !install_phase && vendor.state==5);
+    if(live_error) return live_error;
+    live_keys++; data_tx=next->tx_index; data_rx=next->rx_valid;
+    memcpy(data_keys,next->key,32); return step();
+}
 int q1000k_mac_keys_derive(struct crypto_lskcipher *tfm,const u8 reg[36],const u8 sn[8],const u8 tag[8],struct q1000k_mac_keys *keys) {
     assert(!owned && !auth_held && reg[35]==2 && sn[7]==1); derivations++; int ret=step(); if(ret) return ret;
     memset(keys,0,sizeof(*keys)); memcpy(keys->pon_tag,tag,8); memset(keys->bank[0].omci,0x30,16); memset(keys->bank[1].omci,0x31,16); return 0;
@@ -631,13 +650,18 @@ int main(void)
     q1000k_omci_backend_cleanup();
     /* Coalescing is independent of the remembered version: current PHY and
      * MAC readbacks must match. ACKs and queued/reset work never disappear. */
-    for (int trial=0; trial<11; trial++) {
+    for (int phase=0; phase<5; phase++) for (int trial=0; trial<11; trial++) {
         startup(); b=qomci_current;
         struct q1000k_pon_profile p={.repeat=2,.preamble_len=8,.delimiter_len=8,.version=1};
         u8 tag[8]={1,2,3};
         token=q1000k_protocol_enter();
         assert(!q1000k_omci_burst_profile(&p,tag,1,false));
         q1000k_protocol_leave(token); q1000k_omci_control(); assert(!fault);
+        const int states[]={GPON_10G_STATE_O2_3,GPON_10G_STATE_O4,GPON_10G_STATE_O4,
+                            GPON_10G_STATE_O5,GPON_10G_STATE_O5};
+        vendor.state=states[phase]; b->request.state=states[phase];
+        bench_profile_live=phase==2 || phase==4;
+        bool eligible=phase==0 || bench_profile_live;
         bench_profile_coalesce=trial!=0; phy_match=mac_match=1; match_reads=0;
         hw_ploam_index=hw_omci_index=b->index;
         if(trial==10) hw_ploam_index^=1;
@@ -652,18 +676,109 @@ int main(void)
         int refreshes=refresh_count;
         token=q1000k_protocol_enter();
         int ret=q1000k_omci_burst_profile(&p,tag,2,trial==6);
-        if(trial==1) {
+        if(trial==1 && eligible) {
             assert(!ret && match_reads==2 && b->request.generation==generation && !b->request.burst_mask && !b->request.acks);
             assert(refresh_count==refreshes);
         } else if(trial==7) assert(ret==-EAGAIN && !match_reads);
-        else if(trial==9) assert(ret==-EIO && fault==-EIO && b->request.generation==generation);
+        else if(trial==9 && eligible) assert(ret==-EIO && fault==-EIO && b->request.generation==generation);
         else {
             assert(!ret && b->request.generation>generation && b->request.burst_mask);
             if(trial==6) assert(b->request.acks==1);
         }
         q1000k_protocol_leave(token);
         if(trial==6) { int acks=ack_count; q1000k_omci_control(); assert(!fault && ack_count==acks+1); }
-        q1000k_omci_backend_cleanup(); bench_profile_coalesce=false;
+        q1000k_omci_backend_cleanup(); bench_profile_coalesce=bench_profile_live=false;
     }
+    /* The O5 state callback can enqueue an already completed generation.
+     * Skip only that duplicate; a new Alloc-ID reconciliation still runs. */
+    for (int enabled=0; enabled<2; enabled++) {
+        startup(); profile_and_assign(); operational(); b=qomci_current;
+        assert(b->active && b->completed_generation==b->request.generation);
+        bench_control_coalesce=enabled;
+        int refreshes=refresh_count; u64 epoch=b->epoch;
+        q1000k_omci_control();
+        assert(!fault && b->active);
+        assert(refresh_count==refreshes+(enabled ? 0 : 1));
+        assert(b->epoch==epoch+(enabled ? 0 : 1));
+        int owner=q1000k_protocol_enter();
+        assert(!q1000k_omci_alloc_changed());
+        assert(b->request.generation!=b->completed_generation);
+        q1000k_protocol_leave(owner);
+        refreshes=refresh_count;
+        q1000k_omci_control();
+        assert(!fault && b->active && refresh_count==refreshes+1);
+        q1000k_omci_backend_cleanup(); bench_control_coalesce=false;
+    }
+    /* Narrow O4 updates bypass rebuilding tables only after all live
+     * readbacks agree. Mismatch falls back; I/O failure contains the port. */
+    phy_match=mac_match=key_match=1;
+    for(int mode=1;mode<=3;mode++) for(int trial=0;trial<4;trial++) {
+        startup(); profile_and_assign(); b=qomci_current;
+        bench_ranging_mode=mode;
+        int refreshes=refresh_count, ranges=narrow_ranges, acks=ack_count;
+        if(trial==1) key_match=0;
+        if(trial==2) phy_match=0;
+        token=q1000k_protocol_enter();
+        assert(!q1000k_omci_ranging(100,true,false,91,true));
+        q1000k_protocol_leave(token);
+        if(trial==3) { calls=0; fail_at=2; } /* Key read, then narrow write. */
+        q1000k_omci_control();
+        if(trial==3) assert(fault==-ETIMEDOUT && !b->ranged && vendor.state==4 && ack_count==acks && !b->active);
+        else {
+            assert(!fault && b->ranged && b->active && vendor.state==5 && ack_count==acks+1);
+            assert(refresh_count==refreshes+(trial ? 1 : 0));
+            assert(narrow_ranges==ranges+(!trial));
+        }
+        q1000k_omci_backend_cleanup(); bench_ranging_mode=0; phy_match=mac_match=key_match=1;
+    }
+    /* Inline key response must be queued before processing a later reset.
+     * It preserves service/auth epochs and performs no global refresh. */
+    startup(); profile_and_assign(); operational(); b=qomci_current;
+    bench_key_inline=allow_owned_crypto=true;
+    int refreshes=refresh_count, reports=data_reports;
+    u64 epoch=b->epoch, published=b->published;
+    token=q1000k_protocol_enter();
+    assert(!q1000k_omci_key_control(false,1,16,92));
+    assert(data_reports==reports+1 && b->active && !b->request.data.pending && b->data.regenerating==1);
+    assert(refresh_count==refreshes && b->epoch==epoch && b->published==published);
+    assert(!q1000k_omci_key_control(true,1,0,93));
+    assert(data_reports==reports+2 && data_tx==1 && !b->data.regenerating);
+    assert(!q1000k_omci_reset(false,false));
+    assert(data_reports==reports+2 && !b->active && !b->request.data.pending);
+    q1000k_protocol_leave(token); q1000k_omci_control(); q1000k_omci_backend_cleanup();
+    /* A pre-write unsupported case can use the full transaction, while a
+     * partial update error must never retry through that fallback. */
+    for(int trial=0;trial<2;trial++) {
+        startup(); profile_and_assign(); operational(); b=qomci_current;
+        live_error=trial ? -EIO : -EOPNOTSUPP; reports=data_reports;
+        token=q1000k_protocol_enter();
+        int result=q1000k_omci_key_control(false,1,16,94);
+        if(trial) assert(result==-EIO && fault==-EIO && !b->active && data_reports==reports);
+        else assert(!result && !b->active && b->request.data.pending && data_reports==reports);
+        q1000k_protocol_leave(token); live_error=0;
+        if(!trial) { q1000k_omci_control(); assert(!fault && data_reports==reports+1 && b->active); }
+        q1000k_omci_backend_cleanup();
+    }
+    for(int f=1;f<=4;f++) {
+        startup(); profile_and_assign(); operational(); b=qomci_current;
+        reports=data_reports; calls=0; fail_at=f;
+        token=q1000k_protocol_enter();
+        assert(q1000k_omci_key_control(false,1,16,95)==-ETIMEDOUT);
+        assert(fault==-ETIMEDOUT && !b->active && data_reports==reports);
+        q1000k_protocol_leave(token); q1000k_omci_backend_cleanup();
+    }
+    bench_key_inline=allow_owned_crypto=false;
+    /* Audit checks MIC inputs and formatting, never claims a wire MIC. */
+    startup(); profile_and_assign(); operational(); b=qomci_current;
+    bench_activation_diag=true;
+    u8 message[44]={ [5]=17,[6]=9,[7]=99 };
+    token=q1000k_protocol_enter();
+    assert(!q1000k_omci_ploam_tx_audit(message));
+    message[43]=1; assert(q1000k_omci_ploam_tx_audit(message)==-EILSEQ); message[43]=0;
+    message[5]=18; assert(q1000k_omci_ploam_tx_audit(message)==-EKEYREJECTED); message[5]=17;
+    key_match=0; assert(q1000k_omci_ploam_tx_audit(message)==-EKEYREJECTED); key_match=1;
+    message[6]=5; message[9]=2; assert(!q1000k_omci_ploam_tx_audit(message));
+    message[10]=1; assert(q1000k_omci_ploam_tx_audit(message)==-EILSEQ);
+    q1000k_protocol_leave(token); q1000k_omci_backend_cleanup(); bench_activation_diag=false;
     assert(!live_skb); return 0;
 }

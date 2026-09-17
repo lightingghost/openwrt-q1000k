@@ -21,6 +21,8 @@ int q1000k_protocol_init(int irq, const struct q1000k_protocol_ops *ops);
 int q1000k_protocol_start(void);
 void q1000k_protocol_stop(void);
 int q1000k_protocol_status(void);
+/* First local IRQ indication for the current deferred batch, not wire time. */
+u64 q1000k_protocol_irq_time(void);
 int q1000k_protocol_phy(unsigned int source, unsigned int event);
 /* Pause waits for the current handler and retains the execution mutex until
  * resume by the SAME task. Pending timer/task/IRQ/PHY events remain queued.

@@ -15,6 +15,9 @@ static int random_calls,crypto_error,crypto_calls,provider_error,protocol_error;
 static int reads,writes,delay,fail_read,fail_write,overflow_after;
 static u32 fifo[11];
 static unsigned int avail=32;
+static int audit_error;
+static int q1000k_omci_ploam_tx_audit(const u8 message[44]) { return audit_error; }
+static void q1000k_omci_ploam_tx_done(u8 type,u8 sequence,int result) {}
 static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
 static bool rng_is_initialized(void) { return random_ready; }
 static void get_random_bytes(void *p,size_t n) { assert(random_ready && n==16); memset(p,++random_calls,n); }
@@ -89,6 +92,9 @@ int main(void)
     u8 message[44]={}; for(int i=4;i<44;i++) message[i]=i;
     owned=false; assert(q1000k_ploam_send(message)==-EPERM && !reads && !writes); owned=true;
     assert(q1000k_ploam_send(NULL)==-EINVAL);
+    audit_error=-EKEYREJECTED;
+    assert(q1000k_ploam_send(message)==-EKEYREJECTED && !writes && !reads);
+    audit_error=0;
     for(int i=0;i<4;i++) { message[i]=2; assert(q1000k_ploam_send(message)==-EINVAL && !writes); message[i]=0; }
     assert(!q1000k_ploam_send(message) && writes==11 && !delay);
     for(int i=0;i<11;i++) assert(fifo[i]==get_unaligned_be32(message+4*i));

@@ -9,6 +9,7 @@
 #include <an7581_xpon.h>
 #include "common/q1000k_mac_keys.h"
 #include "common/q1000k_pipeline.h"
+#include "common/q1000k_protocol.h"
 
 #define QMAC_PIK0 0x5360
 #define QMAC_OIK0 0x5380
@@ -227,4 +228,89 @@ int q1000k_mac_data_keys_ready(bool switch_pending)
 		udelay(1);
 	}
 	return -ETIMEDOUT;
+}
+
+int q1000k_mac_keys_match(const struct q1000k_mac_keys *keys)
+{
+	static const u32 bases[] = { QMAC_PIK0, QMAC_OIK0, QMAC_KEK0 };
+	unsigned int bank, kind, word;
+	int ret;
+
+	if (!q1000k_protocol_owned()) return -EPERM;
+	if (!keys) return -EINVAL;
+	for (bank = 0; bank < 2; bank++) {
+		const u8 *material[] = { keys->bank[bank].ploam,
+			keys->bank[bank].omci, keys->bank[bank].kek };
+		for (kind = 0; kind < 3; kind++) for (word = 0; word < 4; word++) {
+			u32 actual = get_xpon_data(bases[kind] + 16 * bank + 4 * word);
+			ret = an7581_xpon_status();
+			if (ret) return ret;
+			if (actual != get_unaligned_be32(material[kind] + 12 - 4 * word))
+				return 0;
+		}
+	}
+	return 1;
+}
+
+int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,
+			    const struct q1000k_mac_data_keys *next)
+{
+	u32 tx, rx, cap, status, state, stop;
+	unsigned int bank, retry;
+	int ret;
+
+	if (!q1000k_protocol_owned()) return -EPERM;
+	if (!old || !next || old->tx_index > 2 || next->tx_index > 2 ||
+	    old->rx_valid > 3 || next->rx_valid > 3 ||
+	    (old->tx_index && !(old->rx_valid & BIT(old->tx_index - 1))) ||
+	    (next->tx_index && !(next->rx_valid & BIT(next->tx_index - 1))))
+		return -EINVAL;
+	/* Active-key confusion recovery still uses full physical retirement. */
+	if (old->tx_index && (!next->tx_index ||
+	    ((next->rx_valid & BIT(old->tx_index - 1)) &&
+	     memcmp(old->key[old->tx_index - 1], next->key[old->tx_index - 1], 16))))
+		return -EOPNOTSUPP;
+	ret = qdata_read(0x5104, &state);
+	if (!ret) ret = qdata_read(0x5004, &stop);
+	if (ret) return ret;
+	if ((state & 15) != 5 || (stop & 0x01010101)) return -EOPNOTSUPP;
+	ret = qdata_read(0x5200, &tx);
+	if (!ret) ret = qdata_read(0x5204, &rx);
+	if (!ret) ret = qdata_read(QMAC_CAP_SETTING, &cap);
+	if (ret) return ret;
+	if ((rx & 3) != old->rx_valid ||
+	    (tx & (BIT(31) | BIT(0))) != (old->tx_index ?
+	     BIT(31) | (old->tx_index - 1) : 0)) return -EUCLEAN;
+	/* Update only an inactive bank, disabling its receive validity first.
+	 * Preserve the active upstream key and all traffic/grant configuration.
+	 */
+	for (bank = 0; bank < 2; bank++) {
+		if (!(next->rx_valid & BIT(bank)) ||
+		    ((old->rx_valid & BIT(bank)) && !memcmp(old->key[bank], next->key[bank], 16)))
+			continue;
+		rx &= ~BIT(bank);
+		ret = q1000k_mac_key_write(0x5204, rx);
+		if (!ret) ret = q1000k_mac_key_bank(0x5210 + 16 * bank, next->key[bank]);
+		if (ret) return ret;
+	}
+	ret = q1000k_mac_key_write(QMAC_CAP_SETTING, (cap & ~BIT(9)) | BIT(12) | BIT(13));
+	/* Both keys can receive until the requested switch has completed. */
+	if (!ret) ret = q1000k_mac_key_write(0x5204, (rx & ~3U) | old->rx_valid | next->rx_valid);
+	if (!ret && next->tx_index != old->tx_index) {
+		ret = qdata_ack_switch();
+		tx = (tx & ~(BIT(31) | BIT(0))) | (next->tx_index - 1);
+		if (!ret) ret = q1000k_mac_key_write(0x5200, tx);
+		if (!ret) ret = q1000k_mac_key_write(0x5200, tx | BIT(31));
+		if (ret) return ret;
+		for (retry = 0; retry < 3000; retry++) {
+			ret = qdata_read(0x5044, &status);
+			if (ret) return ret;
+			if (status & BIT(7)) break;
+			udelay(1);
+		}
+		if (retry == 3000) return -ETIMEDOUT;
+		ret = qdata_ack_switch();
+	}
+	if (!ret) ret = q1000k_mac_key_write(0x5204, (rx & ~3U) | next->rx_valid);
+	return ret;
 }

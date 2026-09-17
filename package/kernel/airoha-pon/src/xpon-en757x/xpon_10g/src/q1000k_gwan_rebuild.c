@@ -4,6 +4,7 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <q1000k_trace.h>
 #include <q1000k_phy_api.h>
 #include "common/q1000k_gwan.h"
 #include "common/q1000k_mac_cold.h"
@@ -318,7 +319,9 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	 * already copied an old binding to finish before physical retirement;
 	 * otherwise it could submit old metadata with the next native epoch.
 	 */
+	q1000k_trace(QT_CONTROL, 4, 0, tx->registration, tx->cold, tx->channels, 0);
 	synchronize_rcu();
+	q1000k_trace(QT_CONTROL, 5, 0, tx->registration, tx->cold, tx->channels, 0);
 	ret = q1000k_pipeline_reconfigure(&ops, tx, tx->channels);
 	if (ret)
 		goto failed;

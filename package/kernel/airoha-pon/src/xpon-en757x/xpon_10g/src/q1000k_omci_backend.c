@@ -28,11 +28,25 @@
 #include "gpon/gpon_act.h"
 #include "gpon/gpon_ploam.h"
 
-/* Immutable per load; collector runs baseline / coalesced / baseline.
- * Only unacknowledged, unchanged O2/3 broadcasts may bypass a transaction. */
+/* Immutable per load. Only unacknowledged, unchanged broadcasts with matching
+ * live hardware may bypass a transaction. O4/O5 need the separate bench flag. */
 static bool bench_profile_coalesce;
 module_param(bench_profile_coalesce, bool, 0400);
 MODULE_PARM_DESC(bench_profile_coalesce, "Compare discovery with checked unchanged-profile coalescing");
+static bool bench_profile_live;
+module_param(bench_profile_live, bool, 0400);
+MODULE_PARM_DESC(bench_profile_live, "Extend checked unchanged-profile bench comparison to O4/O5");
+static bool bench_control_coalesce;
+module_param(bench_control_coalesce, bool, 0400);
+MODULE_PARM_DESC(bench_control_coalesce, "Skip an already completed O5 control generation for bench comparison");
+static unsigned int bench_ranging_mode;
+module_param(bench_ranging_mode, uint, 0400);
+MODULE_PARM_DESC(bench_ranging_mode, "First-O4 experiment: 0=full, 1=TX resync clear, 2=TX resync retain, 3=NAND direct EqD");
+static bool bench_key_inline, bench_activation_diag;
+module_param(bench_key_inline, bool, 0400);
+MODULE_PARM_DESC(bench_key_inline, "Service eligible Key_Control inline using inactive bank update");
+module_param(bench_activation_diag, bool, 0400);
+MODULE_PARM_DESC(bench_activation_diag, "Activation boundary MMIO, response/key readback and timing diagnostics");
 #define QOMCI_ACKS 64
 extern int snSendInO23Cnt;
 struct qomci_key_request {
@@ -64,13 +78,85 @@ struct qomci_backend {
 	u8 burst_mask;
 	u8 serial[8], registration[36], index;
 	u16 onu;
-	u64 epoch, published;
+	u64 epoch, published, completed_generation;
 	bool keys_valid, active, started, cold_started;
 	bool ranged;
 	u32 delay;
 	int service_error;
 };
 static struct qomci_backend __rcu *qomci_current;
+static int qomci_key_inline(struct qomci_backend *b);
+
+static void qomci_boundary(u32 stage, u32 sequence)
+{
+	u64 irq;
+	if (!bench_activation_diag) return;
+	irq = q1000k_protocol_irq_time();
+	q1000k_trace(QT_CONTROL, 0, 0, (u32)irq, (u32)(irq >> 32), stage, sequence);
+	q1000k_activation_snapshot(stage, sequence);
+}
+
+/* Readback precondition for a narrow operation; failure never silently
+ * replaces a pending profile/identity/key transition with an old snapshot. */
+static int qomci_bench_unchanged(struct qomci_backend *b, u8 index)
+{
+	u8 pik, oik;
+	unsigned int i;
+	int ret = q1000k_mac_key_indices(&pik, &oik);
+	if (ret) return ret;
+	if (pik != index || oik != index) return 0;
+	ret = q1000k_mac_keys_match(&b->keys);
+	for (i = 0; ret == 1 && i < 4; i++) {
+		const struct q1000k_pon_profile *p = &b->burst[i];
+		if (!(b->burst_mask & BIT(i))) continue;
+		ret = q1000k_phy_profile_matches(p);
+		if (ret == 1) ret = q1000k_mac_profile_matches(i, p->version,
+			(u16)p->preamble_len * p->repeat + p->delimiter_len);
+	}
+	return ret;
+}
+
+int q1000k_omci_ploam_tx_audit(const u8 message[44])
+{
+	struct qomci_backend *b = rcu_access_pointer(qomci_current);
+	unsigned int i;
+	u16 onu;
+	u8 pik, oik;
+	int ret;
+
+	if (!bench_activation_diag) return 0;
+	if (!q1000k_protocol_owned()) return -EPERM;
+	if (!message || !b || !b->keys_valid) return -ENOKEY;
+	/* Only the post-ranging replies under study. No payload or derived MIC
+	 * is traced. This verifies inputs to hardware MIC, not the emitted MIC. */
+	if (message[6] != 5 && message[6] != 9) return 0;
+	onu = (u16)message[4] << 8 | message[5];
+	ret = q1000k_mac_key_indices(&pik, &oik);
+	if (!ret && (onu != b->onu || message[3] != pik || pik != b->index))
+		ret = -EKEYREJECTED;
+	if (!ret) {
+		ret = q1000k_mac_keys_match(&b->keys);
+		ret = ret == 1 ? 0 : ret < 0 ? ret : -EKEYREJECTED;
+	}
+	if (!ret && message[6] == 5 && (message[8] > 1 ||
+	    message[9] < 1 || message[9] > 2 || message[10] || message[11]))
+		ret = -EILSEQ;
+	if (!ret && message[6] == 9)
+		for (i = 9; i < 44; i++) if (message[i]) { ret = -EILSEQ; break; }
+	q1000k_trace(QT_CONTROL, 14, ret, message[6], message[7], message[3],
+		message[8] | (u32)message[9] << 8);
+	qomci_boundary(6, message[7]);
+	return ret;
+}
+
+void q1000k_omci_ploam_tx_done(u8 type, u8 sequence, int result)
+{
+	if (bench_activation_diag && (type == 5 || type == 9)) {
+		q1000k_trace(QT_CONTROL, 16, result, type, sequence,
+			get_xpon_data(0x5954), get_xpon_data(0x5944));
+		qomci_boundary(7, sequence);
+	}
+}
 
 void q1000k_omci_security_status(struct seq_file *seq)
 {
@@ -353,6 +439,10 @@ int q1000k_omci_reset(bool emergency, bool reset_phy)
 		return -EPERM;
 	if (!b || !b->cold_started)
 		return -ENODEV;
+	qomci_boundary(8, b->request.generation);
+	if (b->request.data.pending)
+		q1000k_trace(QT_CONTROL, 13, -ECANCELED, b->request.data.sequence,
+			b->request.data.index, b->request.data.confirm, b->request.generation);
 	qomci_close(b);
 	ret = q1000k_phy_set_tx(false);
 	if (ret) {
@@ -424,7 +514,10 @@ int q1000k_omci_burst_profile(const struct q1000k_pon_profile *p,
 	if (!q1000k_pon_profile_valid(p) || !tag)
 		return -EINVAL;
  if (bench_profile_coalesce && !acknowledge && b->cold_started && b->keys_valid &&
-     GPON_CURR_STATE == GPON_10G_STATE_O2_3 && !q1000k_protocol_status() &&
+     (GPON_CURR_STATE == GPON_10G_STATE_O2_3 ||
+      (bench_profile_live && (GPON_CURR_STATE == GPON_10G_STATE_O4 ||
+                             GPON_CURR_STATE == GPON_10G_STATE_O5))) &&
+     !q1000k_protocol_status() &&
      !b->request.reset && !b->request.profile && !b->request.assign &&
      !b->request.ranging && !b->request.data.pending && !b->request.acks &&
      !b->request.burst_mask && (b->burst_mask & BIT(p->index)) &&
@@ -536,6 +629,8 @@ int q1000k_omci_ranging(u32 delay, bool absolute, bool negative, u8 sequence, bo
 		return -EPERM;
 	if (!b)
 		return -ENODEV;
+	q1000k_trace(QT_CONTROL, 1, 0, delay, absolute | (negative << 1), sequence, GPON_CURR_STATE);
+	qomci_boundary(1, sequence);
 	if (GPON_CURR_STATE != GPON_10G_STATE_O4 && GPON_CURR_STATE != GPON_10G_STATE_O5)
 		return -EINVAL;
 	if (!absolute && GPON_CURR_STATE == GPON_10G_STATE_O4)
@@ -608,6 +703,13 @@ int q1000k_omci_key_control(bool confirm, u8 index, u8 length, u8 sequence)
 	b->request.data = (struct qomci_key_request) {
 		.pending = true, .confirm = confirm, .index = index, .sequence = sequence,
 	};
+	q1000k_trace(QT_CONTROL, 10, 0, sequence, index, confirm, bench_key_inline);
+	qomci_boundary(4, sequence);
+	if (bench_key_inline) {
+		int ret = qomci_key_inline(b);
+		if (ret != -EOPNOTSUPP) return ret;
+		q1000k_trace(QT_CONTROL, 12, ret, sequence, index, confirm, 0);
+	}
 	return qomci_request(b);
 }
 
@@ -627,9 +729,50 @@ static int qomci_key_report(u16 onu, const struct qomci_key_request *request,
 	message[8] = request->confirm;
 	message[9] = update->report_index;
 	memcpy(message + 12, update->report, 32);
+	/* Critical trace metadata only: message type, sequence, FIFO status and
+	 * hardware TX count. Never record the identity or key-report payload. */
+	q1000k_trace(QT_DISCOVERY, 64, 0, 5, request->sequence,
+		get_xpon_data(0x5300), get_xpon_data(0x5954));
 	ret = q1000k_ploam_send(message);
+	q1000k_trace(QT_DISCOVERY, 65, ret, 5, request->sequence,
+		get_xpon_data(0x5300), get_xpon_data(0x5954));
 	if (!ret) gpGponPriv->ploamMsgcounter.txPloamMsgCnt++;
 	memzero_explicit(message, sizeof(message));
+	return ret;
+}
+
+static int qomci_key_inline(struct qomci_backend *b)
+{
+	struct q1000k_key_update update = {};
+	struct qomci_key_request request = b->request.data;
+	int ret;
+
+	/* No OMCI core calls or service/table changes in this RX callback. Its
+	 * existing executor ownership excludes reset and every other writer. */
+	if (!b->active || b->index || !b->ranged || GPON_CURR_STATE != GPON_10G_STATE_O5)
+		return -EOPNOTSUPP;
+	ret = qomci_bench_unchanged(b, 0);
+	if (ret != 1) {
+		if (ret < 0) { qomci_close(b); q1000k_protocol_fail(ret); }
+		return ret < 0 ? ret : -EOPNOTSUPP;
+	}
+	q1000k_trace(QT_CONTROL, 8, 0, request.sequence, request.index, request.confirm, 1);
+	ret = q1000k_key_prepare(b->ecb_cipher, b->cipher, b->keys.bank[0].kek,
+		&b->data, request.confirm, request.index, &update);
+	if (!ret && update.changed) ret = q1000k_mac_data_keys_live(&b->data.mac, &update.next.mac);
+	q1000k_trace(QT_CONTROL, 9, ret, request.sequence, update.changed,
+		update.next.mac.rx_valid, update.next.mac.tx_index);
+	if (!ret) ret = qomci_key_report(b->onu, &request, &update);
+	if (!ret) {
+		spin_lock_bh(&b->auth_lock);
+		b->data = update.next;
+		spin_unlock_bh(&b->auth_lock);
+		memset(&b->request.data, 0, sizeof(b->request.data));
+	} else if (ret != -EOPNOTSUPP) {
+		qomci_close(b);
+		q1000k_protocol_fail(ret);
+	}
+	memzero_explicit(&update, sizeof(update));
 	return ret;
 }
 
@@ -753,7 +896,7 @@ void q1000k_omci_control(void)
 	struct qomci_request request;
 	u64 epoch;
 	unsigned int i;
-	bool up;
+	bool up, narrow;
 	int token, ret = 0;
 
 	if (!b)
@@ -765,6 +908,29 @@ again:
 	token = q1000k_protocol_enter();
 	if (token < 0) { ret = token; goto failed; }
 	request = b->request;
+	narrow = false;
+	/* A state callback inside this transaction can queue the control job
+	 * again. Its generation is already published when that duplicate runs.
+	 * Never suppress a new request or any pending physical work. */
+	if (bench_control_coalesce && b->cold_started && b->keys_valid && b->ranged &&
+	    READ_ONCE(b->active) && b->published && b->published == b->epoch &&
+	    request.state == GPON_10G_STATE_O5 && GPON_CURR_STATE == request.state &&
+	    request.generation == b->completed_generation &&
+	    !request.reset && !request.profile && !request.assign && !request.ranging &&
+	    !request.data.pending && !request.acks && !request.burst_mask) {
+		q1000k_trace(QT_DISCOVERY, 69, 0, request.generation, request.state, b->index, 0);
+		q1000k_protocol_leave(token);
+		kfree_sensitive(install);
+		return;
+	}
+	if (request.assign || request.ranging || request.reset || request.data.pending || request.acks)
+		q1000k_trace(QT_DISCOVERY, 68, 0, request.generation,
+			request.assign | (request.ranging << 1) | (request.reset << 2) |
+			(request.data.pending << 3) | (request.data.confirm << 4),
+			request.acks, GPON_CURR_STATE);
+	if (request.ranging || request.data.pending)
+		q1000k_trace(QT_CONTROL, 2, 0, request.generation, request.ranging,
+			request.data.pending, request.acks);
 	q1000k_trace(QT_PROFILE_APPLY, 0, 0, request.generation, request.burst_mask, request.reset, request.assign);
 	memcpy(install->burst, b->burst, sizeof(install->burst));
 	install->burst_mask = b->burst_mask;
@@ -834,9 +1000,21 @@ again:
 		q1000k_trace(QT_PROFILE_APPLY, 3, -EAGAIN, request.generation, b->request.generation, 0, 0);
 		q1000k_protocol_leave(token); goto again;
 	}
+	if (bench_ranging_mode && request.ranging && !b->ranged &&
+	    GPON_CURR_STATE == GPON_10G_STATE_O4 && !request.reset &&
+	    !request.assign && !request.profile && !request.burst_mask &&
+	    !request.data.pending && install->valid && install->burst_mask) {
+		ret = qomci_bench_unchanged(b, request.index);
+		q1000k_trace(QT_CONTROL, 11, ret < 0 ? ret : 0, ret == 1,
+			bench_ranging_mode, request.generation, 0);
+		if (ret < 0) { q1000k_protocol_leave(token); goto failed; }
+		narrow = ret == 1;
+	}
 	up = request.state == GPON_10G_STATE_O5 && install->onu != 0xffff &&
 		install->valid && install->burst_mask && b->ranged;
-	if (install->cold)
+	if (narrow)
+		ret = q1000k_mac_ranging_bench(install->delay, bench_ranging_mode);
+	else if (install->cold)
 		ret = q1000k_gwan_cold_reset(qomci_install, install);
 	else if (install->registration)
 		ret = q1000k_gwan_register(install->onu, qomci_install, install);
@@ -844,6 +1022,9 @@ again:
 		ret = q1000k_gwan_refresh_checked(qomci_install, qomci_ready, install);
 	else if (request.profile || request.burst_mask || up)
 		ret = q1000k_gwan_refresh(qomci_install, install);
+	if (request.ranging || request.data.pending)
+		q1000k_trace(QT_CONTROL, 3, ret, request.generation, narrow,
+			request.ranging, request.data.pending);
 	if (ret) {
 		q1000k_protocol_leave(token); goto failed;
 	}
@@ -901,8 +1082,13 @@ again:
 		up = request.state == GPON_10G_STATE_O5;
 		snSendInO23Cnt = 0;
 	}
-	for (i = 0; i < request.acks; i++)
+	for (i = 0; i < request.acks; i++) {
+		q1000k_trace(QT_DISCOVERY, 66, 0, 9, request.ack[i],
+			get_xpon_data(0x5300), get_xpon_data(0x5954));
 		ploam_send_acknowledge_msg(request.ack[i], XGPON_PLOAM_ACK_OK);
+		q1000k_trace(QT_DISCOVERY, 67, q1000k_protocol_status(), 9, request.ack[i],
+			get_xpon_data(0x5300), get_xpon_data(0x5954));
+	}
 	if (request.assign) {
 		gpon_act_change_state(GPON_10G_STATE_O4);
 		if (gpGponPriv->gponCfg.ploamCtrl == XGPON_SW)
@@ -951,6 +1137,8 @@ again:
 			q1000k_services_enable(READ_ONCE(b->started));
 		}
 	}
+	if (!ret)
+		b->completed_generation = request.generation;
 	q1000k_protocol_leave(token);
 	if (ret)
 		goto failed;
@@ -1018,7 +1206,7 @@ int q1000k_omci_backend_init(struct net_device *dev)
 	struct omci_identity identity = {};
 	int ret;
 
-	if (!dev || rcu_access_pointer(qomci_current))
+	if (!dev || rcu_access_pointer(qomci_current) || bench_ranging_mode > 3)
 		return -EINVAL;
 	b = kzalloc(sizeof(*b), GFP_KERNEL);
 	if (!b)

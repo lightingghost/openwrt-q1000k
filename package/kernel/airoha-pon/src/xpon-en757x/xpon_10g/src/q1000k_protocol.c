@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Resumable, bounded MAC protocol executor. No hardware is accessed here. */
 #include <linux/errno.h>
+#include <linux/ktime.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
@@ -40,6 +41,8 @@ static struct q1000k_protocol_job qprotocol_irq_job, qprotocol_control_job;
 static int qprotocol_irq, qprotocol_error;
 static bool qprotocol_live, qprotocol_started, qprotocol_paused;
 static bool qprotocol_irq_masked, qprotocol_fault_pending;
+static u64 qprotocol_irq_ns;
+u64 q1000k_protocol_irq_time(void) { return READ_ONCE(qprotocol_irq_ns); }
 static void qprotocol_work(struct work_struct *work);
 static DECLARE_WORK(qprotocol_worker, qprotocol_work);
 
@@ -224,6 +227,7 @@ static irqreturn_t qprotocol_interrupt(int irq, void *data)
 
 	spin_lock_irqsave(&qprotocol_lock, flags);
 	if (qprotocol_live && !qprotocol_irq_masked) {
+		WRITE_ONCE(qprotocol_irq_ns, ktime_get_boottime_ns());
 		disable_irq_nosync(irq);
 		qprotocol_irq_masked = true;
 		qprotocol_enqueue(&qprotocol_irq_job);

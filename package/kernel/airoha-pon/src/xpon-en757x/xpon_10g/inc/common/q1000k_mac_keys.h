@@ -38,4 +38,10 @@ struct q1000k_mac_data_keys {
 int q1000k_mac_data_keys_install(const struct q1000k_mac_data_keys *keys,
 				bool *switch_pending);
 int q1000k_mac_data_keys_ready(bool switch_pending);
+/* Protocol-owner bench path. EOPNOTSUPP means no writes and requires the
+ * drained path (e.g. replacing an active key). Other errors are contained. */
+int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,
+			    const struct q1000k_mac_data_keys *next);
+/* Compare all integrity/wrapping words without publishing their contents. */
+int q1000k_mac_keys_match(const struct q1000k_mac_keys *keys);
 #endif

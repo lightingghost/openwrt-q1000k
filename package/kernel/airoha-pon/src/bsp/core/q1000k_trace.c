@@ -9,7 +9,7 @@
 
 #define QT_CAPACITY 4096
 #define QT_IDS 256
-#define QT_CRITICAL_CAPACITY 1024
+#define QT_CRITICAL_CAPACITY 8192
 struct qt_record {
 	u64 seq, ns;
 	u32 generation, event, id;
@@ -27,6 +27,7 @@ static bool qt_is_critical(const struct qt_record *r)
 {
  return r->event == QT_FAULT || r->event == QT_ASSIGN || r->event == QT_RESET ||
   r->event == QT_STATE || r->event == QT_DISCOVERY || r->event == QT_RECOVERY_PHASE ||
+  r->event == QT_ACTIVATION || r->event == QT_CONTROL ||
   (r->event == QT_MAC_IRQ && r->id >= 2 && r->id <= 5) ||
   ((r->event == QT_PLOAM_VERIFY || r->event == QT_PLOAM_DISPATCH) && r->id != 1);
 }

@@ -14,6 +14,20 @@ typedef uint8_t u8;
 static u32 regs[0x6000/4], written[0x6000/4];
 static int phase, writes, fail_write, provider_error, delays;
 static bool owned, select_stuck, self_clear;
+#define AN7581_XPON_MBI_TX_STOP BIT(8)
+#define AN7581_XPON_MPI_TX_STOP BIT(24)
+static int stop_calls, stop_fail, drain_error;
+static void q1000k_activation_snapshot(u32 stage,u32 sequence) {}
+static int an7581_xpon_mac_stop(u32 mask,bool hold) {
+    assert(mask==BIT(8)||mask==BIT(24));
+    if(++stop_calls==stop_fail) return -ETIMEDOUT;
+    if(hold) regs[0x5004/4]|=mask; else regs[0x5004/4]&=~mask;
+    return 0;
+}
+static int an7581_xpon_mac_wait_tx_empty(void) {
+    assert((regs[0x5004/4]&BIT(8)) && !(regs[0x5004/4]&BIT(24)));
+    return drain_error;
+}
 static int q1000k_pipeline_table_context(int wanted) { return phase==wanted ? 0 : -EPERM; }
 static bool q1000k_protocol_owned(void) { return owned; }
 static int an7581_xpon_status(void) { return provider_error; }
@@ -36,9 +50,37 @@ static bool q1000k_rx_bench_enabled(void) { return rx_bench; }
 static void reset(void) {
     memset(regs,0,sizeof(regs)); memset(written,0,sizeof(written));
     writes=delays=fail_write=provider_error=0; phase=0; owned=select_stuck=self_clear=false;
+    stop_calls=stop_fail=drain_error=0;
 }
 int main(void) {
     u8 sn[8]={1,2,3,4,5,6,7,8},reg[36];
+    for(unsigned int mode=1;mode<=3;mode++) {
+        reset(); assert(q1000k_mac_ranging_bench(573115,mode)==-EPERM && !writes);
+        owned=true; regs[0x5104/4]=4; regs[0x511c/4]=0x11011101;
+        regs[0x5200/4]=0xabc; regs[0x5108/4]=5632;
+        assert(!q1000k_mac_ranging_bench(573115,mode));
+        assert(regs[0x5114/4]==2292460 && regs[0x511c/4]==0x11011101);
+        assert(!regs[0x5004/4] && regs[0x5200/4]==0xabc && regs[0x5108/4]==5632);
+        assert(stop_calls==(mode==3 ? 0 : 4));
+        assert((regs[0x582c/4]&0x101)==(mode==2 ? 0x101 : 0));
+        int count=writes;
+        for(int fail=1;fail<=count;fail++) {
+            reset(); owned=true; regs[0x5104/4]=4; regs[0x511c/4]=0x11011101;
+            fail_write=fail; assert(q1000k_mac_ranging_bench(573115,mode)==-EIO);
+            assert(writes==fail);
+        }
+    }
+    for(int fail=1;fail<=4;fail++) {
+        reset(); owned=true; regs[0x5104/4]=4; regs[0x511c/4]=1; stop_fail=fail;
+        assert(q1000k_mac_ranging_bench(1,1)==-ETIMEDOUT && stop_calls==fail);
+    }
+    reset(); owned=true; regs[0x5104/4]=5; regs[0x511c/4]=1;
+    assert(q1000k_mac_ranging_bench(1,3)==-EAGAIN && !writes);
+    regs[0x5104/4]=4; regs[0x5004/4]=BIT(16);
+    assert(q1000k_mac_ranging_bench(1,1)==-EAGAIN && !writes);
+    regs[0x5004/4]=0; drain_error=-ETIMEDOUT;
+    assert(q1000k_mac_ranging_bench(1,1)==-ETIMEDOUT && !(regs[0x511c/4]&1));
+    reset();
     assert(q1000k_mac_ranging_install(123)==-EPERM && !writes);
     phase=2;
     assert(q1000k_mac_ranging_install(0x40000000)==-ERANGE && !writes);

@@ -271,7 +271,12 @@ static int qrx_mac_show(struct seq_file *seq, void *unused)
 {
 	static const u32 regs[] = { 0x5100, 0x5104, 0x5108, 0x511c, 0x5120, 0x5124,
 		0x509c, 0x510c, 0x5128, 0x5318, 0x5284, 0x52f0,
-  0x5920, 0x5944, 0x5950, 0x5954, 0x5960, 0x5964, 0x5968, 0x596c, 0x5984 };
+  0x5920, 0x5944, 0x5950, 0x5954, 0x5960, 0x5964, 0x5968, 0x596c, 0x5984,
+  /* Non-clearing counters distinguish absent traffic from receive-side
+   * rejection. FIFO status is read-only; never read the FIFO data port. */
+  0x58fc, 0x5900, 0x5904, 0x5908, 0x590c, 0x5910, 0x5914, 0x5918,
+  0x591c, 0x5924, 0x5940, 0x5970, 0x5974, 0x5978, 0x597c, 0x5980,
+  0x5988, 0x598c, 0x5300, 0x5114 };
 	u32 values[ARRAY_SIZE(regs)], generation;
 	u64 begin = ktime_get_boottime_ns();
 	unsigned int i;
@@ -309,6 +314,28 @@ void q1000k_discovery_snapshot(u32 interrupts)
   q1000k_trace(QT_DISCOVERY, i, ret, regs[i], value, interrupts, q1000k_mac_generation());
   if (ret) break;
  }
+}
+
+void q1000k_activation_snapshot(u32 stage, u32 sequence)
+{
+	static const u32 regs[] = {
+		0x5004, 0x5044, 0x509c, 0x5100, 0x5104, 0x5108, 0x5114,
+		0x511c, 0x5120, 0x5124, 0x5200, 0x5204, 0x5284, 0x5300,
+		0x5318, 0x5800, 0x5814, 0x582c, 0x58fc, 0x5940, 0x5944,
+		0x5950, 0x5954, 0x5984, 0x5988, 0x598c,
+	};
+	unsigned int i;
+
+	if (!q1000k_protocol_owned()) return;
+	q1000k_trace(QT_ACTIVATION, 255, 0, stage, sequence,
+		q1000k_mac_generation(), ARRAY_SIZE(regs));
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		u32 value = get_xpon_data(regs[i]);
+		int ret = an7581_xpon_status();
+
+		q1000k_trace(QT_ACTIVATION, i, ret, regs[i], value, stage, sequence);
+		if (ret) break;
+	}
 }
 
 static int qrx_recover_drained(void *arg)

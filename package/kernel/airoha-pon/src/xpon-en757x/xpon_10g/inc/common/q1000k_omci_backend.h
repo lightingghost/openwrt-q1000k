@@ -17,6 +17,8 @@ int q1000k_omci_reset(bool emergency, bool reset_phy);
  * traffic requires the current ONU's installed registration-derived bank.
  */
 int q1000k_omci_ploam_verify(const u8 *message, size_t length);
+int q1000k_omci_ploam_tx_audit(const u8 message[44]);
+void q1000k_omci_ploam_tx_done(u8 type, u8 sequence, int result);
 extern u32 q1000k_ploam_rejected;
 extern int q1000k_ploam_last_error;
 /* Protocol stopped and RX admission closed before cleanup. */

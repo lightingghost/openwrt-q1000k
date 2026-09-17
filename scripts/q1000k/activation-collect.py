@@ -368,6 +368,21 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'registration':
+        if args.physical_only:
+            raise ValueError('Registration comparisons use connected fiber without physical cycling')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, mode, keys in [('reference',0,0), ('range',1,0), ('keys',0,1),
+                    ('combined',1,1), ('resync-retain',2,1), ('oem-direct',3,1), ('repeat',1,1)]:
+                cases.append(dict(name='activation-reg-'+name, mode='activate', samples=300,
+                    ranging_mode=mode, key_inline=bool(keys),
+                    ids=['H1','H2','H3','H4','H5','D01','D02','D03','D04','D05','D06']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown registration case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'tx' and not args.physical_only:
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
         if not rx_only:
@@ -418,7 +433,13 @@ def trace_summary(records):
     retained += critical
     positions = {}
     for r in critical: positions.setdefault(r.get('stack_generation',1), set()).add(r['position'])
-    critical_gaps = sum((min(v)-1 + sum(b-a-1 for a,b in zip(sorted(v),sorted(v)[1:]))) for v in positions.values() if v)
+    expected = {}
+    for r in records:
+        if isinstance(r,dict) and r.get('critical_header') == 1:
+            stack = r.get('stack_generation',1)
+            expected[stack] = max(expected.get(stack,0), r['newest'])
+    critical_gaps = sum(max(expected.get(k,0), max(positions.get(k, {0}))) - len(positions.get(k, set()))
+                        for k in set(expected) | set(positions))
     counts = {}; per_stack = {}
     for r in records:
         if isinstance(r,dict) and r.get('trace_count') == 1:
@@ -458,6 +479,17 @@ def test_outcomes(case, result, text):
     stages = result['stages']; outcome = {}
     for ident in case.get('ids', []):
         outcome[ident] = 'not-run'
+        if ident.startswith('H'):
+            a = result.get('registration', {})
+            outcome[ident] = {
+                'H1': 'timing-observed' if a.get('ranging_to_ack_ms') else 'no-paired-acknowledgement',
+                'H2': 'key-report-enqueued' if a.get('key_reports_enqueued') else 'no-key-report-enqueued',
+                'H3': 'boundary-registers-observed' if a.get('complete_snapshots') else 'no-complete-boundary-snapshot',
+                'H4': 'eqd-sequence-observed' if a.get('narrow_ranging_completed') else 'reference-or-narrow-path-not-reached',
+                'H5': 'tx-input-audit-observed' if a.get('tx_audit_passed') else 'tx-input-audit-not-reached',
+            }[ident]
+            if not a.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
+            continue
         if ident in ('B02','B03'): outcome[ident] = result['status']
         elif ident in ('A01','A02','A03','D01') and 'activation' in stages:
             outcome[ident] = stages['activation']
@@ -485,7 +517,7 @@ def test_outcomes(case, result, text):
     return outcome
 
 
-def case_outcome(result, trace_required=True):
+def case_outcome(result, trace_required=True, critical_only=False):
     # A functional negative is useful evidence; containment cannot be waived.
     if result['stages'].get('cleanup') != 'passed' or result['stages'].get('failure') == 'containment':
         return 'containment-failure'
@@ -495,7 +527,9 @@ def case_outcome(result, trace_required=True):
     if not result['diagnostics_pairs_valid'] or (physical and (not physical['confirmed'] or physical.get('dark_samples',0) < result.get('required_dark_samples',15))):
         return 'inconclusive'
     t = result.get('trace', {})
-    if trace_required and (not t.get('events') or t.get('internal_sequence_gaps') or t.get('concurrent_wrap')):
+    if critical_only and not result.get('registration', {}).get('critical_evidence_complete'):
+        return 'inconclusive'
+    if trace_required and not critical_only and (not t.get('events') or t.get('internal_sequence_gaps') or t.get('concurrent_wrap')):
         return 'inconclusive'
     if result['returncode'] == 2 and result['stages'].get('outcome') == 'functional-negative':
         return 'functional-negative'
@@ -510,8 +544,10 @@ def json_records(text):
             offset += 1
             continue
         try:
-            value, length = decoder.raw_decode(text[offset:])
-            values.append(value); offset += length
+            # Decode in place: slicing the remaining capture for every
+            # record makes large event histories take quadratic time.
+            value, offset = decoder.raw_decode(text, offset)
+            values.append(value)
         except ValueError:
             offset += 1
     return values
@@ -533,6 +569,63 @@ def burst_segments(mac):
             s['decreases'] += value < s['last']
             s.update(last=value, samples=s['samples']+1, end_ns=row.get('end_ns'))
     return segments
+
+
+def registration_summary(records):
+    """Separate local enqueue/readback evidence from OLT acceptance.
+
+    Deduplicate the ordinary/critical/first copies. Pair only within one
+    stack load and between resets. All timestamps are host-side evidence.
+    """
+    unique = {}
+    for r in records:
+        if isinstance(r, dict) and (r.get('trace_version') == 1 or r.get('critical_version') == 1):
+            unique[(r.get('stack_generation', 1), r['seq'])] = r
+    events = [unique[k] for k in sorted(unique)]
+    starts, key_starts, rcu_starts = {}, {}, {}
+    ranges, keys, rcu, snapshots = [], [], [], []
+    current = None
+    for e in events:
+        stack, ev, ident = e.get('stack_generation', 1), e['event'], e['id']
+        if ev == 16:
+            starts = {k:v for k,v in starts.items() if k[0] != stack}
+            key_starts = {k:v for k,v in key_starts.items() if k[0] != stack}
+        if ev == 27:
+            if ident == 1: starts[(stack, e['c'])] = e['ns']
+            if ident == 10: key_starts[(stack, e['a'])] = e['ns']
+            if ident == 4: rcu_starts[stack] = e['ns']
+            if ident == 5 and stack in rcu_starts:
+                rcu.append((e['ns'] - rcu_starts.pop(stack)) / 1e6)
+            if ident == 15 and e['result'] == 0:
+                pending, values = (starts, ranges) if e['a'] == 9 else (key_starts, keys)
+                if e['a'] in (5, 9) and (stack, e['b']) in pending:
+                    values.append((e['ns'] - pending.pop((stack, e['b']))) / 1e6)
+        if ev == 26:
+            if ident == 255:
+                current = dict(stack_generation=stack, stage=e['a'], sequence=e['b'],
+                    hardware_generation=e['c'], expected_registers=e['d'], ns=e['ns'], registers={})
+                snapshots.append(current)
+            elif current is not None and current['stack_generation'] == stack and e['result'] == 0:
+                if e['c'] == current['stage'] and e['d'] == current['sequence']:
+                    current['registers'][f"{e['a']:04x}"] = e['b']
+    trace = trace_summary(records)
+    def matched(event, ident, predicate=lambda e: True):
+        return sum(e['event'] == event and e['id'] == ident and predicate(e) for e in events)
+    complete = [s for s in snapshots if len(s['registers']) == s['expected_registers']]
+    return dict(ranging_to_ack_ms=ranges, key_request_to_enqueue_ms=keys, rcu_wait_ms=rcu,
+        key_reports_enqueued=matched(27, 15, lambda e: e['a'] == 5 and e['result'] == 0),
+        acknowledgements_enqueued=matched(27, 15, lambda e: e['a'] == 9 and e['result'] == 0),
+        key_requests_accepted=matched(27, 10), key_confirmations_accepted=matched(27, 10, lambda e:e['c'] == 1),
+        key_requests_cancelled=matched(27, 13), key_inline_fallbacks=matched(27, 12),
+        tx_audit_passed=matched(27, 14, lambda e:e['result'] == 0),
+        tx_audit_failed=matched(27, 14, lambda e:e['result'] != 0),
+        narrow_ranging_completed=matched(27, 7, lambda e:e['result'] == 0),
+        narrow_modes=sorted({e['c'] for e in events if e['event'] == 27 and e['id'] == 7 and not e['result']}),
+        olt_deactivations=matched(11, 5, lambda e:e['result'] == 0),
+        complete_snapshots=len(complete), snapshots=snapshots,
+        critical_evidence_complete=bool(trace['critical_records'] and not trace['critical_sequence_gaps'] and not trace['critical_concurrent_wrap']),
+        optical_tx_reception_proven=False, upstream_hardware_mic_verified=False,
+        note='Enqueue, hardware counts and register comparisons are distinct from OLT acceptance; sparse/averaged optical readings cannot certify individual bursts.')
 
 
 def summarize(text, returncode=0, events=None):
@@ -607,6 +700,7 @@ def summarize(text, returncode=0, events=None):
         if not result['physical_control']['passed']:
             result['status'] = 'failed'
     result['trace'] = trace_summary(records)
+    result['registration'] = registration_summary(records)
     winners = re.findall(r'^recovery_winner=([1-7])$', text, re.M)
     result['recovery_winner'] = winners[-1] if winners else None
     result['recovery_sequence'] = re.findall(r'^recovery_action=([1-7]) phase=applied$', text, re.M)
@@ -750,7 +844,8 @@ def capture(pin, case, iperf, directory, redact):
     result = summarize(''.join(lines), code, events if physical else None)
     result['name'] = name
     result['required_dark_samples'] = 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15
-    result['status'] = case_outcome(result)
+    result['trace_scope'] = 'activation-critical' if name.startswith('activation-reg-') else 'all-events'
+    result['status'] = case_outcome(result, critical_only=name.startswith('activation-reg-'))
     if case['mode'] == 'isolated':
         rows = [json.loads(line) for line in lines if line.startswith('{"isolated_tx_version":')]
         result['isolated'] = rows[-1] if rows else {}
@@ -902,7 +997,8 @@ def execute(args, pin):
             elif rx_only:
                 record['not_run'] += ['activation', 'provisioning', 'wan', 'traffic']
                 record['identity_note'] = 'Activation omitted: RX-only selected or no private identity supplied.'
-            active = next((r for r in record['results'] if r['name'] == 'activation'), {})
+            active = next((r for r in record['results'] if r.get('provisioned')), next(
+                (r for r in record['results'] if r.get('name','').startswith('activation')), {}))
             record['hardware_service_verified'] = bool(record.get('cleanup_verified') and active.get('status') == 'observed' and active.get('provisioned') and
                 (active.get('dhcp_ipv4') and active.get('traffic', {}).get('ipv4_https') or
                  active.get('dhcpv6_address') and active.get('traffic', {}).get('ipv6_https')))
@@ -911,6 +1007,18 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
+            if getattr(args, 'suite', 'legacy') == 'registration':
+                report = ['# Registration hypotheses 1–5', '',
+                    'Host processing times and internal transmission evidence. Enqueue is not optical delivery or OLT acceptance.', '',
+                    '| Case | Collection result | Ranging → ACK enqueue ms | Key request → enqueue ms | Key reports | OLT deactivations | Complete snapshots | Critical evidence complete |',
+                    '|---|---|---|---|---:|---:|---:|---|']
+                def span(values):
+                    return f'{min(values):.3f}–{max(values):.3f} ({len(values)})' if values else 'not observed'
+                for result in record['results']:
+                    a = result.get('registration', {})
+                    report.append(f"| {result['name']} | {result['status']} | {span(a.get('ranging_to_ack_ms', []))} | {span(a.get('key_request_to_enqueue_ms', []))} | {a.get('key_reports_enqueued', 0)} | {a.get('olt_deactivations', 0)} | {a.get('complete_snapshots', 0)} | {a.get('critical_evidence_complete', False)} |")
+                report += ['', 'Per-hypothesis coverage and raw boundary snapshots are in collection.json. A missed prerequisite is reported as not reached. Full service requires OMCI provisioning and successful traffic probes.']
+                (args.output/'registration-summary.md').write_text('\n'.join(report)+'\n')
             if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement', 'output'):
                 report = ['# Disconnected transmitter observations', '',
                     'Internal sensor readings; connector emission and O5 remain unverified.', '',
@@ -964,7 +1072,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('output','measurement','isolated','tx','legacy'), default='output', help='Default: disconnected gate/TSSI/monitor correlation; measurement selects the older probes; isolated selects the original pattern suite. tx selects connected-fiber discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('registration','output','measurement','isolated','tx','legacy'), default='registration', help='Default: connected-fiber hypotheses 1–5, with one RX control and seven activation comparisons. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

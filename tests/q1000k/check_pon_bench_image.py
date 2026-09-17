@@ -209,6 +209,14 @@ def inspect(image, revision, profile='bench'):
         if profile == 'activation' and name == 'xpon_10g':
             assert b'parm=bench_sn_limit:' in read(matches[0]) or b'bench_sn_limit' in read(matches[0])
             assert b'parmtype=bench_profile_coalesce:bool' in read(matches[0])
+            for param, kind in [('bench_profile_live','bool'), ('bench_control_coalesce','bool'),
+                                ('bench_ranging_mode','uint'), ('bench_key_inline','bool'),
+                                ('bench_activation_diag','bool')]:
+                assert f'parmtype={param}:{kind}'.encode() in read(matches[0]), param
+            assert {'q1000k_activation_snapshot', 'q1000k_mac_ranging_bench',
+                    'q1000k_mac_data_keys_live', 'q1000k_mac_keys_match',
+                    'q1000k_omci_ploam_tx_audit', 'q1000k_omci_ploam_tx_done',
+                    'q1000k_protocol_irq_time'} <= symbols
             assert b'fast_version\":2' in read(matches[0]) and b'mac_version\":2' in read(matches[0])
             assert {'q1000k_discovery_snapshot', 'q1000k_mac_profile_matches'} <= symbols
             assert {'q1000k_snapshot_init', 'q1000k_snapshot_exit', 'q1000k_omci_security_status', 'qrx_recover_set', 'qrx_mac_show', 'qrx_last_show', 'qrx_fast_show'} <= symbols

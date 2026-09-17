@@ -8,6 +8,8 @@
 #include <an7581_xpon.h>
 #include "common/q1000k_key_exchange.h"
 #include "common/q1000k_protocol.h"
+#include "common/q1000k_omci_backend.h"
+#include <q1000k_trace.h>
 
 int q1000k_key_prepare(struct crypto_lskcipher *ecb,
 	struct crypto_lskcipher *cmac, const u8 kek[16],
@@ -93,6 +95,8 @@ int q1000k_ploam_send(const u8 message[44])
 	if (!q1000k_protocol_owned()) return -EPERM;
 	if (!message || message[0] || message[1] || message[2] || message[3] > 1)
 		return -EINVAL;
+	ret = q1000k_omci_ploam_tx_audit(message);
+	if (ret) return ret;
 	for (retry = 0; retry < 3000; retry++) {
 		ret = qkey_fifo_status(&status);
 		if (ret) return ret;
@@ -108,5 +112,8 @@ int q1000k_ploam_send(const u8 message[44])
 		ret = an7581_xpon_status();
 		if (ret) return ret;
 	}
-	return qkey_fifo_status(&status);
+	ret = qkey_fifo_status(&status);
+	q1000k_trace(QT_CONTROL, 15, ret, message[6], message[7], status, 11);
+	q1000k_omci_ploam_tx_done(message[6], message[7], ret);
+	return ret;
 }
