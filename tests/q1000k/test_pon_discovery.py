@@ -10,6 +10,8 @@ import json
 import contextlib
 import io
 import tarfile
+import sys
+import time
 from pon_test_utils import run_c
 ROOT=Path(__file__).resolve().parents[2]
 B=ROOT/'package/kernel/airoha-pon'
@@ -195,6 +197,37 @@ int main(void) {
                 self.assertEqual(staged.getmember('sleep').mode,0o700)
                 self.assertEqual(staged.extractfile('sleep').read(),elf)
                 self.assertIn((C.digest(elf)+'  sleep').encode(),staged.extractfile('sha256sums').read())
+
+    def test_cancel_keeps_transport_open_until_remote_cleanup_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); pidfile=root/'pid'
+            fixture='''import os,signal,sys,time
+from pathlib import Path
+def stop(signum, frame):
+ print('validation_stage name=cleanup status=passed',flush=True)
+ sys.exit(1)
+signal.signal(signal.SIGTERM,stop)
+sys.stdin.buffer.read()
+Path('''+repr(str(pidfile))+''').write_text(str(os.getpid()))
+print('transport-ready',flush=True)
+while True: time.sleep(1)
+'''
+            def interrupted(*args):
+                deadline=time.monotonic()+3
+                while not pidfile.exists() and time.monotonic()<deadline: time.sleep(.01)
+                self.assertTrue(pidfile.exists())
+                raise KeyboardInterrupt()
+            def cancel(script, **kwargs):
+                self.assertIn('kill -TERM',script)
+                C.os.kill(int(pidfile.read_text()),C.signal.SIGTERM)
+                return ''
+            with mock.patch.object(C,'SSH',[sys.executable,'-c',fixture]), \
+                 mock.patch.object(C,'guards',return_value=''), \
+                 mock.patch.object(C.select,'select',side_effect=interrupted), \
+                 mock.patch.object(C,'ssh',side_effect=cancel), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(KeyboardInterrupt):
+                    C.capture({},dict(name='rx-startup',mode='rx',samples=30),'none',root,lambda s:s)
+            self.assertIn('validation_stage name=cleanup status=passed',(root/'rx-startup.log').read_text())
 
     def test_report_distinguishes_planned_from_executed_tests(self):
         result=dict(stages={'activation':'timeout'},status='functional-negative',

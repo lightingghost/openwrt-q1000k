@@ -414,7 +414,7 @@ def capture(pin, case, iperf, directory, redact):
         timing = 'test -x ' + STAGE + '/sleep\n'
         timing += "sha256sum -c <<'TIMING_SUM'\n" + digest(TIMING_SLEEP) + '  ' + STAGE + "/sleep\nTIMING_SUM\n"
         timing += 'PATH=' + STAGE + ':"$PATH"; export PATH\n'
-    script = guards(pin) + timing + 'exec q1000k-pon-validate ' + shlex.join([
+    script = guards(pin) + timing + 'umask 077; printf "%s\\n" "$$" > ' + STAGE + '/helper.pid\nexec q1000k-pon-validate ' + shlex.join([
         case['mode'], STAGE + '/xgspon-calibration.bin', STAGE, str(case['samples']), iperf, name, case.get('recovery_actions','1,2,3,4,5,6,7')]) + '\n'
     physical = name in PHYSICAL
     events, samples, lines = [], [], []
@@ -426,8 +426,8 @@ def capture(pin, case, iperf, directory, redact):
         dark_confirmed_at = time.time()
     deadline = time.monotonic() + (1500 if physical else case['samples'] * (8 if case['mode'] == 'activate' else 3) + 180)
     process = subprocess.Popen(SSH + ['sh', '-s'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, bufsize=0)
-    process.stdin.write(script.encode()); process.stdin.close()
+                               stderr=subprocess.STDOUT, bufsize=0, start_new_session=True)
+    process.stdin.write(script.encode()); process.stdin.close(); process.stdin = None
     waiting = None; disconnected = reconnected = False; pending = b''; last_notice = time.monotonic()
     print(f'{name}: collecting; TX {"permitted" if case["mode"] == "activate" else "inhibited"}.', flush=True)
     try:
@@ -491,11 +491,26 @@ def capture(pin, case, iperf, directory, redact):
                     print(f'{name}: {len(samples)} coherent samples captured.', flush=True); last_notice = time.monotonic()
             code = process.wait(timeout=20)
     except BaseException:
-        # HUP closes the remote shell/exec helper; the helper's EXIT trap owns
-        # optical teardown. Postflight below must verify it before more work.
-        process.terminate()
-        try: process.wait(timeout=15)
-        except subprocess.TimeoutExpired: process.kill(); process.wait()
+        # Keep the output transport open while the remote EXIT trap exports
+        # history and drains hardware. Closing it first can kill the trap with
+        # SIGPIPE before stop_stack. The child SSH is isolated from Ctrl-C.
+        try:
+            if process.poll() is None:
+                ssh('set -eu; if [ -f ' + STAGE + '/helper.pid ]; then '
+                    'read -r p < ' + STAGE + '/helper.pid; '
+                    'case "$p" in ""|*[!0-9]*) exit 1;; esac; '
+                    'if [ -r /proc/$p/cmdline ]; then '
+                    'test "$(tr "\\000" "\\n" < /proc/$p/cmdline | sed -n "2p")" = /usr/sbin/q1000k-pon-validate; '
+                    'kill -TERM "$p"; fi; fi', timeout=15)
+            remaining, _ = process.communicate(timeout=45)
+            if pending or remaining:
+                with (directory / (name + '.log')).open('a') as output:
+                    output.write(redact((pending + (remaining or b'')).decode(errors='replace')))
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try: process.wait(timeout=15)
+                except subprocess.TimeoutExpired: process.kill(); process.wait()
         raise
     result = summarize(''.join(lines), code, events if physical else None)
     result['name'] = name
@@ -577,13 +592,13 @@ def execute(args, pin):
                     raise RuntimeError(case['name'] + ' did not meet its capture/cleanup checks')
             record['status'] = 'collection-complete'
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-            record.update(status='stopped', error=redact(str(error)))
+            record.update(status='stopped', error=redact(str(error) or type(error).__name__))
         finally:
             try:
                 # Never remove the inputs beneath an active controller lease.
                 (args.output/'postflight.log').write_text(ssh(guards(pin)))
                 if staged:
-                    ssh(f'set -eu; rm -f {FIRMWARE}/A60993.elf.pm {FIRMWARE}/A60993.elf.dm; rmdir {FIRMWARE} 2>/dev/null || test ! -e {FIRMWARE}; rm -f ' + ' '.join(STAGE+'/'+n for n in (*INPUTS, 'identity.json', 'sha256sums', *(['sleep'] if TIMING_SLEEP is not None else []))) + f'; rmdir {STAGE}')
+                    ssh(f'set -eu; rm -f {FIRMWARE}/A60993.elf.pm {FIRMWARE}/A60993.elf.dm; rmdir {FIRMWARE} 2>/dev/null || test ! -e {FIRMWARE}; rm -f ' + ' '.join(STAGE+'/'+n for n in (*INPUTS, 'identity.json', 'sha256sums', 'helper.pid', *(['sleep'] if TIMING_SLEEP is not None else []))) + f'; rmdir {STAGE}')
                 record['cleanup_verified'] = True
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
                 record.update(status='stopped', cleanup_verified=False, cleanup_error=redact(str(error)))
