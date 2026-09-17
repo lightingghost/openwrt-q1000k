@@ -28,7 +28,7 @@ static struct {
  unsigned int id, valid, dark_checks;
  int error, restore_error;
  bool used, restored, tx_off;
- u64 enabled_ns, disabled_ns;
+ u64 enabled_ns, disabled_ns, window_ns;
  u32 words[3][ARRAY_SIZE(qiso_regs)];
 } qiso;
 
@@ -133,6 +133,7 @@ static int qiso_run(unsigned int id)
   if (!ret) qiso.enabled_ns = ktime_get_boottime_ns();
  }
  window_start = qiso.enabled_ns ?: ktime_get_boottime_ns();
+ qiso.window_ns = window_start;
  if (!ret) ret = qiso_sample(1);
  for (tick = 0; !ret && tick < 20; tick++) {
   u64 elapsed = ktime_get_boottime_ns() - window_start;
@@ -195,10 +196,11 @@ static int qiso_get(char *buffer, const struct kernel_param *kp)
  len = scnprintf(buffer, PAGE_SIZE,
   "{\"isolated_tx_version\":1,\"id\":%u,\"error\":%d,\"restore_error\":%d,"
   "\"restored\":%s,\"tx_off\":%s,\"valid_phases\":%u,\"dark_checks\":%u,"
-  "\"enabled_ns\":%llu,\"disabled_ns\":%llu,\"registers\":[",
+  "\"enabled_ns\":%llu,\"disabled_ns\":%llu,\"window_ns\":%llu,\"registers\":[",
   qiso.id, qiso.error, qiso.restore_error, qiso.restored ? "true" : "false",
   qiso.tx_off ? "true" : "false", qiso.valid, qiso.dark_checks,
-  (unsigned long long)qiso.enabled_ns, (unsigned long long)qiso.disabled_ns);
+  (unsigned long long)qiso.enabled_ns, (unsigned long long)qiso.disabled_ns,
+  (unsigned long long)qiso.window_ns);
  for (i = 0; i < ARRAY_SIZE(qiso_regs); i++)
   len += scnprintf(buffer+len, PAGE_SIZE-len, "%s%u", i ? "," : "", qiso_regs[i]);
  len += scnprintf(buffer+len, PAGE_SIZE-len, "],\"samples\":[");

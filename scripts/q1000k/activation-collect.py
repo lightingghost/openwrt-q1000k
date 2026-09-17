@@ -618,23 +618,25 @@ def capture(pin, case, iperf, directory, redact):
         result['planned_ids'] = case.get('ids', [])
         result['test_label'] = case['label']
         result['test_outcomes'] = {i:result['status'] for i in case.get('ids', [])}
-        # Label internal measurements by the kernel's actual TX interval.
+        # Label internal measurements by the kernel's test window, including
+        # the generator-with-TX-disabled negative control. enabled_ns stays
+        # zero for that control and must never be treated as TX enabled.
         # Fresh I2C timestamps still do not establish DDMI refresh/age.
-        begin, end = sample.get('enabled_ns',0), sample.get('disabled_ns',0)
+        begin, end = sample.get('window_ns',0), sample.get('disabled_ns',0)
         tx_rows = []
         for line in lines:
             try: row = json.loads(line)
             except ValueError: continue
             if isinstance(row,dict) and row.get('transmitter_version') == 1: tx_rows.append(row)
-        result['tx']['aligned'] = {}
-        for phase in ('before','enabled','after'):
+        result['tx']['by_window'] = {}
+        for phase in ('before','active','after'):
             aligned = [r for r in tx_rows if (phase == 'before' and r['end_ns'] <= begin or
-                      phase == 'enabled' and begin and r['begin_ns'] >= begin and r['end_ns'] <= end or
+                      phase == 'active' and begin and r['begin_ns'] >= begin and r['end_ns'] <= end or
                       phase == 'after' and r['begin_ns'] >= end)] if end else []
-            result['tx']['aligned'][phase] = {}
+            result['tx']['by_window'][phase] = {}
             for field in ('bias','modulation','tx_power','bias_code','modulation_code','ocp_status','ben_status'):
                 values = [r['fields'][field]['value'] for r in aligned if r['fields'].get(field,{}).get('valid') is True]
-                result['tx']['aligned'][phase][field] = dict(samples=len(values), minimum=min(values) if values else None,
+                result['tx']['by_window'][phase][field] = dict(samples=len(values), minimum=min(values) if values else None,
                     maximum=max(values) if values else None, changed=len(set(values)) > 1)
         return result
     if result['rx_samples'] < 15 and result['status'] != 'containment-failure': result['status'] = 'inconclusive'
@@ -754,12 +756,12 @@ def execute(args, pin):
             if getattr(args, 'suite', 'legacy') == 'isolated':
                 report = ['# Disconnected transmitter observations', '',
                     'Internal sensor readings; connector emission and O5 remain unverified.', '',
-                    '| Case | Result | Internal TX nW before / enabled / after | Bias uA before / enabled / after | TX off / restored |',
+                    '| Case | Result | Internal TX nW before / active / after | Bias uA before / active / after | TX off / restored |',
                     '|---|---|---|---|---|']
                 def ranges(result, field):
                     values=[]
-                    for phase in ('before','enabled','after'):
-                        v=result.get('tx',{}).get('aligned',{}).get(phase,{}).get(field,{})
+                    for phase in ('before','active','after'):
+                        v=result.get('tx',{}).get('by_window',{}).get(phase,{}).get(field,{})
                         values.append(f"{v['minimum']}..{v['maximum']} ({v['samples']} samples)" if v.get('samples') else 'unavailable')
                     return ' / '.join(values)
                 for result in record['results']:

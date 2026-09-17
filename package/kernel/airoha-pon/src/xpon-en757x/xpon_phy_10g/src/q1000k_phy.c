@@ -3,7 +3,6 @@
 /* Sleepable Q1000K PHY control and callback lifetime. */
 #include <linux/interrupt.h>
 #include <linux/delay.h>
-#include "en7581_pma.h"
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -25,6 +24,7 @@
 #include "phy_reg.h"
 #include "en7581.h"
 #include "en7581_reg.h"
+#include "en7581_pma.h"
 
 static DEFINE_MUTEX(qphy_control);
 static DEFINE_MUTEX(qphy_callback);

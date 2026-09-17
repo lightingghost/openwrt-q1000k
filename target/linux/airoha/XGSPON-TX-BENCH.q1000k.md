@@ -54,8 +54,9 @@ DDMI/control status about every 250 ms while the kernel operation runs, and
 captures five after restoration. The kernel records 16 PHY register values at
 before/active/after boundaries. `valid_phases` marks which snapshots completed;
 unavailable slots are not observations. `collection.json` aligns entire I2C
-samples with the actual enable interval. `isolated-summary.md` presents before,
-enabled and after power/current ranges with valid sample counts. Raw errno,
+samples with the actual test window; TX enable time is recorded separately
+so the TX-disabled negative control is still measured. `isolated-summary.md` presents before,
+active-test and after power/current ranges with valid sample counts. Raw errno,
 control readbacks, result/restore errors and serial logs remain in the archive.
 
 The known DSD's eye 0 passes the field checks; eye 1 fails current/monitor bounds.
