@@ -31,6 +31,15 @@ class PinmuxTests(unittest.TestCase):
         ops = ops[:ops.index('};')]
         self.assertIn('.function_is_gpio = pinmux_generic_function_is_gpio', ops)
         self.assertIn('.strict = true', ops)
+        # GPIO38 must be selectable as well as having a mux definition.
+        # The reduced PON group must not claim the same pin as its GPIO owner.
+        groups = re.search(r'static const char \*const gpio_groups\[\] = \{([\s\S]*?)\};', soc)[1]
+        if 'pon_sw_tx_pins' in soc:
+            self.assertIn('"gpio38"', groups)
+            gpio_pin = int(re.search(r'gpio38_pins\[\] = \{ (\d+) \}', soc)[1])
+            peripheral_pins = [int(x) for x in re.search(r'pon_sw_tx_pins\[\] = \{ ([^}]+) \}', soc)[1].split(',')]
+            self.assertNotIn(gpio_pin, peripheral_pins)
+            self.assertEqual(gpio_pin, 51)
         descriptor = re.search(r'\{\n\t\t.desc = PINCTRL_GPIO_PINFUNCTION\("gpio",[\s\S]*?\n\t\}', soc)
         self.assertIsNotNone(descriptor)
         header = (kernel / 'include/linux/pinctrl/pinctrl.h').read_text()

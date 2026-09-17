@@ -33,6 +33,15 @@ activation bench opts in; preserve the existing whole-PON group.
  static const char *const tod_1pps_groups[] = {
  	"pon_tod_1pps", "gsw_tod_1pps"
  };
+@@ -580,7 +583,7 @@
+ static const char *const emmc_groups[] = { "emmc" };
+ static const char *const pnand_groups[] = { "pnand" };
+ static const char *const gpio_groups[] = {
+-	"gpio8", "gpio9", "gpio10", "gpio11", "gpio45", "gpio46",
++	"gpio8", "gpio9", "gpio10", "gpio11", "gpio38", "gpio45", "gpio46",
+ 	"gpio47", "gpio48", "gpio49"
+ };
+ static const char *const pcie_reset_groups[] = {
 @@ -627,6 +630,12 @@
  
  static const struct airoha_pinctrl_func_group pon_func_group[] = {
