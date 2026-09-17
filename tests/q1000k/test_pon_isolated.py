@@ -19,11 +19,13 @@ class IsolatedTests(unittest.TestCase):
 
     def test_actual_finite_phy_owner(self):
         isolated=(PHY/'src/q1000k_phy_isolated.h').read_text()
+        isolated=isolated.replace('#include "q1000k_phy_output.h"', (PHY/'src/q1000k_phy_output.h').read_text())
         source, regs=production_source(extra=isolated)
         source+='\n'+isolated
         fixture=Path(__file__).with_name('pon_phy_lifecycle_fixture.c').read_text()
         extra=r"""
 #include "en7573_mpd.h"
+#include "en7573_output.h"
 #define PAGE_SIZE 4096
 #define scnprintf snprintf
 #define module_param(a,b,c)
@@ -46,6 +48,18 @@ static int q1000k_pon_measure_mpd(struct q1000k_pon *p, bool active, struct en75
  if(active) { msleep(50); msleep(5); } else msleep(1);
  return mpd_calls==mpd_fail ? -EIO : 0;
 }
+static int output_calls, output_fail, output_hold_calls, board_disabled=1;
+static int q1000k_pon_output_gates(struct q1000k_pon *p,unsigned int gates) {
+ assert(p->held && !controller_inhibit); p->tx=!!(gates&1); board_disabled=!(gates&2); return 0;
+}
+static int q1000k_pon_output_sample(struct q1000k_pon *p,struct en7573_output_sample *s) {
+ assert(p->held && controller_los); output_calls++; memset(s,0,sizeof(*s)); s->valid=(1U<<30)-1;
+ s->board_disabled=board_disabled; s->values[12]=p->tx ? 0 : 512; msleep(30);
+ return output_calls==output_fail ? -EIO : 0;
+}
+static int q1000k_pon_output_hold(struct q1000k_pon *p,struct en7573_output_hold *s,bool restore) {
+ assert(p->held && !p->tx); output_hold_calls++; s->saved_valid=!restore; msleep(55); return 0;
+}
 static int recipe_error, recipe_calls, last_recipe;
 static int q1000k_pon_tx_recipe(struct q1000k_pon *p, unsigned int id, struct en7573_tx_recipe *s, bool restore)
 { assert(p->held && !p->tx); if(controller_inhibit) return -EACCES;
@@ -59,7 +73,8 @@ static int q1000k_pon_tx_recipe(struct q1000k_pon *p, unsigned int id, struct en
 static void fresh_isolated(void) {
  reset(); isolated_tx_bench=true; memset(&qiso,0,sizeof(qiso)); memset(&qiso_mpd,0,sizeof(qiso_mpd)); mpd_calls=mpd_fail=0;
  controller_inhibit=false; controller_los=true; slept=light_after=clock_calls=0;
- recipe_error=recipe_calls=last_recipe=0;
+ recipe_error=recipe_calls=last_recipe=0; memset(&qout,0,sizeof(qout));
+ output_calls=output_fail=output_hold_calls=0; board_disabled=1;
  assert(!q1000k_phy_init());
  regs[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
 }
@@ -108,6 +123,32 @@ int main(void) {
   int n=qiso_mpd_get(buffer,NULL); assert(n>0 && n<PAGE_SIZE && strstr(buffer,"\"mpd_version\":1"));
  }
  for(int i=1;i<=3;i++) { fresh_isolated(); mpd_fail=i; assert(qiso_run(21)==-EIO && !controller.tx && qiso.tx_off); }
+ for(unsigned int id=32;id<=48;id++) {
+  fresh_isolated(); assert(!qiso_run(id));
+  assert(qiso.restored && qiso.tx_off && !controller.tx && board_disabled && output_calls==15);
+  assert(qiso.valid==7 && qiso.used && !qphy_active && !allocated_irq);
+  assert(output_hold_calls==(id>=35 ? 2 : 0));
+  assert(qiso.disabled_ns-qiso.window_ns==5000000000ULL);
+  for(unsigned int p=0;p<3;p++) {
+   assert(qout.count[p]==5);
+   for(unsigned int r=0;r<5;r++) {
+    assert(qout.begin[p][r]<qout.end[p][r]);
+    if(p==0) assert(qout.end[p][r]<=qiso.window_ns);
+    if(p==1) assert(qout.begin[p][r]>=qiso.window_ns && qout.end[p][r]<=qiso.disabled_ns);
+    if(p==2) assert(qout.begin[p][r]>=qiso.disabled_ns);
+    memset(qout.sample[p][r].values,0xff,sizeof(qout.sample[p][r].values));
+    qout.begin[p][r]=qout.end[p][r]=~(u64)0;
+   }
+   int n=qout_get(buffer,p); assert(n>0 && n<PAGE_SIZE-1 && buffer[n-2]=='}');
+  }
+ }
+ for(int i=1;i<=15;i++) {
+  fresh_isolated(); output_fail=i; assert(qiso_run(35)==-EIO && !controller.tx && board_disabled);
+ }
+ fresh_isolated(); light_after=2200; assert(qiso_run(35)==-ENOLINK && !controller.tx && board_disabled);
+ fresh_isolated(); assert(!qiso_run(41)); nr=reads; nw=writes;
+ for(unsigned int i=1;i<=nr;i++) { fresh_isolated(); fail_read=i; assert(qiso_run(41)<0 && !controller.tx); }
+ for(unsigned int i=1;i<=nw;i++) { fresh_isolated(); fail_write=i; assert(qiso_run(41)<0 && !controller.tx); }
  reset(); isolated_tx_bench=false;
  puts("Isolated TX: 18 recipes, finite window, LOS guards, disabled callbacks and all MMIO failures passed");
  return 0;

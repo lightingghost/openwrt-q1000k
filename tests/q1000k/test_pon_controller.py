@@ -41,6 +41,7 @@ struct q1000k_pon {
     int *power[2]; bool initialized, tx_enabled; int mode;
 };
 static int restore_error, gpio_error, restores, powers;
+static int pon_board_gate(struct q1000k_pon *p, bool disable) { assert(disable); return 0; }
 static int disable_error, disables;
 static int en7573_set_tx(struct en7573_io *io, bool enabled)
 { (void)io; assert(!enabled); disables++; return disable_error; }
@@ -87,5 +88,6 @@ int main(void)
         source=(ROOT/'package/kernel/q1000k-pon-control/src/driver.c').read_text()
         body=source[source.index('/* Kernel consumer lifecycle:'):source.index('/* End kernel consumer lifecycle. */')]
         fixture=Path(__file__).with_name('pon_controller_fixture.c').read_text()
-        run_c(fixture.replace('/* PRODUCTION */',body), flags=['-Wno-misleading-indentation'])
+        board=source[source.index('static int pon_board_gate('):source.index('static int pon_off(')]
+        run_c(fixture.replace('/* PRODUCTION */',body).replace('/* BOARD GATE */',board), flags=['-Wno-misleading-indentation','-I'+str(ROOT/'package/kernel/q1000k-pon-control/src')])
 if __name__=='__main__': unittest.main()

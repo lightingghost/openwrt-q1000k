@@ -303,6 +303,71 @@ static int rx_output_update(struct en7573_io *io, u16 reg, u32 mask, u32 value)
 	return rx_output_guard(io);
 }
 
+int en7573_output_sample(struct en7573_io *io, struct en7573_output_sample *s)
+{
+	static const u16 regs[EN7573_OUTPUT_FIELDS] = {
+		0x488, 0x3a4, 0xf0, 0xfe, 0x3a4, 0x488, 0x33c,
+		0x66, 0x64, 0x6a, 0x3c4, 0x3c8, 0x3e0, 0x83, 0xfb,
+		0x100, 0x108, 0x120, 0x124, 0x128, 0x130, 0x13c,
+		0x208, 0x210, 0x214, 0x248, 0x160, 0x3e4, 0xb4, 0xb8,
+	};
+	unsigned int i;
+	if (!io || !io->read || !s) return -EINVAL;
+	memset(s, 0, sizeof(*s));
+	s->board_disabled = -1;
+	for (i = 0; i < EN7573_OUTPUT_FIELDS; i++) {
+		u8 data[4];
+		unsigned int width = i == 3 || i == 13 || i == 14 ? 1 :
+			i == 2 || (i >= 7 && i <= 9) ? 2 : 4;
+		int ret = io->read(io->ctx, EN7573_CONTROL, regs[i], data, width);
+		/* Do not extend an enabled window with more failed bus transfers. */
+		if (ret) { s->error = ret; return ret; }
+		s->values[i] = width == 1 ? data[0] : width == 4 ? get_le32(data) :
+			i == 2 ? (u32)data[0] | (u32)data[1] << 8 : (u32)data[0] << 8 | data[1];
+		/* Calibration words and byte flags can legitimately be all ones. */
+		if (i >= 28 || width == 1 || s->values[i] != (width == 2 ? 0xffff : ~0U))
+			s->valid |= 1U << i;
+	}
+	return s->error;
+}
+
+int en7573_output_hold(struct en7573_io *io, struct en7573_output_hold *s, bool restore)
+{
+	static const u16 regs[] = { 0x130, 0x208, 0x120 };
+	static const u32 masks[] = { 0x3f00, 0x70, 1U << 26 };
+	static const unsigned int order[] = { 0, 2, 1 };
+	unsigned int i;
+	int ret, first = 0;
+	if (!io || !s || !io->read || !io->write || !io->delay_ms) return -EINVAL;
+	if (restore && !s->saved_valid) return 0;
+	ret = rx_output_guard(io);
+	if (ret) return ret;
+	if (restore) {
+		for (i = 0; i < 3; i++) {
+			unsigned int j = order[i];
+			ret = mpd_update(io, regs[j], masks[j], s->saved[j]);
+			if (ret && !first) first = ret;
+		}
+		if (!first) s->saved_valid = false;
+		return first;
+	}
+	if (s->saved_valid) return -EBUSY;
+	for (i = 0; i < 3; i++) {
+		ret = en7573_read_control(io, regs[i], &s->saved[i]);
+		if (ret || s->saved[i] == ~0U) return ret ?: -EIO;
+	}
+	if (s->saved[2] & masks[2]) return -EBUSY;
+	s->saved_valid = true; /* caller restores even after a partial setup */
+	ret = mpd_update(io, 0x208, masks[1], 4U << 4);
+	if (!ret) ret = mpd_update(io, 0x130, masks[0], 0x24U << 8);
+	if (!ret) {
+		io->delay_ms(io->ctx, 50);
+		ret = mpd_update(io, 0x120, masks[2], masks[2]);
+	}
+	if (!ret) io->delay_ms(io->ctx, 5);
+	return ret;
+}
+
 static const u16 tx_recipe_regs[EN7573_TX_SAVED] = {
  0x100, 0x210, 0x124, 0x130, 0x128, 0x13c, 0x208, 0xb4,
 };

@@ -76,6 +76,8 @@ static int qiso_probe(unsigned int phase, bool active)
  return ret ?: qiso_dark();
 }
 
+#include "q1000k_phy_output.h"
+
 static int qiso_run(unsigned int id)
 {
  struct en7573_tx_recipe saved = { 0 };
@@ -87,6 +89,7 @@ static int qiso_run(unsigned int id)
  u32 pattern = 0, data = 0, control = 0;
  u64 window_start = 0;
  int ret, restore = 0, next;
+ if (id >= 32) return qout_run(id);
  if (!isolated_tx_bench) return -EPERM;
  if (id < 1 || id > 31) return -EINVAL;
  option = measurement ? options[id - 19] : id;

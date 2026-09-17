@@ -14,6 +14,7 @@ typedef uint32_t u32;
 #endif
 
 #include "en7573_mpd.h"
+#include "en7573_output.h"
 
 #define EN7573_CONTROL 0x51
 #define EN7573_MEMORY 0x50
@@ -92,6 +93,8 @@ int en7573_sample_transmitter(struct en7573_io *io, struct en7573_transmitter *s
  * active=false only reads. Never writes calibration, TX enable or current.
  */
 int en7573_measure_mpd(struct en7573_io *io, bool active, struct en7573_mpd *sample);
+int en7573_output_sample(struct en7573_io *io, struct en7573_output_sample *sample);
+int en7573_output_hold(struct en7573_io *io, struct en7573_output_hold *saved, bool restore);
 /* Fixed disconnected-bench recipes: 1 restart; 2/3 OEM eye0/1;
  * 4/5 same eyes with Sirherobrine TSSI refresh; 6 BEN forced off.
  * Save all affected words before any write; caller must restore with TX off.

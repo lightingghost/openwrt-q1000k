@@ -235,7 +235,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -307,7 +307,9 @@ if [ "$mode" = isolated ]; then
  isolated_pid=$!
  tick=0
  while kill -0 "$isolated_pid" 2>/dev/null; do
-  tx_observe isolated-window || :
+  # Output cases collect their own ordered sensor brackets. A second I2C
+  # reader would add unbounded contention and disturb their sample cadence.
+  [ "$test_id" -ge 32 ] || tx_observe isolated-window || :
   sleep 0.25
   tick=$((tick+1))
   [ "$tick" -lt 320 ] || fail 'Isolated kernel operation exceeded observation bound.'
@@ -316,7 +318,11 @@ if [ "$mode" = isolated ]; then
  printf 'isolated_writer_rc=%s\n' "$test_rc"
  data=$(cat /sys/module/phy_10g/parameters/isolated_tx_test) || fail 'Missing isolated result.'
  printf '%s\n' "$data"
- if [ "$test_id" -ge 19 ]; then
+ if [ "$test_id" -ge 32 ]; then
+  for part in before on after; do
+   cat "/sys/module/phy_10g/parameters/output_$part" || fail "Missing TX output correlation evidence."
+  done
+ elif [ "$test_id" -ge 19 ]; then
   cat /sys/module/phy_10g/parameters/isolated_mpd || fail 'Missing monitor probe evidence.'
  fi
  json_load "$data" || fail 'Invalid isolated result.'

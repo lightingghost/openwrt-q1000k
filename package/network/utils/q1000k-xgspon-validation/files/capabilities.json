@@ -345,7 +345,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "measurement",
+  "default_suite": "output",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -559,6 +559,52 @@
         "name": "isolated-31",
         "label": "mpd-repeat"
       }
+    ]
+  },
+  "tx_output": {
+    "schema_version": 1,
+    "first_id": 32,
+    "last_id": 48,
+    "samples_per_phase": 5,
+    "phases": [
+      "off",
+      "on",
+      "off"
+    ],
+    "board_tx_disable_gpio": 38,
+    "maximum_target_on_ms": 5000,
+    "conversion_ready_verified": false,
+    "registers": [
+      1160,
+      932,
+      240,
+      254,
+      932,
+      1160,
+      828,
+      102,
+      100,
+      106,
+      964,
+      968,
+      992,
+      131,
+      251,
+      256,
+      264,
+      288,
+      292,
+      296,
+      304,
+      316,
+      520,
+      528,
+      532,
+      584,
+      352,
+      996,
+      180,
+      184
     ]
   }
 }

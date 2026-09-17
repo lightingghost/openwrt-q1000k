@@ -33,6 +33,7 @@ MODULE_PARM_DESC(bench_rx_output, "TX-inhibited RX output: 0 unchanged, 1 400mV 
 struct q1000k_pon {
 	struct i2c_client *client;
 	struct gpio_desc *power[2], *los[2]; /* GPON, XGS-PON */
+	struct gpio_desc *board_tx_disable; /* NAND OEM GPIO38; optional outside bench */
 	struct gpio_descs *select;
 	struct en7573_io io;
 	struct en7573_rx_output rx_output_original;
@@ -110,9 +111,19 @@ static void pon_delay(void *ctx, unsigned int ms)
 	msleep(ms);
 }
 
+static int pon_board_gate(struct q1000k_pon *pon, bool disable)
+{
+	int ret;
+	if (!pon->board_tx_disable) return 0;
+	ret = gpiod_set_value_cansleep(pon->board_tx_disable, disable);
+	if (ret) return ret;
+	ret = gpiod_get_value_cansleep(pon->board_tx_disable);
+	return ret < 0 ? ret : ret == disable ? 0 : -EIO;
+}
+
 static int pon_off(struct q1000k_pon *pon)
 {
-	int first, second, restore = 0;
+	int first, second, restore = 0, board = pon_board_gate(pon, true);
 
 	/* Restoration requires TX off, including removal during active service.
 	 * Power removal still runs if disable or restoration fails.
@@ -139,7 +150,7 @@ static int pon_off(struct q1000k_pon *pon)
 	pon->initialized = false;
 	pon->tx_enabled = false;
 	pon->mode = first || second ? -2 : -1;
-	return restore ? restore : first ? first : second;
+	return board ? board : restore ? restore : first ? first : second;
 }
 
 static int pon_select(struct q1000k_pon *pon, int mode)
@@ -518,6 +529,69 @@ int q1000k_pon_measure_mpd(struct q1000k_pon *pon, bool active,
 }
 EXPORT_SYMBOL_GPL(q1000k_pon_measure_mpd);
 
+/* Independent gate truth table, only for the disconnected finite owner.
+ * bit0 releases internal TX_DISABLE; bit1 releases board GPIO38.
+ */
+int q1000k_pon_output_gates(struct q1000k_pon *pon, unsigned int gates)
+{
+	int ret = pon_context();
+	if (ret) return ret;
+	if (IS_ERR_OR_NULL(pon) || gates > 3) return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret && (!pon->activation_bench || pon->tx_inhibited || !pon->board_tx_disable)) ret = -EACCES;
+	if (!ret && gates) {
+		int los = gpiod_get_value_cansleep(pon->los[1]);
+		if (los <= 0) ret = los ?: -ENOLINK;
+	}
+	/* External disable first; release it only after internal write/readback. */
+	if (!ret) ret = pon_board_gate(pon, true);
+	if (!ret) ret = en7573_set_tx(&pon->io, !!(gates & 1));
+	if (!ret) pon->tx_enabled = !!(gates & 1);
+	if (!ret) ret = pon_board_gate(pon, !(gates & 2));
+	if (ret && pon->leased && !pon->dead) pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_output_gates);
+
+int q1000k_pon_output_sample(struct q1000k_pon *pon, struct en7573_output_sample *s)
+{
+	int ret = pon_context();
+	if (ret) return ret;
+	if (IS_ERR_OR_NULL(pon) || !s) return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret) ret = en7573_output_sample(&pon->io, s);
+	if (!ret && pon->board_tx_disable) {
+		s->board_disabled = gpiod_get_value_cansleep(pon->board_tx_disable);
+		if (s->board_disabled < 0) ret = s->board_disabled;
+	}
+	if (ret && pon->leased && !pon->dead) pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_output_sample);
+
+int q1000k_pon_output_hold(struct q1000k_pon *pon, struct en7573_output_hold *s, bool restore)
+{
+	int ret = pon_context();
+	if (ret) return ret;
+	if (IS_ERR_OR_NULL(pon) || !s) return -EINVAL;
+	mutex_lock(&pon->lock);
+	ret = !pon->leased ? -EPERM : pon_check_locked(pon);
+	if (!ret && (!pon->activation_bench || pon->tx_inhibited || pon->tx_enabled)) ret = -EACCES;
+	if (!ret) {
+		int los = gpiod_get_value_cansleep(pon->los[1]);
+		if (los <= 0) ret = los ?: -ENOLINK;
+	}
+	if (!ret) ret = en7573_output_hold(&pon->io, s, restore);
+	if (ret && pon->leased && !pon->dead) pon_contain(pon, ret);
+	mutex_unlock(&pon->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(q1000k_pon_output_hold);
+
 int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 {
 	const char *phase = "check";
@@ -534,10 +608,12 @@ int q1000k_pon_set_tx(struct q1000k_pon *pon, bool enable)
 		phase = "tx-inhibit-policy";
 		ret = -EPERM;
 	}
+	if (!ret && !enable) ret = pon_board_gate(pon, true);
 	if (!ret) {
 		phase = "write-readback";
 		ret = en7573_set_tx(&pon->io, enable);
 	}
+	if (!ret && enable) ret = pon_board_gate(pon, false);
 	if (ret)
 		dev_err_ratelimited(&pon->client->dev,
 			"controller set-tx failed: enable=%d phase=%s error=%d prior_fault=%d initialized=%d leased=%d dead=%d\n",
@@ -586,14 +662,15 @@ int q1000k_pon_put(struct q1000k_pon *pon)
 	}
 	ret = pon->dead ? -ENODEV : pon->fault;
 	if (!pon->dead && pon->initialized) {
+		int board = pon_board_gate(pon, true);
 		int disable = en7573_set_tx(&pon->io, false);
 
 		if (!disable)
 			pon->tx_enabled = false;
-		else
-			pon_contain(pon, disable);
+		if (board || disable)
+			pon_contain(pon, board ?: disable);
 		if (!ret)
-			ret = disable;
+			ret = board ?: disable;
 	}
 	pon->leased = false;
 	mutex_unlock(&pon->lock);
@@ -872,6 +949,12 @@ static int pon_probe(struct i2c_client *client)
 	pon->power[1] = devm_gpiod_get(dev, "xgspon-enable", GPIOD_OUT_LOW);
 	if (IS_ERR(pon->power[1]))
 		return dev_err_probe(dev, PTR_ERR(pon->power[1]), "XGS-PON enable GPIO\n");
+	pon->board_tx_disable = devm_gpiod_get_optional(dev, "tx-disable", GPIOD_OUT_HIGH);
+	if (IS_ERR(pon->board_tx_disable)) {
+		ret = PTR_ERR(pon->board_tx_disable);
+		pon->board_tx_disable = NULL;
+		return dev_err_probe(dev, ret, "board TX-disable GPIO\n");
+	}
 	ret = devm_add_action_or_reset(dev, pon_shutdown_action, pon);
 	if (ret)
 		return ret;

@@ -87,6 +87,10 @@ def inspect(image, revision, profile='bench'):
         assert 'quantum,xgspon-activation-bench' in dt['/']
         assert 'quantum,activation-bench' in dt[controllers[0]]
         assert 'quantum,tx-inhibit' not in dt[controllers[0]]
+        assert struct.unpack('>III', dt[controllers[0]]['tx-disable-gpios'])[1:] == (38, 0)
+        assert any(v.get('groups') == b'pon-sw-tx\0' for v in dt.values())
+        assert any(v.get('groups') == b'gpio38\0' and v.get('function') == b'gpio\0' for v in dt.values())
+        assert any(v.get('pins') == b'gpio38\0' and 'output-high' in v for v in dt.values())
     else:
         assert 'quantum,tx-inhibit' in dt[controllers[0]]
     assert dt['/soc/pcs@1fa08000']['status'] == b'disabled\0'
@@ -199,6 +203,7 @@ def inspect(image, revision, profile='bench'):
             assert {'transmitter_status_show', 'en7573_sample_transmitter', 'q1000k_pon_tx_recipe', 'en7573_tx_recipe', 'en7573_measure_mpd', 'q1000k_pon_measure_mpd'} <= symbols
             assert b'connector_emission_verified' in read(matches[0])
             assert {'q1000k_pon_receiver_startup','q1000k_pon_bench_reinitialize'} <= symbols
+            assert {'q1000k_pon_output_gates', 'q1000k_pon_output_sample', 'q1000k_pon_output_hold', 'en7573_output_sample'} <= symbols
         if profile == 'activation' and name == 'airoha_ecnt_hook':
             assert {'q1000k_trace','q1000k_trace_generation','q1000k_trace_init'} <= symbols
         if profile == 'activation' and name == 'xpon_10g':
@@ -211,6 +216,7 @@ def inspect(image, revision, profile='bench'):
             assert 'q1000k_phy_profile_matches' in symbols
             assert b'parmtype=isolated_tx_bench:bool' in read(matches[0])
             assert {'qiso_set', 'qiso_get', 'qiso_mpd_get'} <= symbols
+            assert {'qout_run', 'output_before_get', 'output_on_get', 'output_after_get'} <= symbols
             assert {'q1000k_phy_snapshot', 'q1000k_phy_receiver_startup', 'q1000k_phy_bench_recover', 'q1000k_phy_last_snapshot', 'q1000k_phy_fast_sample', 'q1000k_phy_rx_bench_recipe'} <= symbols
         if name == 'xpon_10g':
             assert b'parmtype=rx_reacquire:bool' in read(matches[0])

@@ -41,6 +41,7 @@ static int freed;
 static void memzero_explicit(void *p,size_t n) { memset(p,0,n); }
 static void kfree(void *p) { assert(p); freed++; free(p); }
 typedef uint32_t u32;
+#include "en7573_output.h"
 struct en7573_io { void *ctx; };
 struct en7573_oem_post { bool saved; };
 struct en7573_state { int md32_enabled,tx_disabled; };
@@ -53,8 +54,9 @@ struct q1000k_pon {
     unsigned char calibration[513];
     struct en7573_io io;
     struct en7573_oem_post oem_post_original;
-    int *los[2];
+    int *los[2], *board_tx_disable;
 };
+static int board_level=1, board_error, board_calls;
 static int samples,writes,off,los_calls,sample_error,tx_error,off_error,los_value,hw_mcu,hw_disabled;
 static int en7573_sample_state(struct en7573_io *io,struct en7573_state *state)
 {
@@ -75,8 +77,10 @@ static int en7573_set_tx(struct en7573_io *io,bool enable)
     struct q1000k_pon *p=io->ctx; assert(p->lock.held && !p->dead && p->leased); writes++;
     if(tx_error) return tx_error; hw_disabled=!enable; return 0;
 }
-static int pon_off(struct q1000k_pon *p) { assert(p->lock.held); off++; p->initialized=false; p->mode=off_error ? -2 : -1; p->tx_enabled=false; return off_error; }
-static int gpiod_get_value_cansleep(int *gpio) { assert(gpio); los_calls++; return los_value; }
+static int pon_off(struct q1000k_pon *p) { assert(p->lock.held); off++; board_level=1; p->initialized=false; p->mode=off_error ? -2 : -1; p->tx_enabled=false; return off_error; }
+static int gpiod_get_value_cansleep(int *gpio) { assert(gpio); if(gpio==&board_level) return board_error ?: board_level; los_calls++; return los_value; }
+static int gpiod_set_value_cansleep(int *gpio,int value) { assert(gpio==&board_level); board_calls++; if(board_error) return board_error; board_level=value; return 0; }
+/* BOARD GATE */
 static int post_calls;
 static int en7573_oem_post_init(struct en7573_io *io,struct en7573_oem_post *original,bool restore)
 {
@@ -101,13 +105,15 @@ static int mpd_calls, mpd_error;
 static int en7573_measure_mpd(struct en7573_io *io,bool active,struct en7573_mpd *s)
 { struct q1000k_pon *p=io->ctx; assert(p->lock.held && p->leased && p->activation_bench && !p->tx_inhibited);
   mpd_calls++; return mpd_error; }
+static int en7573_output_sample(struct en7573_io *io,struct en7573_output_sample *s) { memset(s,0,sizeof(*s)); return 0; }
+static int en7573_output_hold(struct en7573_io *io,struct en7573_output_hold *s,bool restore) { s->saved_valid=!restore; return 0; }
 /* PRODUCTION */
 static struct q1000k_pon *create(void)
 {
     struct q1000k_pon *p=calloc(1,sizeof(*p));
     p->ref.refs=1; p->mode=1; p->initialized=true; p->io.ctx=p; p->los[1]=&los_value;
     hw_mcu=1; hw_disabled=1; samples=writes=off=los_calls=0;
-    sample_error=tx_error=off_error=0; pon_registered=p; return p;
+    sample_error=tx_error=off_error=board_error=board_calls=0; board_level=1; pon_registered=p; return p;
 }
 int main(void)
 {
@@ -261,6 +267,18 @@ int main(void)
                assert(!q1000k_pon_set_tx(p,true));
                assert(!q1000k_pon_measure_mpd(p,true,&m) && mpd_calls==2 && p->tx_enabled); }
         q1000k_pon_put(p); pon_unpublish(p); pon_drop_device_ref(p);
+    }
+    for(unsigned int gates=0;gates<4;gates++) {
+        p=create(); p->board_tx_disable=&board_level; p->activation_bench=true; los_value=1;
+        assert(q1000k_pon_get()==p);
+        assert(!q1000k_pon_output_gates(p,gates));
+        assert(hw_disabled==!(gates&1) && p->tx_enabled==!!(gates&1) && board_level==!(gates&2));
+        struct en7573_output_sample observation;
+        assert(!q1000k_pon_output_sample(p,&observation) && observation.board_disabled==board_level);
+        assert(!q1000k_pon_output_gates(p,0) && hw_disabled && board_level);
+        board_error=-EREMOTEIO;
+        assert(q1000k_pon_output_gates(p,3)==-EREMOTEIO && off && board_level && !p->tx_enabled);
+        board_error=0; q1000k_pon_put(p); pon_unpublish(p); pon_drop_device_ref(p);
     }
     return 0;
 }

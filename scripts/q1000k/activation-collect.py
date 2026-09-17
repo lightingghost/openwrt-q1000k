@@ -210,6 +210,111 @@ MEASUREMENT_TESTS = [
  'mpd-all-one', 'mpd-all-zero', 'mpd-alternating', 'mpd-existing-clock', 'mpd-repeat',
 ]
 
+OUTPUT_TESTS = [
+ 'internal-only-passive', 'both-gates-passive', 'board-only-passive',
+ 'both-gates-fixed-monitor', 'internal-only-fixed-monitor', 'board-only-fixed-monitor',
+ 'oem-eye0-fixed-monitor', 'sir-eye0-fixed-monitor', 'no-producer-fixed-monitor',
+ 'ben-inverted-fixed-monitor', 'existing-clock-fixed-monitor', 'ben-off-fixed-monitor',
+ 'loop-restart-fixed-monitor', 'all-one-fixed-monitor', 'all-zero-fixed-monitor',
+ 'both-gates-repeat', 'both-disabled-fixed-monitor',
+]
+OUTPUT_REGISTERS = [0x488,0x3a4,0xf0,0xfe,0x3a4,0x488,0x33c,0x66,0x64,0x6a,
+                    0x3c4,0x3c8,0x3e0,0x83,0xfb,0x100,0x108,0x120,0x124,0x128,
+                    0x130,0x13c,0x208,0x210,0x214,0x248,0x160,0x3e4,0xb4,0xb8]
+
+
+# NAND en7572.ko .rodata+0xf8: 156 {key,current_uA} pairs, keys 100..255.
+# Zero ADC -> key256 -> unavailable, never zero current. Not connector power.
+OEM_MPD_CURRENT = (
+    63,64,65,67,68,70,71,73,75,76,78,80,81,83,85,87,
+    89,91,93,95,97,99,101,103,105,108,110,112,115,117,120,123,
+    125,128,131,134,137,140,143,146,149,152,156,159,163,166,170,173,
+    177,181,185,189,193,198,202,206,211,215,220,225,230,235,240,245,
+    251,256,262,268,273,279,286,292,298,305,311,318,325,332,340,347,
+    355,362,370,378,387,395,404,413,422,431,440,450,460,470,480,491,
+    501,512,524,535,547,559,571,584,596,609,623,636,650,665,679,694,
+    709,725,741,757,773,790,808,825,843,862,881,900,920,940,960,981,
+    1003,1025,1047,1070,1094,1118,1142,1167,1193,1219,1245,1273,1301,1329,1358,1388,
+    1418,1449,1481,1514,1547,1581,1615,1651,1687,1724,1761,1800,
+)
+
+def output_result(records, test_id, owner):
+    """Validate the actual gates/timing before interpreting internal sensors."""
+    result = dict(records=records, registers=OUTPUT_REGISTERS,
+                  conversion_ready_verified=False, connector_emission_verified=False)
+    gates = 1 if test_id in (32,36) else 2 if test_id in (34,37) else 0 if test_id == 48 else 3
+    fixed = test_id >= 35
+    if (len(records) != 3 or [r.get('phase') for r in records] != [0,1,2]
+            or any(r.get('output_version') != 1 or r.get('id') != test_id or r.get('gates') != gates
+                   or r.get('fixed_monitor') is not fixed for r in records)):
+        return result, 'containment-failure'
+    start, stop = owner.get('window_ns',0), owner.get('disabled_ns',0)
+    if not 0 < start < stop or stop-start > 6_000_000_000:
+        return result, 'containment-failure'
+    if bool(owner.get('enabled_ns',0)) != bool(gates & 1):
+        return result, 'containment-failure'
+    decoded, all_values = [], []
+    previous_end = 0
+    for phase, record in enumerate(records):
+        rows = record.get('samples', [])
+        if len(rows) != 5: return result, 'containment-failure'
+        phase_rows = []
+        for row in rows:
+            v, valid = row.get('v', []), row.get('valid',0)
+            begin, end = row.get('begin_ns',0), row.get('end_ns',0)
+            if (len(v) != 30 or any(type(x) is not int or not 0 <= x <= 0xffffffff for x in v)
+                    or row.get('error') != 0 or not previous_end <= begin < end
+                    or (phase == 0 and end > start) or (phase == 1 and not start <= begin < end <= stop)
+                    or (phase == 2 and begin < stop)):
+                return result, 'containment-failure'
+            previous_end = end
+            target = gates if phase == 1 else 0
+            if (not valid & (1 << 12) or (not bool(v[12] & 512)) != bool(target & 1)
+                    or row.get('board_disabled') != int(not target & 2)):
+                return result, 'containment-failure'
+            hardware = [((v[i] >> 7) & 0xffff) if valid & (1 << i) else None for i in (1,4)]
+            mailbox = v[2] if valid & 4 else None
+            selected = fixed and all(valid & (1<<i) for i in (17,20,22)) and (v[17] & (1 << 26)) and v[20] & 0x3f00 == 0x2400 and v[22] & 0x70 == 0x40
+            key = ((256 - (v[6] >> 7)) & 0xffff) if valid & (1 << 6) else None
+            current = OEM_MPD_CURRENT[key-100] if selected and key is not None and 100 <= key <= 255 else None
+            phase_rows.append(dict(begin_ns=begin,end_ns=end,hardware_tssi=hardware,mailbox_tssi=mailbox,
+                mailbox_matches_bracket=mailbox in hardware if mailbox is not None and None not in hardware else None,
+                ben=[(v[i]&1) if valid & (1<<i) else None for i in (0,5)],
+                reporting_status=v[3] if valid & 8 else None,raw_monitor=v[6] if valid & 64 else None,
+                monitor_key=key,monitor_current_uA_oem=current,
+                monitor_current_valid=current is not None,monitor_selection_verified=bool(selected),
+                tx_power_nW=v[7]*100 if valid & 128 else None,
+                mcu_idle=v[13],reporting_flags=v[14],ocp_control=v[26],ocp_status=v[27]))
+            all_values.append((v, valid))
+        decoded.append(phase_rows)
+    result['decoded'] = decoded
+    # These are the settings the experiment promises to leave unchanged after
+    # setup. Autonomous hardware/MCU changes remain visible and invalidate the
+    # fixed-settings comparison; they are evidence, not cleanup failures.
+    masks = {15:0xc,17:1<<26,18:0xff00,19:0xfffff00,20:0x3f01,21:0x70060,
+             22:0x71,23:0xfff1fff,24:0x1fff0000,25:0xfff0000,28:0xffffffff,29:0xffffffff}
+    result['settings_changed'] = [hex(OUTPUT_REGISTERS[i]) for i,mask in masks.items()
+        if len({v[i]&mask for v,valid in all_values if valid & (1<<i)}) > 1]
+    result['settings_observation_complete'] = all(valid & (1<<i) for _,valid in all_values for i in masks)
+    result['fixed_settings_verified'] = result['settings_observation_complete'] and not result['settings_changed']
+    result['by_phase'] = []
+    for phase in decoded:
+        def bounds(values):
+            values=[x for x in values if x is not None]
+            return [min(values),max(values)] if values else None
+        result['by_phase'].append(dict(
+            hardware_tssi=bounds([v for r in phase for v in r['hardware_tssi']]),
+            mailbox_tssi=bounds([r['mailbox_tssi'] for r in phase]),
+            ben=sorted({v for r in phase for v in r['ben'] if v is not None}),
+            reporting_status=sorted({r['reporting_status'] for r in phase if r['reporting_status'] is not None}),
+            monitor_current_uA_oem=bounds([r['monitor_current_uA_oem'] for r in phase]),
+            tx_power_nW=bounds([r['tx_power_nW'] for r in phase])))
+    result['on_ben_observed'] = 1 in result['by_phase'][1]['ben']
+    result['sensor_observation_complete'] = all(valid & 0xff == 0xff for _,valid in all_values)
+    if not result['sensor_observation_complete']:
+        return result, 'measurement-unavailable'
+    return result, 'gate-assertion-observed' if result['on_ben_observed'] else 'no-gate-assertion-observed'
+
 def monitor_result(rows, test_id):
     records = [r for r in rows if isinstance(r, dict) and r.get('mpd_version') == 1]
     if len(records) != 1 or records[0].get('id') != test_id:
@@ -248,15 +353,15 @@ def monitor_result(rows, test_id):
 def discovery_plan(args):
     if args.physical_only and args.skip_physical:
         raise ValueError('--physical-only cannot be combined with --skip-physical')
-    if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement'):
+    if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement', 'output'):
         if args.physical_only or args.identity:
             raise ValueError('Isolated suite requires disconnected fiber and no subscriber identity')
         if args.rx_only:
             raise ValueError('Isolated suite emits bounded test patterns; use --suite legacy --rx-only for RX-only work')
         cases = [dict(name=f'isolated-{i}', label=label, mode='isolated', samples=30,
                       ids=[f'I{i:02d}'])
-                 for i,label in enumerate(MEASUREMENT_TESTS if args.suite == 'measurement' else ISOLATED_TESTS,
-                                          19 if args.suite == 'measurement' else 1)]
+                 for i,label in enumerate(OUTPUT_TESTS if args.suite == 'output' else MEASUREMENT_TESTS if args.suite == 'measurement' else ISOLATED_TESTS,
+                                          32 if args.suite == 'output' else 19 if args.suite == 'measurement' else 1)]
         if getattr(args, 'cases', None):
             selected = set(args.cases.split(','))
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown isolated case')
@@ -680,7 +785,11 @@ def capture(pin, case, iperf, directory, redact):
                 values = [r['fields'][field]['value'] for r in aligned if r['fields'].get(field,{}).get('valid') is True]
                 result['tx']['by_window'][phase][field] = dict(samples=len(values), minimum=min(values) if values else None,
                     maximum=max(values) if values else None, changed=len(set(values)) > 1)
-        if int(name.split('-')[1]) >= 19:
+        if int(name.split('-')[1]) >= 32:
+            result['output'], result['output_outcome'] = output_result(
+                [json.loads(line) for line in lines if line.startswith('{\"output_version\":')], int(name.split('-')[1]), sample)
+            if result['output_outcome'] == 'containment-failure': result['status'] = 'containment-failure'
+        elif int(name.split('-')[1]) >= 19:
             result['mpd'], result['measurement_outcome'] = monitor_result(
                 [json.loads(line) for line in lines if line.startswith('{"mpd_version":')], int(name.split('-')[1]))
             if result['measurement_outcome'] == 'containment-failure': result['status'] = 'containment-failure'
@@ -787,7 +896,7 @@ def execute(args, pin):
             record['not_run'] = [c['name'] for c in cases if c['name'] not in {r['name'] for r in record['results']}]
             if args.physical_only:
                 record['not_run'] += ['rx-startup', 'rx-repeat-1', 'rx-repeat-2', 'rx-soak']
-            if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement'):
+            if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement', 'output'):
                 record['not_run'] += ['OLT discovery', 'serial acceptance', 'ranging', 'O5', 'OMCI provisioning', 'WAN traffic']
                 record['identity_note'] = 'Disconnected PHY-only suite; no identity programmed and no registration executor loaded.'
             elif rx_only:
@@ -802,7 +911,7 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement'):
+            if getattr(args, 'suite', 'legacy') in ('isolated', 'measurement', 'output'):
                 report = ['# Disconnected transmitter observations', '',
                     'Internal sensor readings; connector emission and O5 remain unverified.', '',
                     '| Case | Result | Internal TX nW before / active / after | Bias uA before / active / after | TX off / restored |',
@@ -824,6 +933,15 @@ def execute(args, pin):
                     for result in record['results']:
                         m = result.get('mpd', {})
                         report.append(f"| {result['name']} {result.get('test_label','')} | {result.get('measurement_outcome','missing')} | {m.get('raw_monitor_by_phase')} | {m.get('raw_tssi_by_phase')} |")
+                if args.suite == 'output':
+                    report += ['', '## Gate and sensor correlation', '',
+                        'Each cell lists off / on / off. Hardware TSSI is CSR 0x3a4 shifted by seven and truncated to 16 bits. Monitor current uses the NAND OEM lookup, only with verified monitor selection. Conversion age and connector output remain unverified.', '',
+                        '| Case | Gate result | BEN | Hardware TSSI | Mailbox TSSI | MCU status 0xfe | Monitor current uA | Settings unchanged |',
+                        '|---|---|---|---|---|---|---|---|']
+                    for result in record['results']:
+                        o = result.get('output', {})
+                        def phases(key): return ' / '.join(str(p.get(key)) for p in o.get('by_phase', []))
+                        report.append(f"| {result['name']} {result.get('test_label','')} | {result.get('output_outcome','missing')} | {phases('ben')} | {phases('hardware_tssi')} | {phases('mailbox_tssi')} | {phases('reporting_status')} | {phases('monitor_current_uA_oem')} | {o.get('fixed_settings_verified')} |")
                 (args.output/'isolated-summary.md').write_text('\n'.join(report)+'\n')
             files = sorted(p for p in args.output.iterdir() if p.is_file())
             (args.output/'sha256sums').write_text(''.join(f'{digest(p.read_bytes())}  {p.name}\n' for p in files))
@@ -846,7 +964,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('measurement','isolated','tx','legacy'), default='measurement', help='Default: disconnected TX monitor measurements; isolated selects the original pattern suite. tx selects connected-fiber discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('output','measurement','isolated','tx','legacy'), default='output', help='Default: disconnected gate/TSSI/monitor correlation; measurement selects the older probes; isolated selects the original pattern suite. tx selects connected-fiber discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

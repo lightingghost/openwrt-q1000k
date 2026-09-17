@@ -3,8 +3,12 @@
 #define _Q1000K_PON_CONTROL_H
 #include <linux/types.h>
 #include "en7573_mpd.h"
+#include "en7573_output.h"
 
 struct q1000k_pon;
+int q1000k_pon_output_gates(struct q1000k_pon *pon, unsigned int gates);
+int q1000k_pon_output_sample(struct q1000k_pon *pon, struct en7573_output_sample *sample);
+int q1000k_pon_output_hold(struct q1000k_pon *pon, struct en7573_output_hold *saved, bool restore);
 #ifndef Q1000K_EN7573_H
 #define EN7573_TX_SAVED 8
 struct en7573_tx_recipe { u32 words[EN7573_TX_SAVED]; unsigned int count; };

@@ -49,6 +49,9 @@ if action=='cat':
     elif args==[str(root/'sys/module/phy_10g/parameters/isolated_mpd')]:
         if os.environ.get('VALIDATION_BAD')=='mpd-missing': sys.exit(1)
         emit(dict(mpd_version=1,id=21,probes=[]))
+    elif len(args)==1 and pathlib.Path(args[0]).name in ('output_before','output_on','output_after'):
+        if os.environ.get('VALIDATION_BAD')=='output-missing': sys.exit(1)
+        emit(dict(output_version=1,id=35,phase=['output_before','output_on','output_after'].index(pathlib.Path(args[0]).name),samples=[]))
     elif args==[str(root/'proc/q1000k-pon-snapshot')]:
         counter=root/'validation-count'; n=int(counter.read_text())+1 if counter.exists() else 1; counter.write_text(str(n)); (root/'proc/uptime').write_text(str(n)+'.00 0.00\n')
         bad=os.environ.get('VALIDATION_BAD','')
@@ -161,6 +164,16 @@ else: raise AssertionError((action,args))
         self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
         self.assertIn('validation_tx=0',self.calls()[0])
         self.assertFalse((self.root/'sys/module/xpon_10g').exists())
+
+    def test_output_capture_and_missing_evidence(self):
+        for bad in ('', 'output-missing'):
+            self.env['VALIDATION_BAD']=bad
+            result=subprocess.run(['busybox','ash',str(self.script),'isolated',str(self.fixture.calibration),
+                str(self.identity),'30','none','isolated-35'],env=self.env,capture_output=True,text=True,timeout=90)
+            self.assertEqual(result.returncode==0,not bad,result.stdout[-2500:]+result.stderr)
+            if not bad: self.assertEqual(result.stdout.count('"output_version": 1'),3)
+            self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+            self.assertFalse((self.root/'sys/module/phy_10g').exists())
 
     def test_all_active_stages_and_interface_bound_probes(self):
         result=self.run_case('activate')
