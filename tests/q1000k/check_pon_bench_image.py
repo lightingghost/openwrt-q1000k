@@ -183,7 +183,7 @@ def inspect(image, revision, profile='bench'):
     runtime_paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
     if profile == 'activation':
-        runtime_paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/share/q1000k-bench/capabilities.json'])
+        runtime_paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/libexec/q1000k-pd-source', 'usr/share/q1000k-bench/capabilities.json'])
         assert read('usr/share/q1000k-bench/capabilities.json') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/capabilities.json').read_bytes()
         assert read('usr/sbin/q1000k-pon-validate') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/validate').read_bytes()
         for program in ('usr/bin/iperf3', 'usr/bin/curl', 'sbin/ip', 'usr/bin/ping'):

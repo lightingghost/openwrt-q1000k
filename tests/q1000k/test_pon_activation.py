@@ -80,8 +80,12 @@ if action=='uci':
 if action=='ubus':
     interface=args[1].split('.')[-1]; active=(root/'wan-active').exists()
     active=active or os.environ.get('VALIDATION_BAD')=='wan-owned'
+    if args[-1]=='renew':
+        with (root/'validation-calls').open('a') as out: out.write(json.dumps([action]+args)+'\n')
+        sys.exit(1 if os.environ.get('VALIDATION_BAD')=='renew-error' else 0)
     if interface.endswith('wan6'):
-        emit(dict(up=active,pending=False,proto='dhcpv6',l3_device='pon',**{'ipv6-address':[{'address':'2001:db8::2'}] if active else [],'ipv6-prefix':[]}))
+        prefix=[dict(address='2001:db8:1234::',mask=60,preferred=3600,valid=3600)] if os.environ.get('VALIDATION_PD') else []
+        emit(dict(up=active,pending=False,proto='dhcpv6',l3_device='pon',**{'ipv6-address':[{'address':'2001:db8::2'}] if active else [],'ipv6-prefix':prefix}))
     else: emit(dict(up=active,pending=False,proto='dhcp',l3_device='pon',**{'ipv4-address':[{'address':'192.0.2.2'}] if active else []}))
     sys.exit(0)
 with (root/'validation-calls').open('a') as out: out.write(json.dumps([action]+args)+'\n')
@@ -103,8 +107,21 @@ elif action=='rmmod':
     d.rmdir()
 elif action=='ip':
     if args[:4]==['link','set','dev','ponraw']: pass
+    elif args[:3]==['-6','address','add']:
+        (root/'pd-active').touch()
+    elif args[:3]==['-6','address','del']:
+        if os.environ.get('VALIDATION_BAD')=='pd-cleanup': sys.exit(1)
+        (root/'pd-active').unlink()
+    elif args[:3]==['-6','-o','address']:
+        print('1: pon inet6 fe80::1/64 scope link')
+        if (root/'pd-active').exists():
+            suffix=' dadfailed' if os.environ.get('VALIDATION_BAD')=='pd-dad' else ''
+            print('1: pon inet6 2001:db8:1234::1/128 scope global'+suffix)
     elif '-j' in args: emit([])
     else: print('1: pon inet 192.0.2.2/24 scope global')
+elif action=='pd-source':
+    if os.environ.get('VALIDATION_BAD')=='pd-used': sys.exit(3)
+    print('2001:db8:1234::1')
 elif action=='omci':
     if args[-1]=='mib': emit([dict(class_id=268,entity_id=1,data_hex='0000')])
     else:
@@ -119,7 +136,7 @@ elif action=='ifdown': (root/'wan-active').unlink(missing_ok=True)
 elif action in ('ping','curl','iperf3'): pass
 else: raise AssertionError((action,args))
 '''
-        for name in ('cat','sleep','uname','bench-status','uci','ubus','modprobe','insmod','rmmod','ip','omci','ifup','ifdown','ping','curl','iperf3'):
+        for name in ('cat','sleep','uname','bench-status','uci','ubus','modprobe','insmod','rmmod','ip','omci','ifup','ifdown','ping','curl','iperf3','pd-source'):
             fixture.write('v-'+name, '#!'+sys.executable+'\n'+mock.replace("name; args=", "name.removeprefix('v-'); args=")).chmod(0o755)
         source = VALIDATE.read_text()
         source = re.sub(r'(?<![A-Za-z0-9])/(sys|proc|tmp|var/run)/', lambda m: str(self.root)+'/'+m[1]+'/', source)
@@ -129,6 +146,7 @@ else: raise AssertionError((action,args))
         source = source.replace('q1000k-pon-bench status', str(self.root/'v-bench-status'))
         source = source.replace('q1000k-omci -i',str(self.root/'v-omci')+' -i')
         source = source.replace('/usr/bin/ping',str(self.root/'v-ping'))
+        source = source.replace('/usr/libexec/q1000k-pd-source',str(self.root/'v-pd-source'))
         for name in ('cat','sleep','uname','uci','ubus','modprobe','insmod','rmmod','ip','ifup','ifdown','ping','curl','iperf3'):
             source=re.sub(r'(?<![A-Za-z0-9_/-])'+name+r'(?= )','"'+str(self.root/('v-'+name))+'"',source)
         self.script=fixture.write('validate',source)
@@ -141,6 +159,47 @@ else: raise AssertionError((action,args))
     def calls(self):
         p=self.root/'validation-calls'
         return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+
+    def test_wan_source_binding_renewal_and_owned_address_cleanup(self):
+        self.env['VALIDATION_PD']='1'
+        result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+            str(self.identity),'15','none','activation-omci-wan-renew'],env=self.env,
+            capture_output=True,text=True,timeout=90)
+        self.assertEqual(result.returncode,0,result.stdout[-2500:]+result.stderr)
+        summary=COLLECT.ipv6_source_summary(result.stdout)
+        self.assertTrue(summary['delegated_https'])
+        self.assertEqual(set(summary['cycles']),{'initial','after-renew'})
+        self.assertEqual(summary['cleanup_count'],2)
+        self.assertEqual(len(summary['renewal_requests']),2)
+        self.assertEqual(summary['cycles']['after-renew']['ipv4_wan'],dict(ping=0,mtu1500=0,https=0))
+        self.assertFalse((self.root/'pd-active').exists())
+        calls=self.calls()
+        probes=[c for c in calls if c[0]=='curl' and any('ifhost!' in v for v in c)]
+        self.assertEqual(len(probes),4)
+        self.assertTrue(all(c[c.index('--interface')+1].startswith('ifhost!pon!') for c in probes))
+        pings=[c for c in calls if c[0]=='ping' and c.count('-I')==2]
+        self.assertEqual(len(pings),8)
+        self.assertTrue(all(c[c.index('-I')+1]=='pon' for c in pings))
+        add=[i for i,c in enumerate(calls) if c[:4]==['ip','-6','address','add']]
+        delete=[i for i,c in enumerate(calls) if c[:4]==['ip','-6','address','del']]
+        down=next(i for i,c in enumerate(calls) if c[0]=='ifdown')
+        self.assertTrue(add[0]<delete[0]<add[1]<delete[1]<down)
+        modules={Path(c[1]).stem:c for c in calls if c[0] in ('modprobe','insmod')}
+        self.assertIn('bench_live_add=31',modules['xpon_10g'])
+        self.assertIn('bench_vlan_untagged=1',modules['xpon_10g'])
+
+    def test_pd_unavailable_dad_failure_and_delete_failure_remain_distinct(self):
+        self.env['VALIDATION_PD']='1'
+        for bad,success in [('pd-used',True),('pd-dad',True),('pd-cleanup',False)]:
+            self.env['VALIDATION_BAD']=bad
+            result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+                str(self.identity),'15','none','activation-omci-wan-source'],env=self.env,
+                capture_output=True,text=True,timeout=90)
+            self.assertEqual(result.returncode==0,success,result.stdout[-2500:]+result.stderr)
+            self.assertFalse(COLLECT.ipv6_source_summary(result.stdout)['delegated_https'])
+            self.assertIn('validation_stage name=cleanup status='+('passed' if success else 'failed'),result.stdout)
+            self.assertFalse((self.root/'sys/module/xpon_10g').exists())
+            if success: self.assertFalse((self.root/'pd-active').exists())
 
     def test_disconnected_phy_only_and_restore_failure(self):
         for bad in ('', 'restore'):

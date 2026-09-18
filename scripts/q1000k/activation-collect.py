@@ -107,7 +107,7 @@ def runtime_manifest(text):
         if not match or '..' in Path(match[2]).parts or match[2] in entries:
             raise ValueError('Invalid runtime manifest')
         entries[match[2]] = match[1]
-    fixed = {'/usr/sbin/q1000k-pon-validate', '/usr/sbin/q1000k-pon-bench',
+    fixed = {'/usr/sbin/q1000k-pon-validate', '/usr/libexec/q1000k-pd-source', '/usr/sbin/q1000k-pon-bench',
              '/lib/q1000k-xgspon/common.sh', '/usr/share/libubox/jshn.sh',
              '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config', '/usr/share/q1000k-bench/capabilities.json'}
     modules = set(entries) - fixed
@@ -385,6 +385,44 @@ def discovery_skip(case, results):
     return None
 
 
+def ipv6_source_summary(text):
+    """Keep default/IA_NA and delegated-prefix outcomes distinct."""
+    cycle = 'unspecified'
+    cycles, unavailable = {}, []
+    cleanup = 0
+    for line in text.splitlines():
+        if match := re.fullmatch(r'source_cycle name=(\S+)', line):
+            cycle = match[1]
+        elif match := re.fullmatch(r'source_result origin=(ia_na|delegated_prefix|ipv4_wan) kind=(ping|mtu1500|https) rc=(\d+)', line):
+            cycles.setdefault(cycle, {}).setdefault(match[1], {})[match[2]] = int(match[3])
+        elif line == 'pd_source_cleanup status=passed':
+            cleanup += 1
+        elif match := re.fullmatch(r'source_unavailable origin=(\S+) reason=(\S+)', line):
+            unavailable.append(dict(cycle=cycle, origin=match[1], reason=match[2]))
+    attempted = sum('delegated_prefix' in origins for origins in cycles.values())
+    return dict(cycles=cycles, unavailable=unavailable, cleanup_count=cleanup,
+        delegated_https=bool(attempted and cleanup >= attempted and any(
+            origins.get('delegated_prefix', {}).get('https') == 0 for origins in cycles.values())),
+        renewal_requests=[dict(interface=name, returncode=int(rc)) for name, rc in re.findall(
+            r'^renew_result interface=(\S+) rc=(\d+)$', text, re.M)],
+        note='A successful renew method is a request, not proof of a DHCP reply. Per-cycle traffic and lease snapshots supply separate evidence.')
+
+
+def service_summary(results):
+    eligible = [r for r in results if r.get('status') == 'observed' and r.get('provisioned')
+                and r.get('stages', {}).get('cleanup') == 'passed']
+    def ipv4(r):
+        return bool(r.get('dhcp_ipv4') and r.get('traffic', {}).get('ipv4_https'))
+    def ipv6_address(r):
+        return bool(r.get('dhcpv6_address') and r.get('traffic', {}).get('ipv6_https'))
+    def ipv6_prefix(r):
+        return bool(r.get('dhcpv6_prefix') and r.get('ipv6_sources', {}).get('delegated_https'))
+    return dict(ipv4=any(ipv4(r) for r in eligible),
+        ipv6_wan_address=any(ipv6_address(r) for r in eligible),
+        ipv6_delegated_prefix=any(ipv6_prefix(r) for r in eligible),
+        dual_stack_same_case=any(ipv4(r) and (ipv6_address(r) or ipv6_prefix(r)) for r in eligible))
+
+
 def monitor_result(rows, test_id):
     records = [r for r in rows if isinstance(r, dict) and r.get('mpd_version') == 1]
     if len(records) != 1 or records[0].get('id') != test_id:
@@ -438,6 +476,22 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'wan':
+        if args.physical_only:
+            raise ValueError('WAN comparisons keep the fiber connected')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, samples in [('source',180), ('renew',180), ('repeat',600)]:
+                cases.append(dict(name='activation-omci-wan-'+name, mode='activate',
+                    samples=samples, ranging_mode=1, dot1x_oem=True, live_add=31,
+                    vlan_untagged=1, key_inline=True, initial_key_readback=True,
+                    omci_min_len=60, alloc_revoke=False,
+                    ids=['V1','V2','V3','W1','W2','W3','W4','D01','D02','D03','D04','D05','D06']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown WAN case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'discovery':
         if args.physical_only:
             raise ValueError('Discovery comparisons keep the fiber connected')
@@ -659,6 +713,15 @@ def test_outcomes(case, result, text):
     stages = result['stages']; outcome = {}
     for ident in case.get('ids', []):
         outcome[ident] = 'not-run'
+        if ident.startswith('W'):
+            sources = result.get('ipv6_sources', {})
+            outcome[ident] = {
+                'W1': 'source-comparison-recorded' if sources.get('cycles') else 'source-comparison-unavailable',
+                'W2': 'delegated-prefix-HTTPS-passed' if sources.get('delegated_https') else 'delegated-prefix-HTTPS-not-established',
+                'W3': 'renew-request-and-post-traffic-recorded' if sources.get('renewal_requests') and 'after-renew' in sources.get('cycles', {}) else 'renew-not-observed',
+                'W4': 'temporary-address-removed' if sources.get('cleanup_count') else 'temporary-address-not-used',
+            }[ident]
+            continue
         if ident.startswith('V'):
             o=result.get('omci_experiment',{}); k=o.get('key_ring',{}); a=o.get('live_additions',{})
             vlans=[r for r in o.get('topology',{}).get('wire_records',[]) if r['kind']=='set'
@@ -1228,6 +1291,7 @@ def summarize(text, returncode=0, events=None):
                   encryption_note='Key state and traffic are separate evidence; encrypted GEM counter attribution is not exposed.',
                   throughput={direction: int(code) == 0 for direction, code in re.findall(
                       r'^throughput_result direction=(\S+) rc=(\d+)$', text, re.M)})
+    result['ipv6_sources'] = ipv6_source_summary(text)
     tx_records = [r for r in records if isinstance(r,dict) and r.get('transmitter_version') == 1]
     mac = [r for r in live_records if isinstance(r,dict) and r.get('mac_version') == 2]
     phases = {}
@@ -1268,7 +1332,19 @@ def summarize(text, returncode=0, events=None):
     result['registration'] = registration_summary(records)
     result['omci_experiment'] = omci_summary(records)
     milestones = result['trace']['milestones']
-    if result['omci_experiment'].get('authenticated_rx', 0):
+    ipv4_service = result['provisioned'] and result['dhcp_ipv4'] and traffic.get('ipv4_https')
+    ipv6_service = result['provisioned'] and (
+        result['dhcpv6_address'] and traffic.get('ipv6_https') or
+        result['dhcpv6_prefix'] and result['ipv6_sources']['delegated_https'])
+    if ipv4_service and ipv6_service:
+        reached, missing = 'dual-stack-traffic', 'long-term-stability-and-throughput'
+    elif ipv4_service:
+        reached, missing = 'ipv4-traffic', 'ipv6-traffic'
+    elif ipv6_service:
+        reached, missing = 'ipv6-traffic', 'ipv4-traffic'
+    elif result['provisioned']:
+        reached, missing = 'service-provisioned', 'traffic'
+    elif result['omci_experiment'].get('authenticated_rx', 0):
         reached, missing = 'authenticated-omci', 'service-and-traffic'
     elif milestones['ranging_accepted']:
         reached, missing = 'ranging-accepted', 'authenticated-omci'
@@ -1588,14 +1664,25 @@ def execute(args, pin):
                 record['identity_note'] = 'Activation omitted: RX-only selected or no private identity supplied.'
             active = next((r for r in record['results'] if r.get('provisioned')), next(
                 (r for r in record['results'] if r.get('name','').startswith('activation')), {}))
-            record['hardware_service_verified'] = bool(record.get('cleanup_verified') and active.get('status') == 'observed' and active.get('provisioned') and
-                (active.get('dhcp_ipv4') and active.get('traffic', {}).get('ipv4_https') or
-                 active.get('dhcpv6_address') and active.get('traffic', {}).get('ipv6_https')))
+            record['service_by_family'] = service_summary(record['results']) if record.get('cleanup_verified') else {}
+            record['hardware_service_verified'] = any(record['service_by_family'].values())
             if not rx_only:
                 for stage in ('provisioning', 'wan', 'traffic-soak'):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
+            report = ['# WAN and IPv6 source observations', '',
+                '| Case | Provisioned | IPv4 DHCP / HTTPS | IPv6 address / prefix | Default IPv6 HTTPS | Prefix-source HTTPS | Cleanup |',
+                '|---|---|---|---|---|---|---|']
+            for r in record['results']:
+                report.append(f"| {r['name']} | {r.get('provisioned',False)} | {r.get('dhcp_ipv4',False)} / {r.get('traffic',{}).get('ipv4_https','not-run')} | {r.get('dhcpv6_address',False)} / {r.get('dhcpv6_prefix',False)} | {r.get('traffic',{}).get('ipv6_https','not-run')} | {r.get('ipv6_sources',{}).get('delegated_https',False)} | {r.get('stages',{}).get('cleanup','not-run')} |")
+            report += ['', '| Case / cycle / source | Ping return code | 1500-byte return code | HTTPS return code |', '|---|---:|---:|---:|']
+            for r in record['results']:
+                for cycle, origins in r.get('ipv6_sources', {}).get('cycles', {}).items():
+                    for origin, values in origins.items():
+                        report.append(f"| {r['name']} / {cycle} / {origin} | {values.get('ping','not-run')} | {values.get('mtu1500','not-run')} | {values.get('https','not-run')} |")
+            report += ['', 'Return code 0 means the probe succeeded. An address or prefix lease alone does not prove Internet access. Prefix probes use one temporary /128 from an unused live delegation, bind both the PON device and source, and remove the address. Renewal method success means a request was accepted; compare the lease snapshots and post-renew traffic separately.']
+            (args.output/'wan-summary.md').write_text('\n'.join(report)+'\n')
             report = ['# Discovery and passive TX observations', '',
                 'Periodic read-only observations during normal PON operation. No monitor mux/loop changes or test patterns. A fresh bus read is not a conversion-ready indication, and narrow bursts can fall between reads.', '',
                 '| Case | Result | Farthest evidence | SN requested / sent | Assigned / ranged | Passive samples |',
@@ -1611,7 +1698,7 @@ def execute(args, pin):
                     report.append(f"| {result['name']} / {phase} | {p['hardware_tssi']} | {p['mailbox_tssi']} | {p['ben']} / {p['reporting_status']} | {p['tx_power_nW']} / {p['bias_uA']} | {p['raw_monitor']} / {p['monitor_current_uA_oem']} | {p['board_disabled']} / {p['internal_tx_disabled']} |")
             report += ['', 'Decoded monitor current is unavailable unless the OEM monitor-selection readbacks and lookup range are valid. Published power at the MCU floor does not establish absence of optical output. Raw samples, timestamp brackets and generation-separated MAC counters remain in collection.json and the case logs.']
             (args.output/'discovery-summary.md').write_text('\n'.join(report)+'\n')
-            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan', 'discovery'):
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan', 'discovery', 'wan'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
@@ -1717,7 +1804,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('discovery','vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='discovery', help='Default: passive TX feedback and bounded discovery controls, then VLAN/key-ring comparisons only after authenticated OMCI. vlan: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('wan','discovery','vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='wan', help='Default: working VLAN/key-ring policies, IPv6 WAN versus delegated-prefix source tests, renewal and repeat. discovery: passive TX feedback and bounded discovery controls, then VLAN/key-ring comparisons only after authenticated OMCI. vlan: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "bench": "tx-monitor-and-discovery",
+  "bench": "wan-source-and-renewal",
   "hardware_acceptance": false,
   "trace": {
     "version": 1,
@@ -23,7 +23,8 @@
     "/proc/q1000k-pon-fast",
     "controller-sysfs/transmitter_status",
     "/sys/module/phy_10g/parameters/isolated_tx_test",
-    "controller-sysfs/output_status"
+    "controller-sysfs/output_status",
+    "/usr/libexec/q1000k-pd-source"
   ],
   "control": "/sys/module/xpon_10g/parameters/bench_recover",
   "recovery_actions": [
@@ -438,6 +439,38 @@
       "hypothesis": "Local completion does not establish OLT acceptance or working service",
       "implemented": true,
       "hardware_run": false
+    },
+    {
+      "id": "W1",
+      "test": "Compare explicitly bound DHCPv6 IA_NA and delegated-prefix sources",
+      "selection": "activation-omci-wan-*",
+      "hypothesis": "IPv6 source choice versus PON data-path failure",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W2",
+      "test": "PON-bound IPv6 ping, MTU1500 and HTTPS from an unused delegation",
+      "selection": "activation-omci-wan-*",
+      "hypothesis": "IPv6 source choice versus PON data-path failure",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W3",
+      "test": "Request DHCP/DHCPv6 renewal, capture leases and repeat traffic",
+      "selection": "activation-omci-wan-renew",
+      "hypothesis": "IPv6 source choice versus PON data-path failure",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W4",
+      "test": "Verify temporary source removal before WAN and PON shutdown",
+      "selection": "activation-omci-wan-*",
+      "hypothesis": "IPv6 source choice versus PON data-path failure",
+      "implemented": true,
+      "hardware_run": false
     }
   ],
   "event_names": {
@@ -482,7 +515,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "discovery",
+  "default_suite": "wan",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -1214,5 +1247,33 @@
       "live-coalesced-repeat"
     ],
     "all_existing_suites_retained": true
+  },
+  "wan_source_tests": {
+    "prefix_lengths": [
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64
+    ],
+    "minimum_remaining_lifetime_seconds": 120,
+    "temporary_address_lifetime_seconds": 120,
+    "existing_prefix_use": "skip",
+    "binding": "PON device and explicit IPv6 source",
+    "persistent_network_changes": false,
+    "renewal": "ubus renew requests; confirmation requires lease/traffic evidence",
+    "prior_suites_retained": true
   }
 }
