@@ -145,6 +145,8 @@ int omci_me_encode_attributes(const struct omci_me_desc *desc,
 			      const struct omci_mib_object *object,
 			      u16 mask, u8 *data, size_t len,
 			      u16 *encoded_mask, size_t *encoded_len);
+int omci_me_upload_masks(const struct omci_me_desc *desc,
+			 const struct omci_mib_object *object, u16 masks[16]);
 
 const char *omci_me_class_name(u16 class_id);
 int omci_me_class_get(struct omci_device *odev, u16 class_id,

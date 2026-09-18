@@ -11,6 +11,7 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+static u32 get_unaligned_be32(const void *p) { const uint8_t *b=p; return (u32)b[0]<<24 | (u32)b[1]<<16 | (u32)b[2]<<8 | b[3]; }
 typedef uint64_t u64;
 typedef int32_t s32;
 #define module_param(...)

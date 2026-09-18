@@ -368,7 +368,23 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
-    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity'):
+    if getattr(args, 'suite', 'legacy') == 'topology':
+        if args.physical_only:
+            raise ValueError('Topology comparisons keep the fiber connected')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, factory, ranging, samples in [('strict',False,1,300),
+                    ('oem',True,1,300), ('eqd',True,3,300), ('repeat',True,1,600)]:
+                cases.append(dict(name='activation-omci-topology-'+name, mode='activate',
+                    samples=samples, ranging_mode=ranging, dot1x_oem=factory, live_add=3,
+                    key_inline=True, initial_key_readback=True, omci_min_len=60, alloc_revoke=False,
+                    ids=['O1','O2','O3','O4','O5','O6','O7','O8','Q1','Q2','Q3','Q4','Q5']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown topology case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
+    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology'):
         if args.physical_only:
             raise ValueError('OMCI comparisons use connected fiber without physical cycling')
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -503,6 +519,21 @@ def test_outcomes(case, result, text):
     stages = result['stages']; outcome = {}
     for ident in case.get('ids', []):
         outcome[ident] = 'not-run'
+        if ident.startswith('Q'):
+            o=result.get('omci_experiment',{}); t=o.get('topology',{}); p=o.get('provisioning',{})
+            responses=p.get('response_results',[])
+            queue_sets=[r for r in responses if r['class_id']==277 and r['opcode']==8]
+            gem_creates=[r for r in responses if r['class_id']==268 and r['opcode']==4 and r['result']==0]
+            dot1x=[r for r in responses if r['class_id']==290 and r['opcode']==8]
+            outcome[ident]={
+                'Q1':'queue-topology-submitted' if t.get('fully_described_queues') else 'topology-not-observed',
+                'Q2':'queue-sets-accepted' if queue_sets and all(r['result']==0 for r in queue_sets) else 'queue-acceptance-not-established',
+                'Q3':'dot1x-controls-accepted' if dot1x and all(r['result']==0 for r in dot1x) else 'dot1x-acceptance-not-established',
+                'Q4':'upstream-gems-created' if any(r['entity_id'] in range(1023,1027) for r in gem_creates) else 'upstream-gems-not-established',
+                'Q5':'service-and-traffic-observed' if result.get('provisioned') and any(result.get('traffic',{}).values()) else 'service-not-verified',
+            }[ident]
+            if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
+            continue
         if ident.startswith('O'):
             o = result.get('omci_experiment', {})
             outcome[ident] = {
@@ -707,10 +738,66 @@ def omci_provisioning_summary(events):
             operations.append(dict(base, class_id=e['a'] >> 16, entity_id=e['a'] & 0xffff,
                 transaction_id=e['b'] >> 16, attribute_mask=e['b'] & 0xffff, opcode=e['c'],
                 stage={0:'none',1:'validation',2:'hardware',3:'reconciliation',4:'MIB storage'}.get(e['id'], 'unknown'),
-                error=e['result'], dot1x_enable=e['d'] & 255 if e['d'] & 256 else None))
+                error=e['result'], dot1x_enable=e['d'] & 255 if e['d'] & 256 else None,
+                dot1x_action=(e['d'] >> 9) & 255 if e['d'] & (1 << 17) else None,
+                dot1x_oem=bool(e['d'] & (1 << 18))))
     return dict(response_results=list(counts.values()), response_errors=responses,
         operations=operations, gem_configurations=gems, gem_qos=qos,
         note='Retained records only. Check critical evidence completeness; a successful ME operation does not prove a working data service.')
+
+
+def topology_summary(events):
+    """Reassemble only the public, explicitly whitelisted wire records.
+
+    A missing word record leaves an incomplete row, never a zero-filled success.
+    Header sequence and transaction identity distinguish retries and fragments.
+    """
+    rows, counts, pending = [], [], {}
+    layouts = {
+        262: [('alloc_id',2),('deprecated',1),('policy',1)],
+        277: [('configuration',1),('maximum_size',2),('allocated_size',2),
+              ('discard_reset',2),('discard_threshold',2),('related_port',4),
+              ('scheduler_pointer',2),('weight',1),('backpressure_operation',2),
+              ('backpressure_time',4),('backpressure_occur',2),('backpressure_clear',2)],
+        278: [('tcont',2),('parent',2),('policy',1),('priority',1)],
+    }
+    for e in events:
+        if e['event'] != 32: continue
+        stack=e.get('stack_generation',1)
+        if e['id'] == 1:
+            counts.append(dict(stack_generation=stack, transaction_id=e['a'],
+                               commands=e['b'], transport_error=e['result']))
+        elif e['id'] in (2,6):
+            row=dict(stack_generation=stack, seq=e['seq'], kind='upload' if e['id']==2 else 'set',
+                     class_id=e['a'] >> 16, entity_id=e['a'] & 65535,
+                     attribute_mask=e['b'] & 65535, sequence=e['b'] >> 16,
+                     transaction_id=e['c'], length=e['d'], transport_error=e['result'],
+                     complete=False, chunks={})
+            if row['class_id'] not in layouts or not 0 <= row['length'] <= 26: continue
+            rows.append(row); pending[(stack,row['transaction_id'],row['class_id'])]=row
+        elif e['id'] in (3,4,5):
+            row=pending.get((stack,e['a'] >> 16,e['a'] & 65535))
+            if row is not None:
+                row['chunks'][e['id']]=b''.join(e[k].to_bytes(4,'big') for k in ('b','c','d'))
+    for row in rows:
+        chunks=row.pop('chunks')
+        if set(chunks) != {3,4,5}: continue
+        data=b''.join(chunks[i] for i in (3,4,5))[:row['length']]
+        row['data_hex']=data.hex(); row['values']={}; pos=0
+        for i,(name,size) in enumerate(layouts[row['class_id']]):
+            if row['attribute_mask'] & (1 << (15-i)):
+                if pos+size > len(data): break
+                row['values'][name]=int.from_bytes(data[pos:pos+size],'big'); pos+=size
+        else:
+            supported=(0xffff << (16-len(layouts[row['class_id']]))) & 0xffff
+            row['complete']=not bool(row['attribute_mask'] & ~supported)
+    uploads=[r for r in rows if r['kind']=='upload']
+    queues={r['entity_id'] for r in uploads if r['class_id']==277 and r['complete'] and
+            {'related_port','scheduler_pointer','weight'} <= r.get('values',{}).keys()}
+    requests=[r for r in rows if r['kind']=='set']
+    return dict(upload_commands=counts, wire_records=rows, fully_described_queues=sorted(queues),
+                unresolved_queue_requests=[r for r in requests if r['entity_id'] not in queues],
+                note='Wire bytes prove what was submitted locally; subsequent OLT requests test whether it used that description.')
 
 
 def native_tx_summary(events):
@@ -759,7 +846,7 @@ def omci_summary(records):
     def count(ident, predicate=lambda e: True):
         return sum(e['id'] == ident and predicate(e) for e in control)
     return dict(
-        provisioning=omci_provisioning_summary(events),
+        provisioning=omci_provisioning_summary(events), topology=topology_summary(events),
         native_tx=native_tx_summary(events), live_additions=append_summary(events),
         ethernet_runt_omci_delivered=count(30, lambda e: bool(e['a'] & (1 << 12))),
         rx_descriptor_words=sorted({f"0x{e['a']:08x}" for e in control if e['id'] == 30}),
@@ -1162,7 +1249,7 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity'):
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
@@ -1251,7 +1338,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='continuity', help='Default: connected-fiber native TX diagnostics and live GEM/T-CONT additions, with one RX control and six activation cases. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='topology', help='Default: RX control, complete MIB topology, strict/factory Dot1X, OEM EqD and repeat; no fiber cycling. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

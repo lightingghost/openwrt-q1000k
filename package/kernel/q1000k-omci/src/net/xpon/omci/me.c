@@ -359,11 +359,12 @@ static const struct omci_attr_desc omci_olt_g_attrs[] = {
 	OMCI_ATTR(12, 38, 14, OMCI_RW),
 };
 
-/* A transparent UNI supports the disabled control. An authenticator and its
- * state/action attributes are not implemented; do not advertise fake states.
+/* The factory comparison implements the two validated configuration writes.
+ * It does not advertise authenticator states or claim an EAP exchange.
  */
 static const struct omci_attr_desc omci_dot1x_port_attrs[] = {
 	OMCI_ATTR(15, 0, 1, OMCI_RW),
+	OMCI_ATTR(14, 1, 1, OMCI_ATTR_ACCESS_WRITE),
 };
 
 static const struct omci_attr_desc omci_cardholder_attrs[] = {
@@ -469,7 +470,7 @@ static const struct omci_attr_desc omci_priority_queue_attrs[] = {
 	OMCI_ATTR(15, 0, 1, OMCI_R), OMCI_ATTR(14, 1, 2, OMCI_R),
 	OMCI_ATTR(13, 3, 2, OMCI_R), OMCI_ATTR(12, 5, 2, OMCI_R),
 	OMCI_ATTR(11, 7, 2, OMCI_R), OMCI_ATTR(10, 9, 4, OMCI_R),
-	OMCI_ATTR(9, 13, 2, OMCI_R), OMCI_ATTR(8, 15, 1, OMCI_RW),
+	OMCI_ATTR(9, 13, 2, OMCI_RW), OMCI_ATTR(8, 15, 1, OMCI_RW),
 	OMCI_ATTR(7, 16, 2, OMCI_R), OMCI_ATTR(6, 18, 4, OMCI_R),
 	OMCI_ATTR(5, 22, 2, OMCI_R), OMCI_ATTR(4, 24, 2, OMCI_R),
 };
@@ -675,8 +676,8 @@ static const struct omci_me_desc omci_me_descs[] = {
 		      52, OMCI_CLASS_CATEGORY_MANAGEMENT, OMCI_CLASS_SUPPORT_NATIVE,
 		      omci_olt_g_attrs),
 	STANDARD_DESC(OMCI_CLASS_DOT1X_PORT_EXTENSION, "Dot1X port extension package",
-		      STANDARD_ACTIONS, OMCI_ME_F_ONU_CREATED, BIT(15), BIT(15),
-		      1, OMCI_CLASS_CATEGORY_UNI, OMCI_CLASS_SUPPORT_NATIVE,
+		      STANDARD_ACTIONS, OMCI_ME_F_ONU_CREATED, GENMASK(15, 14), BIT(15),
+		      2, OMCI_CLASS_CATEGORY_UNI, OMCI_CLASS_SUPPORT_NATIVE,
 		      omci_dot1x_port_attrs),
 	STANDARD_DESC(OMCI_CLASS_MAC_BRIDGE_PORT_CONFIG_DATA,
 		      "MAC bridge port configuration data", OLT_CREATED_ACTIONS,
@@ -705,11 +706,11 @@ static const struct omci_me_desc omci_me_descs[] = {
 		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_NATIVE,
 		      omci_tcont_attrs),
 	STANDARD_DESC(OMCI_CLASS_PRIORITY_QUEUE, "Priority queue", STANDARD_ACTIONS,
-		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 4), BIT(8), 26,
+		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 4), GENMASK(15, 4), 26,
 		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_PROVISIONED,
 		      omci_priority_queue_attrs),
 	STANDARD_DESC(OMCI_CLASS_TRAFFIC_SCHEDULER, "Traffic scheduler", STANDARD_ACTIONS,
-		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 12), BIT(13), 6,
+		      OMCI_ME_F_ONU_CREATED, GENMASK(15, 12), GENMASK(15, 12), 6,
 		      OMCI_CLASS_CATEGORY_ANI, OMCI_CLASS_SUPPORT_PROVISIONED,
 		      omci_traffic_scheduler_attrs),
 	STANDARD_DESC(OMCI_CLASS_UNI_G, "UNI-G", STANDARD_ACTIONS,
@@ -1074,6 +1075,42 @@ int omci_me_encode_attributes(const struct omci_me_desc *desc,
 		*encoded_len = used;
 
 	return encoded ? 0 : -ENOSPC;
+}
+
+/* Baseline MIB Upload Next has 26 attribute octets. Count and encode the same
+ * attribute-aligned fragments; a second fragment must not silently disappear.
+ */
+int omci_me_upload_masks(const struct omci_me_desc *desc,
+			 const struct omci_mib_object *object, u16 masks[16])
+{
+	unsigned int bit, chunk = 0, used = 0;
+	u16 mask;
+
+	memset(masks, 0, 16 * sizeof(*masks));
+	if (!desc) {
+		masks[0] = object->attr_mask;
+		return 1;
+	}
+	mask = object->attr_mask & desc->valid_attr_mask & desc->mib_upload_mask;
+	for (bit = 0; bit < 16; bit++) {
+		const struct omci_attr_desc *attr;
+		u16 selected = BIT(15 - bit);
+
+		if (!(mask & selected))
+			continue;
+		attr = omci_me_find_attr(desc, selected);
+		if (!attr || !(attr->access & OMCI_ATTR_ACCESS_READ))
+			continue;
+		if (attr->len > 26 || attr->offset + attr->len > sizeof(object->data))
+			return -EMSGSIZE;
+		if (used + attr->len > 26) {
+			chunk++;
+			used = 0;
+		}
+		masks[chunk] |= selected;
+		used += attr->len;
+	}
+	return chunk + 1;
 }
 
 unsigned int omci_me_attr_count(const struct omci_agent *agent)

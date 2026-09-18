@@ -209,6 +209,96 @@ static int fixture_stop_thread(void *arg)
 
 int q1000k_omci_telemetry_test(void);
 
+/* Exercise the production fragment selector, encoder and authenticated TX.
+ * Every descriptor-backed readable attribute appears once; queue related-port
+ * and scheduler bytes must be on the wire, not only in the local MIB.
+ */
+static int fixture_upload(struct omci_device *odev)
+{
+	struct omci_agent *agent = &odev->agent;
+	struct omci_mib_object *object;
+	const struct omci_me_desc *desc;
+	struct sk_buff *skb;
+	unsigned long index;
+	u8 content[32], repeated[32];
+	u16 masks[16], queue_sequence = 0;
+	unsigned int sequence = 0, queues = 0, schedulers = 0, i, j;
+	int count = omci_mib_upload_count_locked(agent), chunks, ret = 0;
+
+	CHECK(count > omci_mib_count_locked(agent));
+	xa_for_each(&agent->mib, index, object) {
+		u16 complete = 0, expected = 0;
+
+		if (!omci_mib_object_uploadable(agent, object)) continue;
+		desc = omci_me_lookup(agent, object->class_id);
+		if (!desc) {
+			CHECK(!omci_agent_upload_next_locked(agent, sequence++, content));
+			CHECK(get_unaligned_be16(content) == object->class_id);
+			continue; /* Existing opaque/vendor representation is unchanged. */
+		}
+		chunks = omci_me_upload_masks(desc, object, masks);
+		CHECK(chunks > 0 && chunks <= 16);
+		for (i = 0; i < desc->num_attrs; i++)
+			if (desc->attrs[i].access & OMCI_ATTR_ACCESS_READ)
+				expected |= desc->attrs[i].mask;
+		expected &= object->attr_mask & desc->mib_upload_mask & desc->valid_attr_mask;
+		for (i = 0; i < chunks; i++, sequence++) {
+			unsigned int offset = 6;
+
+			CHECK(!omci_agent_upload_next_locked(agent, sequence, content));
+			CHECK(!omci_agent_upload_next_locked(agent, sequence, repeated));
+			CHECK(!memcmp(content, repeated, sizeof(content)));
+			CHECK(get_unaligned_be16(content) == object->class_id);
+			CHECK(get_unaligned_be16(content + 2) == object->entity_id);
+			CHECK(get_unaligned_be16(content + 4) == masks[i]);
+			CHECK(!(complete & masks[i])); complete |= masks[i];
+			for (j = 0; j < desc->num_attrs; j++) {
+				const struct omci_attr_desc *attr = &desc->attrs[j];
+
+				if (!(masks[i] & attr->mask)) continue;
+				CHECK(offset + attr->len <= sizeof(content));
+				CHECK(!memcmp(content + offset, object->data + attr->offset, attr->len));
+				offset += attr->len;
+			}
+			if (object->class_id == OMCI_CLASS_PRIORITY_QUEUE) {
+				CHECK(chunks == 1 && masks[i] == 0xfff0);
+				CHECK(get_unaligned_be16(content + 15) == 0x8000 + queues / 8);
+				CHECK(get_unaligned_be16(content + 17) == 7 - queues % 8);
+				CHECK(get_unaligned_be16(content + 19) == 0x8000 + queues / 8);
+				queue_sequence = sequence; queues++;
+			} else if (object->class_id == OMCI_CLASS_TRAFFIC_SCHEDULER) {
+				CHECK(chunks == 1 && masks[i] == 0xf000); schedulers++;
+			}
+		}
+		CHECK(complete == expected);
+	}
+	CHECK(sequence == count && queues == 256 && schedulers == 32);
+	CHECK(omci_agent_upload_next_locked(agent, count, content) == -ENOENT);
+	CHECK(omci_agent_upload_next_locked(agent, U16_MAX, content) == -ENOENT);
+	CHECK(!omci_mib_lookup(agent, OMCI_CLASS_PRIORITY_QUEUE, 0xdead));
+	for (i = 0; i < 3; i++) {
+		skb = fixture_packet(9100 + i, false); CHECK(skb);
+		skb->data[2] = i == 0 ? 0x4d : 0x4e;
+		put_unaligned_be16(OMCI_CLASS_ONU_DATA, skb->data + 4);
+		put_unaligned_be16(i == 1 ? queue_sequence : 0, skb->data + 8);
+		omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
+		flush_work(&odev->rx_work);
+		if (!i) {
+			CHECK(get_unaligned_be16(fixture_response + 8) == count);
+			CHECK(fixture_diagnostic.public_kind == 1 && fixture_diagnostic.public_sequence == count);
+		} else if (i == 1) {
+			CHECK(fixture_diagnostic.public_kind == 2 && fixture_diagnostic.public_class == 277);
+			CHECK(fixture_diagnostic.public_mask == 0xfff0 && fixture_diagnostic.public_len == 26);
+			CHECK(!memcmp(fixture_diagnostic.public_data, fixture_response + 14, 26));
+		} else {
+			/* The first ME contains software identity; no payload diagnostic. */
+			CHECK(!fixture_diagnostic.public_kind && !fixture_diagnostic.public_len);
+		}
+	}
+out:
+	return ret;
+}
+
 static int fixture_provisioning(struct omci_device *odev)
 {
 	u8 request[32] = {}, answer[64] = {};
@@ -255,9 +345,26 @@ static int fixture_provisioning(struct omci_device *odev)
 	CHECK(written == 4 && answer[3] == 0);
 	CHECK(omci_agent_get_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x102,
 		request, 2, answer, sizeof(answer), &written) == OMCI_RESULT_UNKNOWN_INSTANCE);
-	put_unaligned_be16(BIT(14), request);
+	put_unaligned_be16(BIT(14), request); request[2] = 1;
 	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
-		OMCI_MSG_TYPE_SET, request, 3, &changed) == OMCI_RESULT_PARAMETER_ERROR);
+		OMCI_MSG_TYPE_SET, request, 3, &changed) == OMCI_RESULT_NOT_SUPPORTED);
+	/* Factory comparison stores only valid controls, with no PAE state. */
+	bench_dot1x_oem = true;
+	put_unaligned_be16(0xc000, request); request[2] = 1; request[3] = 3;
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		OMCI_MSG_TYPE_SET, request, 4, &changed) == OMCI_RESULT_SUCCESS);
+	for (i = 0; i < 5; i++) {
+		request[3] = i;
+		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+			OMCI_MSG_TYPE_SET, request, 4, &changed) ==
+			(i >= 1 && i <= 3 ? OMCI_RESULT_SUCCESS : OMCI_RESULT_PARAMETER_ERROR));
+	}
+	CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101)->data[1] == 3);
+	request[2] = 2; request[3] = 2;
+	CHECK(omci_agent_set_locked(odev, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101,
+		OMCI_MSG_TYPE_SET, request, 4, &changed) == OMCI_RESULT_PARAMETER_ERROR);
+	CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x101)->data[0] == 1);
+	bench_dot1x_oem = false;
 	CHECK(!omci_agent_mib_reset(odev, false));
 	olt = omci_mib_lookup(&odev->agent, OMCI_CLASS_OLT_G, 0);
 	CHECK(olt && !olt->olt_g.valid && !memcmp(olt->data, "    ", 4));
@@ -301,7 +408,23 @@ static int fixture_provisioning(struct omci_device *odev)
 	CHECK(fixture_diagnostic.attribute_mask == BIT(15) && fixture_diagnostic.dot1x_enable == 1);
 	CHECK((fixture_diagnostic.flags & 32) && fixture_diagnostic.operation_error == -EOPNOTSUPP);
 	CHECK(fixture_diagnostic.stage == OMCI_OPERATION_VALIDATE);
+	bench_dot1x_oem = true;
+	for (i = 0; i < 2; i++) {
+		skb = fixture_packet(9003, false); CHECK(skb);
+		skb->data[2] = 0x48;
+		put_unaligned_be16(OMCI_CLASS_DOT1X_PORT_EXTENSION, skb->data + 4);
+		put_unaligned_be16(0x101, skb->data + 6);
+		put_unaligned_be16(0xc000, skb->data + 8);
+		skb->data[10] = 1; skb->data[11] = 3;
+		omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
+		flush_work(&odev->rx_work);
+		CHECK(fixture_response[8] == OMCI_RESULT_SUCCESS);
+		CHECK(fixture_diagnostic.dot1x_enable == 1 && fixture_diagnostic.dot1x_action == 3);
+		CHECK((fixture_diagnostic.flags & (BIT(5) | BIT(7) | BIT(8))) == (BIT(5) | BIT(7) | BIT(8)));
+		CHECK(!!(fixture_diagnostic.flags & 1) == !!i);
+	}
 out:
+	bench_dot1x_oem = false;
 	fixture_gem_error = -EOPNOTSUPP;
 	return ret;
 }
@@ -462,6 +585,7 @@ int q1000k_omci_core_test(void)
 	omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
 	flush_work(&odev->rx_work);
 	CHECK(fixture_tx == before);
+	CHECK(!fixture_upload(odev));
 	CHECK(!fixture_provisioning(odev));
 	before = fixture_tx;
 
@@ -658,6 +782,18 @@ int q1000k_omci_core_test(void)
 			request, sizeof(request), &changed) == OMCI_RESULT_PROCESSING_ERROR);
 		CHECK(q->data[15] == 17);
 		fixture_scheduler_error = 0;
+		{
+			u8 binding[] = { 0x03, 0x00, 0, 0, 0 };
+			CHECK(omci_agent_set_locked(odev, OMCI_CLASS_PRIORITY_QUEUE, 0x8003, OMCI_MSG_TYPE_SET,
+				binding, sizeof(binding), &changed) == OMCI_RESULT_SUCCESS);
+			CHECK(!fixture_queue_value.scheduler_entity_id && !fixture_queue_value.weight);
+			binding[0] = 2; binding[2] = 0x80;
+			CHECK(omci_agent_set_locked(odev, OMCI_CLASS_PRIORITY_QUEUE, 0x8003, OMCI_MSG_TYPE_SET,
+				binding, 4, &changed) == OMCI_RESULT_SUCCESS);
+			CHECK(fixture_queue_value.scheduler_entity_id == 0x8000 && !fixture_queue_value.weight);
+			CHECK(omci_agent_set_locked(odev, OMCI_CLASS_PRIORITY_QUEUE, 0xdead, OMCI_MSG_TYPE_SET,
+				binding, 4, &changed) == OMCI_RESULT_UNKNOWN_INSTANCE);
+		}
 		request[0] = 0x20; request[1] = 0; request[2] = 2;
 		CHECK(omci_agent_set_locked(odev, OMCI_CLASS_TRAFFIC_SCHEDULER, 0x8000, OMCI_MSG_TYPE_SET,
 			request, sizeof(request), &changed) == OMCI_RESULT_SUCCESS);

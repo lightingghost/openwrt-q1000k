@@ -17,6 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/math.h>
 #include <linux/math64.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -66,6 +67,14 @@
 #define OMCI_BRIDGE_TP_VEIP		11
 
 static void omci_agent_reset_table_snapshot_locked(struct omci_agent *agent);
+
+/* NAND adapter 0x50b10/0x50bc0 validates then stores these controls without
+ * invoking an authenticator. Keep this explicitly selected bench comparison
+ * separate from the default rejection of unavailable authentication.
+ */
+static bool bench_dot1x_oem;
+module_param(bench_dot1x_oem, bool, 0400);
+MODULE_PARM_DESC(bench_dot1x_oem, "Factory Dot1X control-store comparison; no authenticator");
 
 /* A failed undo cannot establish agreement between the MIB and hardware.
  * Preserve diagnostic snapshots, close admission, and require a new device
@@ -1833,11 +1842,9 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 		if (ret)
 			return ret;
 
-		/* Same entity as the Ethernet UNI. Only disabled authentication is
-		 * supported: enabling an absent authenticator must fail explicitly.
-		 */
+		/* Same entity as the Ethernet UNI; action register is write-only. */
 		ret = omci_mib_add_default_mask(agent, OMCI_CLASS_DOT1X_PORT_EXTENSION,
-						entity_id, BIT(15), data, 1);
+						entity_id, GENMASK(15, 14), data, 2);
 		if (ret)
 			return ret;
 
@@ -2644,6 +2651,27 @@ static unsigned int omci_mib_count_locked(struct omci_agent *agent)
 	xa_for_each(&agent->mib, index, object)
 		if (omci_mib_object_uploadable(agent, object))
 			count++;
+	return count;
+}
+
+static int omci_mib_upload_count_locked(struct omci_agent *agent)
+{
+	struct omci_mib_object *object;
+	unsigned long index;
+	u16 masks[16];
+	int count = 0, chunks;
+
+	xa_for_each(&agent->mib, index, object) {
+		if (!omci_mib_object_uploadable(agent, object))
+			continue;
+		chunks = omci_me_upload_masks(omci_me_lookup(agent, object->class_id),
+					    object, masks);
+		if (chunks < 0)
+			return chunks;
+		count += chunks;
+		if (count > U16_MAX)
+			return -EOVERFLOW;
+	}
 	return count;
 }
 
@@ -3574,9 +3602,16 @@ static u8 omci_agent_set_locked(struct omci_device *odev, u16 class_id,
 		goto rollback_parameter;
 	if (class_id == OMCI_CLASS_GEM_PORT_CTP && object->data[15] > 3)
 		goto rollback_parameter;
-	if (class_id == OMCI_CLASS_DOT1X_PORT_EXTENSION && object->data[0]) {
-		ret = object->data[0] == 1 ? -EOPNOTSUPP : -EINVAL;
-		goto rollback_parameter;
+	if (class_id == OMCI_CLASS_DOT1X_PORT_EXTENSION) {
+		if (object->data[0] > 1 || ((mask & BIT(14)) &&
+		    (object->data[1] < 1 || object->data[1] > 3))) {
+			ret = -EINVAL;
+			goto rollback_parameter;
+		}
+		if (!bench_dot1x_oem && (object->data[0] || (mask & BIT(14)))) {
+			ret = -EOPNOTSUPP;
+			goto rollback_parameter;
+		}
 	}
 
 	/* Keep ONU-created instances across a subsequent MIB reset. */
@@ -4186,14 +4221,20 @@ static int omci_agent_upload_next_locked(struct omci_agent *agent,
 	unsigned long index;
 	size_t encoded_len = 0;
 	u16 encoded_mask = 0;
-	u16 upload_pos = 0;
-	int ret;
+	u16 masks[16];
+	unsigned int upload_pos = 0;
+	int ret, chunks;
 
 	xa_for_each(&agent->mib, index, object) {
 		if (!omci_mib_object_uploadable(agent, object))
 			continue;
-		if (upload_pos++ == sequence)
+		desc = omci_me_lookup(agent, object->class_id);
+		chunks = omci_me_upload_masks(desc, object, masks);
+		if (chunks < 0)
+			return chunks;
+		if (sequence - upload_pos < chunks)
 			goto found;
+		upload_pos += chunks;
 	}
 
 	return -ENOENT;
@@ -4201,9 +4242,8 @@ static int omci_agent_upload_next_locked(struct omci_agent *agent,
 found:
 	put_unaligned_be16(object->class_id, content);
 	put_unaligned_be16(object->entity_id, content + 2);
-	desc = omci_me_lookup(agent, object->class_id);
 	if (desc) {
-		u16 mask = object->attr_mask & desc->mib_upload_mask;
+		u16 mask = masks[sequence - upload_pos];
 
 		ret = omci_me_encode_attributes(desc, object, mask,
 						content + 6, 26,
@@ -4334,8 +4374,11 @@ omci_agent_build_response_locked(struct omci_device *odev,
 	case OMCI_MSG_TYPE_MIB_UPLOAD:
 		if (capacity < 2)
 			return -EMSGSIZE;
+		ret = omci_mib_upload_count_locked(agent);
+		if (ret < 0)
+			return ret;
 		agent->upload_index = 0;
-		put_unaligned_be16(omci_mib_count_locked(agent), content);
+		put_unaligned_be16(ret, content);
 		*content_len = 2;
 		break;
 	case OMCI_MSG_TYPE_MIB_UPLOAD_NEXT:
@@ -4536,13 +4579,13 @@ void omci_agent_receive(struct omci_device *odev, const struct sk_buff *skb)
 out:
 	if (odev->ops->diagnostic) {
 		u8 op = request.message_type & 0x1f;
+		unsigned int off = request.device_id == OMCI_BASELINE_DEV_ID ? 8 : 10;
 		u32 flags = duplicate | unsupported << 1 | fake << 2 | operational_changed << 3;
 		u32 result = 0;
 		/* Only actions whose response starts with a result code. MIB upload
 		 * headers and attribute bytes are not result codes or diagnostics. */
 		if (response_len && (op == 4 || op == 6 || op == 8 || op == 9 ||
 				     op == 26 || op == 28 || op == 29)) {
-			unsigned int off = request.device_id == OMCI_BASELINE_DEV_ID ? 8 : 10;
 			if (response_len > off) { result = response[off]; flags |= 16; }
 		}
 		diagnostic.class_id = request.class_id;
@@ -4561,6 +4604,42 @@ out:
 		    (diagnostic.attribute_mask & BIT(15)) && request.payload_len >= 3) {
 			diagnostic.dot1x_enable = request.payload[2];
 			flags |= 32;
+		}
+		if (request.class_id == OMCI_CLASS_DOT1X_PORT_EXTENSION && op == 8) {
+			unsigned int action_offset = 2 + !!(diagnostic.attribute_mask & BIT(15));
+
+			if ((diagnostic.attribute_mask & BIT(14)) && request.payload_len > action_offset) {
+				diagnostic.dot1x_action = request.payload[action_offset];
+				flags |= BIT(7);
+			}
+			if (bench_dot1x_oem)
+				flags |= BIT(8);
+		}
+		if (op == OMCI_MSG_TYPE_MIB_UPLOAD && response_len >= off + 2) {
+			diagnostic.public_kind = 1;
+			diagnostic.public_sequence = get_unaligned_be16(response + off);
+		} else if (op == OMCI_MSG_TYPE_MIB_UPLOAD_NEXT &&
+			   response_len >= off + 32 && request.payload_len >= 2) {
+			u16 uploaded = get_unaligned_be16(response + off);
+
+			if (uploaded == OMCI_CLASS_TCONT || uploaded == OMCI_CLASS_PRIORITY_QUEUE ||
+			    uploaded == OMCI_CLASS_TRAFFIC_SCHEDULER) {
+				diagnostic.public_kind = 2;
+				diagnostic.public_class = uploaded;
+				diagnostic.public_entity = get_unaligned_be16(response + off + 2);
+				diagnostic.public_mask = get_unaligned_be16(response + off + 4);
+				diagnostic.public_sequence = get_unaligned_be16(request.payload);
+				diagnostic.public_len = 26;
+				memcpy(diagnostic.public_data, response + off + 6, 26);
+			}
+		} else if (op == OMCI_MSG_TYPE_SET && request.class_id == OMCI_CLASS_PRIORITY_QUEUE &&
+			   request.payload_len >= 2) {
+			diagnostic.public_kind = 3;
+			diagnostic.public_class = request.class_id;
+			diagnostic.public_entity = request.entity_id;
+			diagnostic.public_mask = diagnostic.attribute_mask;
+			diagnostic.public_len = min_t(size_t, request.payload_len - 2, 26);
+			memcpy(diagnostic.public_data, request.payload + 2, diagnostic.public_len);
 		}
 		diagnostic.flags = flags;
 		odev->ops->diagnostic(odev, &diagnostic);

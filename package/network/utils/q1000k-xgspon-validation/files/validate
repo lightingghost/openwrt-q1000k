@@ -269,7 +269,7 @@ case "$recovery_actions" in
 esac
 sn_limit=20; coalesce=0
 registration_bench=0 live_profiles=0 control_coalesce=0 ranging_mode=0 key_inline=0 activation_diag=0
-initial_key_readback=0 omci_min_len=60 alloc_revoke=0 live_add=3
+initial_key_readback=0 omci_min_len=60 alloc_revoke=0 live_add=3 dot1x_oem=0
 case "$phase" in
  activation-reg-*|activation-omci-*)
   registration_bench=1; sn_limit=40; coalesce=1; live_profiles=1; control_coalesce=1; activation_diag=1
@@ -280,7 +280,9 @@ case "$phase" in
      activation-omci-oem) ranging_mode=3 ;;
      activation-omci-live-gem) live_add=1 ;;
      activation-omci-live-tcont) live_add=2 ;;
-     activation-omci-live-both|activation-omci-live-repeat) live_add=3 ;;
+     activation-omci-live-both|activation-omci-live-repeat|activation-omci-topology-strict) live_add=3 ;;
+     activation-omci-topology-oem|activation-omci-topology-repeat) live_add=3; dot1x_oem=1 ;;
+     activation-omci-topology-eqd) live_add=3; dot1x_oem=1; ranging_mode=3 ;;
      activation-omci-live-oem) live_add=3; ranging_mode=3 ;;
      activation-omci-min48) omci_min_len=48 ;;
      activation-omci-revoke) alloc_revoke=1 ;;
@@ -294,6 +296,7 @@ case "$phase" in
   esac
  ;;
 esac
+printf 'topology_comparison dot1x_oem=%s phase=%s\n' "$dot1x_oem" "$phase"
 printf 'continuity_comparison live_add=%s phase=%s\n' "$live_add" "$phase"
 printf 'omci_comparison initial_key_readback=%s min_len=%s alloc_revoke=%s phase=%s\n' "$initial_key_readback" "$omci_min_len" "$alloc_revoke" "$phase"
 printf 'registration_comparison range_mode=%s key_inline=%s diag=%s phase=%s\n' "$ranging_mode" "$key_inline" "$activation_diag" "$phase"
@@ -346,7 +349,8 @@ if [ "$mode" = isolated ]; then
 fi
 ip link set dev ponraw up || fail 'Cannot open DMA endpoint.'
 lower_owned=1
-for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do load_module "$module"; done
+for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon; do load_module "$module"; done
+load_module omci bench_dot1x_oem="$dot1x_oem"
 # Only fixed names and validated hexadecimal/scalar module values are expanded.
 load_module xpon_10g bench_live_add="$live_add" bench_initial_key_readback="$initial_key_readback" bench_omci_min_len="$omci_min_len" bench_alloc_revoke="$alloc_revoke" bench_profile_coalesce="$coalesce" bench_profile_live="$live_profiles" bench_control_coalesce="$control_coalesce" bench_ranging_mode="$ranging_mode" bench_key_inline="$key_inline" bench_activation_diag="$activation_diag" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
 }

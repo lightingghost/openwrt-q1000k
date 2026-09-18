@@ -19,7 +19,7 @@
 struct qs_gem { u16 entity, gem, tcont; u8 direction, key_ring; bool valid, seeded; };
 struct qs_rules { size_t count; u8 channels[QS_MAX]; u16 vlan_group[QS_MAX];
 	struct q1000k_vlan_program vlan[QS_MAX]; struct omci_service_config rule[]; };
-struct qs_scheduler { u8 policy, weight[8]; };
+struct qs_scheduler { u8 policy, weight[8], direct_mask; };
 static u16 qs_alloc[QS_TCONTS];
 static bool qs_seeded_alloc[QS_TCONTS];
 static struct qs_scheduler qs_schedulers[QS_TCONTS];
@@ -27,6 +27,17 @@ static struct qs_gem qs_gems[QS_MAX];
 static bool qs_uni[4];
 static bool qs_enabled, qs_changing;
 static struct qs_rules __rcu *qs_current;
+
+static void qs_reset_schedulers(void)
+{
+	unsigned int i;
+
+	memset(qs_schedulers, 0, sizeof(qs_schedulers));
+	for (i = 0; i < QS_TCONTS; i++) {
+		qs_schedulers[i].policy = 1;
+		memset(qs_schedulers[i].weight, 1, sizeof(qs_schedulers[i].weight));
+	}
+}
 
 static int qs_uni_index(u16 entity)
 {
@@ -42,7 +53,7 @@ void q1000k_services_init(void)
 {
 	memset(qs_alloc, 0xff, sizeof(qs_alloc));
 	memset(qs_seeded_alloc, 0, sizeof(qs_seeded_alloc));
-	memset(qs_schedulers, 1, sizeof(qs_schedulers));
+	qs_reset_schedulers();
 	memset(qs_gems, 0, sizeof(qs_gems));
 	memset(qs_uni, 1, sizeof(qs_uni));
 	qs_enabled = qs_changing = false;
@@ -75,7 +86,7 @@ void q1000k_services_reset(void)
 	kfree(old);
 	memset(qs_alloc, 0xff, sizeof(qs_alloc));
 	memset(qs_seeded_alloc, 0, sizeof(qs_seeded_alloc));
-	memset(qs_schedulers, 1, sizeof(qs_schedulers));
+	qs_reset_schedulers();
 	memset(qs_gems, 0, sizeof(qs_gems));
 	memset(qs_uni, 1, sizeof(qs_uni));
 	WRITE_ONCE(qs_changing, false);
@@ -385,9 +396,28 @@ static int qs_scheduler_update(unsigned int index, const struct qs_scheduler *ca
 	struct qs_qos_update update = { .scheduler = *candidate };
 	bool was_changing;
 	int ret, channel;
+	unsigned int i;
+
+	/* A direct T-CONT queue uses the fixed strict-priority bank. Mixed
+	 * direct/WRR scheduling and zero WRR weights cannot be represented.
+	 */
+	if (candidate->policy == 2) {
+		if (candidate->direct_mask)
+			return -EOPNOTSUPP;
+		for (i = 0; i < 8; i++)
+			if (!candidate->weight[i] || candidate->weight[i] > 127)
+				return -ERANGE;
+	}
 
 	if (!memcmp(&qs_schedulers[index], candidate, sizeof(*candidate)))
 		return 0;
+	/* Weight and the equivalent direct-bank pointer do not change SP
+	 * hardware. Preserve OMCC continuity for these configuration writes.
+	 */
+	if (qs_schedulers[index].policy == 1 && candidate->policy == 1) {
+		qs_schedulers[index] = *candidate;
+		return 0;
+	}
 	table = kzalloc(sizeof(*table), GFP_KERNEL);
 	if (!table)
 		return -ENOMEM;
@@ -434,15 +464,20 @@ int q1000k_services_queue(struct omci_device *odev, u16 entity,
 	    q->backpressure_operation || q->backpressure_time ||
 	    q->backpressure_occur != 0xffff || q->backpressure_clear ||
 	    q->tcont_entity_id != QS_TCONT_BASE + index ||
-	    q->scheduler_entity_id != 0x8000 + index || q->priority != 7 - queue)
+	    (q->scheduler_entity_id && q->scheduler_entity_id != 0x8000 + index) ||
+	    q->priority != 7 - queue)
 		return -EOPNOTSUPP;
-	if (!q->weight || q->weight > 127)
+	if (q->weight > 127)
 		return -ERANGE;
 	token = q1000k_protocol_enter();
 	if (token < 0)
 		return token;
 	candidate = qs_schedulers[index];
 	candidate.weight[queue] = q->weight;
+	if (q->scheduler_entity_id)
+		candidate.direct_mask &= ~BIT(queue);
+	else
+		candidate.direct_mask |= BIT(queue);
 	ret = qs_scheduler_update(index, &candidate);
 	q1000k_protocol_leave(token);
 	return ret;

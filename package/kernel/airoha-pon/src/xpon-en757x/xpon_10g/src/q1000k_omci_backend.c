@@ -10,6 +10,7 @@
 #include <linux/rcupdate.h>
 #include <linux/random.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <net/xpon.h>
@@ -380,11 +381,32 @@ static void qomci_diagnostic(struct omci_device *odev, const struct omci_diagnos
 	q1000k_trace(QT_OMCI, e->opcode, e->error, e->class_id,
 		e->flags | 64 | (u32)e->transaction_id << 16, e->result,
 		(u32)e->entity_id << 16 | e->attribute_mask);
-	if (e->operation_error || (e->flags & 32))
+	if (e->operation_error || (e->flags & (BIT(5) | BIT(7))))
 		q1000k_trace(QT_OMCI_OPERATION, e->stage, e->operation_error,
 			(u32)e->class_id << 16 | e->entity_id,
 			(u32)e->transaction_id << 16 | e->attribute_mask,
-			e->opcode, e->flags & 32 ? 0x100 | e->dot1x_enable : 0);
+			e->opcode, (e->flags & BIT(5) ? 0x100 | e->dot1x_enable : 0) |
+			(e->flags & BIT(7) ? BIT(17) | (u32)e->dot1x_action << 9 : 0) |
+			(e->flags & BIT(8) ? BIT(18) : 0));
+	if (e->public_kind == 1) {
+		q1000k_trace(QT_OMCI_TOPOLOGY, 1, e->error,
+			e->transaction_id, e->public_sequence, 0, 0);
+	} else if (e->public_kind == 2 || e->public_kind == 3) {
+		u8 data[36] = {};
+		unsigned int i;
+
+		memcpy(data, e->public_data, e->public_len);
+		q1000k_trace(QT_OMCI_TOPOLOGY, e->public_kind == 2 ? 2 : 6, e->error,
+			(u32)e->public_class << 16 | e->public_entity,
+			(u32)e->public_sequence << 16 | e->public_mask,
+			e->transaction_id, e->public_len);
+		for (i = 0; i < 3; i++)
+			q1000k_trace(QT_OMCI_TOPOLOGY, 3 + i, 0,
+				(u32)e->transaction_id << 16 | e->public_class,
+				get_unaligned_be32(data + i * 12),
+				get_unaligned_be32(data + i * 12 + 4),
+				get_unaligned_be32(data + i * 12 + 8));
+	}
 }
 
 static const struct omci_device_ops qomci_ops = {

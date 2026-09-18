@@ -12,7 +12,7 @@
     "host_drain_seconds_approx": 5,
     "overflow_is_inconclusive": true,
     "counter_errno_counts": true,
-    "critical_capacity": 1024,
+    "critical_capacity": 8192,
     "critical_stream_version": 1,
     "critical_positions_independent": true
   },
@@ -349,6 +349,46 @@
       "hypothesis": "REG5",
       "implemented": true,
       "hardware_run": false
+    },
+    {
+      "id": "Q1",
+      "test": "Decode the actual queue topology in MIB Upload replies",
+      "selection": "topology suite",
+      "hypothesis": "OLT cannot resolve queues because related-port and scheduler attributes were omitted",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "Q2",
+      "test": "Capture full public queue Set values and results",
+      "selection": "topology suite",
+      "hypothesis": "0xDEAD disappears when the OLT receives usable queue mappings",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "Q3",
+      "test": "Compare strict and factory Dot1X control storage",
+      "selection": "topology suite",
+      "hypothesis": "Class 290 action/enable compatibility blocks provisioning",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "Q4",
+      "test": "Track GEM creates and native completions with live additions",
+      "selection": "topology suite",
+      "hypothesis": "Valid queue references allow bidirectional GEM provisioning",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "Q5",
+      "test": "Observe service rules, addressing and traffic separately from O5",
+      "selection": "topology suite",
+      "hypothesis": "Remaining provisioning or data-path failure persists",
+      "implemented": true,
+      "hardware_run": false
     }
   ],
   "event_names": {
@@ -382,7 +422,8 @@
     "28": "OMCI GEM candidate and QoS fields",
     "29": "OMCI original provider error and failing stage",
     "30": "Native OMCI TX: id 1 admission-drop,2 submit,3 DMA-complete,4 descriptor-drop,5 teardown-abort,6 DMA-error,7 admission-retry. a=TCI/type/device, b=class/entity, c=GEM/length, d=native epoch low32. Headers only; no optical acknowledgement.",
-    "31": "GWAN append: id 1 begin,2 end; a=GEM/T-CONT mask,b=added channel bitmap,c=added GEM count,d=complete channel bitmap; result errno."
+    "31": "GWAN append: id 1 begin,2 end; a=GEM/T-CONT mask,b=added channel bitmap,c=added GEM count,d=complete channel bitmap; result errno.",
+    "32": "Public OMCI topology: id 1 upload count; 2 upload header; 6 queue Set header; 3..5 data words. Classes 262/277/278 only; no identity payload."
   },
   "discovery_irq_bits": {
     "2": "SN request received",
@@ -391,7 +432,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "continuity",
+  "default_suite": "topology",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -868,6 +909,36 @@
       "21": "after live addition",
       "22": "before full retirement",
       "23": "after full reactivation"
+    }
+  },
+  "omci_topology": {
+    "revision": 1,
+    "live_add": 3,
+    "physical_actions_required": 0,
+    "upload": "All descriptor-backed readable attributes, split into 26-byte attribute-aligned blocks; PQ mask fff0, scheduler f000.",
+    "dot1x": "Read-only module selector bench_dot1x_oem; strict default. Factory comparison validates enable 0..1 and write-only action 1..3 and stores controls; no authenticator or PAE success claimed.",
+    "queue_binding": "Same-T-CONT scheduler or null direct strict-priority bank. Zero weights allowed only under SP. Cross-T-CONT, mixed direct/WRR and zero WRR weights rejected.",
+    "cases": {
+      "activation-omci-topology-strict": {
+        "dot1x_oem": false,
+        "ranging_mode": 1,
+        "samples": 300
+      },
+      "activation-omci-topology-oem": {
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 300
+      },
+      "activation-omci-topology-eqd": {
+        "dot1x_oem": true,
+        "ranging_mode": 3,
+        "samples": 300
+      },
+      "activation-omci-topology-repeat": {
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 600
+      }
     }
   }
 }
