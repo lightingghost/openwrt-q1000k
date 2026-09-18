@@ -29,6 +29,9 @@ class ActivationTests(unittest.TestCase):
         fixture.write('proc/q1000k-pon-mac','{"mac_version":1}\n')
         fixture.write(str(fixture.controller.relative_to(self.root))+'/transmitter_status', '{"transmitter_version":1,"fields":{}}\n')
         fixture.write(str(fixture.controller.relative_to(self.root))+'/receiver_status', '{"oem_post_saved":true}\n')
+        fixture.write(str(fixture.controller.relative_to(self.root))+'/output_status', json.dumps(dict(
+            passive_output_version=1, error=0, begin_ns=1, end_ns=2, valid=(1<<30)-1,
+            board_disabled_before=1, board_disabled=1, v=[0]*30))+'\n')
         self.identity = self.root/'tmp/private'
         self.identity.mkdir(); (self.identity/'identity.json').write_text(json.dumps(IDENTITY))
         mock = r'''import os,sys,json,pathlib
@@ -39,7 +42,9 @@ def tx():
     return p.exists() and json.loads(p.read_text()).get('validation_tx')=='1'
 def emit(v): print(json.dumps(v))
 if action=='cat':
-    if args==[str(ctl/'status')]:
+    if args==[str(ctl/'output_status')] and os.environ.get('VALIDATION_BAD')=='output-error':
+        emit(dict(passive_output_version=1,error=-121))
+    elif args==[str(ctl/'status')]:
         active=(ctl/'operation').read_text().strip()=='initialize'
         emit(dict(mode='xgspon' if active else 'off',tx_inhibited=not tx(),tx_disabled=not tx() or not active,
             last_error=0,md32_enabled=active,firmware_verified=active,calibration_supplied=active))
@@ -272,6 +277,27 @@ else: raise AssertionError((action,args))
             if not bad: self.assertEqual(result.stdout.count('"output_version": 1'),3)
             self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
             self.assertFalse((self.root/'sys/module/phy_10g').exists())
+
+    def test_discovery_variants_and_passive_read_failure_cleanup(self):
+        for case,full in [('probe',False),('full',True),('repeat',False)]:
+            result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+                str(self.identity),'15','none','activation-omci-discovery-'+case],env=self.env,
+                capture_output=True,text=True,timeout=90)
+            self.assertEqual(result.returncode,0,result.stdout[-2500:]+result.stderr)
+            modules={Path(c[1]).stem:c for c in self.calls() if c[0] in ('modprobe','insmod')}
+            for setting in ('bench_live_add=31','bench_vlan_untagged=1','bench_ranging_mode=1',
+                            'bench_initial_key_readback=1','bench_key_inline=1',
+                            f'bench_profile_coalesce={int(not full)}',f'bench_profile_live={int(not full)}',
+                            f'bench_control_coalesce={int(not full)}'):
+                self.assertIn(setting,modules['xpon_10g'])
+            self.assertIn('passive_output_observation phase=initialized-tx-off',result.stdout)
+            self.assertIn('passive_output_observation phase=after-mac-stop-2s',result.stdout)
+            self.assertFalse((self.root/'sys/module/phy_10g').exists())
+        self.env['VALIDATION_BAD']='output-error'
+        result=self.run_case(success=False)
+        self.assertEqual(result.returncode,1)
+        self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+        self.assertFalse((self.root/'sys/module/q1000k_pon_control').exists())
 
     def test_all_active_stages_and_interface_bound_probes(self):
         result=self.run_case('activate')

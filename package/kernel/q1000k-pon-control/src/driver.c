@@ -864,6 +864,44 @@ static ssize_t transmitter_status_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(transmitter_status);
 
+/* Passive observation during normal registration. This shares the controller
+ * lock with configuration and performs no ADC selection, loop hold or TX
+ * change. A fresh bus read is not proof of a fresh conversion or optical burst.
+ */
+static ssize_t output_status_show(struct device *dev,
+                                 struct device_attribute *attr, char *buffer)
+{
+ struct q1000k_pon *pon = dev_get_drvdata(dev);
+ struct en7573_output_sample sample = { .board_disabled = -1 };
+ u64 begin, end;
+ unsigned int i;
+ int ret, board_before = -1;
+ ssize_t len;
+
+ mutex_lock(&pon->lock);
+ ret = pon_check_locked(pon);
+ if (ret) { mutex_unlock(&pon->lock); return ret; }
+ begin = ktime_get_boottime_ns();
+ if (pon->board_tx_disable)
+  board_before = gpiod_get_value_cansleep(pon->board_tx_disable);
+ ret = en7573_output_sample(&pon->io, &sample);
+ if (pon->board_tx_disable)
+  sample.board_disabled = gpiod_get_value_cansleep(pon->board_tx_disable);
+ if (!ret && (board_before < 0 || sample.board_disabled < 0))
+  ret = board_before < 0 ? board_before : sample.board_disabled;
+ end = ktime_get_boottime_ns();
+ len = sysfs_emit(buffer, "{\"passive_output_version\":1,\"begin_ns\":%llu,\"end_ns\":%llu,"
+  "\"valid\":%u,\"error\":%d,\"board_disabled_before\":%d,\"board_disabled\":%d,"
+  "\"conversion_ready_verified\":false,\"burst_synchronous\":false,\"v\":[",
+  begin, end, sample.valid, ret, board_before, sample.board_disabled);
+ for (i = 0; i < EN7573_OUTPUT_FIELDS; i++)
+  len += sysfs_emit_at(buffer, len, "%s%u", i ? "," : "", sample.values[i]);
+ len += sysfs_emit_at(buffer, len, "]}\n");
+ mutex_unlock(&pon->lock);
+ return len;
+}
+static DEVICE_ATTR_RO(output_status);
+
 static ssize_t calibration_write(struct file *file, struct kobject *kobj,
 				 const struct bin_attribute *attr, char *buffer,
 				 loff_t offset, size_t count)
@@ -889,7 +927,8 @@ static BIN_ATTR_WO(calibration, 513);
 
 static struct attribute *pon_attributes[] = {
 	&dev_attr_operation.attr, &dev_attr_status.attr,
-	&dev_attr_receiver_status.attr, &dev_attr_transmitter_status.attr, NULL,
+	&dev_attr_receiver_status.attr, &dev_attr_transmitter_status.attr,
+	&dev_attr_output_status.attr, NULL,
 };
 static const struct bin_attribute *const pon_bin_attributes[] = {
 	&bin_attr_calibration, NULL,

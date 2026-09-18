@@ -316,6 +316,75 @@ def output_result(records, test_id, owner):
         return result, 'measurement-unavailable'
     return result, 'gate-assertion-observed' if result['on_ben_observed'] else 'no-gate-assertion-observed'
 
+def passive_output_summary(text):
+    """Decode passive reads without claiming burst capture or ADC freshness."""
+    result = dict(samples=0, invalid_records=0, unavailable_records=0,
+                  conversion_ready_verified=False, connector_emission_verified=False,
+                  burst_synchronous=False, by_phase={}, decoded=[])
+    for phase, raw in re.findall(r'^passive_output_observation phase=(\S+)\n(\{[^\n]+\})', text, re.M):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            result['invalid_records'] += 1
+            continue
+        if row.get('passive_output_unavailable'):
+            result['unavailable_records'] += 1
+            continue
+        v, valid = row.get('v', []), row.get('valid', 0)
+        if (row.get('passive_output_version') != 1 or row.get('error') != 0
+                or type(valid) is not int or not 0 <= valid < 1 << 30
+                or not isinstance(v, list) or len(v) != 30 or any(type(x) is not int or not 0 <= x <= 0xffffffff for x in v)
+                or type(row.get('begin_ns')) is not int or type(row.get('end_ns')) is not int
+                or not 0 < row['begin_ns'] < row['end_ns']
+                or row.get('board_disabled_before') not in (0, 1)
+                or row.get('board_disabled') not in (0, 1)):
+            result['invalid_records'] += 1
+            continue
+        def value(i): return v[i] if valid & (1 << i) else None
+        selected = (all(value(i) is not None for i in (17,20,22)) and
+                    bool(v[17] & (1 << 26)) and v[20] & 0x3f00 == 0x2400 and v[22] & 0x70 == 0x40)
+        key = ((256 - (v[6] >> 7)) & 0xffff) if value(6) is not None else None
+        current = OEM_MPD_CURRENT[key-100] if selected and key is not None and 100 <= key <= 255 else None
+        decoded = dict(phase=phase, begin_ns=row['begin_ns'], end_ns=row['end_ns'],
+            board_disabled_before=row['board_disabled_before'], board_disabled=row['board_disabled'],
+            internal_tx_disabled=bool(v[12] & 512) if value(12) is not None else None,
+            ben=[v[i] & 1 if value(i) is not None else None for i in (0,5)],
+            hardware_tssi=[(v[i] >> 7) & 0xffff if value(i) is not None else None for i in (1,4)],
+            mailbox_tssi=value(2), reporting_status=value(3), raw_monitor=value(6),
+            monitor_selection_verified=selected, monitor_current_uA_oem=current,
+            tx_power_nW=v[7]*100 if value(7) is not None else None,
+            bias_uA=v[8]*2 if value(8) is not None else None,
+            modulation_uA=v[9]*2 if value(9) is not None else None,
+            bias_code=value(10), modulation_code=value(11),
+            calibration_on_tssi=v[28] & 0xffff if value(28) is not None else None,
+            calibration_off_tssi=v[29] & 0xffff if value(29) is not None else None,
+            mcu_idle=value(13), reporting_flags=value(14), ocp_status=value(27))
+        result['decoded'].append(decoded)
+        result['samples'] += 1
+    for phase in sorted({r['phase'] for r in result['decoded']}):
+        rows = [r for r in result['decoded'] if r['phase'] == phase]
+        summary = dict(samples=len(rows))
+        for name in ('hardware_tssi','mailbox_tssi','raw_monitor','monitor_current_uA_oem',
+                     'tx_power_nW','bias_uA','modulation_uA'):
+            values = [v for r in rows for v in (r[name] if isinstance(r[name],list) else [r[name]]) if v is not None]
+            summary[name] = [min(values),max(values)] if values else None
+        for name in ('ben','reporting_status','board_disabled_before','board_disabled','internal_tx_disabled'):
+            summary[name] = sorted({v for r in rows for v in (r[name] if isinstance(r[name],list) else [r[name]]) if v is not None})
+        result['by_phase'][phase] = summary
+    return result
+
+
+def discovery_skip(case, results):
+    authenticated = any(r.get('omci_experiment', {}).get('authenticated_rx', 0) > 0
+                        and r.get('stages', {}).get('cleanup') == 'passed'
+                        and r.get('status') in ('observed','functional-negative') for r in results)
+    if case.get('requires_discovery_failure') and authenticated:
+        return 'Authenticated OMCI already observed; discovery fallback unnecessary'
+    if case.get('requires_authenticated_discovery') and not authenticated:
+        return 'Authenticated OMCI not observed; provisioning comparison not reached'
+    return None
+
+
 def monitor_result(rows, test_id):
     records = [r for r in rows if isinstance(r, dict) and r.get('mpd_version') == 1]
     if len(records) != 1 or records[0].get('id') != test_id:
@@ -369,6 +438,25 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'discovery':
+        if args.physical_only:
+            raise ValueError('Discovery comparisons keep the fiber connected')
+        vlan_args = argparse.Namespace(**vars(args))
+        vlan_args.suite = 'vlan'; vlan_args.cases = None
+        vlan = discovery_plan(vlan_args)
+        cases = vlan[:1]
+        if not rx_only:
+            probe = next(c for c in vlan if c['name'] == 'activation-omci-vlan-combined')
+            for name, full in [('probe',False), ('full',True), ('repeat',False)]:
+                cases.append(dict(probe, name='activation-omci-discovery-'+name,
+                    samples=180, discovery_full_profile=full,
+                    requires_discovery_failure=name != 'probe'))
+            cases += [dict(c, requires_authenticated_discovery=True) for c in vlan[1:]]
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown discovery case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'vlan':
         if args.physical_only:
             raise ValueError('VLAN comparisons keep the fiber connected')
@@ -382,7 +470,7 @@ def discovery_plan(args):
                     vlan_untagged=policy, key_inline=True, initial_key_readback=True,
                     omci_min_len=60, alloc_revoke=False,
                     ids=['O1','O2','O3','O4','O5','O6','O7','O8','Q1','Q2','Q3','Q4','Q5',
-                         'S1','S2','S3','S4','S5','V1','V2','V3']))
+                         'S1','S2','S3','S4','S5','V1','V2','V3','D01','D02','D03','D04','D05','D06']))
         if getattr(args, 'cases', None):
             selected = set(args.cases.split(','))
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown VLAN case')
@@ -436,7 +524,7 @@ def discovery_plan(args):
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown topology case')
             cases = [c for c in cases if c['name'] in selected]
         return cases
-    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan'):
+    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan', 'discovery'):
         if args.physical_only:
             raise ValueError('OMCI comparisons use connected fiber without physical cycling')
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -1162,6 +1250,7 @@ def summarize(text, returncode=0, events=None):
         fast_transition_unavailable=sum(isinstance(r,dict) and r.get('fast_version') == 2 and r.get('available') is False for r in records),
         connector_emission_verified=False, sensor_refresh_verified=False,
         note='Internal DDMI/drive observations only. Constant or zero values do not establish no light; bursts can be missed and MCU sensor age is unknown. Counter resets must be separated before computing deltas.')
+    result['tx']['passive_output'] = passive_output_summary(text)
     if events is not None:
         disconnect = next((e['sampled_ms'] for e in events if e['action'] == 'DISCONNECTED'), None)
         reconnect = next((e['sampled_ms'] for e in events if e['action'] == 'RECONNECTED'), None)
@@ -1178,6 +1267,22 @@ def summarize(text, returncode=0, events=None):
     result['trace'] = trace_summary(records)
     result['registration'] = registration_summary(records)
     result['omci_experiment'] = omci_summary(records)
+    milestones = result['trace']['milestones']
+    if result['omci_experiment'].get('authenticated_rx', 0):
+        reached, missing = 'authenticated-omci', 'service-and-traffic'
+    elif milestones['ranging_accepted']:
+        reached, missing = 'ranging-accepted', 'authenticated-omci'
+    elif milestones['local_assignment_observed']:
+        reached, missing = 'local-onu-id-assignment', 'ranging-accepted'
+    elif milestones['sn_sent_interrupts']:
+        reached, missing = 'serial-response-interrupt', 'local-onu-id-assignment'
+    elif milestones['profile_commit_observed']:
+        reached, missing = 'profile-installed', 'serial-response-interrupt'
+    else:
+        reached, missing = 'no-discovery-milestone', 'profile-installed'
+    result['discovery'] = dict(farthest_evidence=reached, next_unobserved=missing,
+        milestones=milestones, connector_emission_verified=False,
+        note='Unobserved is not proof of absence. An internal serial-response interrupt does not prove OLT reception.')
     result['interface_counters'] = [r for r in records if isinstance(r,dict) and r.get('interface_version')==1]
     winners = re.findall(r'^recovery_winner=([1-7])$', text, re.M)
     result['recovery_winner'] = winners[-1] if winners else None
@@ -1431,6 +1536,12 @@ def execute(args, pin):
             staged = True
             ssh(f'set -eu; tar -x -C {STAGE}; cd {STAGE}; sha256sum -c sha256sums >/dev/null; mkdir -p {FIRMWARE}; cp A60993.elf.pm A60993.elf.dm {FIRMWARE}/', payload=payload)
             for case in cases:
+                reason = discovery_skip(case, record['results'])
+                if reason:
+                    record['results'].append(dict(name=case['name'], status='skipped', reason=reason))
+                    write_json(args.output/'collection.json', record)
+                    print(f"{case['name']}: skipped: {reason}", flush=True)
+                    continue
                 if case.get('requires_winner'):
                     prior = next((r for r in record['results'] if r['name']=='rx-reconnect'), {})
                     if not prior.get('recovery_winner') or prior.get('status') != 'observed':
@@ -1485,7 +1596,22 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan'):
+            report = ['# Discovery and passive TX observations', '',
+                'Periodic read-only observations during normal PON operation. No monitor mux/loop changes or test patterns. A fresh bus read is not a conversion-ready indication, and narrow bursts can fall between reads.', '',
+                '| Case | Result | Farthest evidence | SN requested / sent | Assigned / ranged | Passive samples |',
+                '|---|---|---|---|---|---:|']
+            for result in record['results']:
+                d = result.get('discovery', {}); m = d.get('milestones', {})
+                p = result.get('tx', {}).get('passive_output', {})
+                report.append(f"| {result['name']} | {result['status']} | {d.get('farthest_evidence',result.get('reason','not observed'))} | {m.get('sn_request_interrupts',0)} / {m.get('sn_sent_interrupts',0)} | {m.get('local_assignment_observed',False)} / {m.get('ranging_accepted',0)} | {p.get('samples',0)} |")
+            report += ['', '| Case / phase | HW TSSI | Mailbox TSSI | BEN / MCU status | TX nW / bias uA | Raw monitor / decoded uA | External disable / internal disable |',
+                       '|---|---|---|---|---|---|---|']
+            for result in record['results']:
+                for phase, p in result.get('tx', {}).get('passive_output', {}).get('by_phase', {}).items():
+                    report.append(f"| {result['name']} / {phase} | {p['hardware_tssi']} | {p['mailbox_tssi']} | {p['ben']} / {p['reporting_status']} | {p['tx_power_nW']} / {p['bias_uA']} | {p['raw_monitor']} / {p['monitor_current_uA_oem']} | {p['board_disabled']} / {p['internal_tx_disabled']} |")
+            report += ['', 'Decoded monitor current is unavailable unless the OEM monitor-selection readbacks and lookup range are valid. Published power at the MCU floor does not establish absence of optical output. Raw samples, timestamp brackets and generation-separated MAC counters remain in collection.json and the case logs.']
+            (args.output/'discovery-summary.md').write_text('\n'.join(report)+'\n')
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan', 'discovery'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
@@ -1591,7 +1717,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='vlan', help='Default: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('discovery','vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='discovery', help='Default: passive TX feedback and bounded discovery controls, then VLAN/key-ring comparisons only after authenticated OMCI. vlan: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

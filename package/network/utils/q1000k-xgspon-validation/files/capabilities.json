@@ -22,7 +22,8 @@
     "/proc/q1000k-pon-mac",
     "/proc/q1000k-pon-fast",
     "controller-sysfs/transmitter_status",
-    "/sys/module/phy_10g/parameters/isolated_tx_test"
+    "/sys/module/phy_10g/parameters/isolated_tx_test",
+    "controller-sysfs/output_status"
   ],
   "control": "/sys/module/xpon_10g/parameters/bench_recover",
   "recovery_actions": [
@@ -481,7 +482,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "service",
+  "default_suite": "discovery",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -1155,5 +1156,63 @@
       "Native epochs and subsequent authenticated OLT request",
       "WAN and encrypted traffic remain independent validation"
     ]
+  },
+  "passive_output": {
+    "version": 1,
+    "register_order": [
+      1160,
+      932,
+      240,
+      254,
+      932,
+      1160,
+      828,
+      102,
+      100,
+      106,
+      964,
+      968,
+      992,
+      131,
+      251,
+      256,
+      264,
+      288,
+      292,
+      296,
+      304,
+      316,
+      520,
+      528,
+      532,
+      584,
+      352,
+      996,
+      180,
+      184
+    ],
+    "read_only": true,
+    "analog_selection_changed": false,
+    "board_gate_bracket": true,
+    "hardware_tssi_bracket": true,
+    "conversion_ready_verified": false,
+    "burst_synchronous": false,
+    "connector_emission_verified": false,
+    "monitor_current_requires_selection_and_lookup": true
+  },
+  "discovery_suite": {
+    "default": true,
+    "physical_actions": 0,
+    "probe_seconds": 180,
+    "fallback_seconds": 180,
+    "repeat_seconds": 180,
+    "fallback_requires_no_authenticated_omci": true,
+    "vlan_comparisons_require_authenticated_omci": true,
+    "profile_controls": [
+      "live-coalesced",
+      "full-reload",
+      "live-coalesced-repeat"
+    ],
+    "all_existing_suites_retained": true
   }
 }
