@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Only the private test client's namespace may invoke this DHCPv6 hook.
+[ "$1" = q6client ] && [ -n "$Q6_WORK" ] && [ -d "$Q6_WORK" ] || exit 1
+umask 077
+printf 'client_dhcp_event event=%s addresses=%s rdnss=%s ra_dns=%s\n' "$2" "$ADDRESSES" "$RDNSS" "$RA_DNS" >> "$Q6_WORK/client-events"
+# Kernel SLAAC and RA routes remain untouched. Install the independent IA_NA
+# address exactly for the server's advertised preferred and valid lifetimes.
+for item in $ADDRESSES; do
+	address=${item%%,*}; rest=${item#*,}; preferred=${rest%%,*}; rest=${rest#*,}; valid=${rest%%,*}
+	case "$preferred:$valid" in *[!0-9:]*|:*|*:) continue;; esac
+	ip -6 address replace "$address" dev q6client preferred_lft "$preferred" valid_lft "$valid" || exit 1
+done
+printf '%s\n' "$RDNSS $RA_DNS" > "$Q6_WORK/client-dns"

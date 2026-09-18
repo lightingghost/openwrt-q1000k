@@ -1,0 +1,351 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# shellcheck shell=ash
+# RAM-only IPv6 experiments, called only inside the activation runner's lease.
+. /usr/share/libubox/jshn.sh
+umask 077
+export LC_ALL=C
+mode=$1
+work='' native_owned='' ns_client='' ns_wan='' link_client='' link_wan='' dynamic='' dhcp_owned='' lan_member='' wan_member='' server_pid='' client_pid='' capture_pid='' real_dynamic='' real_dhcp='' real_address='' real_device='' resolver_owned=''
+now() { local up rest; read -r up rest < /proc/uptime; echo "${up%.*}"; }
+pause() { local remaining=$1; while [ "$remaining" -gt 0 ]; do sleep 1; remaining=$((remaining-1)); done; }
+result() { printf 'ipv6_check name=%s rc=%s\n' "$1" "$2"; }
+die() { echo "ipv6_experiment_error $*" >&2; exit 1; }
+cleanup() {
+	local rc=$? failed=0 pid
+	trap - EXIT; trap '' HUP INT TERM
+	for pid in "$server_pid" "$client_pid" "$capture_pid"; do
+		[ -z "$pid" ] || { kill -TERM "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; }
+	done
+	restore_native || failed=1
+	[ -z "$work" ] || {
+		for file in client-events client-dns lan-packets client.log; do
+			[ ! -f "$work/$file" ] || { printf 'ipv6_evidence name=%s begin\n' "$file"; cat "$work/$file"; printf '\nipv6_evidence name=%s end\n' "$file"; }
+		done
+	}
+	if [ -n "$dhcp_owned" ]; then
+		uci -q delete dhcp.q6lan && uci -q commit dhcp && /etc/init.d/odhcpd reload || failed=1
+	fi
+	if [ -n "$dynamic" ]; then ubus call network.interface.q6lan remove || failed=1; fi
+	if [ -n "$real_dhcp" ]; then
+		uci -q delete dhcp.q6real && uci -q commit dhcp && /etc/init.d/odhcpd reload || failed=1
+	fi
+	if [ -n "$real_dynamic" ]; then
+		ubus call network.interface.q6real remove || failed=1
+		sleep 1
+		# netifd deliberately retains deprecated addresses during renumbering.
+		# This alias was created with no preexisting delegated LAN assignment.
+		[ -z "$real_address" ] || {
+			if ip -6 -o address show dev "$real_device" | grep -Fq " $real_address "; then
+				ip -6 address del "$real_address" dev "$real_device" || failed=1
+			fi
+		}
+	fi
+	if [ -n "$lan_member$wan_member" ]; then
+		[ -z "$lan_member" ] || uci -q del_list "firewall.$lan_zone.device=q6router" || failed=1
+		[ -z "$wan_member" ] || uci -q del_list "firewall.$wan_zone.device=q6uplink" || failed=1
+		uci -q commit firewall && /etc/init.d/firewall reload || failed=1
+	fi
+	[ -z "$ns_client" ] || ip netns delete q6client || failed=1
+	[ -z "$ns_wan" ] || ip netns delete q6outside || failed=1
+	if [ -n "$link_client" ] && ip link show q6router >/dev/null 2>&1; then ip link delete q6router || failed=1; fi
+	if [ -n "$link_wan" ] && ip link show q6uplink >/dev/null 2>&1; then ip link delete q6uplink || failed=1; fi
+	if [ -n "$resolver_owned" ]; then
+		rm -f /etc/netns/q6client/resolv.conf
+		rmdir /etc/netns/q6client || failed=1
+	fi
+	if [ -n "$work" ]; then
+		rm -rf "$work"
+	fi
+	[ "$failed" = 0 ] || rc=1
+	printf 'ipv6_experiment_cleanup mode=%s rc=%s\n' "$mode" "$failed"
+	exit "$rc"
+}
+lifetimes() {
+	local data keys key akeys akey addr_local prefixlen preferred_life_time valid_life_time
+	data=$(ip -6 -j address show dev pon) && json_load "{\"interfaces\":$data}" && json_select interfaces || return 1
+	json_get_keys keys
+	for key in $keys; do
+		json_select "$key"; json_select addr_info || return 1; json_get_keys akeys
+		for akey in $akeys; do
+			json_select "$akey"; json_get_var addr_local local; json_get_vars prefixlen preferred_life_time valid_life_time
+			if [ "$addr_local" = "$native" ]; then
+				case "$preferred_life_time:$valid_life_time:$prefixlen" in *[!0-9:]*|:*|*:|*::*) return 1;; esac
+				native_preferred=$preferred_life_time; native_valid=$valid_life_time; native_mask=$prefixlen; return 0
+			fi
+			json_select ..
+		done
+		json_select ..; json_select ..
+	done
+	return 1
+}
+restore_native() {
+	local preferred
+	[ -n "$native_owned" ] || return 0
+	lifetimes || return 1
+	# A DHCP update may have already restored preference. Never replace its lease.
+	if [ "$native_preferred" = 0 ]; then
+		preferred=$((native_until - $(now)))
+		[ "$preferred" -ge 0 ] || preferred=0
+		[ "$preferred" -le "$native_valid" ] || preferred=$native_valid
+		ip -6 address change "$native/$native_mask" dev pon preferred_lft "$preferred" valid_lft "$native_valid" || return 1
+	fi
+	native_owned=
+	result source-preference-restored 0
+}
+auto_probe() {
+	local label=$1 rc
+	ip -6 route get 2606:4700:4700::1111 oif pon
+	/usr/bin/ping -6 -I pon -c 2 -W 2 2606:4700:4700::1111
+	result "$label-ping" "$?"
+	curl --fail -6 --interface pon --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	rc=$?; result "$label-https" "$rc"
+}
+source_test() {
+	local address label
+	native=$2
+	for label in ia-na pd; do
+		[ "$label" = ia-na ] && address=$2 || address=$3
+		[ -n "$address" ] || continue
+		ip -6 route get 2001:4860:4860::8888 from "$address" oif pon
+		/usr/bin/ping -6 -I pon -I "$address" -c 2 -W 2 2001:4860:4860::8888
+		result "$label-google-ping" "$?"
+		curl --fail -6 --interface "ifhost!pon!$address" --resolve 'dns.google:443:[2001:4860:4860::8888]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' 'https://dns.google/resolve?name=example.com&type=AAAA'
+		result "$label-google-https" "$?"
+	done
+	[ -n "$native" ] || { result native-preference-no-address 2; return; }
+	nft -a list ruleset
+	auto_probe auto-before
+	lifetimes && [ "$native_preferred" -gt 0 ] && [ "$native_valid" -ge 45 ] || { result native-preference-no-live-lease 2; return; }
+	native_until=$(( $(now) + native_preferred ))
+	native_owned=1
+	ip -6 address change "$native/$native_mask" dev pon preferred_lft 0 valid_lft "$native_valid" || die 'cannot change source preference'
+	ip -6 -j address show dev pon
+	auto_probe auto-prefer-pd
+	# The leased address remains usable explicitly: changing selection is not
+	# evidence that packets with that source have acquired an upstream route.
+	/usr/bin/ping -6 -I pon -I "$native" -c 2 -W 2 2606:4700:4700::1111
+	result ia-na-after-preference-ping "$?"
+	restore_native || die 'cannot restore source preference'
+	auto_probe auto-restored
+	nft -a list ruleset
+}
+zone() {
+	local wanted=$1 sections section name found=
+	sections=$(uci -q show firewall) || return 1
+	for section in $(printf '%s\n' "$sections" | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+		name=$(uci -q get "firewall.$section.name") || continue
+		[ "$name" = "$wanted" ] || continue
+		[ -z "$found" ] || return 1
+		found=$section
+	done
+	[ -n "$found" ] || return 1
+	printf '%s\n' "$found"
+}
+dynamic_lan() {
+	ubus call network add_dynamic "{\"name\":\"q6lan\",\"proto\":\"static\",\"device\":\"q6router\",\"ip6assign\":64,\"ip6hint\":\"$1\",\"ip6class\":[\"q1000k_wan6\"],\"ip6ifaceid\":\"::1\"}" || return 1
+	dynamic=1
+	ubus call network.interface.q6lan up
+}
+client_address() {
+	ip -n q6client -6 -o address show dev q6client scope global | awk '/inet6 [23]/ && !/tentative|dadfailed|deprecated/ {split($4,a,"/"); print a[1]; exit}'
+}
+client_snapshot() {
+	printf 'ipv6_client_snapshot phase=%s\n' "$1"
+	ubus call network.interface.q6lan status
+	ip -6 -j route show table all
+	ip -n q6client -6 -j address show
+	ip -n q6client -6 -j route show table all
+	ip -n q6client -6 -j neigh show
+	ip netns exec q6client cat /proc/net/snmp6
+	nft -a list ruleset
+}
+client_probes() {
+	local label=$1
+	ip -n q6client -6 route get 2606:4700:4700::1111
+	ip netns exec q6client /usr/bin/ping -6 -I q6client -c 2 -W 2 2606:4700:4700::1111
+	result "$label-ping" "$?"
+	ip netns exec q6client /usr/bin/ping -6 -I q6client -M 'do' -s 1452 -c 2 -W 2 2606:4700:4700::1111
+	result "$label-mtu1500" "$?"
+	ip netns exec q6client curl --fail -6 --interface q6client --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_client_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	result "$label-https" "$?"
+}
+lan_test() {
+	local config changes name attempt address old new dns domain=example.com rc
+	for config in dhcp firewall; do
+		changes=$(uci -q changes "$config") && [ -z "$changes" ] || die "pending $config edits"
+	done
+	! uci -q get dhcp.q6lan >/dev/null && ! ubus -S list network.interface.q6lan | grep -q q6lan || die 'test interface already exists'
+	[ ! -e /etc/netns/q6client ] || die 'test resolver directory exists'
+	for name in q6client q6outside; do
+		! ip netns list | grep -q "^$name\b" || die 'namespace exists'
+	done
+	for name in q6router q6uplink q6client q6outside; do
+		! ip link show "$name" >/dev/null 2>&1 || die 'test device exists'
+	done
+	lan_zone=$(zone lan) && wan_zone=$(zone wan) || die 'unique LAN/WAN zones required'
+	case " $(uci -q get "firewall.$lan_zone.device") $(uci -q get "firewall.$wan_zone.device") " in *q6router*|*q6uplink*) die 'test firewall devices exist';; esac
+	work=$(mktemp -d /tmp/q1000k-ipv6.XXXXXX) || die 'temporary directory'
+	ip netns add q6client || die 'client namespace'; ns_client=1
+	ip netns add q6outside || die 'outside namespace'; ns_wan=1
+	ip link add q6router type veth peer name q6client || die 'client veth'; link_client=1
+	ip link set q6client netns q6client || die 'client veth move'
+	ip link add q6uplink type veth peer name q6outside || die 'outside veth'; link_wan=1
+	ip link set q6outside netns q6outside || die 'outside veth move'
+	ip link set q6router up && ip link set q6uplink up || die 'router veth up'
+	ip -n q6client link set lo up && ip -n q6client link set q6client up || die 'client veth up'
+	ip -n q6outside link set lo up && ip -n q6outside link set q6outside up || die 'outside veth up'
+	ip netns exec q6client sysctl -w net.ipv6.conf.all.forwarding=0 net.ipv6.conf.q6client.accept_ra=2 net.ipv6.conf.q6client.autoconf=1 || die 'client RA configuration'
+	ip -6 address add 2001:db8:610::1/64 dev q6uplink || die 'test uplink address'
+	ip -n q6outside -6 address add 2001:db8:610::2/64 dev q6outside || die 'outside address'
+	ip -n q6outside -6 route add default via 2001:db8:610::1 || die 'outside route'
+	# These two virtual devices traverse the actual existing LAN and WAN chains.
+	# No prefix or RA is added to the management bridge or copper ports.
+	uci -q add_list "firewall.$lan_zone.device=q6router" || die 'LAN firewall membership'; lan_member=1
+	uci -q add_list "firewall.$wan_zone.device=q6uplink" || die 'WAN firewall membership'; wan_member=1
+	uci -q commit firewall && /etc/init.d/firewall reload || die 'firewall apply'
+	uci -q set dhcp.q6lan=dhcp || die 'DHCP test section'; dhcp_owned=1
+	uci -q batch <<'UCI' || die 'DHCP test configuration'
+set dhcp.q6lan.interface='q6lan'
+set dhcp.q6lan.ra='server'
+set dhcp.q6lan.dhcpv6='server'
+set dhcp.q6lan.ra_slaac='1'
+add_list dhcp.q6lan.ra_flags='managed-config'
+add_list dhcp.q6lan.ra_flags='other-config'
+set dhcp.q6lan.ra_mininterval='3'
+set dhcp.q6lan.ra_maxinterval='4'
+set dhcp.q6lan.ra_lifetime='30'
+UCI
+	uci -q commit dhcp || die 'DHCP commit'
+	dynamic_lan e || die 'netifd delegated LAN'
+	/etc/init.d/odhcpd reload || die 'DHCP reload'
+	tcpdump -i q6router -n -tt -vv -l -s 256 -c 2500 'ip6 and (icmp6 or udp port 546 or udp port 547 or port 53)' > "$work/lan-packets" 2>&1 & capture_pid=$!
+	for attempt in $(seq 1 35); do
+		address=$(client_address)
+		[ -z "$address" ] || break
+		sleep 1
+	done
+	[ -n "$address" ] || { result lan-slaac 1; client_snapshot no-slaac; return; }
+	result lan-slaac 0
+	client_snapshot slaac
+	client_probes lan-slaac
+	# The second client is the real DHCPv6 executable, inside the namespace. Its
+	# hook never invokes netifd or changes any router/WAN address.
+	Q6_WORK=$work ip netns exec q6client odhcp6c -e -N force -s /usr/libexec/q1000k-ipv6-client -p "$work/client.pid" q6client > "$work/client.log" 2>&1 & client_pid=$!
+	for attempt in $(seq 1 35); do
+		grep -Eq '^client_dhcp_event event=(bound|updated|rebound) addresses=[23][^ ]+' "$work/client-events" 2>/dev/null && break
+		sleep 1
+	done
+	grep -Eq '^client_dhcp_event event=(bound|updated|rebound) addresses=[23][^ ]+' "$work/client-events" 2>/dev/null
+	result lan-dhcpv6 "$?"
+	client_snapshot dhcpv6
+	# Test both the advertised resolver and a direct control. The namespace has
+	# no management interface and cannot pass via the host's resolver route.
+	mkdir -p /etc/netns/q6client || die 'client resolver directory'; resolver_owned=1
+	dns=$(awk '{print $1; exit}' "$work/client-dns" 2>/dev/null)
+	case "$dns" in fe80:*) dns="$dns%q6client";; esac
+	if [ -n "$dns" ]; then
+		printf 'nameserver %s\n' "$dns" > /etc/netns/q6client/resolv.conf
+		ip netns exec q6client nslookup "$domain" "$dns"; result lan-advertised-dns "$?"
+		ip netns exec q6client curl --fail -6 --interface q6client --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_client_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://example.com/
+		result lan-dns-https "$?"
+	else result lan-advertised-dns 2; fi
+	ip netns exec q6client nslookup "$domain" 2606:4700:4700::1111; result lan-direct-dns "$?"
+	# Existing LAN->WAN and return state: use a finite echo peer, then a fresh
+	# unsolicited UDP flow in the reverse direction with a listener control.
+	ip netns exec q6outside /usr/libexec/q1000k-udp6-probe server 2001:db8:610::2 47100 > "$work/server" 2>&1 & server_pid=$!
+	sleep 1
+	ip netns exec q6client /usr/libexec/q1000k-udp6-probe client 2001:db8:610::2 47100; result firewall-outbound-return "$?"
+	kill -TERM "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null; server_pid=
+	ip netns exec q6client /usr/libexec/q1000k-udp6-probe server "$address" 47101 > "$work/server" 2>&1 & server_pid=$!
+	sleep 1
+	/usr/libexec/q1000k-udp6-probe client "$address" 47101; result firewall-inbound-listener-control "$?"
+	ip netns exec q6outside /usr/libexec/q1000k-udp6-probe client "$address" 47101; rc=$?
+	# rc=1 is no valid reply, rc=2 is setup failure. Keep raw result distinct.
+	result firewall-unsolicited-raw "$rc"
+	kill -TERM "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null; server_pid=
+	ip link set q6uplink mtu 1280 && ip -n q6outside link set q6outside mtu 1280 || die 'PMTU control'
+	ip netns exec q6client /usr/bin/ping -6 -M 'do' -s 1452 -c 2 -W 2 2001:db8:610::2; result pmtu1500-raw "$?"
+	ip netns exec q6client /usr/bin/ping -6 -M 'do' -s 1232 -c 2 -W 2 2001:db8:610::2; result pmtu1280 "$?"
+	ip -n q6client -6 route get 2001:db8:610::2
+	# Observe an actual Renew/Reply in the PON capture and exercise the same
+	# client's service across it; a ubus method return alone is insufficient.
+	ubus call network.interface.q1000k_wan6 renew; result lan-wan-renew-request "$?"
+	pause 60
+	ubus call network.interface.q1000k_wan6 status
+	client_snapshot after-renew
+	client_probes lan-after-renew
+	# Change the LAN /64 allocation within the live delegation. This is a
+	# controlled local renumber, not an assertion that the ISP changed its PD.
+	old=$(ip -6 -o address show dev q6router scope global | awk '/inet6 [23]/ && !/deprecated/ {print $4; exit}')
+	dynamic_lan f || die 'LAN renumber request'
+	/etc/init.d/odhcpd reload || die 'renumber RA reload'
+	pause 20
+	new=$(ip -6 -o address show dev q6router scope global | awk '/inet6 [23]/ && !/deprecated/ {print $4; exit}')
+	printf 'ipv6_renumber old=%s new=%s\n' "$old" "$new"
+	if [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ]; then
+		result lan-renumber 0
+		client_snapshot renumber
+		client_probes lan-after-renumber
+	else result lan-renumber 2; fi
+}
+physical_test() {
+	local changes data l3_device up attempt
+	changes=$(uci -q changes dhcp) && [ -z "$changes" ] || die 'pending DHCP edits'
+	! uci -q get dhcp.q6real >/dev/null || die 'physical DHCP section exists'
+	! ubus -S list network.interface.q6real | grep -q q6real || die 'physical interface exists'
+	[ -z "$(uci -q get network.lan.ip6assign)" ] || { result physical-preexisting-assignment 2; return; }
+	data=$(ubus call network.interface.lan status) && json_load "$data" || die 'LAN status'
+	json_get_vars l3_device up
+	[ "$up" = 1 ] && [ "$l3_device" = br-lan ] || { result physical-lan-unavailable 2; return; }
+	real_device=$l3_device
+	# Refuse preexisting global LAN addresses so ownership/removal is exact.
+	[ -z "$(ip -6 -o address show dev "$real_device" scope global | awk '/inet6 [23]/ {print $4}')" ] || { result physical-preexisting-global 2; return; }
+	work=$(mktemp -d /tmp/q1000k-ipv6.XXXXXX) || die 'physical work directory'
+	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan","ip6assign":64,"ip6hint":"d","ip6class":["q1000k_wan6"],"ip6ifaceid":"::1"}' || die 'physical delegated alias'
+	real_dynamic=1
+	ubus call network.interface.q6real up || die 'physical alias up'
+	# shellcheck disable=SC2034
+	for attempt in $(seq 1 20); do
+		real_address=$(ip -6 -o address show dev "$real_device" scope global | awk '/inet6 [23]/ {print $4; exit}')
+		if [ -n "$real_address" ]; then
+			ip -6 -o address show dev "$real_device" | grep -F " $real_address " | grep -qvE "tentative|dadfailed|deprecated" && break
+		fi
+		sleep 1
+	done
+	[ -n "$real_address" ] && ip -6 -o address show dev "$real_device" | grep -F " $real_address " | grep -qvE 'tentative|dadfailed|deprecated' || { result physical-prefix-assignment 1; return; }
+	result physical-prefix-assignment 0
+	uci -q set dhcp.q6real=dhcp || die 'physical DHCP section'; real_dhcp=1
+	uci -q batch <<'UCI' || die 'physical RA configuration'
+set dhcp.q6real.interface='q6real'
+set dhcp.q6real.ra='server'
+set dhcp.q6real.dhcpv6='server'
+set dhcp.q6real.ra_slaac='1'
+add_list dhcp.q6real.ra_flags='managed-config'
+add_list dhcp.q6real.ra_flags='other-config'
+set dhcp.q6real.ra_mininterval='3'
+set dhcp.q6real.ra_maxinterval='4'
+set dhcp.q6real.ra_lifetime='30'
+UCI
+	uci -q commit dhcp && /etc/init.d/odhcpd reload || die 'physical RA apply'
+	tcpdump -i "$real_device" -n -tt -vv -l -s 256 -c 1500 'ip6 and (icmp6 or udp port 546 or udp port 547 or port 53)' > "$work/lan-packets" 2>&1 & capture_pid=$!
+	ubus call network.interface.q6real status
+	printf 'physical_lan_ready router=%s window=150\n' "$real_address"
+	# The collector probes its real Ethernet interface during this window.
+	# IPv4 LAN address, bridge membership and management routes never change.
+	pause 150
+	ubus call network.interface.q6real status
+	ip -6 -j neigh show dev "$real_device"
+	nft -a list ruleset
+	# Withdraw the advertisement before removing the owned alias. Clients can
+	# keep a deprecated IPv6 address per RFC4862; the default router expires.
+	uci -q set dhcp.q6real.ra_lifetime=0
+	uci -q commit dhcp && /etc/init.d/odhcpd reload || die 'physical RA withdrawal'
+	pause 8
+	result physical-window-complete 0
+}
+[ -d /var/run/q1000k-pon-bench.lock ] || die 'activation lease missing'
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
+case "$mode" in source) source_test "$@";; lan) lan_test;; physical) physical_test;; *) die 'unknown mode';; esac

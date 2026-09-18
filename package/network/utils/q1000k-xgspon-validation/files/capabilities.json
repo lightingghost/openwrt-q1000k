@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "bench": "wan-source-and-renewal",
+  "bench": "ipv6-source-lan-renewal",
   "hardware_acceptance": false,
   "trace": {
     "version": 1,
@@ -24,7 +24,10 @@
     "controller-sysfs/transmitter_status",
     "/sys/module/phy_10g/parameters/isolated_tx_test",
     "controller-sysfs/output_status",
-    "/usr/libexec/q1000k-pd-source"
+    "/usr/libexec/q1000k-pd-source",
+    "/usr/libexec/q1000k-ipv6-bench",
+    "/usr/libexec/q1000k-ipv6-client",
+    "/usr/libexec/q1000k-udp6-probe"
   ],
   "control": "/sys/module/xpon_10g/parameters/bench_recover",
   "recovery_actions": [
@@ -469,6 +472,38 @@
       "test": "Verify temporary source removal before WAN and PON shutdown",
       "selection": "activation-omci-wan-*",
       "hypothesis": "IPv6 source choice versus PON data-path failure",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W5",
+      "test": "Reversible source preference, two Internet providers, PON packet and firewall capture",
+      "hypothesis": "Lease address route versus local source selection/filtering",
+      "selection": "activation-omci-wan-*",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W6",
+      "test": "Isolated LAN SLAAC/DHCPv6/DNS/forwarding/firewall/PMTU and local renumber",
+      "hypothesis": "Routed IPv6 client behavior and local prefix lifecycle",
+      "selection": "activation-omci-wan-lan",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W7",
+      "test": "Match DHCPv6 Renew/Reply transaction ID and test service afterward",
+      "hypothesis": "Renewal actually completed rather than just requested",
+      "selection": "activation-omci-wan-*",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "W8",
+      "test": "Real Ethernet-connected collection host prefix, route, ping, MTU, HTTPS and IPv6 DNS",
+      "hypothesis": "Copper LAN client can reach the Internet through PON",
+      "selection": "activation-omci-wan-lan",
       "implemented": true,
       "hardware_run": false
     }
@@ -1275,5 +1310,15 @@
     "persistent_network_changes": false,
     "renewal": "ubus renew requests; confirmation requires lease/traffic evidence",
     "prior_suites_retained": true
+  },
+  "physical_lan_tests": {
+    "computer": "Direct Ethernet to Q1000K; Wi-Fi disconnected",
+    "host_configuration_changes": false,
+    "requires": [
+      "Linux iproute2",
+      "ping",
+      "curl"
+    ],
+    "no_fiber_actions": true
   }
 }

@@ -40,12 +40,14 @@ preflight() {
 	[ "$(cat /proc/sys/kernel/panic)" = 0 ] || fail 'Panic timeout must be zero.'
 }
 owned_modules= controller= locked=0 lower_owned=0 wan_owned=0 pd_owned=
-manual_recovery=0 stack_generation=0 isolated_pid=
+manual_recovery=0 stack_generation=0 isolated_pid= ipv6_pid= packet_pid= packet_file=
 cleanup() {
 	local result=$? module failed=0
 	trap - EXIT
 	trap '' HUP INT TERM
 	[ "$locked" = 1 ] || exit "$result"
+	[ -z "$ipv6_pid" ] || { kill -TERM "$ipv6_pid" 2>/dev/null || :; wait "$ipv6_pid" || failed=1; ipv6_pid=; }
+	packet_stop
 	pd_cleanup || failed=1
 	if [ "$wan_owned" = 1 ]; then
 		ifdown q1000k_wan6 || failed=1
@@ -61,6 +63,24 @@ cleanup() {
 	rmdir /var/run/q1000k-pon-bench.lock || failed=1
 	if [ "$failed" = 0 ]; then event cleanup passed; else event cleanup failed; result=1; fi
 	exit "$result"
+}
+packet_start() {
+	case "$phase" in activation-omci-wan-*) ;; *) return;; esac
+	packet_file=/var/run/q1000k-pon-bench.lock/ipv6-packets
+	tcpdump -i pon -n -tt -vv -l -s 256 -c 40000 'ip6 and (icmp6 or udp port 546 or udp port 547 or port 53 or host 2606:4700:4700::1111 or host 2001:4860:4860::8888)' > "$packet_file" 2>&1 & packet_pid=$!
+}
+packet_stop() {
+	[ -n "$packet_pid" ] || return 0
+	kill -INT "$packet_pid" 2>/dev/null || :
+	wait "$packet_pid"; printf 'ipv6_packet_capture rc=%s\n' "$?"
+	printf 'ipv6_packets_begin\n'; cat "$packet_file"; printf '\nipv6_packets_end\n'
+	rm -f "$packet_file"; packet_pid= packet_file=
+}
+ipv6_experiment() {
+	local rc
+	/usr/libexec/q1000k-ipv6-bench "$@" & ipv6_pid=$!
+	wait "$ipv6_pid"; rc=$?; ipv6_pid=
+	[ "$rc" = 0 ] || fail 'IPv6 experiment setup or restoration failed.'
 }
 pd_cleanup() {
 	[ -n "$pd_owned" ] || return 0
@@ -113,7 +133,7 @@ pd_probes() {
 		json_select "$key"
 		json_get_vars address mask preferred valid
 		case "$preferred:$valid" in *[!0-9:]*|:*|*:) json_select ..; continue;; esac
-		if [ "$preferred" -ge 120 ] && [ "$valid" -ge 120 ]; then
+		if [ "$preferred" -ge 300 ] && [ "$valid" -ge 300 ]; then
 			count=$((count+1)); source=$address; pd_mask=$mask
 		fi
 		json_select ..
@@ -126,7 +146,7 @@ pd_probes() {
 	source=$(/usr/libexec/q1000k-pd-source "$source" "$pd_mask" $existing) || {
 		echo 'source_unavailable origin=delegated_prefix reason=invalid-or-used-prefix'; return;
 	}
-	ip -6 address add "$source/128" dev pon valid_lft 120 preferred_lft 120 || fail 'Temporary IPv6 address add failed.'
+	ip -6 address add "$source/128" dev pon valid_lft 300 preferred_lft 300 || fail 'Temporary IPv6 address add failed.'
 	pd_owned=$source
 	for attempt in 1 2 3 4 5; do
 		sleep 1
@@ -139,6 +159,7 @@ pd_probes() {
 			wan_network_snapshot before-source-probes
 			[ -z "$native" ] || source_probes ia_na "$native"
 			source_probes delegated_prefix "$source"
+			ipv6_experiment source "$native" "$source"
 			wan_network_snapshot after-source-probes
 			;;
 	esac
@@ -361,7 +382,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-wan-source|activation-omci-wan-renew|activation-omci-wan-repeat|activation-omci-discovery-probe|activation-omci-discovery-full|activation-omci-discovery-repeat|activation-omci-vlan-control|activation-omci-vlan-narrow|activation-omci-vlan-combined|activation-omci-vlan-oem|activation-omci-vlan-eqd|activation-omci-vlan-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-wan-source|activation-omci-wan-lan|activation-omci-wan-soak|activation-omci-wan-renew|activation-omci-wan-repeat|activation-omci-discovery-probe|activation-omci-discovery-full|activation-omci-discovery-repeat|activation-omci-vlan-control|activation-omci-vlan-narrow|activation-omci-vlan-combined|activation-omci-vlan-oem|activation-omci-vlan-eqd|activation-omci-vlan-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -608,15 +629,21 @@ event provisioning passed
 wan_idle || fail 'WAN ownership changed.'
 event wan started
 wan_owned=1
+packet_start
 ifup q1000k_wan || fail 'DHCP startup failed.'
 ifup q1000k_wan6 || fail 'DHCPv6 startup failed.'
-count=0 deadline=$(( $(now) + limit ))
-while [ "$count" -lt "$limit" ] && [ "$(now)" -lt "$deadline" ]; do
+wan_limit=$limit
+[ "$phase" != activation-omci-wan-soak ] || wan_limit=4200
+count=0 deadline=$(( $(now) + wan_limit ))
+while [ "$count" -lt "$wan_limit" ] && [ "$(now)" -lt "$deadline" ]; do
 	snapshot
 	for interface in q1000k_wan q1000k_wan6; do
 		printf 'wan_status interface=%s\n' "$interface"
 		ubus call network.interface.$interface status || fail 'WAN status unavailable.'
 	done
+	if [ "$phase" = activation-omci-wan-soak ] && [ $((count % 300)) = 0 ]; then
+		pd_probes "soak-$count"
+	fi
 	# Keep the complete bounded window to capture leases, renewal and loss.
 	count=$((count+1)); sleep 1
 done
@@ -639,6 +666,10 @@ done
 case "$phase" in
  activation-omci-wan-*) pd_probes initial ;;
 esac
+if [ "$phase" = activation-omci-wan-lan ]; then
+ ipv6_experiment lan
+ ipv6_experiment physical
+fi
 if [ "$phase" = activation-omci-wan-renew ]; then
  event wan-renew started
  for interface in q1000k_wan q1000k_wan6; do

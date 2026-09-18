@@ -84,7 +84,7 @@ class SourceTests(unittest.TestCase):
                                identity=Path('/private/identity'), cases=None)
         plan = C.discovery_plan(args)
         self.assertEqual([p['name'] for p in plan], ['rx-startup', 'activation-omci-wan-source',
-            'activation-omci-wan-renew', 'activation-omci-wan-repeat'])
+            'activation-omci-wan-lan', 'activation-omci-wan-renew', 'activation-omci-wan-repeat'])
         for case in plan[1:]:
             self.assertEqual((case['live_add'],case['vlan_untagged'],case['ranging_mode']), (31,1,1))
             self.assertNotIn('physical', case)

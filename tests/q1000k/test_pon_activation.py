@@ -133,10 +133,10 @@ elif action=='omci':
             schema_version=1,onu_id=1 if active else 65535,gem_port_id=1 if active else 65535))
 elif action=='ifup': (root/'wan-active').touch()
 elif action=='ifdown': (root/'wan-active').unlink(missing_ok=True)
-elif action in ('ping','curl','iperf3'): pass
+elif action in ('ping','curl','iperf3','ipv6-bench','tcpdump'): pass
 else: raise AssertionError((action,args))
 '''
-        for name in ('cat','sleep','uname','bench-status','uci','ubus','modprobe','insmod','rmmod','ip','omci','ifup','ifdown','ping','curl','iperf3','pd-source'):
+        for name in ('cat','sleep','uname','bench-status','uci','ubus','modprobe','insmod','rmmod','ip','omci','ifup','ifdown','ping','curl','iperf3','pd-source','ipv6-bench','tcpdump'):
             fixture.write('v-'+name, '#!'+sys.executable+'\n'+mock.replace("name; args=", "name.removeprefix('v-'); args=")).chmod(0o755)
         source = VALIDATE.read_text()
         source = re.sub(r'(?<![A-Za-z0-9])/(sys|proc|tmp|var/run)/', lambda m: str(self.root)+'/'+m[1]+'/', source)
@@ -147,8 +147,9 @@ else: raise AssertionError((action,args))
         source = source.replace('q1000k-omci -i',str(self.root/'v-omci')+' -i')
         source = source.replace('/usr/bin/ping',str(self.root/'v-ping'))
         source = source.replace('/usr/libexec/q1000k-pd-source',str(self.root/'v-pd-source'))
-        for name in ('cat','sleep','uname','uci','ubus','modprobe','insmod','rmmod','ip','ifup','ifdown','ping','curl','iperf3'):
-            source=re.sub(r'(?<![A-Za-z0-9_/-])'+name+r'(?= )','"'+str(self.root/('v-'+name))+'"',source)
+        source = source.replace('/usr/libexec/q1000k-ipv6-bench',str(self.root/'v-ipv6-bench'))
+        for name in ('cat','sleep','uname','uci','ubus','modprobe','insmod','rmmod','ip','ifup','ifdown','ping','curl','iperf3','tcpdump'):
+            source=re.sub(r'(?<![A-Za-z0-9_/=-])'+name+r'(?= )','"'+str(self.root/('v-'+name))+'"',source)
         self.script=fixture.write('validate',source)
 
     def run_case(self, mode='rx', success=True):
