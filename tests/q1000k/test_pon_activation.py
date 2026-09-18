@@ -105,7 +105,8 @@ elif action=='omci':
     else:
         active=tx(); state=5 if active else 1
         if os.environ.get('VALIDATION_BAD')=='o5': state=3
-        emit(dict(state=state,authenticated=int(active and state==5),agent_operational=int(active),service_error=0,
+        service_error={'service-einval':-22,'service-fault':-117}.get(os.environ.get('VALIDATION_BAD'),0)
+        emit(dict(state=state,authenticated=int(active and state==5),agent_operational=int(active),service_error=service_error,
             service_rules=int(active and os.environ.get('VALIDATION_BAD')!='provision'),mib_objects=3,
             schema_version=1,onu_id=1 if active else 65535,gem_port_id=1 if active else 65535))
 elif action=='ifup': (root/'wan-active').touch()
@@ -235,6 +236,32 @@ else: raise AssertionError((action,args))
                     self.assertIn(setting,modules['xpon_10g'])
                 self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
                 self.assertFalse((self.root/'sys/module/omci').exists())
+
+    def test_vlan_variants_select_exact_policies_and_containment(self):
+        for case,live,policy,ranging in [('control',15,0,1),('narrow',15,1,1),
+                ('combined',31,1,1),('oem',31,2,1),('eqd',31,1,3),('repeat',31,1,1)]:
+            with self.subTest(case=case):
+                result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+                    str(self.identity),'15','none','activation-omci-vlan-'+case],env=self.env,
+                    capture_output=True,text=True,timeout=90)
+                self.assertEqual(result.returncode,0,result.stdout[-2500:]+result.stderr)
+                modules={Path(c[1]).stem:c for c in self.calls() if c[0] in ('modprobe','insmod')}
+                for setting in (f'bench_live_add={live}',f'bench_vlan_untagged={policy}',
+                                f'bench_ranging_mode={ranging}','bench_initial_key_readback=1',
+                                'bench_key_inline=1','bench_alloc_revoke=0','bench_omci_min_len=60'):
+                    self.assertIn(setting,modules['xpon_10g'])
+                self.assertIn('bench_dot1x_oem=1',modules['omci'])
+                self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+        for case,bad,code in [('control','service-einval',2),('control','service-fault',1),
+                              ('combined','service-einval',1)]:
+            self.env['VALIDATION_BAD']=bad
+            result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+                str(self.identity),'15','none','activation-omci-vlan-'+case],env=self.env,
+                capture_output=True,text=True,timeout=90)
+            self.assertEqual(result.returncode,code,result.stdout[-2500:]+result.stderr)
+            self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+            self.assertIn('status=functional-negative' if code==2 else 'status=containment',result.stdout)
+            self.assertFalse((self.root/'sys/module/omci').exists())
 
     def test_output_capture_and_missing_evidence(self):
         for bad in ('', 'output-missing'):

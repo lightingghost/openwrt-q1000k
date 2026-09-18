@@ -413,6 +413,30 @@
       "hypothesis": "Local service install succeeds but OLT or data path does not continue",
       "implemented": true,
       "hardware_run": false
+    },
+    {
+      "id": "V1",
+      "test": "Compare exact captured untagged row across strict, missing-DEI-zero and factory normalization",
+      "selection": "vlan suite",
+      "hypothesis": "Untagged DEI copy causes -EINVAL",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "V2",
+      "test": "Read back unchanged GEM hardware and compare native epochs across RX-only key-ring update",
+      "selection": "vlan suite",
+      "hypothesis": "Full retirement of downstream-only policy interrupts OMCC",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "V3",
+      "test": "Correlate key-ring response, next authenticated OLT request, deactivation and WAN observations",
+      "selection": "vlan suite",
+      "hypothesis": "Local completion does not establish OLT acceptance or working service",
+      "implemented": true,
+      "hardware_run": false
     }
   ],
   "event_names": {
@@ -446,9 +470,9 @@
     "28": "OMCI GEM candidate and QoS fields",
     "29": "OMCI original provider error and failing stage",
     "30": "Native OMCI TX: id 1 admission-drop,2 submit,3 DMA-complete,4 descriptor-drop,5 teardown-abort,6 DMA-error,7 admission-retry. a=TCI/type/device, b=class/entity, c=GEM/length, d=native epoch low32. Headers only; no optical acknowledgement.",
-    "31": "GWAN append: id 1 begin,2 end; a=kind bits (1 GEM,2 T-CONT,4 first service),b=added channel bitmap,c=added GEM count,d=complete channel bitmap; result errno.",
-    "32": "Public OMCI topology: id 1 upload count; 2 upload header; 6 queue Set header; 3..5 data words. Classes 262/277/278 only; no identity payload.",
-    "33": "service-install: 1 selection (old/new rules, first-service eligibility); 2 QoS read (a=sample-sequence<<5|channel,b=mode,c=units); 3 verified write result; 4 install outcome (old/new rules, live path, stage); 6/8 read weights and 7/9 write weights packed u16 pairs with matching sample/channel token; errors never assert valid readback"
+    "31": "GWAN append: id 1 begin,2 end; a=kind bits (1 GEM,2 T-CONT,4 first service,8 classifier,16 RX-only metadata),b=added channel bitmap,c=added GEM count,d=channel bitmap. id 3 GEM readback: a=GEM,b=expected,c=actual valid/type/TX-encryption bits,d=old/new RX flags; result errno.",
+    "32": "Public OMCI topology: id 1 upload count; 2 upload header; 6 Set header after its response; 3..5 data words. Classes 171/262/277/278 only. Set response correlation requires matching stack, generation, TCI, class, entity and attribute mask.",
+    "33": "service-install: 1 selection (old/new rules, first-service eligibility); 2 QoS read (a=sample-sequence<<5|channel,b=mode,c=units); 3 verified write result; 4 install outcome (old/new rules, live path, stage); 6/8 read weights and 7/9 write weights packed u16 pairs with matching sample/channel token; errors never assert valid readback; id 11 VLAN compile: a=entity<<16|rule,b=policy<<24|inner filter PCP<<20|outer filter PCP<<16|remove<<12|inner treatment PCP<<8|inner mode<<4|outer mode,c=input/output TPID,d=inner/outer VID; result errno."
   },
   "discovery_irq_bits": {
     "2": "SN request received",
@@ -1044,5 +1068,92 @@
     ],
     "new_hardware_validation": "pending",
     "wan_observation": "sample and wall-clock limits, followed by interface-bound probes"
+  },
+  "omci_vlan": {
+    "revision": 1,
+    "physical_actions_required": 0,
+    "new_hardware_validation": "pending",
+    "cases": {
+      "activation-omci-vlan-control": {
+        "samples": 120,
+        "ranging_mode": 1,
+        "dot1x_oem": true,
+        "live_add": 15,
+        "vlan_untagged": 0,
+        "key_inline": true,
+        "initial_key_readback": true,
+        "omci_min_len": 60,
+        "alloc_revoke": false
+      },
+      "activation-omci-vlan-narrow": {
+        "samples": 180,
+        "ranging_mode": 1,
+        "dot1x_oem": true,
+        "live_add": 15,
+        "vlan_untagged": 1,
+        "key_inline": true,
+        "initial_key_readback": true,
+        "omci_min_len": 60,
+        "alloc_revoke": false
+      },
+      "activation-omci-vlan-combined": {
+        "samples": 300,
+        "ranging_mode": 1,
+        "dot1x_oem": true,
+        "live_add": 31,
+        "vlan_untagged": 1,
+        "key_inline": true,
+        "initial_key_readback": true,
+        "omci_min_len": 60,
+        "alloc_revoke": false
+      },
+      "activation-omci-vlan-oem": {
+        "samples": 300,
+        "ranging_mode": 1,
+        "dot1x_oem": true,
+        "live_add": 31,
+        "vlan_untagged": 2,
+        "key_inline": true,
+        "initial_key_readback": true,
+        "omci_min_len": 60,
+        "alloc_revoke": false
+      },
+      "activation-omci-vlan-eqd": {
+        "samples": 300,
+        "ranging_mode": 3,
+        "dot1x_oem": true,
+        "live_add": 31,
+        "vlan_untagged": 1,
+        "key_inline": true,
+        "initial_key_readback": true,
+        "omci_min_len": 60,
+        "alloc_revoke": false
+      },
+      "activation-omci-vlan-repeat": {
+        "samples": 600,
+        "ranging_mode": 1,
+        "dot1x_oem": true,
+        "live_add": 31,
+        "vlan_untagged": 1,
+        "key_inline": true,
+        "initial_key_readback": true,
+        "omci_min_len": 60,
+        "alloc_revoke": false
+      }
+    },
+    "policies": {
+      "0": "Strict previous compiler",
+      "1": "Missing input DEI becomes zero only for untagged mode 2/3",
+      "2": "Factory first-treatment output-TPID/DEI-zero normalization for untagged nonliteral modes"
+    },
+    "rx_policy": "Ring 0/3 metadata only, same GEM/T-CONT/ANI/multicast/TX encryption, verified unchanged GEM hardware; no keys or OMCC retirement",
+    "control_stop": "Strict-control -EINVAL is a functional rejection and immediately cleans up. All protocol faults and all other service errors retain containment.",
+    "observations": [
+      "Exact public row and matched OMCI response",
+      "Compile policy and errno",
+      "GEM readback and metadata transaction",
+      "Native epochs and subsequent authenticated OLT request",
+      "WAN and encrypted traffic remain independent validation"
+    ]
   }
 }

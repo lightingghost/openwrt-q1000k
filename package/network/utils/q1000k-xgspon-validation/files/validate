@@ -139,7 +139,16 @@ mac_status() {
 	omci=$(q1000k-omci -i pon status) && json_load "$omci" || fail 'OMCI status unavailable.'
 	printf '%s\n' "$omci"
 	field state int || fail 'Missing O-state.'; state=$value
-	field service_error int && [ "$value" = 0 ] || fail 'OMCI service installation failed.'
+	field service_error int || fail 'Missing OMCI service error.'
+	# The deliberately strict control may reproduce the captured validation
+	# rejection. Stop this case immediately, then verify normal cleanup;
+	# protocol/hardware faults and all other cases retain containment.
+	if [ "$phase" = activation-omci-vlan-control ] && [ "$value" = -22 ]; then
+		event service-install rejected-einval
+		event outcome functional-negative
+		exit 2
+	fi
+	[ "$value" = 0 ] || fail 'OMCI service installation failed.'
 	field authenticated int || fail 'Missing authentication state.'; authenticated=$value
 	field agent_operational int || fail 'Missing OMCI operational state.'; operational=$value
 	field service_rules int || fail 'Missing service rules.'; rules=$value
@@ -260,7 +269,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-vlan-control|activation-omci-vlan-narrow|activation-omci-vlan-combined|activation-omci-vlan-oem|activation-omci-vlan-eqd|activation-omci-vlan-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -269,7 +278,7 @@ case "$recovery_actions" in
 esac
 sn_limit=20; coalesce=0
 registration_bench=0 live_profiles=0 control_coalesce=0 ranging_mode=0 key_inline=0 activation_diag=0
-initial_key_readback=0 omci_min_len=60 alloc_revoke=0 live_add=3 dot1x_oem=0
+initial_key_readback=0 omci_min_len=60 alloc_revoke=0 live_add=3 dot1x_oem=0 vlan_untagged=1
 case "$phase" in
  activation-reg-*|activation-omci-*)
   registration_bench=1; sn_limit=40; coalesce=1; live_profiles=1; control_coalesce=1; activation_diag=1
@@ -282,6 +291,11 @@ case "$phase" in
      activation-omci-live-tcont) live_add=2 ;;
      activation-omci-live-both|activation-omci-live-repeat|activation-omci-topology-strict) live_add=3 ;;
      activation-omci-topology-oem|activation-omci-topology-repeat) live_add=3; dot1x_oem=1 ;;
+     activation-omci-vlan-control) live_add=15; dot1x_oem=1; vlan_untagged=0 ;;
+     activation-omci-vlan-narrow) live_add=15; dot1x_oem=1 ;;
+     activation-omci-vlan-combined|activation-omci-vlan-repeat) live_add=31; dot1x_oem=1 ;;
+     activation-omci-vlan-oem) live_add=31; dot1x_oem=1; vlan_untagged=2 ;;
+     activation-omci-vlan-eqd) live_add=31; dot1x_oem=1; ranging_mode=3 ;;
      activation-omci-filter-control) live_add=7; dot1x_oem=1 ;;
      activation-omci-filter-live|activation-omci-filter-repeat) live_add=15; dot1x_oem=1 ;;
      activation-omci-filter-eqd) live_add=15; dot1x_oem=1; ranging_mode=3 ;;
@@ -302,6 +316,7 @@ case "$phase" in
   esac
  ;;
 esac
+printf 'vlan_comparison untagged_policy=%s phase=%s\n' "$vlan_untagged" "$phase"
 printf 'topology_comparison dot1x_oem=%s phase=%s\n' "$dot1x_oem" "$phase"
 printf 'continuity_comparison live_add=%s phase=%s\n' "$live_add" "$phase"
 printf 'omci_comparison initial_key_readback=%s min_len=%s alloc_revoke=%s phase=%s\n' "$initial_key_readback" "$omci_min_len" "$alloc_revoke" "$phase"
@@ -358,7 +373,7 @@ lower_owned=1
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon; do load_module "$module"; done
 load_module omci bench_dot1x_oem="$dot1x_oem"
 # Only fixed names and validated hexadecimal/scalar module values are expanded.
-load_module xpon_10g bench_live_add="$live_add" bench_initial_key_readback="$initial_key_readback" bench_omci_min_len="$omci_min_len" bench_alloc_revoke="$alloc_revoke" bench_profile_coalesce="$coalesce" bench_profile_live="$live_profiles" bench_control_coalesce="$control_coalesce" bench_ranging_mode="$ranging_mode" bench_key_inline="$key_inline" bench_activation_diag="$activation_diag" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
+load_module xpon_10g bench_vlan_untagged="$vlan_untagged" bench_live_add="$live_add" bench_initial_key_readback="$initial_key_readback" bench_omci_min_len="$omci_min_len" bench_alloc_revoke="$alloc_revoke" bench_profile_coalesce="$coalesce" bench_profile_live="$live_profiles" bench_control_coalesce="$control_coalesce" bench_ranging_mode="$ranging_mode" bench_key_inline="$key_inline" bench_activation_diag="$activation_diag" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
 }
 start_stack
 if [ "$mode" = isolated ]; then

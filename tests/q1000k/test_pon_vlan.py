@@ -18,5 +18,11 @@ class VlanTests(unittest.TestCase):
     def test_tag_count_priority_zero_inverse_and_unsupported_rules(self):
         fixture = Path(__file__).with_name('pon_vlan_fixture.c').read_text()
         run_c(fixture.replace('/* PRODUCTION */', vlan_types() + vlan_source()))
+    def test_captured_olt_rows_and_untagged_dei_policies(self):
+        agent=(ROOT/'package/kernel/q1000k-omci/src/net/xpon/omci/agent.c').read_text()
+        parser=agent[agent.index('static bool omci_ext_vlan_rule_is_delete('):
+                     agent.index('static int omci_ext_vlan_update_rule(')]
+        fixture=Path(__file__).with_name('pon_vlan_capture_fixture.c').read_text()
+        run_c(fixture.replace('/* PRODUCTION */',vlan_types()+vlan_source()+parser))
 if __name__ == '__main__':
     unittest.main()

@@ -6,6 +6,7 @@ Python 3 and OpenSSH only. No flash/boot actions. --identity explicitly selects
 normal optical TX activation after RX tests. Private inputs never enter the kit.
 """
 import argparse
+import bisect
 import fcntl
 import hashlib
 import io
@@ -368,6 +369,25 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'vlan':
+        if args.physical_only:
+            raise ValueError('VLAN comparisons keep the fiber connected')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, live, policy, ranging, samples in [('control',15,0,1,120),
+                    ('narrow',15,1,1,180), ('combined',31,1,1,300), ('oem',31,2,1,300),
+                    ('eqd',31,1,3,300), ('repeat',31,1,1,600)]:
+                cases.append(dict(name='activation-omci-vlan-'+name, mode='activate',
+                    samples=samples, ranging_mode=ranging, dot1x_oem=True, live_add=live,
+                    vlan_untagged=policy, key_inline=True, initial_key_readback=True,
+                    omci_min_len=60, alloc_revoke=False,
+                    ids=['O1','O2','O3','O4','O5','O6','O7','O8','Q1','Q2','Q3','Q4','Q5',
+                         'S1','S2','S3','S4','S5','V1','V2','V3']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown VLAN case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'filter':
         if args.physical_only:
             raise ValueError('Classifier comparisons keep the fiber connected')
@@ -416,7 +436,7 @@ def discovery_plan(args):
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown topology case')
             cases = [c for c in cases if c['name'] in selected]
         return cases
-    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter'):
+    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan'):
         if args.physical_only:
             raise ValueError('OMCI comparisons use connected fiber without physical cycling')
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -551,6 +571,17 @@ def test_outcomes(case, result, text):
     stages = result['stages']; outcome = {}
     for ident in case.get('ids', []):
         outcome[ident] = 'not-run'
+        if ident.startswith('V'):
+            o=result.get('omci_experiment',{}); k=o.get('key_ring',{}); a=o.get('live_additions',{})
+            vlans=[r for r in o.get('topology',{}).get('wire_records',[]) if r['kind']=='set'
+                   and r.get('values',{}).get('received_frame_vlan_table')=='f8000000f03d5000000f0000000003d2']
+            outcome[ident]={
+                'V1':'captured-untagged-row-accepted' if vlans and all(r.get('response_result')==0 and r.get('response_transport_error')==0 for r in vlans) else 'captured-row-rejected-or-unobserved',
+                'V2':'rx-policy-live-readback-observed' if a.get('rx_policy_completed') else 'rx-policy-live-not-observed',
+                'V3':'OLT-continued-after-key-ring' if k.get('continued') else 'key-ring-continuation-not-established',
+            }[ident]
+            if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
+            continue
         if ident.startswith('S'):
             o=result.get('omci_experiment',{}); s=o.get('service_install',{})
             weight=[r for r in o.get('topology',{}).get('wire_records',[])
@@ -802,7 +833,7 @@ def topology_summary(events):
     A missing word record leaves an incomplete row, never a zero-filled success.
     Header sequence and transaction identity distinguish retries and fragments.
     """
-    rows, counts, pending = [], [], {}
+    rows, counts, pending, responses = [], [], {}, {}
     layouts = {
         171: [('association_type',1),('maximum_table_size',2),('input_tpid',2),
               ('output_tpid',2),('downstream_mode',1),('received_frame_vlan_table',16),
@@ -815,8 +846,11 @@ def topology_summary(events):
         278: [('tcont',2),('parent',2),('policy',1),('priority',1)],
     }
     for e in events:
-        if e['event'] != 32: continue
         stack=e.get('stack_generation',1)
+        if e['event']==22 and e['id']==8:
+            key=(stack,e.get('generation',0),e['b']>>16,e['a'],e['d'])
+            responses[key]=e
+        if e['event'] != 32: continue
         if e['id'] == 1:
             counts.append(dict(stack_generation=stack, transaction_id=e['a'],
                                commands=e['b'], transport_error=e['result']))
@@ -827,6 +861,14 @@ def topology_summary(events):
                      transaction_id=e['c'], length=e['d'], transport_error=e['result'],
                      complete=False, chunks={})
             if row['class_id'] not in layouts or not 0 <= row['length'] <= 26: continue
+            # The provider emits the public Set bytes AFTER its response.
+            # Match the exact transaction, never the preceding VLAN row.
+            if row['kind']=='set':
+                reply=responses.pop((stack,e.get('generation',0),row['transaction_id'],
+                                     row['class_id'],row['entity_id']<<16 | row['attribute_mask']),None)
+                row['response_result']=reply['c'] if reply else None
+                row['response_transport_error']=reply['result'] if reply else None
+                row['response_seq']=reply['seq'] if reply else None
             rows.append(row); pending[(stack,row['transaction_id'],row['class_id'])]=row
         elif e['id'] in (3,4,5):
             row=pending.get((stack,e['a'] >> 16,e['a'] & 65535))
@@ -898,9 +940,88 @@ def append_summary(events):
     rows=[dict(stack_generation=e.get('stack_generation',1),seq=e['seq'],ns=e['ns'],
                phase='begin' if e['id']==1 else 'end',error=e['result'],kind=e['a'],
                added_channels=e['b'],added_gems=e['c'],channels=e['d'])
-          for e in events if e['event']==31]
+          for e in events if e['event']==31 and e['id'] in (1,2)]
+    checks=[dict(stack_generation=e.get('stack_generation',1),seq=e['seq'],ns=e['ns'],
+                 gem=e['a'],expected=e['b'],actual=e['c'],old_rx=bool(e['d']&1),
+                 new_rx=bool(e['d']&2),error=e['result'])
+            for e in events if e['event']==31 and e['id']==3]
     return dict(events=rows,completed=sum(r['phase']=='end' and r['error']==0 for r in rows),
-                failed=sum(r['phase']=='end' and r['error']!=0 for r in rows))
+                failed=sum(r['phase']=='end' and r['error']!=0 for r in rows),
+                rx_policy_readbacks=checks,
+                rx_policy_completed=sum(r['phase']=='end' and r['kind']==16 and not r['error'] for r in rows))
+
+
+def continuation_index(events):
+    groups={}
+    for e in events:
+        kind=('requests' if e['event']==27 and e['id']==32 and not e['result'] else
+              'stops' if e['event']==16 or e['event']==11 and e['id']==5 else
+              'responses' if e['event']==22 else None)
+        if kind:
+            groups.setdefault(e.get('stack_generation',1),{}).setdefault(kind,[]).append(e)
+    for group in groups.values():
+        for kind in ('requests','stops','responses'):
+            group[kind]=sorted(group.get(kind,[]),key=lambda e:e['ns'])
+            group[kind+'_ns']=[e['ns'] for e in group[kind]]
+    return groups
+
+
+def continuation_after(index, row):
+    g=index.get(row['stack_generation'],{})
+    stops=g.get('stops_ns',[]); i=bisect.bisect_right(stops,row['ns'])
+    stop=stops[i] if i<len(stops) else float('inf')
+    requests=g.get('requests_ns',[]); first=bisect.bisect_right(requests,row['ns'])
+    last=bisect.bisect_left(requests,stop)
+    row['requests_after_install']=last-first
+    row['first_request_delay_ms']=(requests[first]-row['ns'])/1e6 if first<last else None
+    row['reset_or_deactivation_after_ms']=(stop-row['ns'])/1e6 if stop!=float('inf') else None
+    i=bisect.bisect_right(g.get('responses_ns',[]),row['ns']); replies=g.get('responses',[])
+    reply=replies[i] if i<len(replies) and replies[i]['ns']<stop else None
+    row['next_omci_response']=dict(class_id=reply['a'],entity_id=reply['d']>>16,
+        attribute_mask=reply['d']&65535,transaction_id=reply['b']>>16,
+        opcode=reply['id'],result=reply['c'],transport_error=reply['result']) if reply else None
+
+
+def key_ring_summary(events):
+    """Bound one key-ring Set by authenticated request and response.
+
+    Trace metadata and native completion are not proof of OLT reception.
+    A later authenticated request before deactivation is separate evidence.
+    """
+    windows, epochs, rows, native = {}, {}, [], {}
+    index=continuation_index(events)
+    for e in events:
+        stack=e.get('stack_generation',1)
+        if e['event']==30 and e['id']==2:
+            epochs[stack]=e['d']
+            key=(stack,e.get('generation',0),e['a']>>16,e['b'])
+            native.setdefault(key,[]).append(e)
+        if e['event']==27 and e['id']==32 and not e['result']:
+            windows[stack]=dict(request_ns=e['ns'],native_epoch_before=epochs.get(stack),
+                                full_retirements=0,rx_policy_completed=0,key_ring=None,gem=None)
+        w=windows.get(stack)
+        if w is None: continue
+        if e['event']==27 and e['id']==4: w['full_retirements']+=1
+        if e['event']==31 and e['id']==2 and e['a']==16 and not e['result']:
+            w['rx_policy_completed']+=1
+        if e['event']==28 and e['id']==1 and not e['result']:
+            w.update(entity=e['a']>>16,gem=e['a']&65535,key_ring=e['b']&255)
+        if e['event']==22 and e['id']==8 and e['a']==268 and e['d']&65535==64:
+            row=dict(w,stack_generation=stack,generation=e.get('generation',0),seq=e['seq'],ns=e['ns'],
+                     transaction_id=e['b']>>16,entity_id=e['d']>>16,result=e['c'],transport_error=e['result'])
+            if w.get('entity')!=row['entity_id']: row.update(key_ring=None,gem=None)
+            row['request_to_response_ms']=(e['ns']-w['request_ns'])/1e6
+            continuation_after(index,row); rows.append(row)
+    for row in rows:
+        key=(row['stack_generation'],row['generation'],row['transaction_id'],268<<16|row['entity_id'])
+        candidates=native.get(key,[])
+        submit=next((e for e in candidates if e['ns']>=row['ns'] and
+                     (row['reset_or_deactivation_after_ms'] is None or
+                      (e['ns']-row['ns'])/1e6<row['reset_or_deactivation_after_ms'])),None)
+        row['native_epoch_response']=submit['d'] if submit else None
+        row['native_epoch_preserved']=(submit['d']==row['native_epoch_before']) if submit and row['native_epoch_before'] is not None else None
+    return dict(sets=rows,continued=sum(bool(r['requests_after_install']) for r in rows),
+                note='RX-only metadata readback, native epochs, and OLT continuation are distinct observations; service decryption needs traffic validation.')
 
 
 def service_install_summary(events):
@@ -910,18 +1031,9 @@ def service_install_summary(events):
     installs = [dict(r, old_rules=r['a'], new_rules=r['b'],
                      path={0:'full-retirement',1:'initial-live',2:'classifier-live'}.get(r['c'],'unknown'))
                 for r in rows if r['id']==4]
+    index=continuation_index(events)
     for row in installs:
-        later=[e for e in events if e.get('stack_generation',1)==row['stack_generation'] and e['ns']>row['ns']]
-        stop=next((e['ns'] for e in later if e['event']==16 or e['event']==11 and e['id']==5),None)
-        requests=[e for e in later if e['event']==27 and e['id']==32 and not e['result']
-                  and (stop is None or e['ns']<stop)]
-        row['requests_after_install']=len(requests)
-        row['first_request_delay_ms']=(requests[0]['ns']-row['ns'])/1e6 if requests else None
-        row['reset_or_deactivation_after_ms']=(stop-row['ns'])/1e6 if stop else None
-        reply=next((e for e in later if e['event']==22 and (stop is None or e['ns']<stop)),None)
-        row['next_omci_response']=dict(class_id=reply['a'],entity_id=reply['d']>>16,
-            attribute_mask=reply['d']&65535,transaction_id=reply['b']>>16,
-            opcode=reply['id'],result=reply['c'],transport_error=reply['result']) if reply else None
+        continuation_after(index,row)
     qos, pending = [], {}
     for r in rows:
         if r['id'] in (2,3):
@@ -948,6 +1060,9 @@ def service_install_summary(events):
     checks=[dict(r,channel=r['a'],actual_mask=r['b'],expected_mask=r['c'])
             for r in rows if r['id']==10]
     return dict(events=rows, installs=installs, qos=qos, eligibility=eligibility, queue_checks=checks,
+                vlan_compiles=[dict(r,entity_id=r['a']>>16,rule_index=r['a']&65535,
+                    policy=r['b']>>24,input_tpid=r['c']>>16,output_tpid=r['c']&65535,
+                    inner_vid=r['d']>>16,outer_vid=r['d']&65535) for r in rows if r['id']==11],
                 classifier_live_completed=sum(r['path']=='classifier-live' and r['error']==0 for r in installs),
                 initial_live_completed=sum(r['path']=='initial-live' and r['error']==0 for r in installs),
                 full_completed=sum(r['path']=='full-retirement' and r['error']==0 for r in installs),
@@ -968,7 +1083,7 @@ def omci_summary(records):
     return dict(
         provisioning=omci_provisioning_summary(events), topology=topology_summary(events),
         native_tx=native_tx_summary(events), live_additions=append_summary(events),
-        service_install=service_install_summary(events),
+        service_install=service_install_summary(events), key_ring=key_ring_summary(events),
         ethernet_runt_omci_delivered=count(30, lambda e: bool(e['a'] & (1 << 12))),
         rx_descriptor_words=sorted({f"0x{e['a']:08x}" for e in control if e['id'] == 30}),
         rx_guard_rejected=count(31, lambda e: e['result'] != 0),
@@ -1370,7 +1485,7 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter'):
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter', 'vlan'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
@@ -1384,6 +1499,17 @@ def execute(args, pin):
                     o=result.get('omci_experiment',{}); n=o.get('native_tx',{}).get('counts',{})
                     report.append(f"| {result['name']} | {n.get('submitted',0)} | {n.get('dma-complete',0)} | {n.get('hardware-drop',0)} | {n.get('admission-drop',0)} | {n.get('dma-error',0)} | {n.get('teardown-abort',0)} | {n.get('admission-retry',0)} | {o.get('live_additions',{}).get('completed',0)} | {o.get('critical_evidence_complete',False)} |")
                 report += ['', 'Native consumption does not prove upstream optical delivery. An unobserved allocation/pause is an untested condition; use the raw logs and collection.json to distinguish it from success.']
+                report += ['', '## Untagged VLAN and key-ring comparisons', '',
+                    '| Case | Captured untagged row: accepted / rejected / unmatched | RX policy updates | Key-ring Sets followed by OLT request | Native epoch preserved |',
+                    '|---|---|---:|---:|---:|']
+                for result in record['results']:
+                    o=result.get('omci_experiment',{}); k=o.get('key_ring',{})
+                    vlans=[r for r in o.get('topology',{}).get('wire_records',[]) if r['kind']=='set' and
+                           r.get('values',{}).get('received_frame_vlan_table')=='f8000000f03d5000000f0000000003d2']
+                    accepted=sum(r.get('response_result')==0 and r.get('response_transport_error')==0 for r in vlans)
+                    rejected=sum(r.get('response_result') not in (None,0) for r in vlans)
+                    unmatched=sum(r.get('response_result') is None for r in vlans)
+                    report.append(f"| {result['name']} | {accepted} / {rejected} / {unmatched} | {o.get('live_additions',{}).get('rx_policy_completed',0)} | {k.get('continued',0)} | {sum(r.get('native_epoch_preserved') is True for r in k.get('sets',[]))} |")
                 report += ['', '## Service installation and classifier observations', '',
                     '| Case | Initial live installs | Classifier live installs | Full installs | Install failures | OLT requests after nonempty install | QoS records valid |',
                     '|---|---:|---:|---:|---:|---:|---:|']
@@ -1465,7 +1591,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='filter', help='Default: RX control, full/live VLAN classifier comparison, OEM EqD and repeat; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='vlan', help='Default: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

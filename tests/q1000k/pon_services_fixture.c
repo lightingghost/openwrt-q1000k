@@ -62,7 +62,7 @@ static int q1000k_pon_fix_vlans(void) { return fixture_fix_vlans; }
 #define QT_SERVICE_INSTALL 33
 static struct { int error; u32 a,b,c,d; } gem_trace[2];
 static void fixture_gem_trace(unsigned int event,unsigned int id,int error,u32 a,u32 b,u32 c,u32 d) {
-    if(event==QT_SERVICE_INSTALL) { assert(id>=1 && id<=10); return; }
+    if(event==QT_SERVICE_INSTALL) { assert(id>=1 && id<=11); return; }
     assert(event==28 && id>=1 && id<=2);
     gem_trace[id-1]=(typeof(gem_trace[0])){error,a,b,c,d};
 }
@@ -382,7 +382,13 @@ int main(void)
         tag.vlan_input_tpid=tag.vlan_output_tpid=0x8100;
         tag.vlan_rule=(struct omci_extended_vlan_rule){.filter_outer_pbit=15,
             .filter_inner_pbit=15,.treat_outer_pbit=15,.treat_inner_pbit=0,
-            .treat_inner_vid=123,.treat_inner_tpid_dei=4,.raw={0xf8,0,0,0,0xf8}};
+            .treat_inner_vid=123,.treat_inner_tpid_dei=2,.raw={0xf8,0,0,0,0xf8}};
+        struct qs_rules *unchanged=qs_current;
+        int ops=physical_ops;
+        bench_vlan_untagged=0;
+        assert(q1000k_services_replace(NULL,&tag,1)==-EINVAL);
+        assert(qs_current==unchanged && physical_ops==ops && !protocol_error);
+        bench_vlan_untagged=1;
         assert(!q1000k_services_replace(NULL,&tag,1));
         memset(&skb,0,sizeof(skb)); skb.len=60; skb.data[12]=8; skb.data[13]=6;
         for(unsigned int j=0;j<12;j++) skb.data[j]=j+7;
@@ -393,6 +399,11 @@ int main(void)
         assert(skb.data[12]==8 && skb.data[13]==6);
         for(unsigned int j=0;j<12;j++) assert(skb.data[j]==j+7);
         for(unsigned int j=14;j<60;j++) assert(skb.data[j]==0x5a);
+        bench_vlan_untagged=2;
+        assert(!q1000k_services_replace(NULL,&tag,1));
+        assert(!q1000k_services_tx(&skb) && get_unaligned_be16(skb.data+14)==123);
+        assert(!q1000k_services_rx(&skb,500) && skb.len==60);
+        bench_vlan_untagged=1; tag.vlan_rule.treat_inner_tpid_dei=4;
         skb.vlan=true; skb.vlan_proto=0x8100; skb.tci=0;
         assert(q1000k_services_tx(&skb)==-ENOENT);
         tag.vlan_rule.filter_inner_pbit=8; tag.vlan_rule.filter_inner_vid=0;

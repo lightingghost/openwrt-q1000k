@@ -88,6 +88,15 @@ static int __init pon_vlan_init(void)
     memcpy(tagged+16,plain+12,sizeof(plain)-12);
     ret=run_case(&s,plain,sizeof(plain),tagged,sizeof(tagged),false);
     if (ret) return ret;
+    /* Captured AT&T untagged -> VID 122, mode 2: output TPID and DEI 0
+     * despite an absent input DEI. Exercise real nonlinear/cloned skbs.
+     */
+    s.vlan_rule.treat_inner_tpid_dei=2; s.vlan_rule.treat_inner_vid=122;
+    s.vlan_output_tpid=0x8100; put_unaligned_be16(122,tagged+14);
+    ret=run_case(&s,plain,sizeof(plain),tagged,sizeof(tagged),false);
+    if (ret) return ret;
+    s.vlan_rule.treat_inner_tpid_dei=4; s.vlan_rule.treat_inner_vid=123;
+    s.vlan_output_tpid=0x88a8; put_unaligned_be16(123,tagged+14);
     memcpy(priority,tagged,sizeof(priority)); put_unaligned_be16(5<<13,priority+14);
     memcpy(translated,tagged,sizeof(translated)); put_unaligned_be16((5<<13)|123,translated+14);
     s.vlan_rule.filter_inner_pbit=8; s.vlan_rule.filter_inner_vid=0;

@@ -19,9 +19,9 @@
  * live addition and classifier update. Resource rebinding/removal always
  * uses full retirement.
  */
-static unsigned int bench_live_add = 15;
+static unsigned int bench_live_add = 31;
 module_param(bench_live_add, uint, 0400);
-MODULE_PARM_DESC(bench_live_add, "Live operations: bit 0 GEM, bit 1 T-CONT, bit 2 first service, bit 3 classifier on unchanged bindings and queues; 0 full-drain control");
+MODULE_PARM_DESC(bench_live_add, "Live operations: bit 0 GEM, bit 1 T-CONT, bit 2 first service, bit 3 classifier, bit 4 RX-only encryption metadata with hardware readback; 0 full-drain control");
 
 struct q1000k_gwan_transaction {
 	struct q1000k_gwan_table old, next;
@@ -29,7 +29,7 @@ struct q1000k_gwan_transaction {
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
 	u32 added_channels, added_gems;
-	bool registration, cold, tx_enabled, initial_service, classifier_update;
+	bool registration, cold, tx_enabled, initial_service, classifier_update, rx_policy;
 	int (*install)(void *arg);
 	void *install_arg;
 };
@@ -208,6 +208,38 @@ static const struct q1000k_pipeline_ops q1000k_gwan_pipeline_ops = {
 	.install = q1000k_gwan_install,
 };
 
+/* RX key selection belongs to the MAC/PLOAM key machinery. The per-GEM
+ * command contains only TX encryption. A downstream-only policy change
+ * must not retire the OMCC or reinterpret any queued packet's destination,
+ * channel, queue or TX encryption. Do not combine it with any other edit.
+ */
+static bool q1000k_gwan_rx_policy_only(struct q1000k_gwan_transaction *tx)
+{
+	unsigned int i;
+	bool changed = false;
+
+	if (!(bench_live_add & 16))
+		return false;
+	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++)
+		if (tx->old.alloc_id[i] != tx->next.alloc_id[i])
+			return false;
+	for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
+		const struct q1000k_gwan_entry *old = &tx->old.gem[i];
+		struct q1000k_gwan_entry next = tx->next.gem[i];
+
+		if (q1000k_gwan_entry_equal(old, &next))
+			continue;
+		if (!old->valid || !next.valid || !old->channel ||
+		    old->encrypted || next.encrypted)
+			return false;
+		next.rx_encrypted = old->rx_encrypted;
+		if (!q1000k_gwan_entry_equal(old, &next))
+			return false;
+		changed = true;
+	}
+	return changed;
+}
+
 static unsigned int q1000k_gwan_append_kind(struct q1000k_gwan_transaction *tx)
 {
 	unsigned int i, kind = 0;
@@ -218,6 +250,10 @@ static unsigned int q1000k_gwan_append_kind(struct q1000k_gwan_transaction *tx)
 		return 8;
 	if (tx->registration || tx->install || tx->old.alloc_id[0] == Q1000K_GWAN_UNASSIGNED)
 		return 0;
+	if (q1000k_gwan_rx_policy_only(tx)) {
+		tx->rx_policy = true;
+		return 16;
+	}
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
 		if (tx->old.alloc_id[i] == tx->next.alloc_id[i])
 			continue;
@@ -230,8 +266,8 @@ static unsigned int q1000k_gwan_append_kind(struct q1000k_gwan_transaction *tx)
 	for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
 		if (q1000k_gwan_entry_equal(&tx->old.gem[i], &tx->next.gem[i]))
 			continue;
-		/* Including software-only changes: an old queued frame must not
-		 * inherit a new binding, encryption policy or multicast role.
+		/* Other changes require retirement: an old queued frame must not
+		 * inherit a new binding, TX encryption policy or multicast role.
 		 */
 		if (tx->old.gem[i].valid || !tx->next.gem[i].valid)
 			return 0;
@@ -248,6 +284,28 @@ static int q1000k_gwan_append_install(void *arg)
 	unsigned int i;
 	int ret;
 	u8 closed;
+
+	if (tx->rx_policy) {
+		for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
+			const struct q1000k_gwan_entry *old = &tx->old.gem[i];
+			const struct q1000k_gwan_entry *next = &tx->next.gem[i];
+			struct q1000k_gem_value actual = {};
+
+			if (q1000k_gwan_entry_equal(old, next))
+				continue;
+			ret = q1000k_gem_read(old->gem, &actual);
+			if (!ret && (!actual.valid || actual.multicast != old->multicast ||
+			    actual.encrypted != old->encrypted))
+				ret = -ESTALE;
+			q1000k_trace(QT_GWAN_APPEND, 3, ret, old->gem,
+				1 | old->multicast << 1 | old->encrypted << 2,
+				actual.valid | actual.multicast << 1 | actual.encrypted << 2,
+				old->rx_encrypted | next->rx_encrypted << 1);
+			if (ret)
+				return ret;
+		}
+		return 0;
+	}
 
 	/* This callback only checks queue masks. The service owner publishes
 	 * its immutable classifier after this unchanged-namespace transaction.
@@ -307,7 +365,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	bool found = all;
 	int ret, token;
 
-	if (bench_live_add & ~15U)
+	if (bench_live_add & ~31U)
 		return -EINVAL;
 	if (edit == Q1000K_GWAN_INITIAL_SERVICE && !(bench_live_add & 4))
 		return -EAGAIN;

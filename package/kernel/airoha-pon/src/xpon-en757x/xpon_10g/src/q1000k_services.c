@@ -2,6 +2,7 @@
 /* OMCI entities and UNI-side service selection for the native PON datapath. */
 #include <linux/errno.h>
 #include <linux/if_vlan.h>
+#include <linux/moduleparam.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
@@ -28,6 +29,9 @@ static struct qs_gem qs_gems[QS_MAX];
 static bool qs_uni[4];
 static bool qs_enabled, qs_changing;
 static struct qs_rules __rcu *qs_current;
+static unsigned int bench_vlan_untagged = 1;
+module_param(bench_vlan_untagged, uint, 0);
+MODULE_PARM_DESC(bench_vlan_untagged, "Untagged VLAN treatment: 0 strict, 1 absent DEI zero, 2 NAND normalization");
 
 static void qs_reset_schedulers(void)
 {
@@ -752,7 +756,7 @@ int q1000k_services_replace(struct omci_device *odev,
 	bool was_changing;
 	unsigned int path = 0, classifier_reason;
 
-	if (count > QS_MAX || (count && !services))
+	if (bench_vlan_untagged > 2 || count > QS_MAX || (count && !services))
 		return -EINVAL;
 	next = kzalloc(struct_size(next, rule, count), GFP_KERNEL);
 	if (!next)
@@ -791,8 +795,19 @@ int q1000k_services_replace(struct omci_device *odev,
 			if (ret) goto free;
 		}
 		if (s->vlan_treatment_valid) {
+			const struct omci_extended_vlan_rule *r = &s->vlan_rule;
+
 			if (s->vlan_valid) { ret = -EINVAL; goto free; }
-			ret = q1000k_vlan_compile(s, &next->vlan[i]);
+			ret = q1000k_vlan_compile_policy(s, &next->vlan[i], bench_vlan_untagged);
+			if (ret || (r->filter_outer_pbit == 15 && r->filter_inner_pbit == 15))
+				q1000k_trace(QT_SERVICE_INSTALL, 11, ret,
+					(u32)s->vlan_entity_id << 16 | i,
+					bench_vlan_untagged << 24 | r->filter_inner_pbit << 20 |
+					r->filter_outer_pbit << 16 | r->tags_to_remove << 12 |
+					r->treat_inner_pbit << 8 | r->treat_inner_tpid_dei << 4 |
+					r->treat_outer_tpid_dei,
+					(u32)s->vlan_input_tpid << 16 | s->vlan_output_tpid,
+					(u32)r->treat_inner_vid << 16 | r->treat_outer_vid);
 			if (ret) goto free;
 		}
 		ret = qs_prepare_service(replacement, s, &next->channels[i]);

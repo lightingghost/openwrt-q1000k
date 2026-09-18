@@ -161,6 +161,14 @@ int q1000k_pipeline_activate_checked(bool transmit,int (*ready)(void *),void *ar
 }
 
 bool q1000k_gem_faulted(void) { return faulted; }
+int q1000k_gem_read(u16 gem,struct q1000k_gem_value *value)
+{
+    assert(physical_phase==2 && q1000k_gwan_changing);
+    int ret=physical_step(); if(ret) return ret;
+    if(faulted) return -EIO;
+    *value=(struct q1000k_gem_value){.valid=hardware[gem],.encrypted=encrypted_hardware[gem]};
+    return 0;
+}
 int q1000k_gem_replace(u16 gem,const struct q1000k_gem_value *expected,
                       const struct q1000k_gem_value *value)
 {

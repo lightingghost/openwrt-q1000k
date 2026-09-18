@@ -18,6 +18,45 @@ def payload(kind, entity, mask, raw, tid=10, class_id=277):
 
 
 class TopologyBenchTests(unittest.TestCase):
+    def test_vlan_suite_correlates_exact_set_and_rx_policy(self):
+        args=argparse.Namespace(suite='vlan',physical_only=False,identity='private.json',rx_only=False,cases=None)
+        plan=C.discovery_plan(args)
+        self.assertEqual([c['name'] for c in plan[1:]],[
+            'activation-omci-vlan-'+n for n in ('control','narrow','combined','oem','eqd','repeat')])
+        self.assertEqual([c['live_add'] for c in plan[1:]],[15,15,31,31,31,31])
+        self.assertEqual([c['vlan_untagged'] for c in plan[1:]],[0,1,1,2,1,1])
+        self.assertEqual([c['ranging_mode'] for c in plan[1:]],[1,1,1,1,3,1])
+        self.assertFalse(any(c['name'] in C.PHYSICAL for c in plan))
+        raw=bytes.fromhex('f8000000f03d5000000f0000000003d2')
+        wire=events(payload(6,0x101,0x400,raw,class_id=171,tid=11))
+        reply=dict(wire[0],event=22,id=8,a=171,b=11<<16,c=1,d=0x1010400)
+        unrelated=dict(reply,b=10<<16,c=0)
+        rows=C.topology_summary([unrelated,reply]+wire)['wire_records']
+        self.assertEqual(rows[0]['response_result'],1)
+        self.assertEqual(rows[0]['vlan_rule']['treatment_inner_vid'],122)
+        self.assertIsNone(C.topology_summary([unrelated]+wire)['wire_records'][0]['response_result'])
+        self.assertIsNone(C.topology_summary([dict(reply,generation=2)]+wire)['wire_records'][0]['response_result'])
+        self.assertIsNone(C.topology_summary([dict(reply,stack_generation=2)]+wire)['wire_records'][0]['response_result'])
+
+    def test_key_ring_epochs_readback_and_continuation_are_independent(self):
+        rows=[dict(seq=i,ns=i*1000000,generation=1,event=ev,id=ident,a=a,b=b,c=c,d=d,result=0)
+              for i,ev,ident,a,b,c,d in [(1,30,2,9<<16,171<<16|257,0,12),
+                   (2,27,32,0,0,0,0),(3,31,1,16,0,0,3),(4,31,3,1023,1,1,2),
+                   (5,31,2,16,0,0,3),(6,28,1,1023<<16|1023,0x80000303,1024,0),
+                   (7,22,8,268,10<<16,0,1023<<16|64),(8,30,2,10<<16,268<<16|1023,0,12),
+                   (9,27,32,0,0,0,0),(10,11,5,0,0,0,0),(11,27,32,0,0,0,0)]]
+        a=C.append_summary(rows)
+        self.assertEqual(a['completed'],1); self.assertEqual(a['rx_policy_completed'],1)
+        self.assertEqual(a['rx_policy_readbacks'][0]['actual'],1)
+        k=C.key_ring_summary(rows)['sets'][0]
+        self.assertEqual(k['key_ring'],3); self.assertEqual(k['rx_policy_completed'],1)
+        self.assertEqual(k['requests_after_install'],1); self.assertTrue(k['native_epoch_preserved'])
+        self.assertEqual(k['full_retirements'],0)
+        rows[2].update(event=27,id=4); rows[4].update(a=0); rows[7]['d']=15
+        k=C.key_ring_summary(rows[:8]+rows[9:])['sets'][0]
+        self.assertEqual(k['full_retirements'],1); self.assertEqual(k['rx_policy_completed'],0)
+        self.assertEqual(k['requests_after_install'],0); self.assertFalse(k['native_epoch_preserved'])
+
     def test_classifier_suite_vlan_bytes_and_correlated_response(self):
         args=argparse.Namespace(suite='filter',physical_only=False,skip_physical=False,
                                identity='private.json',rx_only=False,cases=None)

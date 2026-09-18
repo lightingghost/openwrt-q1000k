@@ -25,6 +25,11 @@ struct q1000k_vlan_program {
 };
 int q1000k_vlan_compile(const struct omci_service_config *service,
 			struct q1000k_vlan_program *program);
+/* 0: strict copy validation; 1: absent untagged DEI is zero; 2: NAND rule
+ * normalization (inner treatment uses output TPID/DEI zero, except mode 4).
+ */
+int q1000k_vlan_compile_policy(const struct omci_service_config *service,
+			struct q1000k_vlan_program *program, unsigned int untagged_policy);
 int q1000k_vlan_apply(const struct q1000k_vlan_program *program, bool upstream,
 		      const struct q1000k_vlan_frame *input,
 		      struct q1000k_vlan_frame *output);

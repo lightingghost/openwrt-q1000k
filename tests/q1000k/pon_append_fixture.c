@@ -7,9 +7,68 @@ static void append_reset(unsigned mode)
     memset(queue_model,255,sizeof(queue_model)); queue_model[0]=0xfe;
     physical_phase=3; rx_channels=BIT(0);
 }
+static void rx_policy_setup(struct q1000k_gwan_table *old)
+{
+    struct q1000k_gwan_table next;
+    append_reset(31);
+    assert(!q1000k_gwan_add_tcont(448));
+    assert(!q1000k_gwan_snapshot(old)); next=*old;
+    next.gem[1]=(struct q1000k_gwan_entry){.valid=true,.gem=600,
+        .channel=1,.alloc_id=448,.ani=1};
+    assert(!q1000k_gwan_apply(old,&next));
+    assert(!q1000k_gwan_snapshot(old));
+    queue_model[1]=0xfe; physical_ops=0; writes=0; append_calls=0;
+}
+static void rx_policy_tests(void)
+{
+    struct q1000k_gwan_table old,next,after;
+    struct q1000k_gwan_binding before_binding,after_binding;
+    rx_policy_setup(&old);
+    assert(!q1000k_gwan_binding(600,true,&before_binding));
+    next=old; next.gem[1].rx_encrypted=true;
+    assert(!q1000k_gwan_apply(&old,&next));
+    assert(append_calls==1 && physical_ops==1 && !writes && !physical_started);
+    assert(!producers_drained && !tx_queries && optical_tx);
+    assert(queue_model[0]==0xfe && queue_model[1]==0xfe && tcont_model[1]==448);
+    assert(!q1000k_gwan_snapshot(&after) && after.gem[1].rx_encrypted);
+    assert(!q1000k_gwan_binding(600,true,&after_binding));
+    assert(before_binding.gem==after_binding.gem && before_binding.channel==after_binding.channel &&
+        before_binding.ani==after_binding.ani && before_binding.alloc_id==after_binding.alloc_id &&
+        before_binding.index==after_binding.index && before_binding.multicast==after_binding.multicast);
+    assert(q1000k_gwan_apply(&old,&old)==-ESTALE); /* stale CAS never mutates */
+    assert(!q1000k_gwan_apply(&after,&old)); /* ring 3 -> 0 also preserves hardware */
+    assert(append_calls==2 && !writes && !physical_started);
+    /* Control, upstream encryption and an actual rebind retain retirement. */
+    for(unsigned variant=0;variant<3;variant++) {
+        rx_policy_setup(&old); next=old; next.gem[1].rx_encrypted=true;
+        if(variant==0) bench_live_add=15;
+        if(variant==1) next.gem[1].encrypted=true;
+        if(variant==2) next.gem[1].ani=2;
+        assert(!q1000k_gwan_apply(&old,&next));
+        assert(!append_calls && physical_started && producers_drained && writes);
+    }
+    /* A failed command or conflicting hardware contains the transaction;
+     * no successful metadata publication and no full-rebuild fallback.
+     */
+    for(unsigned failure=0;failure<5;failure++) {
+        rx_policy_setup(&old); next=old; next.gem[1].rx_encrypted=true;
+        if(failure==0) physical_fail=1;
+        if(failure==1) hardware[600]=false;
+        if(failure==2) encrypted_hardware[600]=true;
+        if(failure==3) faulted=true;
+        if(failure==4) async_protocol_fault_step=1;
+        assert(q1000k_gwan_apply(&old,&next)==-EUCLEAN);
+        assert(protocol_error<0 && !writes && !physical_started && append_calls==1);
+        assert(!wan.gpon.gemPort[1].info.rxEncrypt);
+    }
+    rx_policy_setup(&old); next=old; next.gem[1].rx_encrypted=true;
+    bench_live_add=32;
+    assert(q1000k_gwan_apply(&old,&next)==-EINVAL && !physical_ops);
+}
 int main(void)
 {
     struct q1000k_gwan_table old,next;
+    rx_policy_tests();
     append_reset(7);
     assert(!q1000k_gwan_snapshot(&old)); next=old;
     next.alloc_id[1]=448;

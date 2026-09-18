@@ -39,7 +39,7 @@ static int qv_copy(struct q1000k_vlan_expr *e, unsigned int count,
 }
 
 static int qv_output(struct q1000k_vlan_expr *e, unsigned int count,
-		     u8 pbit, u16 vid, u8 mode, u16 tpid)
+		     u8 pbit, u16 vid, u8 mode, u16 tpid, bool untagged_dei_zero)
 {
 	int ret;
 
@@ -59,7 +59,15 @@ static int qv_output(struct q1000k_vlan_expr *e, unsigned int count,
 	if (mode < 2) return qv_copy(e, count, mode == 1, 0, 0xffff) ?:
 		qv_copy(e, count, mode == 1, 1, 0x1000);
 	e->value[0] = mode == 4 ? 0x8100 : tpid;
-	if (mode == 2 || mode == 3) return qv_copy(e, count, mode == 3, 1, 0x1000);
+	if (mode == 2 || mode == 3) {
+		/* Some OLTs use copy-DEI even for an untagged input. There is no
+		 * DEI to preserve; use zero without inventing a source tag. This
+		 * does not relax PCP, VID, TPID, or single-tag outer-copy checks.
+		 */
+		if (!count && untagged_dei_zero)
+			return 0;
+		return qv_copy(e, count, mode == 3, 1, 0x1000);
+	}
 	if (mode == 7) e->value[1] |= 0x1000;
 	return 0;
 }
@@ -102,8 +110,8 @@ static void qv_inverse(struct q1000k_vlan_program *p)
 		}
 }
 
-int q1000k_vlan_compile(const struct omci_service_config *s,
-			struct q1000k_vlan_program *program)
+int q1000k_vlan_compile_policy(const struct omci_service_config *s,
+			struct q1000k_vlan_program *program, unsigned int untagged_policy)
 {
 	struct q1000k_vlan_program p = {};
 	const struct omci_extended_vlan_rule *r;
@@ -111,7 +119,7 @@ int q1000k_vlan_compile(const struct omci_service_config *s,
 	unsigned int added, n, i;
 	int ret;
 
-	if (!s || !program || !s->vlan_treatment_valid)
+	if (!s || !program || !s->vlan_treatment_valid || untagged_policy > 2)
 		return -EINVAL;
 	r = &s->vlan_rule;
 	if (r->delete || r->filter_ethertype > 5) return -EINVAL;
@@ -142,12 +150,23 @@ int q1000k_vlan_compile(const struct omci_service_config *s,
 	up->output_count = n - r->tags_to_remove + added;
 	if (added == 2) {
 		ret = qv_output(&up->output[0], n, r->treat_outer_pbit, r->treat_outer_vid,
-				r->treat_outer_tpid_dei, s->vlan_output_tpid);
+				r->treat_outer_tpid_dei, s->vlan_output_tpid, untagged_policy == 1);
 		if (ret) return ret;
 	}
 	if (added) {
+		u8 mode = r->treat_inner_tpid_dei;
+
+		/* NAND setExtVlanTagOpTblValue 0x70440..0x70468 normalizes the
+		 * first treatment for tag_num=0, nonliteral TPID, BBF247 off.
+		 * Preserve the received MIB row; normalize only the compiled rule.
+		 */
+		if (!n && untagged_policy == 2 && mode != 4) {
+			if (mode == 5 || mode > 7)
+				return -EINVAL;
+			mode = 6;
+		}
 		ret = qv_output(&up->output[added - 1], n, r->treat_inner_pbit, r->treat_inner_vid,
-				r->treat_inner_tpid_dei, s->vlan_output_tpid);
+				mode, s->vlan_output_tpid, untagged_policy == 1);
 		if (ret) return ret;
 	}
 	for (i = r->tags_to_remove; i < n; i++) {
@@ -158,6 +177,12 @@ int q1000k_vlan_compile(const struct omci_service_config *s,
 	qv_inverse(&p);
 	*program = p;
 	return 0;
+}
+
+int q1000k_vlan_compile(const struct omci_service_config *s,
+			struct q1000k_vlan_program *program)
+{
+	return q1000k_vlan_compile_policy(s, program, 1);
 }
 
 static bool qv_ethertype(u8 filter, u16 type)
