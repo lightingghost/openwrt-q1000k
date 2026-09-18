@@ -78,4 +78,32 @@ class TopologyBenchTests(unittest.TestCase):
         with self.assertRaises(ValueError): C.discovery_plan(args)
 
 
+    def test_service_suite_and_post_install_continuation(self):
+        args=argparse.Namespace(suite='service',physical_only=False,skip_physical=False,
+                               identity='private.json',rx_only=False,cases=None)
+        plan=C.discovery_plan(args)
+        self.assertEqual([c['name'] for c in plan[1:]],[
+            'activation-omci-service-'+n for n in ('control','initial','eqd','repeat')])
+        self.assertEqual([c['live_add'] for c in plan[1:]],[3,7,7,7])
+        self.assertTrue(all(c['dot1x_oem'] for c in plan[1:]))
+        self.assertFalse(any(c['name'] in C.PHYSICAL for c in plan))
+        def row(seq,ev,ident,a=0,b=0,c=0,d=0,error=0):
+            return dict(seq=seq,ns=seq*1000000,event=ev,id=ident,a=a,b=b,c=c,d=d,result=error)
+        rows=[row(1,33,2,1,0,3),row(2,33,6,1,0x10002,0x30004,0x50006),
+              row(3,33,8,1,0x70008),row(4,33,4,0,24,1),row(5,27,32),
+              row(6,11,5),row(7,27,32)]
+        s=C.service_install_summary(rows)
+        self.assertEqual(s['qos'][0]['weights'],list(range(1,9)))
+        self.assertTrue(s['qos'][0]['valid'])
+        self.assertEqual(s['initial_live_completed'],1)
+        self.assertEqual(s['installs'][0]['requests_after_install'],1)
+        self.assertEqual(s['installs'][0]['reset_or_deactivation_after_ms'],2)
+        s=C.service_install_summary(rows[:2])
+        self.assertIsNone(s['qos'][0]['weights']); self.assertFalse(s['qos'][0]['valid'])
+        rows[3]['result']=-117
+        self.assertEqual(C.service_install_summary(rows)['initial_live_completed'],0)
+        args.cases='activation-omci-service-initial'
+        self.assertEqual(len(C.discovery_plan(args)),1)
+
+
 if __name__=='__main__': unittest.main()

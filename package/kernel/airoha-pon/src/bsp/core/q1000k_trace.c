@@ -30,7 +30,7 @@ static bool qt_is_critical(const struct qt_record *r)
   r->event == QT_ACTIVATION || r->event == QT_CONTROL ||
   r->event == QT_OMCI_GEM || r->event == QT_OMCI_OPERATION ||
   r->event == QT_OMCI || r->event == QT_OMCI_NATIVE_TX || r->event == QT_GWAN_APPEND ||
-  r->event == QT_OMCI_TOPOLOGY ||
+  r->event == QT_OMCI_TOPOLOGY || r->event == QT_SERVICE_INSTALL ||
   (r->event == QT_MAC_IRQ && r->id >= 2 && r->id <= 5) ||
   ((r->event == QT_PLOAM_VERIFY || r->event == QT_PLOAM_DISPATCH) && r->id != 1);
 }

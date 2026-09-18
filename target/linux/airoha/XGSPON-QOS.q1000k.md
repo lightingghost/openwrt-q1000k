@@ -53,3 +53,14 @@ startup/shutdown cycles. All 32 schedulers are read; the unprovisioned cold
 namespace replays channel zero. Loaded SP/WRR behavior on subscriber channels
 remains unverified. This is a Linux lifecycle correction, not an http-uboot
 issue.
+
+## Full-byte weights and first service
+
+The topology bench exposed an unjustified provider cap of 127: the OLT sets
+weight 150. The NAND QDMA scheduler uses 16-bit command values, as does the
+native driver. SP now stores all 0..255 OMCI values without hardware change;
+WRR accepts 1..255 with exact readback. Native/global-unit checks remain.
+The first data classifier can use unchanged bindings and closed data queues
+without retiring OMCC; subsequent replacement retains the full transaction.
+See [the service audit](XGSPON-OMCI-SERVICE-AUDIT.q1000k.md) for evidence, guards
+and the selectable full-retirement control. Hardware validation is pending.

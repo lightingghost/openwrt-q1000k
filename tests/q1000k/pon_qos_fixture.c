@@ -96,6 +96,20 @@ int main(void)
 {
     struct airoha_pon_qos cfg,actual,sentinel;
     unsigned int c,mode,n,k;
+    /* First data service: OMCC stays open and has a pending descriptor.
+     * Only the target bank must be empty/closed, and its commands must not
+     * change channel zero's mode/weights, admission or pending accounting.
+     */
+    reset_fixture();
+    pon.closed[0]=254; pon.channel_pending[0]=1; pon.pending=1; pon.tx_enabled=3;
+    eth.qdma[1].weights[0][3]=1234;
+    cfg=(struct airoha_pon_qos){.mode=1};
+    assert(!airoha_pon_set_qos(&pon,1,&cfg));
+    assert(!airoha_pon_get_qos(&pon,1,&actual));
+    assert(actual.mode==1 && eth.qdma[1].weights[0][3]==1234);
+    assert(pon.closed[0]==254 && pon.channel_pending[0]==1 && pon.pending==1 && pon.tx_enabled==3);
+    assert(!(eth.qdma[1].mode[0]&7) && !pon.paused && !pon.retiring);
+    check_unmodified_lan();
     for(unsigned int global=0;global<4;global++) {
         reset_fixture();
         eth.qdma[1].global=(global&1?BIT(3):0)|(global&2?BIT(31):0)|0x400;

@@ -370,24 +370,43 @@ struct qs_qos_update {
 	u8 channel;
 	struct qs_scheduler scheduler;
 };
+static u32 qs_qos_sequence; /* Protocol executor serializes all QoS calls. */
 
-/* The namespace owner invokes this only after full physical drain, with
- * queues closed. Read the actual global units instead of guessing byte/packet
- * policy or changing units shared with OMCC and other Alloc-IDs.
+static void qs_qos_trace(unsigned int id, u8 channel,
+			 const struct airoha_pon_qos *qos, int result)
+{
+	u32 sample = ((++qs_qos_sequence & 0x07ffffff) << 5) | channel;
+
+	q1000k_trace(QT_SERVICE_INSTALL, id, result, sample, qos->mode,
+		     qos->byte_mode | (qos->scale16 << 1), 0);
+	q1000k_trace(QT_SERVICE_INSTALL, id + 4, result, sample,
+		     ((u32)qos->weights[0] << 16) | qos->weights[1],
+		     ((u32)qos->weights[2] << 16) | qos->weights[3],
+		     ((u32)qos->weights[4] << 16) | qos->weights[5]);
+	q1000k_trace(QT_SERVICE_INSTALL, id + 6, result, sample,
+		     ((u32)qos->weights[6] << 16) | qos->weights[7], 0, 0);
+}
+
+/* The namespace owner invokes this after full physical drain or for a first
+ * service on verified closed data banks with no native mappings. Read actual
+ * global units instead of changing units shared with OMCC/other Alloc-IDs.
  */
 static int qs_qos_install(void *arg)
 {
 	const struct qs_qos_update *update = arg;
-	struct airoha_pon_qos qos;
+	struct airoha_pon_qos qos = {};
 	unsigned int i;
 	int ret = q1000k_transport_get_qos(update->channel, &qos);
 
+	qs_qos_trace(2, update->channel, &qos, ret);
 	if (ret)
 		return ret;
 	qos.mode = update->scheduler.policy == 1 ? 1 : 0;
 	for (i = 0; i < 8; i++)
 		qos.weights[i] = qos.mode == 1 ? 0 : update->scheduler.weight[i];
-	return q1000k_transport_set_qos(update->channel, &qos);
+	ret = q1000k_transport_set_qos(update->channel, &qos);
+	qs_qos_trace(3, update->channel, &qos, ret);
+	return ret;
 }
 
 static int qs_scheduler_update(unsigned int index, const struct qs_scheduler *candidate)
@@ -405,7 +424,7 @@ static int qs_scheduler_update(unsigned int index, const struct qs_scheduler *ca
 		if (candidate->direct_mask)
 			return -EOPNOTSUPP;
 		for (i = 0; i < 8; i++)
-			if (!candidate->weight[i] || candidate->weight[i] > 127)
+			if (!candidate->weight[i])
 				return -ERANGE;
 	}
 
@@ -467,8 +486,10 @@ int q1000k_services_queue(struct omci_device *odev, u16 entity,
 	    (q->scheduler_entity_id && q->scheduler_entity_id != 0x8000 + index) ||
 	    q->priority != 7 - queue)
 		return -EOPNOTSUPP;
-	if (q->weight > 127)
-		return -ERANGE;
+	/* OMCI stores an octet even when SP ignores the weight. QDMA's weight
+	 * field is 16 bits, so all nonzero OMCI weights fit WRR without scaling.
+	 * A later SP -> WRR transition still rejects zero weights/direct banks.
+	 */
 	token = q1000k_protocol_enter();
 	if (token < 0)
 		return token;
@@ -521,6 +542,8 @@ static int qs_service_qos_install(void *arg)
 		int ret;
 		unsigned int channel = rules->channels[i];
 
+		if (!channel)
+			return -EINVAL;
 		if (channel >= 32 || installed[channel])
 			continue;
 		update.channel = channel;
@@ -658,7 +681,7 @@ int q1000k_services_replace(struct omci_device *odev,
 	u8 closed[32];
 	size_t i, j;
 	int ret = 0, token;
-	bool was_changing;
+	bool was_changing, initial_service;
 
 	if (count > QS_MAX || (count && !services))
 		return -EINVAL;
@@ -738,12 +761,29 @@ int q1000k_services_replace(struct omci_device *odev,
 			closed[next->channels[i]] &= ~BIT(s->queue);
 	}
 	WRITE_ONCE(qs_changing, true);
-	/* Retire old classifier-selected traffic, including native retries and
-	 * downstream frames, even when the GEM record set itself is identical.
+	old = rcu_dereference_protected(qs_current, q1000k_protocol_owned());
+	q1000k_trace(QT_SERVICE_INSTALL, 1, 0, old ? old->count : 0,
+		     count, (!old || !old->count) && count, 0);
+	/* No data classifier has ever admitted a frame in this service epoch.
+	 * The existing GEM/T-CONT namespace may therefore be activated with
+	 * its closed data-channel QoS, without retiring the live OMCC. The
+	 * namespace owner independently verifies unchanged bindings and every
+	 * data queue closed; native QoS verifies no pending descriptors.
 	 */
-	ret = q1000k_gwan_apply_install(&replacement->before, &replacement->after,
-				       qs_service_qos_install, next);
+	ret = (!old || !old->count) && count ?
+		q1000k_gwan_initial_service(&replacement->before, &replacement->after,
+					    qs_service_qos_install, next) : -EAGAIN;
+	initial_service = ret != -EAGAIN;
+	/* Retire old classifier-selected traffic, including native retries and
+	 * downstream frames. The initial-service exception above cannot be used
+	 * for replacement/removal or for a changed namespace.
+	 */
+	if (ret == -EAGAIN)
+		ret = q1000k_gwan_apply_install(&replacement->before, &replacement->after,
+					       qs_service_qos_install, next);
 	if (ret) {
+		q1000k_trace(QT_SERVICE_INSTALL, 4, ret, old ? old->count : 0,
+			     count, initial_service, 0);
 		if (ret != -EUCLEAN) WRITE_ONCE(qs_changing, was_changing);
 		goto free;
 	}
@@ -752,6 +792,8 @@ int q1000k_services_replace(struct omci_device *odev,
 		if (ret) {
 			q1000k_protocol_fail(ret);
 			ret = -EUCLEAN;
+			q1000k_trace(QT_SERVICE_INSTALL, 4, ret, old ? old->count : 0,
+				     count, initial_service, 1);
 			goto free;
 		}
 	}
@@ -761,6 +803,8 @@ int q1000k_services_replace(struct omci_device *odev,
 	old = rcu_replace_pointer(qs_current, next, q1000k_protocol_owned());
 	next = NULL;
 	synchronize_rcu();
+	q1000k_trace(QT_SERVICE_INSTALL, 4, 0, old ? old->count : 0,
+		     count, initial_service, 0);
 	kfree(old);
 	WRITE_ONCE(qs_changing, false);
 free:

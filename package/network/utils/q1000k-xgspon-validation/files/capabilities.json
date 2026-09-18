@@ -389,6 +389,30 @@
       "hypothesis": "Remaining provisioning or data-path failure persists",
       "implemented": true,
       "hardware_run": false
+    },
+    {
+      "id": "S1",
+      "test": "Capture full-byte queue weight request and OMCI acceptance",
+      "selection": "service suite",
+      "hypothesis": "The provider incorrectly rejected weight 150",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "S2",
+      "test": "Compare full service retirement with first service on unchanged closed data banks",
+      "selection": "service suite",
+      "hypothesis": "Initial service activation interrupts live OMCC",
+      "implemented": true,
+      "hardware_run": false
+    },
+    {
+      "id": "S3",
+      "test": "Correlate QoS readback, post-install OMCI, OLT resets and WAN traffic",
+      "selection": "service suite",
+      "hypothesis": "Local service install succeeds but OLT or data path does not continue",
+      "implemented": true,
+      "hardware_run": false
     }
   ],
   "event_names": {
@@ -422,8 +446,9 @@
     "28": "OMCI GEM candidate and QoS fields",
     "29": "OMCI original provider error and failing stage",
     "30": "Native OMCI TX: id 1 admission-drop,2 submit,3 DMA-complete,4 descriptor-drop,5 teardown-abort,6 DMA-error,7 admission-retry. a=TCI/type/device, b=class/entity, c=GEM/length, d=native epoch low32. Headers only; no optical acknowledgement.",
-    "31": "GWAN append: id 1 begin,2 end; a=GEM/T-CONT mask,b=added channel bitmap,c=added GEM count,d=complete channel bitmap; result errno.",
-    "32": "Public OMCI topology: id 1 upload count; 2 upload header; 6 queue Set header; 3..5 data words. Classes 262/277/278 only; no identity payload."
+    "31": "GWAN append: id 1 begin,2 end; a=kind bits (1 GEM,2 T-CONT,4 first service),b=added channel bitmap,c=added GEM count,d=complete channel bitmap; result errno.",
+    "32": "Public OMCI topology: id 1 upload count; 2 upload header; 6 queue Set header; 3..5 data words. Classes 262/277/278 only; no identity payload.",
+    "33": "service-install: 1 selection (old/new rules, first-service eligibility); 2 QoS read (a=sample-sequence<<5|channel,b=mode,c=units); 3 verified write result; 4 install outcome (old/new rules, live path, stage); 6/8 read weights and 7/9 write weights packed u16 pairs with matching sample/channel token; errors never assert valid readback"
   },
   "discovery_irq_bits": {
     "2": "SN request received",
@@ -432,7 +457,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "topology",
+  "default_suite": "service",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -903,7 +928,7 @@
       }
     },
     "native_admission_race": "Authenticated OMCI preserves skb on transient closure/stale native epoch; retry checks auth epoch and original 1000 ms deadline. Data cannot acquire a replacement epoch.",
-    "live_add_policy": "Append only to empty hardware/software entries; old bindings and OMCC unchanged. T-CONT queues stay closed until provisioned. Deletion, replacement, QoS install, reset and keys use full retirement.",
+    "live_add_policy": "Bits 0/1: append empty GEM/T-CONT entries. Bit 2: first data classifier only, unchanged namespace, all data queues closed, target native mappings absent. OMCC remains live. Replacements/removals/reset/keys retain full retirement.",
     "boundary_snapshots": {
       "20": "before live addition",
       "21": "after live addition",
@@ -940,5 +965,44 @@
         "samples": 600
       }
     }
+  },
+  "omci_service": {
+    "revision": 1,
+    "physical_actions_required": 0,
+    "large_sp_weight": "Store 0..255 under SP without hardware update. Native QDMA weight field is 16 bits; WRR accepts OMCI 1..255 exactly, rejecting zero/direct bindings. Hardware service validation pending.",
+    "cases": {
+      "activation-omci-service-control": {
+        "live_add": 3,
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 240
+      },
+      "activation-omci-service-initial": {
+        "live_add": 7,
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 300
+      },
+      "activation-omci-service-eqd": {
+        "live_add": 7,
+        "dot1x_oem": true,
+        "ranging_mode": 3,
+        "samples": 300
+      },
+      "activation-omci-service-repeat": {
+        "live_add": 7,
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 600
+      }
+    },
+    "observations": [
+      "namespace/QoS install path and outcome",
+      "actual QoS before and verified target after",
+      "OMCI requests following install before next reset",
+      "queue topology and requested weight",
+      "OLT deactivation",
+      "WAN addresses and traffic if stable service permits"
+    ]
   }
 }

@@ -1,4 +1,6 @@
 /* Production table transaction under an active authenticated namespace. */
+static unsigned initial_installs;
+static int initial_install(void *arg) { assert(physical_phase==2); initial_installs++; return 0; }
 static void append_reset(unsigned mode)
 {
     reset_model(); bench_live_add=mode;
@@ -8,6 +10,16 @@ static void append_reset(unsigned mode)
 int main(void)
 {
     struct q1000k_gwan_table old,next;
+    append_reset(7);
+    assert(!q1000k_gwan_snapshot(&old)); next=old;
+    next.alloc_id[1]=448;
+    assert(q1000k_gwan_initial_service(&old,&next,initial_install,NULL)==-EAGAIN);
+    assert(!initial_installs && !append_calls && !physical_started && !physical_ops);
+    next=old; next.alloc_id[0]=99;
+    assert(q1000k_gwan_initial_service(&next,&old,initial_install,NULL)==-ESTALE);
+    assert(!initial_installs && !physical_started);
+    assert(!q1000k_gwan_initial_service(&old,&old,initial_install,NULL));
+    assert(initial_installs==1 && append_calls==1 && !physical_started && queue_model[0]==0xfe);
     for(unsigned mode=0;mode<4;mode++) {
         append_reset(mode);
         assert(!q1000k_gwan_snapshot(&old)); next=old;

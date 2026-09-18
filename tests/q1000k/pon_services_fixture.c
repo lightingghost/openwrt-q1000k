@@ -8,6 +8,7 @@
 #define RCU_INIT_POINTER(p,v) ((p)=(v))
 #define rcu_access_pointer(p) (p)
 #define rcu_dereference(p) (p)
+#define rcu_dereference_protected(p,condition) ({ assert(condition); (p); })
 #define rcu_replace_pointer(p,v,condition) ({ assert(condition); __typeof__(p) old_=(p); (p)=(v); old_; })
 #define kcalloc(n,z,f) calloc(n,z)
 #define struct_size(p,member,n) (sizeof(*(p))+(n)*sizeof((p)->member[0]))
@@ -58,8 +59,10 @@ static bool fixture_fix_vlans;
 static int q1000k_pon_fix_vlans(void) { return fixture_fix_vlans; }
 #undef q1000k_trace
 #define QT_OMCI_GEM 28
+#define QT_SERVICE_INSTALL 33
 static struct { int error; u32 a,b,c,d; } gem_trace[2];
 static void fixture_gem_trace(unsigned int event,unsigned int id,int error,u32 a,u32 b,u32 c,u32 d) {
+    if(event==QT_SERVICE_INSTALL) { assert(id>=1 && id<=9); return; }
     assert(event==28 && id>=1 && id<=2);
     gem_trace[id-1]=(typeof(gem_trace[0])){error,a,b,c,d};
 }
@@ -130,6 +133,53 @@ static void test_deferred_gem(void)
     int token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
 }
 
+static void test_initial_service(void)
+{
+    struct omci_service_config s={.cookie=1,.uni_entity_id=1,.gem_ctp_entity_id=100,
+        .gem_port_id=500,.tcont_entity_id=0x8000,.alloc_id=200,.vlan_id=1894,
+        .vlan_valid=true,.queue=3,.direction=3};
+    /* Same production calls as the OLT's T-CONT/GEM/mapper sequence. */
+    for(unsigned mode=3;mode<=7;mode+=4) {
+        reset_model(); q1000k_services_init(); bench_live_add=mode;
+        memset(queue_model,255,sizeof(queue_model)); queue_model[0]=0xfe;
+        physical_phase=3; rx_channels=BIT(0);
+        assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+        assert(!gwan_create_new_tcont(200));
+        assert(!q1000k_services_gem(NULL,100,500,0x8000,3,true,0));
+        assert(!physical_started && append_calls==2);
+        struct airoha_pon_qos omcc=qos_model[0];
+        assert(!q1000k_services_replace(NULL,&s,1));
+        assert(qs_current && qs_current->count==1 && !qs_changing);
+        assert(queue_model[1]==(255^BIT(3)) && queue_model[0]==0xfe && optical_tx);
+        assert(qos_model[1].mode==1 && !qos_model[1].weights[3]);
+        assert(!memcmp(&omcc,&qos_model[0],sizeof(omcc)));
+        assert(append_calls==(mode==7 ? 3U : 2U));
+        assert(physical_started==(mode==3));
+        /* An existing classifier, even with identical bindings, must retire. */
+        physical_started=false;
+        s.vlan_id=1895;
+        assert(!q1000k_services_replace(NULL,&s,1));
+        assert(physical_started && append_calls==(mode==7 ? 3U : 2U));
+        int token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+    }
+    /* Unexpected open data queue or failed QoS access contains the port,
+     * never publishes a classifier or falls back after partial mutation. */
+    for(int failure=0;failure<3;failure++) {
+        reset_model(); q1000k_services_init(); bench_live_add=7;
+        memset(queue_model,255,sizeof(queue_model)); queue_model[0]=0xfe;
+        physical_phase=3; rx_channels=BIT(0);
+        assert(!q1000k_services_tcont(NULL,0x8000,200,true));
+        assert(!gwan_create_new_tcont(200));
+        assert(!q1000k_services_gem(NULL,100,500,0x8000,3,true,0));
+        if(!failure) queue_model[31]=0;
+        else physical_fail=physical_ops+31+failure; /* reads of 31 queue masks, then QoS read/write */
+        assert(q1000k_services_replace(NULL,&s,1)==-EUCLEAN);
+        assert(!qs_current && qs_changing && protocol_error && !physical_started && append_calls==3);
+        for(unsigned i=0;i<32;i++) assert(queue_model[i]==255);
+        int token=q1000k_protocol_enter(); q1000k_services_destroy(); q1000k_protocol_leave(token);
+    }
+}
+
 int main(void)
 {
     struct omci_priority_queue_config q={.configuration=1,.maximum_size=0xffff,
@@ -143,6 +193,7 @@ int main(void)
         .vlan_valid=true,.queue=3,.direction=3};
     struct omci_service_config rules[2];
     test_deferred_gem();
+    test_initial_service();
     reset_model(); q1000k_services_init();
     assert(!q1000k_services_topology(NULL,&topology) && topology.tcont_count==31 && topology.queues_per_tcont==8);
     assert(q1000k_services_tcont(NULL,0x7fff,200,true)==-EINVAL);
@@ -226,12 +277,18 @@ int main(void)
     assert(q1000k_services_queue(NULL,0xdead,&q)==-EINVAL);
     assert(physical_ops==untouched);
     q.scheduler_entity_id=0x8000;
+    q.weight=150; assert(!q1000k_services_queue(NULL,0x8003,&q));
+    assert(physical_ops==untouched && qs_schedulers[0].weight[3]==150);
+    q.weight=255; assert(!q1000k_services_queue(NULL,0x8003,&q));
+    assert(physical_ops==untouched && qs_schedulers[0].weight[3]==255);
     q.weight=127; assert(!q1000k_services_queue(NULL,0x8003,&q));
     assert(physical_ops==untouched);
     scheduler.policy=2; assert(!q1000k_services_scheduler(NULL,0x8000,&scheduler));
     assert(qos_model[1].mode==0 && qos_model[1].weights[3]==127);
     untouched=physical_ops;
-    q.weight=128; assert(q1000k_services_queue(NULL,0x8003,&q)==-ERANGE);
+    q.weight=150; assert(!q1000k_services_queue(NULL,0x8003,&q));
+    assert(qos_model[1].weights[3]==150 && qs_schedulers[0].weight[3]==150);
+    untouched=physical_ops;
     q.weight=0; assert(q1000k_services_queue(NULL,0x8003,&q)==-ERANGE);
     q.weight=17; q.priority=3; assert(q1000k_services_queue(NULL,0x8003,&q)==-EOPNOTSUPP);
     q.priority=4; q.allocated_size=1; assert(q1000k_services_queue(NULL,0x8003,&q)==-EOPNOTSUPP);
@@ -240,7 +297,7 @@ int main(void)
     scheduler.parent_entity_id=0; assert(physical_ops==untouched);
     physical_fail=physical_ops+1;
     assert(q1000k_services_queue(NULL,0x8003,&q)==-ETIMEDOUT);
-    assert(qs_schedulers[0].weight[3]==127 && !qs_changing);
+    assert(qs_schedulers[0].weight[3]==150 && !qs_changing);
     physical_fail=0;
     make_tag(&skb,1894,0);
     assert(q1000k_services_tx(&skb)==-ENOLINK);

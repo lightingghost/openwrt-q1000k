@@ -18,9 +18,9 @@
 /* One image can compare the former full-drain path with each independent
  * live addition. Replacement/removal/rebinding always uses full retirement.
  */
-static unsigned int bench_live_add = 3;
+static unsigned int bench_live_add = 7;
 module_param(bench_live_add, uint, 0400);
-MODULE_PARM_DESC(bench_live_add, "Live empty-entry additions: bit 0 GEM, bit 1 T-CONT; 0 full-drain control");
+MODULE_PARM_DESC(bench_live_add, "Live additions: bit 0 GEM, bit 1 T-CONT, bit 2 first service on unchanged closed data channels; 0 full-drain control");
 
 struct q1000k_gwan_transaction {
 	struct q1000k_gwan_table old, next;
@@ -28,7 +28,7 @@ struct q1000k_gwan_transaction {
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
 	u32 added_channels, added_gems;
-	bool registration, cold, tx_enabled;
+	bool registration, cold, tx_enabled, initial_service;
 	int (*install)(void *arg);
 	void *install_arg;
 };
@@ -211,6 +211,8 @@ static unsigned int q1000k_gwan_append_kind(struct q1000k_gwan_transaction *tx)
 {
 	unsigned int i, kind = 0;
 
+	if (tx->initial_service)
+		return 4;
 	if (tx->registration || tx->install || tx->old.alloc_id[0] == Q1000K_GWAN_UNASSIGNED)
 		return 0;
 	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
@@ -244,6 +246,17 @@ static int q1000k_gwan_append_install(void *arg)
 	int ret;
 	u8 closed;
 
+	if (tx->initial_service) {
+		/* Verify every data bank before any QoS command. Channel zero is
+		 * the live OMCC and is deliberately excluded from all writes.
+		 */
+		for (i = 1; i < Q1000K_GWAN_CHANNELS; i++) {
+			ret = q1000k_transport_get_queue_close(i, &closed);
+			if (ret || closed != 0xff)
+				return ret ?: -EBUSY;
+		}
+		return tx->install(tx->install_arg);
+	}
 	for (i = 1; i < Q1000K_GWAN_CHANNELS; i++) {
 		if (!(tx->added_channels & BIT(i)))
 			continue;
@@ -271,7 +284,8 @@ static int q1000k_gwan_append_install(void *arg)
 }
 
 enum q1000k_gwan_edit { Q1000K_GWAN_APPLY, Q1000K_GWAN_DELETE_GEM,
-	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH, Q1000K_GWAN_REGISTER, Q1000K_GWAN_COLD };
+	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH, Q1000K_GWAN_REGISTER,
+	Q1000K_GWAN_COLD, Q1000K_GWAN_INITIAL_SERVICE };
 
 static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			      const struct q1000k_gwan_table *desired,
@@ -284,8 +298,10 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	bool found = all;
 	int ret, token;
 
-	if (bench_live_add & ~3U)
+	if (bench_live_add & ~7U)
 		return -EINVAL;
+	if (edit == Q1000K_GWAN_INITIAL_SERVICE && !(bench_live_add & 4))
+		return -EAGAIN;
 	/* Enter also supports a PLOAM callback already owning the executor:
 	 * no self-cancel/flush and no recursion into an OMCI session barrier.
 	 */
@@ -305,10 +321,11 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	ops.reset_mac = tx->cold;
 	tx->install = install;
 	tx->install_arg = install_arg;
+	tx->initial_service = edit == Q1000K_GWAN_INITIAL_SERVICE;
 	ret = q1000k_gwan_snapshot(&tx->old);
 	if (ret)
 		goto free;
-	if (edit == Q1000K_GWAN_APPLY) {
+	if (edit == Q1000K_GWAN_APPLY || tx->initial_service) {
 		if (!q1000k_gwan_table_equal(expected, &tx->old)) {
 			ret = -ESTALE;
 			goto free;
@@ -381,6 +398,12 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	ret = q1000k_gwan_validate(tx);
 	if (ret || (!install && !tx->registration && q1000k_gwan_table_equal(&tx->old, &tx->next)))
 		goto free;
+	if (tx->initial_service &&
+	    (!q1000k_gwan_table_equal(&tx->old, &tx->next) ||
+	     tx->old.alloc_id[0] == Q1000K_GWAN_UNASSIGNED)) {
+		ret = -EAGAIN; /* No mutation; caller uses the full transaction. */
+		goto free;
+	}
 	append = q1000k_gwan_append_kind(tx);
 	if (append) {
 		/* Protocol producers are serialized and data binding acquisition
@@ -480,6 +503,16 @@ int q1000k_gwan_apply_install(const struct q1000k_gwan_table *expected,
 	if (!expected || !desired || !install)
 		return -EINVAL;
 	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_APPLY, 0, false, install, arg, NULL);
+}
+
+int q1000k_gwan_initial_service(const struct q1000k_gwan_table *expected,
+			       const struct q1000k_gwan_table *desired,
+			       int (*install)(void *), void *arg)
+{
+	if (!expected || !desired || !install)
+		return -EINVAL;
+	return q1000k_gwan_rebuild(expected, desired, Q1000K_GWAN_INITIAL_SERVICE,
+				   0, false, install, arg, NULL);
 }
 
 int q1000k_gwan_delete_gem(u16 gem, bool all)

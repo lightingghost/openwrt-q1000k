@@ -368,6 +368,22 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'service':
+        if args.physical_only:
+            raise ValueError('Service comparisons keep the fiber connected')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, live, ranging, samples in [('control',3,1,240),
+                    ('initial',7,1,300), ('eqd',7,3,300), ('repeat',7,1,600)]:
+                cases.append(dict(name='activation-omci-service-'+name, mode='activate',
+                    samples=samples, ranging_mode=ranging, dot1x_oem=True, live_add=live,
+                    key_inline=True, initial_key_readback=True, omci_min_len=60, alloc_revoke=False,
+                    ids=['O1','O2','O3','O4','O5','O6','O7','O8','Q1','Q2','Q3','Q4','Q5','S1','S2','S3']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown service case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'topology':
         if args.physical_only:
             raise ValueError('Topology comparisons keep the fiber connected')
@@ -384,7 +400,7 @@ def discovery_plan(args):
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown topology case')
             cases = [c for c in cases if c['name'] in selected]
         return cases
-    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology'):
+    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service'):
         if args.physical_only:
             raise ValueError('OMCI comparisons use connected fiber without physical cycling')
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -519,6 +535,22 @@ def test_outcomes(case, result, text):
     stages = result['stages']; outcome = {}
     for ident in case.get('ids', []):
         outcome[ident] = 'not-run'
+        if ident.startswith('S'):
+            o=result.get('omci_experiment',{}); s=o.get('service_install',{})
+            weight=[r for r in o.get('topology',{}).get('wire_records',[])
+                    if r['kind']=='set' and r.get('values',{}).get('weight',0)>127]
+            responses=o.get('provisioning',{}).get('response_results',[])
+            weight_ok=bool(weight) and all(any(r['class_id']==277 and r['entity_id']==w['entity_id']
+                and r['attribute_mask']==w['attribute_mask'] and r['result']==0 for r in responses) and
+                not any(r['class_id']==277 and r['entity_id']==w['entity_id'] and
+                        r['attribute_mask']==w['attribute_mask'] and r['result'] for r in responses) for w in weight)
+            outcome[ident]={
+                'S1':'large-weight-accepted' if weight_ok else 'large-weight-acceptance-not-established',
+                'S2':'initial-live-install-observed' if s.get('initial_live_completed') else 'full-install-control-observed' if s.get('full_completed') else 'service-install-not-observed',
+                'S3':'OLT-continued-after-install' if any(r.get('requests_after_install') for r in s.get('installs',[])) else 'OLT-continuation-not-established',
+            }[ident]
+            if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
+            continue
         if ident.startswith('Q'):
             o=result.get('omci_experiment',{}); t=o.get('topology',{}); p=o.get('provisioning',{})
             responses=p.get('response_results',[])
@@ -835,6 +867,45 @@ def append_summary(events):
                 failed=sum(r['phase']=='end' and r['error']!=0 for r in rows))
 
 
+def service_install_summary(events):
+    rows = [dict(stack_generation=e.get('stack_generation',1), seq=e['seq'], ns=e['ns'],
+                 id=e['id'], error=e['result'], a=e['a'], b=e['b'], c=e['c'], d=e['d'])
+            for e in events if e['event']==33]
+    installs = [dict(r, old_rules=r['a'], new_rules=r['b'],
+                     path='initial-live' if r['c'] else 'full-retirement')
+                for r in rows if r['id']==4]
+    for row in installs:
+        later=[e for e in events if e.get('stack_generation',1)==row['stack_generation'] and e['ns']>row['ns']]
+        stop=next((e['ns'] for e in later if e['event']==16 or e['event']==11 and e['id']==5),None)
+        requests=[e for e in later if e['event']==27 and e['id']==32 and not e['result']
+                  and (stop is None or e['ns']<stop)]
+        row['requests_after_install']=len(requests)
+        row['first_request_delay_ms']=(requests[0]['ns']-row['ns'])/1e6 if requests else None
+        row['reset_or_deactivation_after_ms']=(stop-row['ns'])/1e6 if stop else None
+    qos, pending = [], {}
+    for r in rows:
+        if r['id'] in (2,3):
+            q=dict(r,channel=r['a']&31,sample_sequence=r['a']>>5,mode=r['b'],byte_mode=bool(r['c']&1),
+                   scale16=bool(r['c']&2),phase='read-before' if r['id']==2 else 'write-result',
+                   weights=None,valid=False,chunks={})
+            qos.append(q); pending[(r['stack_generation'],r['a'],r['id'])]=q
+        elif r['id'] in (6,7,8,9):
+            ident=r['id']-(4 if r['id']<8 else 6)
+            q=pending.get((r['stack_generation'],r['a'],ident))
+            if q is not None and q['error']==r['error']:
+                q['chunks'][r['id']]=[n for k in (('b','c','d') if r['id']<8 else ('b',))
+                                    for n in (r[k]>>16,r[k]&65535)]
+    for q in qos:
+        chunks=q.pop('chunks'); first=q['id']+4; last=q['id']+6
+        if first in chunks and last in chunks:
+            q['weights']=chunks[first]+chunks[last]; q['valid']=not q['error']
+    return dict(events=rows, installs=installs, qos=qos,
+                initial_live_completed=sum(r['path']=='initial-live' and r['error']==0 for r in installs),
+                full_completed=sum(r['path']=='full-retirement' and r['error']==0 for r in installs),
+                failures=sum(r['error']!=0 for r in installs),
+                note='Local installation/readback only. Check OLT continuation, deactivation and WAN results separately.')
+
+
 def omci_summary(records):
     """Deduplicate polling snapshots; never infer OLT receipt from local TX."""
     unique = {}
@@ -848,6 +919,7 @@ def omci_summary(records):
     return dict(
         provisioning=omci_provisioning_summary(events), topology=topology_summary(events),
         native_tx=native_tx_summary(events), live_additions=append_summary(events),
+        service_install=service_install_summary(events),
         ethernet_runt_omci_delivered=count(30, lambda e: bool(e['a'] & (1 << 12))),
         rx_descriptor_words=sorted({f"0x{e['a']:08x}" for e in control if e['id'] == 30}),
         rx_guard_rejected=count(31, lambda e: e['result'] != 0),
@@ -1249,7 +1321,7 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology'):
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
@@ -1263,6 +1335,12 @@ def execute(args, pin):
                     o=result.get('omci_experiment',{}); n=o.get('native_tx',{}).get('counts',{})
                     report.append(f"| {result['name']} | {n.get('submitted',0)} | {n.get('dma-complete',0)} | {n.get('hardware-drop',0)} | {n.get('admission-drop',0)} | {n.get('dma-error',0)} | {n.get('teardown-abort',0)} | {n.get('admission-retry',0)} | {o.get('live_additions',{}).get('completed',0)} | {o.get('critical_evidence_complete',False)} |")
                 report += ['', 'Native consumption does not prove upstream optical delivery. An unobserved allocation/pause is an untested condition; use the raw logs and collection.json to distinguish it from success.']
+                report += ['', '## First service and scheduler observations', '',
+                    '| Case | Initial live installs | Full installs | Install failures | OLT requests after install | QoS records valid |',
+                    '|---|---:|---:|---:|---:|---:|']
+                for result in record['results']:
+                    s=result.get('omci_experiment',{}).get('service_install',{})
+                    report.append(f"| {result['name']} | {s.get('initial_live_completed',0)} | {s.get('full_completed',0)} | {s.get('failures',0)} | {sum(r.get('requests_after_install',0) for r in s.get('installs',[]))} | {sum(r.get('valid',False) for r in s.get('qos',[]))} |")
                 report += ['', '## Managed-entity responses', '',
                     'Counts include duplicate replies and are limited to retained evidence. Details and provider errno/stage are in collection.json.', '',
                     '| Case | Class | Entity | Opcode | Mask | Result | Count | Duplicates |',
@@ -1338,7 +1416,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='topology', help='Default: RX control, complete MIB topology, strict/factory Dot1X, OEM EqD and repeat; no fiber cycling. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='service', help='Default: RX control, corrected SP weight storage, full/initial-service transport comparison, OEM EqD and repeat; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')
