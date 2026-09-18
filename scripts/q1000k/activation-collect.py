@@ -1630,6 +1630,15 @@ def capture(pin, case, iperf, directory, redact):
     if host_future is not None:
         result['physical_lan'] = host_future.result()
         host_pool.shutdown(wait=True)
+        after = result['physical_lan']['after_router_cleanup'] = {}
+        if dev := result['physical_lan'].get('interface'):
+            for field, command in [('addresses',['ip','-6','-j','address','show','dev',dev]),
+                                  ('routes',['ip','-6','-j','route','show','dev',dev])]:
+                try:
+                    p = subprocess.run(command, capture_output=True, text=True, timeout=5)
+                    after[field] = dict(returncode=p.returncode, stdout=p.stdout, stderr=p.stderr)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    after[field] = dict(unavailable=str(error))
         write_json(directory/(name+'-physical-lan.json'), result['physical_lan'])
     result['required_dark_samples'] = 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15
     result['trace_scope'] = 'activation-critical' if name.startswith('activation-reg-') else 'all-events'

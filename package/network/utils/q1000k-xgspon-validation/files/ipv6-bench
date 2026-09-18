@@ -339,7 +339,9 @@ UCI
 	nft -a list ruleset
 	# Withdraw the advertisement before removing the owned alias. Clients can
 	# keep a deprecated IPv6 address per RFC4862; the default router expires.
-	uci -q set dhcp.q6real.ra_lifetime=0
+	# This odhcpd computes a lifetime when ra_lifetime=0. MODE_DISABLED instead
+	# calls router_setup_interface(false), emits the final RA, then closes it.
+	uci -q set dhcp.q6real.ra=disabled
 	uci -q commit dhcp && /etc/init.d/odhcpd reload || die 'physical RA withdrawal'
 	pause 8
 	result physical-window-complete 0
