@@ -221,6 +221,21 @@ else: raise AssertionError((action,args))
                 self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
                 self.assertFalse((self.root/'sys/module/omci').exists())
 
+    def test_classifier_variants_select_transport_control_and_exact_parameters(self):
+        for case,live,ranging in [('control',7,1),('live',15,1),('eqd',15,3),('repeat',15,1)]:
+            with self.subTest(case=case):
+                result=subprocess.run(['busybox','ash',str(self.script),'activate',str(self.fixture.calibration),
+                    str(self.identity),'15','none','activation-omci-filter-'+case],env=self.env,
+                    capture_output=True,text=True,timeout=90)
+                self.assertEqual(result.returncode,0,result.stdout[-2500:]+result.stderr)
+                modules={Path(c[1]).stem:c for c in self.calls() if c[0] in ('modprobe','insmod')}
+                self.assertIn('bench_dot1x_oem=1',modules['omci'])
+                for setting in (f'bench_live_add={live}',f'bench_ranging_mode={ranging}','bench_initial_key_readback=1',
+                                'bench_key_inline=1','bench_alloc_revoke=0'):
+                    self.assertIn(setting,modules['xpon_10g'])
+                self.assertIn('validation_stage name=cleanup status=passed',result.stdout)
+                self.assertFalse((self.root/'sys/module/omci').exists())
+
     def test_output_capture_and_missing_evidence(self):
         for bad in ('', 'output-missing'):
             self.env['VALIDATION_BAD']=bad

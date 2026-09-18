@@ -295,6 +295,29 @@ static int fixture_upload(struct omci_device *odev)
 			CHECK(!fixture_diagnostic.public_kind && !fixture_diagnostic.public_len);
 		}
 	}
+	/* Public VLAN table bytes survive the real authenticated RX/diagnostic
+	 * path, including an unknown-instance result. Identity Set payloads
+	 * remain excluded from the explicit class allowlist.
+	 */
+	for (i = 0; i < 2; i++) {
+		static const u8 row[16] = {0xf8,0,0,0,0xf8,0,0,0,0,0x0f,0,0,0,0,3,0xdc};
+		skb = fixture_packet(9200 + i, false); CHECK(skb);
+		skb->data[2] = 0x48;
+		put_unaligned_be16(i ? OMCI_CLASS_ONU_G : OMCI_CLASS_EXTENDED_VLAN, skb->data + 4);
+		put_unaligned_be16(0xee6, skb->data + 6);
+		put_unaligned_be16(0x0400, skb->data + 8);
+		memcpy(skb->data + 10, row, sizeof(row));
+		omci_device_receive(odev, skb, 7, OMCI_F_MIC_VALID, fixture_auth_epoch);
+		flush_work(&odev->rx_work);
+		if (!i) {
+			CHECK(fixture_diagnostic.public_kind == 3 && fixture_diagnostic.public_class == 171);
+			CHECK(fixture_diagnostic.public_entity == 0xee6 && fixture_diagnostic.public_mask == 0x0400);
+			CHECK(fixture_diagnostic.public_len == 26 && !memcmp(fixture_diagnostic.public_data, row, 16));
+		} else {
+			CHECK(!fixture_diagnostic.public_kind && !fixture_diagnostic.public_len);
+		}
+	}
+
 out:
 	return ret;
 }

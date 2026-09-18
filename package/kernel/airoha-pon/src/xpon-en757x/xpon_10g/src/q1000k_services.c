@@ -17,9 +17,10 @@
 #define QS_TCONTS 31
 #define QS_MAX 256
 struct qs_gem { u16 entity, gem, tcont; u8 direction, key_ring; bool valid, seeded; };
-struct qs_rules { size_t count; u8 channels[QS_MAX]; u16 vlan_group[QS_MAX];
-	struct q1000k_vlan_program vlan[QS_MAX]; struct omci_service_config rule[]; };
 struct qs_scheduler { u8 policy, weight[8], direct_mask; };
+struct qs_rules { size_t count; u8 channels[QS_MAX]; u16 vlan_group[QS_MAX];
+	struct qs_scheduler scheduler[QS_TCONTS];
+	struct q1000k_vlan_program vlan[QS_MAX]; struct omci_service_config rule[]; };
 static u16 qs_alloc[QS_TCONTS];
 static bool qs_seeded_alloc[QS_TCONTS];
 static struct qs_scheduler qs_schedulers[QS_TCONTS];
@@ -673,6 +674,73 @@ static int qs_prepare_service(struct qs_replacement *p,
 	return -ENOSPC;
 }
 
+static u32 qs_rule_channels(const struct qs_rules *rules, u8 *closed)
+{
+	u32 channels = 0;
+	size_t i;
+
+	memset(closed, 0xff, 32);
+	for (i = 0; i < rules->count; i++) {
+		u8 ch = rules->channels[i];
+
+		if (ch >= 32)
+			continue;
+		channels |= BIT(ch);
+		if (rules->rule[i].direction != OMCI_GEM_PORT_DIRECTION_ANI_TO_UNI)
+			closed[ch] &= ~BIT(rules->rule[i].queue);
+	}
+	return channels;
+}
+
+/* A filter update may change matching/tag treatment, not resource ownership
+ * or the hardware queue configuration. Old RCU readers and queued DMA frames
+ * retain their complete, still-valid GEM/channel/queue metadata. A scheduler
+ * snapshot also rules out silently skipping an unapplied QoS change.
+ */
+static unsigned int qs_classifier_reason(const struct qs_rules *old,
+					 const struct qs_rules *next)
+{
+	u8 before[32], after[32];
+	u32 old_channels, new_channels;
+	unsigned int i, reason = 0;
+
+	if (!old || !old->count || !next->count)
+		return 1;
+	old_channels = qs_rule_channels(old, before);
+	new_channels = qs_rule_channels(next, after);
+	if (old_channels != new_channels)
+		reason |= 2;
+	if (memcmp(before, after, sizeof(before)))
+		reason |= 4;
+	for (i = 0; i < QS_TCONTS; i++) {
+		const struct qs_scheduler *a = &old->scheduler[i], *b = &next->scheduler[i];
+
+		if (a->policy != b->policy ||
+		    (a->policy != 1 && memcmp(a->weight, b->weight, sizeof(a->weight))))
+			reason |= 8;
+	}
+	return reason;
+}
+
+static int qs_classifier_check(void *arg)
+{
+	const u8 *expected = arg;
+	unsigned int i;
+
+	for (i = 1; i < 32; i++) {
+		u8 actual = 0;
+		int ret = q1000k_transport_get_queue_close(i, &actual);
+
+		if (!ret && actual != expected[i])
+			ret = -ESTALE;
+		if (ret || expected[i] != 0xff)
+			q1000k_trace(QT_SERVICE_INSTALL, 10, ret, i, actual, expected[i], 0);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 int q1000k_services_replace(struct omci_device *odev,
 		const struct omci_service_config *services, size_t count)
 {
@@ -681,7 +749,8 @@ int q1000k_services_replace(struct omci_device *odev,
 	u8 closed[32];
 	size_t i, j;
 	int ret = 0, token;
-	bool was_changing, initial_service;
+	bool was_changing;
+	unsigned int path = 0, classifier_reason;
 
 	if (count > QS_MAX || (count && !services))
 		return -EINVAL;
@@ -696,6 +765,7 @@ int q1000k_services_replace(struct omci_device *odev,
 	token = q1000k_protocol_enter();
 	if (token < 0) { kfree(next); kfree(replacement); return token; }
 	was_changing = READ_ONCE(qs_changing);
+	memcpy(next->scheduler, qs_schedulers, sizeof(next->scheduler));
 	ret = qs_prepare_replacement(replacement);
 	if (ret)
 		goto free;
@@ -762,38 +832,46 @@ int q1000k_services_replace(struct omci_device *odev,
 	}
 	WRITE_ONCE(qs_changing, true);
 	old = rcu_dereference_protected(qs_current, q1000k_protocol_owned());
+	classifier_reason = qs_classifier_reason(old, next);
 	q1000k_trace(QT_SERVICE_INSTALL, 1, 0, old ? old->count : 0,
-		     count, (!old || !old->count) && count, 0);
+		     count, (!old || !old->count) && count, 0x100 | classifier_reason);
+	ret = classifier_reason ? -EAGAIN :
+		q1000k_gwan_classifier(&replacement->before, &replacement->after,
+				       qs_classifier_check, closed);
+	if (ret != -EAGAIN)
+		path = 2;
 	/* No data classifier has ever admitted a frame in this service epoch.
 	 * The existing GEM/T-CONT namespace may therefore be activated with
 	 * its closed data-channel QoS, without retiring the live OMCC. The
 	 * namespace owner independently verifies unchanged bindings and every
 	 * data queue closed; native QoS verifies no pending descriptors.
 	 */
-	ret = (!old || !old->count) && count ?
-		q1000k_gwan_initial_service(&replacement->before, &replacement->after,
-					    qs_service_qos_install, next) : -EAGAIN;
-	initial_service = ret != -EAGAIN;
+	if (ret == -EAGAIN && (!old || !old->count) && count) {
+		ret = q1000k_gwan_initial_service(&replacement->before, &replacement->after,
+						qs_service_qos_install, next);
+		if (ret != -EAGAIN)
+			path = 1;
+	}
 	/* Retire old classifier-selected traffic, including native retries and
-	 * downstream frames. The initial-service exception above cannot be used
-	 * for replacement/removal or for a changed namespace.
+	 * downstream frames. The exceptions above cannot rebind resources,
+	 * change encryption or close/reopen a used queue with pending packets.
 	 */
 	if (ret == -EAGAIN)
 		ret = q1000k_gwan_apply_install(&replacement->before, &replacement->after,
 					       qs_service_qos_install, next);
 	if (ret) {
 		q1000k_trace(QT_SERVICE_INSTALL, 4, ret, old ? old->count : 0,
-			     count, initial_service, 0);
+			     count, path, 0);
 		if (ret != -EUCLEAN) WRITE_ONCE(qs_changing, was_changing);
 		goto free;
 	}
-	for (i = 1; i < 32; i++) {
+	for (i = 1; path != 2 && i < 32; i++) {
 		ret = q1000k_transport_set_queue_close(i, closed[i]);
 		if (ret) {
 			q1000k_protocol_fail(ret);
 			ret = -EUCLEAN;
 			q1000k_trace(QT_SERVICE_INSTALL, 4, ret, old ? old->count : 0,
-				     count, initial_service, 1);
+				     count, path, 1);
 			goto free;
 		}
 	}
@@ -804,7 +882,7 @@ int q1000k_services_replace(struct omci_device *odev,
 	next = NULL;
 	synchronize_rcu();
 	q1000k_trace(QT_SERVICE_INSTALL, 4, 0, old ? old->count : 0,
-		     count, initial_service, 0);
+		     count, path, 0);
 	kfree(old);
 	WRITE_ONCE(qs_changing, false);
 free:

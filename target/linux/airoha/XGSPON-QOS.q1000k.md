@@ -61,6 +61,10 @@ weight 150. The NAND QDMA scheduler uses 16-bit command values, as does the
 native driver. SP now stores all 0..255 OMCI values without hardware change;
 WRR accepts 1..255 with exact readback. Native/global-unit checks remain.
 The first data classifier can use unchanged bindings and closed data queues
-without retiring OMCC; subsequent replacement retains the full transaction.
+without retiring OMCC. The 45aea00d3d bench confirms OLT continuation after
+that installation, then deactivation after a class-171 VLAN update takes the
+full transaction. Classifier updates with unchanged complete bindings,
+used channels, queue masks and scheduler configuration now have a separately
+selectable live path. Resource/queue/encryption changes still retire.
 See [the service audit](XGSPON-OMCI-SERVICE-AUDIT.q1000k.md) for evidence, guards
-and the selectable full-retirement control. Hardware validation is pending.
+and the selectable full-retirement control. See [the classifier audit](XGSPON-OMCI-CLASSIFIER-AUDIT.q1000k.md) for the next image and pending hardware validation.

@@ -60,6 +60,15 @@ int q1000k_gwan_apply_install(const struct q1000k_gwan_table *expected,
 int q1000k_gwan_initial_service(const struct q1000k_gwan_table *expected,
 			       const struct q1000k_gwan_table *desired,
 			       int (*install)(void *), void *arg);
+/* Service owner only: an existing classifier changes without changing its
+ * complete namespace, used channels, queue masks or scheduler intent. check
+ * verifies actual data queue masks and must not write hardware. Already
+ * admitted packets keep valid old metadata; RCU retires only the classifier.
+ * EAGAIN is a pre-mutation fallback. Any failed live check contains the port.
+ */
+int q1000k_gwan_classifier(const struct q1000k_gwan_table *expected,
+			  const struct q1000k_gwan_table *desired,
+			  int (*check)(void *), void *arg);
 int q1000k_gwan_delete_gem(u16 gem, bool all);
 int q1000k_gwan_delete_tcont(u16 alloc_id, bool all);
 int q1000k_gwan_add_tcont(u16 alloc_id);

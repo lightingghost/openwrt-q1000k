@@ -260,7 +260,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -282,6 +282,9 @@ case "$phase" in
      activation-omci-live-tcont) live_add=2 ;;
      activation-omci-live-both|activation-omci-live-repeat|activation-omci-topology-strict) live_add=3 ;;
      activation-omci-topology-oem|activation-omci-topology-repeat) live_add=3; dot1x_oem=1 ;;
+     activation-omci-filter-control) live_add=7; dot1x_oem=1 ;;
+     activation-omci-filter-live|activation-omci-filter-repeat) live_add=15; dot1x_oem=1 ;;
+     activation-omci-filter-eqd) live_add=15; dot1x_oem=1; ranging_mode=3 ;;
      activation-omci-service-control) live_add=3; dot1x_oem=1 ;;
      activation-omci-service-initial|activation-omci-service-repeat) live_add=7; dot1x_oem=1 ;;
      activation-omci-service-eqd) live_add=7; dot1x_oem=1; ranging_mode=3 ;;
@@ -498,8 +501,8 @@ event wan started
 wan_owned=1
 ifup q1000k_wan || fail 'DHCP startup failed.'
 ifup q1000k_wan6 || fail 'DHCPv6 startup failed.'
-count=0
-while [ "$count" -lt "$limit" ]; do
+count=0 deadline=$(( $(now) + limit ))
+while [ "$count" -lt "$limit" ] && [ "$(now)" -lt "$deadline" ]; do
 	snapshot
 	for interface in q1000k_wan q1000k_wan6; do
 		printf 'wan_status interface=%s\n' "$interface"

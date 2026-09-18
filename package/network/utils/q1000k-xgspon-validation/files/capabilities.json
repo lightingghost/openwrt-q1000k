@@ -928,7 +928,7 @@
       }
     },
     "native_admission_race": "Authenticated OMCI preserves skb on transient closure/stale native epoch; retry checks auth epoch and original 1000 ms deadline. Data cannot acquire a replacement epoch.",
-    "live_add_policy": "Bits 0/1: append empty GEM/T-CONT entries. Bit 2: first data classifier only, unchanged namespace, all data queues closed, target native mappings absent. OMCC remains live. Replacements/removals/reset/keys retain full retirement.",
+    "live_add_policy": "Bits 0/1: append empty GEM/T-CONT entries. Bit 2: first data classifier only, unchanged namespace, all data queues closed, target native mappings absent. OMCC remains live. Bit 3: classifier updates with unchanged bindings, used channels, queue masks and scheduler configuration. Resource rebinding/removals/reset/keys retain full retirement.",
     "boundary_snapshots": {
       "20": "before live addition",
       "21": "after live addition",
@@ -1004,5 +1004,45 @@
       "OLT deactivation",
       "WAN addresses and traffic if stable service permits"
     ]
+  },
+  "omci_classifier": {
+    "revision": 1,
+    "physical_actions_required": 0,
+    "policy": "Only unchanged full GEM/T-CONT namespace, used channels, queue masks and scheduler configuration. Read back data queue masks, publish immutable classifier with RCU, keep existing packet metadata valid. Queue/resource/encryption changes retain full retirement.",
+    "cases": {
+      "activation-omci-filter-control": {
+        "live_add": 7,
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 180
+      },
+      "activation-omci-filter-live": {
+        "live_add": 15,
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 300
+      },
+      "activation-omci-filter-eqd": {
+        "live_add": 15,
+        "dot1x_oem": true,
+        "ranging_mode": 3,
+        "samples": 300
+      },
+      "activation-omci-filter-repeat": {
+        "live_add": 15,
+        "dot1x_oem": true,
+        "ranging_mode": 1,
+        "samples": 600
+      }
+    },
+    "observations": [
+      "class 171 Set mask and complete public wire bytes",
+      "eligibility/rejection reason and actual queue masks",
+      "actual classifier/full installation path",
+      "next OMCI response identity and authenticated continuation",
+      "deactivation delay, WAN addresses and traffic"
+    ],
+    "new_hardware_validation": "pending",
+    "wan_observation": "sample and wall-clock limits, followed by interface-bound probes"
   }
 }

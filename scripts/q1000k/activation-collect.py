@@ -368,6 +368,22 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'filter':
+        if args.physical_only:
+            raise ValueError('Classifier comparisons keep the fiber connected')
+        cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
+        if not rx_only:
+            for name, live, ranging, samples in [('control',7,1,180),
+                    ('live',15,1,300), ('eqd',15,3,300), ('repeat',15,1,600)]:
+                cases.append(dict(name='activation-omci-filter-'+name, mode='activate',
+                    samples=samples, ranging_mode=ranging, dot1x_oem=True, live_add=live,
+                    key_inline=True, initial_key_readback=True, omci_min_len=60, alloc_revoke=False,
+                    ids=['O1','O2','O3','O4','O5','O6','O7','O8','Q1','Q2','Q3','Q4','Q5','S1','S2','S3','S4','S5']))
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown classifier case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'service':
         if args.physical_only:
             raise ValueError('Service comparisons keep the fiber connected')
@@ -400,7 +416,7 @@ def discovery_plan(args):
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown topology case')
             cases = [c for c in cases if c['name'] in selected]
         return cases
-    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service'):
+    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter'):
         if args.physical_only:
             raise ValueError('OMCI comparisons use connected fiber without physical cycling')
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -547,7 +563,9 @@ def test_outcomes(case, result, text):
             outcome[ident]={
                 'S1':'large-weight-accepted' if weight_ok else 'large-weight-acceptance-not-established',
                 'S2':'initial-live-install-observed' if s.get('initial_live_completed') else 'full-install-control-observed' if s.get('full_completed') else 'service-install-not-observed',
-                'S3':'OLT-continued-after-install' if any(r.get('requests_after_install') for r in s.get('installs',[])) else 'OLT-continuation-not-established',
+                'S3':'OLT-continued-after-install' if any(r.get('requests_after_install') for r in s.get('installs',[]) if r.get('new_rules') and not r.get('error')) else 'OLT-continuation-not-established',
+                'S4':'classifier-live-observed' if s.get('classifier_live_completed') else 'classifier-live-not-observed',
+                'S5':'OLT-continued-after-classifier' if any(r.get('requests_after_install') for r in s.get('installs',[]) if r.get('path')=='classifier-live' and not r.get('error')) else 'classifier-continuation-not-established',
             }[ident]
             if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
             continue
@@ -786,6 +804,9 @@ def topology_summary(events):
     """
     rows, counts, pending = [], [], {}
     layouts = {
+        171: [('association_type',1),('maximum_table_size',2),('input_tpid',2),
+              ('output_tpid',2),('downstream_mode',1),('received_frame_vlan_table',16),
+              ('association_pointer',2),('dscp_to_pbit',24)],
         262: [('alloc_id',2),('deprecated',1),('policy',1)],
         277: [('configuration',1),('maximum_size',2),('allocated_size',2),
               ('discard_reset',2),('discard_threshold',2),('related_port',4),
@@ -819,16 +840,31 @@ def topology_summary(events):
         for i,(name,size) in enumerate(layouts[row['class_id']]):
             if row['attribute_mask'] & (1 << (15-i)):
                 if pos+size > len(data): break
-                row['values'][name]=int.from_bytes(data[pos:pos+size],'big'); pos+=size
+                value=data[pos:pos+size]
+                row['values'][name]=value.hex() if size > 4 else int.from_bytes(value,'big'); pos+=size
         else:
             supported=(0xffff << (16-len(layouts[row['class_id']]))) & 0xffff
             row['complete']=not bool(row['attribute_mask'] & ~supported)
+        vlan=row['values'].get('received_frame_vlan_table')
+        if row['complete'] and vlan:
+            w=[int(vlan[i:i+8],16) for i in range(0,32,8)]
+            row['vlan_rule']=dict(
+                filter_outer_priority=w[0]>>28, filter_outer_vid=(w[0]>>15)&8191,
+                filter_outer_tpid_dei=(w[0]>>12)&7,
+                filter_inner_priority=w[1]>>28, filter_inner_vid=(w[1]>>15)&8191,
+                filter_inner_tpid_dei=(w[1]>>12)&7,
+                filter_extended_criteria=(w[1]>>4)&255, filter_ethertype=w[1]&15,
+                treatment_remove_tags=w[2]>>30,
+                treatment_outer_priority=(w[2]>>16)&15, treatment_outer_vid=(w[2]>>3)&8191,
+                treatment_outer_tpid_dei=w[2]&7,
+                treatment_inner_priority=(w[3]>>16)&15, treatment_inner_vid=(w[3]>>3)&8191,
+                treatment_inner_tpid_dei=w[3]&7)
     uploads=[r for r in rows if r['kind']=='upload']
     queues={r['entity_id'] for r in uploads if r['class_id']==277 and r['complete'] and not r['transport_error'] and
             {'related_port','scheduler_pointer','weight'} <= r.get('values',{}).keys()}
     requests=[r for r in rows if r['kind']=='set']
     return dict(upload_commands=counts, wire_records=rows, fully_described_queues=sorted(queues),
-                unresolved_queue_requests=[r for r in requests if r['entity_id'] not in queues],
+                unresolved_queue_requests=[r for r in requests if r['class_id']==277 and r['entity_id'] not in queues],
                 note='Wire bytes prove what was submitted locally; subsequent OLT requests test whether it used that description.')
 
 
@@ -872,7 +908,7 @@ def service_install_summary(events):
                  id=e['id'], error=e['result'], a=e['a'], b=e['b'], c=e['c'], d=e['d'])
             for e in events if e['event']==33]
     installs = [dict(r, old_rules=r['a'], new_rules=r['b'],
-                     path='initial-live' if r['c'] else 'full-retirement')
+                     path={0:'full-retirement',1:'initial-live',2:'classifier-live'}.get(r['c'],'unknown'))
                 for r in rows if r['id']==4]
     for row in installs:
         later=[e for e in events if e.get('stack_generation',1)==row['stack_generation'] and e['ns']>row['ns']]
@@ -882,6 +918,10 @@ def service_install_summary(events):
         row['requests_after_install']=len(requests)
         row['first_request_delay_ms']=(requests[0]['ns']-row['ns'])/1e6 if requests else None
         row['reset_or_deactivation_after_ms']=(stop-row['ns'])/1e6 if stop else None
+        reply=next((e for e in later if e['event']==22 and (stop is None or e['ns']<stop)),None)
+        row['next_omci_response']=dict(class_id=reply['a'],entity_id=reply['d']>>16,
+            attribute_mask=reply['d']&65535,transaction_id=reply['b']>>16,
+            opcode=reply['id'],result=reply['c'],transport_error=reply['result']) if reply else None
     qos, pending = [], {}
     for r in rows:
         if r['id'] in (2,3):
@@ -899,7 +939,16 @@ def service_install_summary(events):
         chunks=q.pop('chunks'); first=q['id']+4; last=q['id']+6
         if first in chunks and last in chunks:
             q['weights']=chunks[first]+chunks[last]; q['valid']=not q['error']
-    return dict(events=rows, installs=installs, qos=qos,
+    eligibility=[dict(r,initial_eligible=bool(r['c']),
+                     classifier_eligible=not (r['d']&255) if r['d']&256 else None,
+                     classifier_reasons=[name for bit,name in ((1,'empty-classifier'),
+                         (2,'used-channels-changed'),(4,'queue-masks-changed'),
+                         (8,'scheduler-config-changed')) if r['d']&bit] if r['d']&256 else None)
+                 for r in rows if r['id']==1]
+    checks=[dict(r,channel=r['a'],actual_mask=r['b'],expected_mask=r['c'])
+            for r in rows if r['id']==10]
+    return dict(events=rows, installs=installs, qos=qos, eligibility=eligibility, queue_checks=checks,
+                classifier_live_completed=sum(r['path']=='classifier-live' and r['error']==0 for r in installs),
                 initial_live_completed=sum(r['path']=='initial-live' and r['error']==0 for r in installs),
                 full_completed=sum(r['path']=='full-retirement' and r['error']==0 for r in installs),
                 failures=sum(r['error']!=0 for r in installs),
@@ -1321,7 +1370,7 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service'):
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity', 'topology', 'service', 'filter'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
@@ -1335,12 +1384,12 @@ def execute(args, pin):
                     o=result.get('omci_experiment',{}); n=o.get('native_tx',{}).get('counts',{})
                     report.append(f"| {result['name']} | {n.get('submitted',0)} | {n.get('dma-complete',0)} | {n.get('hardware-drop',0)} | {n.get('admission-drop',0)} | {n.get('dma-error',0)} | {n.get('teardown-abort',0)} | {n.get('admission-retry',0)} | {o.get('live_additions',{}).get('completed',0)} | {o.get('critical_evidence_complete',False)} |")
                 report += ['', 'Native consumption does not prove upstream optical delivery. An unobserved allocation/pause is an untested condition; use the raw logs and collection.json to distinguish it from success.']
-                report += ['', '## First service and scheduler observations', '',
-                    '| Case | Initial live installs | Full installs | Install failures | OLT requests after install | QoS records valid |',
-                    '|---|---:|---:|---:|---:|---:|']
+                report += ['', '## Service installation and classifier observations', '',
+                    '| Case | Initial live installs | Classifier live installs | Full installs | Install failures | OLT requests after nonempty install | QoS records valid |',
+                    '|---|---:|---:|---:|---:|---:|---:|']
                 for result in record['results']:
                     s=result.get('omci_experiment',{}).get('service_install',{})
-                    report.append(f"| {result['name']} | {s.get('initial_live_completed',0)} | {s.get('full_completed',0)} | {s.get('failures',0)} | {sum(r.get('requests_after_install',0) for r in s.get('installs',[]))} | {sum(r.get('valid',False) for r in s.get('qos',[]))} |")
+                    report.append(f"| {result['name']} | {s.get('initial_live_completed',0)} | {s.get('classifier_live_completed',0)} | {s.get('full_completed',0)} | {s.get('failures',0)} | {sum(r.get('requests_after_install',0) for r in s.get('installs',[]) if r.get('new_rules') and not r.get('error'))} | {sum(r.get('valid',False) for r in s.get('qos',[]))} |")
                 report += ['', '## Managed-entity responses', '',
                     'Counts include duplicate replies and are limited to retained evidence. Details and provider errno/stage are in collection.json.', '',
                     '| Case | Class | Entity | Opcode | Mask | Result | Count | Duplicates |',
@@ -1416,7 +1465,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='service', help='Default: RX control, corrected SP weight storage, full/initial-service transport comparison, OEM EqD and repeat; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='filter', help='Default: RX control, full/live VLAN classifier comparison, OEM EqD and repeat; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

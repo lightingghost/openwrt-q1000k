@@ -4632,7 +4632,9 @@ out:
 				diagnostic.public_len = 26;
 				memcpy(diagnostic.public_data, response + off + 6, 26);
 			}
-		} else if (op == OMCI_MSG_TYPE_SET && request.class_id == OMCI_CLASS_PRIORITY_QUEUE &&
+		} else if (op == OMCI_MSG_TYPE_SET &&
+			   (request.class_id == OMCI_CLASS_PRIORITY_QUEUE ||
+			    request.class_id == OMCI_CLASS_EXTENDED_VLAN) &&
 			   request.payload_len >= 2) {
 			diagnostic.public_kind = 3;
 			diagnostic.public_class = request.class_id;

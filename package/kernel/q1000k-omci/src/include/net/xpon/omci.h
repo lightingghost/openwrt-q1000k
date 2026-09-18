@@ -373,8 +373,8 @@ struct omci_diagnostic {
 	u32 flags, result;
 	/* Public controls only: flags 5 enable, 7 action, 8 factory comparison. */
 	u8 dot1x_enable, dot1x_action;
-	/* Whitelisted queue/T-CONT/scheduler wire attributes, never identity MEs.
-	 * kind: 1 upload count, 2 upload chunk, 3 queue Set request.
+	/* Whitelisted queue/T-CONT/scheduler/VLAN attributes, never identity MEs.
+	 * kind: 1 upload count, 2 upload chunk, 3 queue or VLAN Set request.
 	 */
 	u8 public_kind, public_len, public_data[26];
 	u16 public_class, public_entity, public_mask, public_sequence;

@@ -10,14 +10,47 @@ def events(records):
             for i,r in enumerate(records)]
 
 
-def payload(kind, entity, mask, raw, tid=10):
+def payload(kind, entity, mask, raw, tid=10, class_id=277):
     raw=raw.ljust(36,b'\0')
-    return [(kind,(277<<16)|entity,mask,tid,26)]+[
-        (3+i,(tid<<16)|277,*[int.from_bytes(raw[i*12+j:i*12+j+4],'big') for j in (0,4,8)])
+    return [(kind,(class_id<<16)|entity,mask,tid,26)]+[
+        (3+i,(tid<<16)|class_id,*[int.from_bytes(raw[i*12+j:i*12+j+4],'big') for j in (0,4,8)])
         for i in range(3)]
 
 
 class TopologyBenchTests(unittest.TestCase):
+    def test_classifier_suite_vlan_bytes_and_correlated_response(self):
+        args=argparse.Namespace(suite='filter',physical_only=False,skip_physical=False,
+                               identity='private.json',rx_only=False,cases=None)
+        plan=C.discovery_plan(args)
+        self.assertEqual([c['name'] for c in plan[1:]],[
+            'activation-omci-filter-'+n for n in ('control','live','eqd','repeat')])
+        self.assertEqual([c['live_add'] for c in plan[1:]],[7,15,15,15])
+        self.assertEqual([c['ranging_mode'] for c in plan[1:]],[1,1,3,1])
+        self.assertFalse(any(c['name'] in C.PHYSICAL for c in plan))
+        raw=bytes.fromhex('f8000000f8000000000f0000000003dc')
+        wire=events(payload(6,0x101,0x400,raw,class_id=171))
+        t=C.omci_summary(wire)['topology']
+        self.assertEqual(t['wire_records'][0]['values']['received_frame_vlan_table'],raw.hex())
+        self.assertTrue(t['wire_records'][0]['complete'])
+        self.assertEqual(t['unresolved_queue_requests'],[])
+        self.assertEqual(t['wire_records'][0]['vlan_rule']['filter_outer_priority'],15)
+        self.assertEqual(t['wire_records'][0]['vlan_rule']['treatment_inner_vid'],123)
+        rows=[dict(seq=i,ns=i*1000000,event=ev,id=ident,a=a,b=b,c=c,d=d,result=0)
+              for i,ev,ident,a,b,c,d in [(1,33,4,24,24,2,0),
+                   (2,22,8,171,99<<16,0,0x1010400),(3,27,32,0,0,0,0),
+                   (4,11,5,0,0,0,0),(5,27,32,0,0,0,0)]]
+        s=C.service_install_summary(rows)
+        self.assertEqual(s['classifier_live_completed'],1)
+        self.assertEqual(s['installs'][0]['requests_after_install'],1)
+        self.assertEqual(s['installs'][0]['next_omci_response']['class_id'],171)
+        eligibility=[dict(rows[0],id=1,d=d) for d in (0,0x100,0x10c)]
+        checks=C.service_install_summary(eligibility)['eligibility']
+        self.assertIsNone(checks[0]['classifier_eligible'])
+        self.assertTrue(checks[1]['classifier_eligible'])
+        self.assertEqual(checks[2]['classifier_reasons'],['queue-masks-changed','scheduler-config-changed'])
+        rows[1]['ns']=6000000
+        self.assertIsNone(C.service_install_summary(rows)['installs'][0]['next_omci_response'])
+
     def test_wire_queue_decode_and_missing_word_evidence(self):
         raw=bytes.fromhex('01ffff00000000000080000007800001000000000000ffff0000')
         wire=events([(1,1,350,0,0)]+payload(2,0x8000,0xfff0,raw))

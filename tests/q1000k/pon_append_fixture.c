@@ -20,6 +20,17 @@ int main(void)
     assert(!initial_installs && !physical_started);
     assert(!q1000k_gwan_initial_service(&old,&old,initial_install,NULL));
     assert(initial_installs==1 && append_calls==1 && !physical_started && queue_model[0]==0xfe);
+    append_reset(15);
+    assert(!q1000k_gwan_snapshot(&old)); next=old; next.alloc_id[1]=448;
+    unsigned installed=initial_installs;
+    assert(q1000k_gwan_classifier(&old,&next,initial_install,NULL)==-EAGAIN);
+    assert(!physical_ops && initial_installs==installed && !append_calls);
+    next=old; next.alloc_id[0]=99;
+    assert(q1000k_gwan_classifier(&next,&old,initial_install,NULL)==-ESTALE);
+    assert(!q1000k_gwan_classifier(&old,&old,initial_install,NULL));
+    assert(initial_installs==installed+1 && append_calls==1 && !physical_started);
+    bench_live_add=7;
+    assert(q1000k_gwan_classifier(&old,&old,initial_install,NULL)==-EAGAIN);
     for(unsigned mode=0;mode<4;mode++) {
         append_reset(mode);
         assert(!q1000k_gwan_snapshot(&old)); next=old;
