@@ -529,7 +529,7 @@ def test_outcomes(case, result, text):
                 'Q1':'queue-topology-submitted' if t.get('fully_described_queues') else 'topology-not-observed',
                 'Q2':'queue-sets-accepted' if queue_sets and all(r['result']==0 for r in queue_sets) else 'queue-acceptance-not-established',
                 'Q3':'dot1x-controls-accepted' if dot1x and all(r['result']==0 for r in dot1x) else 'dot1x-acceptance-not-established',
-                'Q4':'upstream-gems-created' if any(r['entity_id'] in range(1023,1027) for r in gem_creates) else 'upstream-gems-not-established',
+                'Q4':'upstream-gem-create-observed' if any(r['entity_id'] in range(1023,1027) for r in gem_creates) else 'upstream-gems-not-established',
                 'Q5':'service-and-traffic-observed' if result.get('provisioned') and any(result.get('traffic',{}).values()) else 'service-not-verified',
             }[ident]
             if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
@@ -792,7 +792,7 @@ def topology_summary(events):
             supported=(0xffff << (16-len(layouts[row['class_id']]))) & 0xffff
             row['complete']=not bool(row['attribute_mask'] & ~supported)
     uploads=[r for r in rows if r['kind']=='upload']
-    queues={r['entity_id'] for r in uploads if r['class_id']==277 and r['complete'] and
+    queues={r['entity_id'] for r in uploads if r['class_id']==277 and r['complete'] and not r['transport_error'] and
             {'related_port','scheduler_pointer','weight'} <= r.get('values',{}).keys()}
     requests=[r for r in rows if r['kind']=='set']
     return dict(upload_commands=counts, wire_records=rows, fully_described_queues=sorted(queues),

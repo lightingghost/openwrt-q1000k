@@ -34,6 +34,10 @@ class TopologyBenchTests(unittest.TestCase):
         t=C.omci_summary(wire[:-1])['topology']
         self.assertFalse(t['wire_records'][0]['complete'])
         self.assertEqual(t['fully_described_queues'],[])
+        wire[1]['result']=-11
+        t=C.omci_summary(wire)['topology']
+        self.assertTrue(t['wire_records'][0]['complete'])
+        self.assertEqual(t['fully_described_queues'],[])
 
     def test_partial_sets_and_dead_reference_are_not_aliased(self):
         wire=events(payload(6,0xdead,0x300,b'\x80\x00\x11')+
