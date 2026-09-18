@@ -10,3 +10,9 @@ class RecordTests(unittest.TestCase):
         fixture=fixture[:fixture.index('int main(void)')]
         body=Path(__file__).with_name('pon_records_fixture.c').read_text()
         run_c(fixture.replace('/* PRODUCTION */',binding_source())+body,flags=['-pthread'])
+
+    def test_live_append_preserves_omcc_and_rejects_replacement_or_partial_failure(self):
+        fixture=Path(__file__).with_name('pon_gem_binding_fixture.c').read_text()
+        fixture=fixture[:fixture.index('int main(void)')]
+        body=Path(__file__).with_name('pon_append_fixture.c').read_text()
+        run_c(fixture.replace('/* PRODUCTION */',binding_source())+body,flags=['-pthread'])

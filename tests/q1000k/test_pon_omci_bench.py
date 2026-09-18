@@ -33,15 +33,41 @@ class OmciBenchTests(unittest.TestCase):
         self.assertEqual(p['gem_qos'][0]['downstream_queue'],0xffff)
         self.assertEqual(C.omci_summary([])['provisioning']['response_results'],[])
 
+    def test_native_packet_outcomes_and_append_boundaries(self):
+        records=[]
+        for event,ident,result,a,b,c,d in [
+                (30,7,-116,0x1234240a,0x010cfffe,0x00110034,7),
+                (30,2,0,0x1234240a,0x010cfffe,0x00110034,8),
+                (30,3,0,0x1234240a,0x010cfffe,0x00110034,8),
+                (30,2,0,0x1235240a,0x010cfffe,0x00110034,8),
+                (30,4,-5,0x1235240a,0x010cfffe,0x00110034,8),
+                (31,1,0,2,2,0,3),(31,2,0,2,2,0,3)]:
+            records.append(dict(critical_version=1,position=len(records)+1,seq=len(records)+1,
+                ns=len(records)+1,generation=1,event=event,id=ident,result=result,a=a,b=b,c=c,d=d))
+        o=C.omci_summary(records+records); n=o['native_tx']
+        self.assertEqual(n['counts'],{'admission-retry':1,'submitted':2,'dma-complete':1,'hardware-drop':1})
+        self.assertFalse(n['unbalanced']); self.assertFalse(n['optical_delivery_proven'])
+        self.assertEqual(n['events'][1]['tci'],0x1234)
+        self.assertEqual(n['events'][1]['me_class'],268)
+        self.assertEqual(n['events'][1]['entity_id'],65534)
+        self.assertEqual(n['events'][1]['length'],52)
+        self.assertEqual(o['live_additions']['completed'],1)
+        self.assertEqual(C.omci_summary(records[:2])['native_tx']['unbalanced'][0]['submitted'],1)
+
     def test_matrix_has_control_comparisons_and_no_physical_actions(self):
         args=argparse.Namespace(suite='omci', physical_only=False, skip_physical=False,
                                rx_only=False, identity='private.json', cases=None)
         cases=C.discovery_plan(args)
         self.assertEqual(cases[0]['name'], 'rx-startup')
-        self.assertEqual([(c['ranging_mode'],c['omci_min_len'],c['alloc_revoke']) for c in cases[1:]],
+        self.assertEqual([(c['ranging_mode'],c['omci_min_len'],c['alloc_revoke']) for c in cases[1:6]],
                          [(1,60,False),(3,60,False),(1,48,False),(1,60,True),(1,60,False)])
         self.assertTrue(all(c['initial_key_readback'] and c['key_inline'] for c in cases[1:]))
         self.assertFalse(any(c['name'] in C.PHYSICAL for c in cases))
+        self.assertEqual([c['live_add'] for c in cases[6:]], [1,2,3,3,3])
+        args.suite='continuity'
+        self.assertEqual([c['name'] for c in C.discovery_plan(args)], ['rx-startup',
+            'activation-omci-fixed','activation-omci-live-gem','activation-omci-live-tcont',
+            'activation-omci-live-both','activation-omci-live-oem','activation-omci-live-repeat'])
         args.cases='activation-omci-fixed'
         self.assertEqual(len(C.discovery_plan(args)),1)
         args.cases=None; args.identity=None

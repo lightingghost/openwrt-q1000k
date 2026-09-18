@@ -133,7 +133,7 @@ static unsigned int pending_count;
 static atomic_t hold_dma=ATOMIC_INIT(0);
 static void check_admission(struct airoha_pon *pon,u32 msg);
 static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *skb, struct net_device *netdev,
-                                     u32 msg, struct airoha_pon *pon)
+                                     u32 msg, struct airoha_pon *pon, const struct airoha_pon_tx_status *status)
 {
     unsigned long flags;
     struct pending_tx *tx=kmalloc(sizeof(*tx),GFP_ATOMIC);
@@ -254,7 +254,12 @@ static void detached(void *priv)
 {
     ASSERT_RTNL(); atomic_inc(&detached_calls); atomic_set(&live, 0);
 }
-static const struct airoha_pon_ops ops={ .rx=rx, .tx_wake=tx_wake, .detached=detached };
+static atomic_t status_calls=ATOMIC_INIT(0);
+static void tx_status(void *priv,enum airoha_pon_tx_stage stage,int result,const struct airoha_pon_tx_status *status)
+{
+    check_callback(); atomic_inc(&status_calls);
+}
+static const struct airoha_pon_ops ops={ .rx=rx, .tx_wake=tx_wake, .detached=detached, .tx_status=tx_status };
 static netdev_tx_t lower_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     dev_kfree_skb_any(skb); return NETDEV_TX_OK;
@@ -344,6 +349,11 @@ static int __init pon_transport_test_init(void)
     atomic_set(&hold_dma,1); atomic_set(&live,1);
     pon=airoha_pon_attach(lower,&ops,NULL);
     if(IS_ERR(pon)) { ret=PTR_ERR(pon); pon=NULL; goto out; }
+    {
+        struct airoha_pon_tx_status status={.len=48};
+        airoha_pon_tx_report(pon,&status,AIROHA_PON_TX_SUBMIT,0);
+        CHECK(atomic_read(&status_calls)==1 && !atomic_read(&bad_calls));
+    }
     gdm->eth->qdma[1].weight_mode=BIT(3);
     CHECK(!check_qos(pon));
     /* Exercise a non-detaching pause with actual pending DMA and waitqueues,
@@ -455,6 +465,12 @@ static int __init pon_transport_test_init(void)
     atomic_set(&hold_dma,0);
     CHECK(!airoha_pon_quiesce(pon,1000) && !atomic_read(&gdm->pon_tx_pending));
     CHECK(!airoha_pon_quiesce(pon,0));
+    {
+        struct airoha_pon_tx_status status={.len=48};
+        int before=atomic_read(&status_calls);
+        airoha_pon_tx_report(pon,&status,AIROHA_PON_TX_ABORT,-ECANCELED);
+        CHECK(atomic_read(&status_calls)==before);
+    }
     airoha_pon_release(pon); pon=NULL;
     task=kthread_run(reader,NULL,"pon-transport-test");
     if (IS_ERR(task)) { ret=PTR_ERR(task); task=NULL; goto out; }

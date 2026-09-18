@@ -378,7 +378,11 @@
     "24": "profile_skip: id 0..3 actual skip; 4..7 mismatch/read error; a=skipped,b=request generation,c=version",
     "25": "discovery_register: a=address,b=raw,c=IRQ flags,d=MAC cold generation",
     "26": "activation boundary snapshot; header id=255, then numbered MMIO readbacks",
-    "27": "registration control, local timing and response enqueue audit"
+    "27": "registration control, local timing and response enqueue audit",
+    "28": "OMCI GEM candidate and QoS fields",
+    "29": "OMCI original provider error and failing stage",
+    "30": "Native OMCI TX: id 1 admission-drop,2 submit,3 DMA-complete,4 descriptor-drop,5 teardown-abort,6 DMA-error,7 admission-retry. a=TCI/type/device, b=class/entity, c=GEM/length, d=native epoch low32. Headers only; no optical acknowledgement.",
+    "31": "GWAN append: id 1 begin,2 end; a=GEM/T-CONT mask,b=added channel bitmap,c=added GEM count,d=complete channel bitmap; result errno."
   },
   "discovery_irq_bits": {
     "2": "SN request received",
@@ -387,7 +391,7 @@
     "5": "Registration sent"
   },
   "transmitter_schema": 1,
-  "default_suite": "registration",
+  "default_suite": "continuity",
   "default_physical_actions": 0,
   "mac_registers": {
     "509c": "US_RATE_CAP",
@@ -788,8 +792,8 @@
     }
   },
   "omci_reconfiguration": {
-    "revision": 1,
-    "default_suite": "omci",
+    "revision": 2,
+    "default_suite": "continuity",
     "runt_exception": "Both RX guards; OMCI only; exact length, GEM/session and MIC checked by authenticator",
     "ethernet_minimum_default": 60,
     "crc_oversize_aggregation_rejected": true,
@@ -799,28 +803,71 @@
       "activation-omci-fixed": {
         "ranging_mode": 1,
         "min_len": 60,
-        "allocation_revokes": false
+        "allocation_revokes": false,
+        "live_add": 0
       },
       "activation-omci-oem": {
         "ranging_mode": 3,
         "min_len": 60,
-        "allocation_revokes": false
+        "allocation_revokes": false,
+        "live_add": 0
       },
       "activation-omci-min48": {
         "ranging_mode": 1,
         "min_len": 48,
-        "allocation_revokes": false
+        "allocation_revokes": false,
+        "live_add": 0
       },
       "activation-omci-revoke": {
         "ranging_mode": 1,
         "min_len": 60,
-        "allocation_revokes": true
+        "allocation_revokes": true,
+        "live_add": 0
       },
       "activation-omci-repeat": {
         "ranging_mode": 1,
         "min_len": 60,
-        "allocation_revokes": false
+        "allocation_revokes": false,
+        "live_add": 0
+      },
+      "activation-omci-live-gem": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": false,
+        "live_add": 1
+      },
+      "activation-omci-live-tcont": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": false,
+        "live_add": 2
+      },
+      "activation-omci-live-both": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": false,
+        "live_add": 3
+      },
+      "activation-omci-live-oem": {
+        "ranging_mode": 3,
+        "min_len": 60,
+        "allocation_revokes": false,
+        "live_add": 3
+      },
+      "activation-omci-live-repeat": {
+        "ranging_mode": 1,
+        "min_len": 60,
+        "allocation_revokes": false,
+        "live_add": 3
       }
+    },
+    "native_admission_race": "Authenticated OMCI preserves skb on transient closure/stale native epoch; retry checks auth epoch and original 1000 ms deadline. Data cannot acquire a replacement epoch.",
+    "live_add_policy": "Append only to empty hardware/software entries; old bindings and OMCC unchanged. T-CONT queues stay closed until provisioned. Deletion, replacement, QoS install, reset and keys use full retirement.",
+    "boundary_snapshots": {
+      "20": "before live addition",
+      "21": "after live addition",
+      "22": "before full retirement",
+      "23": "after full reactivation"
     }
   }
 }

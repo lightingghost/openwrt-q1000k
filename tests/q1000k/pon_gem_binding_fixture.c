@@ -31,6 +31,9 @@ typedef unsigned int uint;
 #define NO_ENCRYPTION 0
 #define READ_ONCE(x) (x)
 #define GFP_KERNEL 0
+#define q1000k_activation_snapshot(...) ((void)0)
+#define module_param(...)
+#define MODULE_PARM_DESC(...)
 #define kzalloc(n,f) calloc(1,n)
 #define kfree free
 #define BIT(n) (UINT32_C(1)<<(n))
@@ -71,6 +74,7 @@ static int physical_ops,physical_fail,physical_phase,protocol_error,async_protoc
 static bool physical_started, producers_drained, cold_expected, reset_done, receive_only;
 static u32 rx_channels;
 static bool optical_tx;
+static unsigned append_calls;
 static int tx_query_error, tx_queries;
 static int q1000k_phy_get_tx(bool *enabled) {
     tx_queries++; if(tx_query_error) return tx_query_error;
@@ -134,6 +138,14 @@ int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,void *arg,
     physical_phase=2; ret=ops->install(arg); if(ret) return ret;
     rx_channels=channels; return 0;
 }
+int q1000k_pipeline_append(int (*install)(void *),void *arg,u32 channels)
+{
+    assert(q1000k_gwan_changing && protocol_owned && !held);
+    append_calls++; int saved=physical_phase; physical_phase=2;
+    int ret=install(arg); physical_phase=saved;
+    if(!ret) rx_channels=channels;
+    return ret;
+}
 int q1000k_pipeline_activate(void)
 {
     assert(q1000k_gwan_changing && physical_phase==2);
@@ -189,6 +201,7 @@ static int q1000k_transport_quiesce_channel(u8 channel)
 static void reset_model(void)
 {
     memset(encrypted_hardware,0,sizeof(encrypted_hardware));
+    bench_live_add=0; append_calls=0;
     assert(!held); memset(&wan,0,sizeof(wan)); memset(hardware,0,sizeof(hardware));
     for(unsigned int i=0;i<65536;i++) wan.gpon.gemIdToIndex[i]=0x7fff;
     for(unsigned int i=0;i<32;i++) wan.gpon.allocId[i]=0xffff;

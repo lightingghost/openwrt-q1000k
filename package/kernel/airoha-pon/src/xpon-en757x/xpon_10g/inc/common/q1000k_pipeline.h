@@ -54,11 +54,16 @@ struct q1000k_pipeline_ops {
 	int (*clear)(void *arg);
 	int (*install)(void *arg);
 };
-enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL, Q1000K_TABLE_ACTIVATE };
+enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL, Q1000K_TABLE_ACTIVATE, Q1000K_TABLE_APPEND };
 /* Internal table primitives: permission exists only in the owning callback. */
 int q1000k_pipeline_table_context(enum q1000k_table_phase phase);
 int q1000k_pipeline_reconfigure(const struct q1000k_pipeline_ops *ops,
 			       void *arg, u32 channels);
+/* Add previously empty entries only, with the protocol/table transaction
+ * guard held. No old identity, key, binding or queue may change. New channels
+ * remain closed. A failure after entry contains the entire port permanently.
+ */
+int q1000k_pipeline_append(int (*install)(void *), void *arg, u32 channels);
 /* Restore receive DMA, PHY callbacks, MAC transfers and controller TX in order.
  * CPU queues remain closed for explicit provisioning after success.
  */

@@ -11,8 +11,19 @@ history() {
 	[ -r /proc/q1000k-pon-events ] || return 0
 	cat /proc/q1000k-pon-events
 }
+interface_counters() {
+ local key value fields=
+ [ -d /sys/class/net/ponraw/statistics ] || return 0
+ for key in rx_packets tx_packets rx_bytes tx_bytes rx_dropped tx_dropped rx_errors tx_errors; do
+  read -r value < "/sys/class/net/ponraw/statistics/$key" || return 0
+  case "$value" in ''|*[!0-9]*) return 0;; esac
+  fields="$fields,\"$key\":$value"
+ done
+ printf '{"interface_version":1,"uptime_s":%s%s}\n' "$(now)" "$fields"
+}
 postmortem() {
 	echo postmortem_begin
+	interface_counters
 	history
 	[ ! -r /proc/q1000k-pon-last-snapshot ] || cat /proc/q1000k-pon-last-snapshot
 	echo postmortem_end
@@ -44,6 +55,7 @@ cleanup() {
 	[ -z "$isolated_pid" ] || { wait "$isolated_pid" || :; isolated_pid=; }
 	postmortem
 	stop_stack || failed=1
+	interface_counters
 	rm -f /var/run/q1000k-pon-bench.lock/control
 	rmdir /var/run/q1000k-pon-bench.lock || failed=1
 	if [ "$failed" = 0 ]; then event cleanup passed; else event cleanup failed; result=1; fi
@@ -137,6 +149,7 @@ mac_status() {
 	fi
 }
 snapshot() {
+ [ "$((count % 5))" != 0 ] || interface_counters
  # Internal boundary traces capture the transition itself. Avoid controller
  # I2C and the large PHY snapshot on four of every five activation ticks.
  if [ "$registration_bench" = 1 ] && [ "$((count % 5))" != 0 ]; then
@@ -247,7 +260,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -256,15 +269,19 @@ case "$recovery_actions" in
 esac
 sn_limit=20; coalesce=0
 registration_bench=0 live_profiles=0 control_coalesce=0 ranging_mode=0 key_inline=0 activation_diag=0
-initial_key_readback=0 omci_min_len=60 alloc_revoke=0
+initial_key_readback=0 omci_min_len=60 alloc_revoke=0 live_add=3
 case "$phase" in
  activation-reg-*|activation-omci-*)
   registration_bench=1; sn_limit=40; coalesce=1; live_profiles=1; control_coalesce=1; activation_diag=1
   case "$phase" in
    activation-omci-*)
-    ranging_mode=1; key_inline=1; initial_key_readback=1
+    ranging_mode=1; key_inline=1; initial_key_readback=1; live_add=0
     case "$phase" in
      activation-omci-oem) ranging_mode=3 ;;
+     activation-omci-live-gem) live_add=1 ;;
+     activation-omci-live-tcont) live_add=2 ;;
+     activation-omci-live-both|activation-omci-live-repeat) live_add=3 ;;
+     activation-omci-live-oem) live_add=3; ranging_mode=3 ;;
      activation-omci-min48) omci_min_len=48 ;;
      activation-omci-revoke) alloc_revoke=1 ;;
     esac
@@ -277,6 +294,7 @@ case "$phase" in
   esac
  ;;
 esac
+printf 'continuity_comparison live_add=%s phase=%s\n' "$live_add" "$phase"
 printf 'omci_comparison initial_key_readback=%s min_len=%s alloc_revoke=%s phase=%s\n' "$initial_key_readback" "$omci_min_len" "$alloc_revoke" "$phase"
 printf 'registration_comparison range_mode=%s key_inline=%s diag=%s phase=%s\n' "$ranging_mode" "$key_inline" "$activation_diag" "$phase"
 case "$phase" in activation-long-sn|activation-tx-*) sn_limit=40 ;; esac
@@ -330,7 +348,7 @@ ip link set dev ponraw up || fail 'Cannot open DMA endpoint.'
 lower_owned=1
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do load_module "$module"; done
 # Only fixed names and validated hexadecimal/scalar module values are expanded.
-load_module xpon_10g bench_initial_key_readback="$initial_key_readback" bench_omci_min_len="$omci_min_len" bench_alloc_revoke="$alloc_revoke" bench_profile_coalesce="$coalesce" bench_profile_live="$live_profiles" bench_control_coalesce="$control_coalesce" bench_ranging_mode="$ranging_mode" bench_key_inline="$key_inline" bench_activation_diag="$activation_diag" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
+load_module xpon_10g bench_live_add="$live_add" bench_initial_key_readback="$initial_key_readback" bench_omci_min_len="$omci_min_len" bench_alloc_revoke="$alloc_revoke" bench_profile_coalesce="$coalesce" bench_profile_live="$live_profiles" bench_control_coalesce="$control_coalesce" bench_ranging_mode="$ranging_mode" bench_key_inline="$key_inline" bench_activation_diag="$activation_diag" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
 }
 start_stack
 if [ "$mode" = isolated ]; then

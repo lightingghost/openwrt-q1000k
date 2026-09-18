@@ -14,6 +14,8 @@ ETH = Path(os.environ['Q1000K_PON_ETH']) if 'Q1000K_PON_ETH' in os.environ else 
 class PonTransportTests(unittest.TestCase):
     def test_attachment_generations_metadata_and_skb_ownership(self):
         source = (ETH / 'airoha_pon.c').read_text()
+        api = (ETH.parents[3] / 'include/linux/soc/airoha/airoha_pon.h').read_text()
+        status_api = api[api.index('/* OMCI header only'):api.index('struct airoha_pon_ops {')]
         source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
         # Indirect QoS and FE release have separate command/fault fixtures.
         source = re.sub(r'/\* RTNL serializes the indirect QDMA1.*?EXPORT_SYMBOL_GPL\(airoha_pon_get_qos\);',
@@ -177,9 +179,11 @@ struct sk_buff {
 };
 struct airoha_pon_tx_meta { u64 epoch; u16 gem; u8 channel,queue,cpu_queue,mic_index; bool omci; };
 struct airoha_pon_rx_meta { u32 words[4]; u16 gem; u8 channel; bool omci,no_mic; };
+''' + status_api + r'''
 struct airoha_pon_ops {
     void (*rx)(void *,struct sk_buff *,const struct airoha_pon_rx_meta *);
     void (*tx_wake)(void *);
+    void (*tx_status)(void *,enum airoha_pon_tx_stage,int,const struct airoha_pon_tx_status *);
     void (*detached)(void *);
 };
 static struct airoha_gdm_dev *netdev_priv(struct net_device *d) { return d->priv; }
@@ -201,7 +205,7 @@ static void __netif_tx_unlock_bh(struct netdev_queue *q) { assert(q->locked); q-
 static bool netif_xmit_stopped(struct netdev_queue *q) { return q->stopped; }
 static u16 skb_get_queue_mapping(struct sk_buff *s) { return s->queue; }
 static void skb_set_queue_mapping(struct sk_buff *s,u16 q) { s->queue=q; }
-static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *s,struct net_device *n,u32 msg,struct airoha_pon *pon) {
+static netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *s,struct net_device *n,u32 msg,struct airoha_pon *pon,const struct airoha_pon_tx_status *status) {
     assert(s->dev==n && s->queue<32 && rcu_readers);
     xmit_calls++; last_msg=msg;
     if(xmit_result==NETDEV_TX_OK) dev_kfree_skb_any(s);
@@ -220,7 +224,13 @@ static void rx(void *p,struct sk_buff *skb,const struct airoha_pon_rx_meta *meta
 }
 static void wake(void *p) { assert(p==&context && rcu_readers); wake_calls++; }
 static void detached(void *p) { assert(p==&context && rtnl_held && !rcu_readers); detach_calls++; }
-static struct airoha_pon_ops ops={rx,wake,detached};
+static unsigned status_calls;
+static enum airoha_pon_tx_stage status_stage;
+static struct airoha_pon_tx_status last_status;
+static void tx_status(void *priv,enum airoha_pon_tx_stage stage,int result,const struct airoha_pon_tx_status *status) {
+    assert(rcu_readers && priv==&context); status_calls++; status_stage=stage; last_status=*status;
+}
+static struct airoha_pon_ops ops={.rx=rx,.tx_wake=wake,.detached=detached,.tx_status=tx_status};
 static void reset_skb(struct sk_buff *skb,struct net_device *dev) {
     memset(skb,0,sizeof(*skb)); skb->dev=dev; skb->queue=7; skb->len=48;
     for(int i=0;i<64;i++) skb->data[i]=i;
@@ -313,6 +323,25 @@ int main(void) {
         if(error==5) skb.empty_head=true;
         assert(airoha_pon_xmit(pon,&skb,&tx)==NETDEV_TX_OK && skb.freed && xmit_calls==old);
     }
+    /* An OMCI prepare/closure race preserves the exact skb for a bounded
+     * authenticated retry. Preparing again, not submitting stale metadata,
+     * grants the new native epoch. Data keeps the old discard behavior.
+     */
+    reset_skb(&skb,&upper); skb.data[0]=0x12; skb.data[1]=0x34;
+    skb.data[2]=0x24; skb.data[3]=0x0a;
+    skb.data[4]=1; skb.data[5]=12; skb.data[6]=0xff; skb.data[7]=0xfe;
+    before=skb; unsigned sc=status_calls; int xc=xmit_calls;
+    assert(!airoha_pon_set_queue_close(pon,31,255));
+    assert(airoha_pon_xmit(pon,&skb,&tx)==NETDEV_TX_BUSY && !memcmp(&skb,&before,sizeof(skb)));
+    assert(status_calls==sc+1 && status_stage==AIROHA_PON_TX_RETRY && xmit_calls==xc);
+    assert(last_status.header==0x1234240a && last_status.me==0x010cfffe);
+    assert(last_status.gem==65535 && last_status.len==skb.len);
+    assert(airoha_pon_prepare_tx(pon,&tx)==-ESHUTDOWN);
+    assert(!airoha_pon_set_queue_close(pon,31,0));
+    assert(airoha_pon_xmit(pon,&skb,&tx)==NETDEV_TX_BUSY && !skb.freed);
+    assert(!airoha_pon_prepare_tx(pon,&tx));
+    assert(!airoha_pon_xmit(pon,&skb,&tx) && skb.freed && xmit_calls==xc+1);
+    tx.omci=false; tx.mic_index=0;
     /* Every byte in all eight registers preserves its three neighbours. */
     for(int ch=0;ch<32;ch++) for(int bits=0;bits<256;bits++) {
         u32 saved_regs[8]; memcpy(saved_regs,eth.qdma[1].regs,sizeof(saved_regs));

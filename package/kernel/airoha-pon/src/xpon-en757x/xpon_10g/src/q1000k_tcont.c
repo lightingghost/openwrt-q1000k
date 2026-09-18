@@ -241,10 +241,14 @@ int q1000k_tcont_install(unsigned int channel, u16 alloc_id, u16 onu_id)
 {
 	unsigned long flags;
 	unsigned int i;
-	bool valid, occupied = false;
+	bool valid, occupied = false, append = false;
 	u16 id;
 	int ret = q1000k_pipeline_table_context(Q1000K_TABLE_INSTALL);
 
+	if (ret == -EPERM) {
+		ret = q1000k_pipeline_table_context(Q1000K_TABLE_APPEND);
+		append = !ret;
+	}
 	if (ret)
 		return ret;
 	if (!channel || channel >= Q1000K_TCONT_COUNT ||
@@ -265,7 +269,7 @@ int q1000k_tcont_install(unsigned int channel, u16 alloc_id, u16 onu_id)
 			goto out;
 		}
 		if (valid && i == channel) {
-			if (id != alloc_id) {
+			if (append || id != alloc_id) {
 				ret = -EBUSY;
 				goto out;
 			}

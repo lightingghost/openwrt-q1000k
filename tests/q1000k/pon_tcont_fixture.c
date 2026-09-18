@@ -56,7 +56,7 @@ static u32 IO_GREG(unsigned int reg)
 }
 static void udelay(unsigned int usec) { assert(held && usec==1); delays++; }
 
-enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL };
+enum q1000k_table_phase { Q1000K_TABLE_CLEAR, Q1000K_TABLE_INSTALL, Q1000K_TABLE_ACTIVATE, Q1000K_TABLE_APPEND };
 static _Thread_local int table_phase=-1;
 static int q1000k_pipeline_table_context(enum q1000k_table_phase phase)
 {
@@ -206,6 +206,12 @@ int main(void)
         assert(q1000k_tcont_clear_namespace()==-EIO && commands==n);
         assert(q1000k_tcont_quarantined==~0U && q1000k_tcont_fault);
     }
+    reset_model(); table_phase=Q1000K_TABLE_APPEND;
+    assert(!q1000k_tcont_install(1,448,10));
+    unsigned before=data_writes;
+    assert(q1000k_tcont_install(1,448,10)==-EBUSY && data_writes==before);
+    assert(q1000k_tcont_install(2,448,10)==-EEXIST && data_writes==before);
+    assert(q1000k_tcont_clear_namespace()==-EPERM);
     table_phase=-1;
     return 0;
 }

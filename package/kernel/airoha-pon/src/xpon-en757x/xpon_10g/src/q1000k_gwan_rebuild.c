@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Complete physical replacement of the legacy data service records. */
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -14,11 +15,19 @@
 #include "common/q1000k_pipeline.h"
 #include "common/q1000k_transport.h"
 
+/* One image can compare the former full-drain path with each independent
+ * live addition. Replacement/removal/rebinding always uses full retirement.
+ */
+static unsigned int bench_live_add = 3;
+module_param(bench_live_add, uint, 0400);
+MODULE_PARM_DESC(bench_live_add, "Live empty-entry additions: bit 0 GEM, bit 1 T-CONT; 0 full-drain control");
+
 struct q1000k_gwan_transaction {
 	struct q1000k_gwan_table old, next;
 	struct airoha_pon_qos qos[Q1000K_GWAN_CHANNELS];
 	u8 closed[Q1000K_GWAN_CHANNELS];
 	u32 channels;
+	u32 added_channels, added_gems;
 	bool registration, cold, tx_enabled;
 	int (*install)(void *arg);
 	void *install_arg;
@@ -198,6 +207,69 @@ static const struct q1000k_pipeline_ops q1000k_gwan_pipeline_ops = {
 	.install = q1000k_gwan_install,
 };
 
+static unsigned int q1000k_gwan_append_kind(struct q1000k_gwan_transaction *tx)
+{
+	unsigned int i, kind = 0;
+
+	if (tx->registration || tx->install || tx->old.alloc_id[0] == Q1000K_GWAN_UNASSIGNED)
+		return 0;
+	for (i = 0; i < Q1000K_GWAN_CHANNELS; i++) {
+		if (tx->old.alloc_id[i] == tx->next.alloc_id[i])
+			continue;
+		if (!i || tx->old.alloc_id[i] != Q1000K_GWAN_UNASSIGNED ||
+		    tx->next.alloc_id[i] == Q1000K_GWAN_UNASSIGNED)
+			return 0;
+		tx->added_channels |= BIT(i);
+		kind |= 2;
+	}
+	for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
+		if (q1000k_gwan_entry_equal(&tx->old.gem[i], &tx->next.gem[i]))
+			continue;
+		/* Including software-only changes: an old queued frame must not
+		 * inherit a new binding, encryption policy or multicast role.
+		 */
+		if (tx->old.gem[i].valid || !tx->next.gem[i].valid)
+			return 0;
+		tx->added_gems++;
+		kind |= 1;
+	}
+	return (kind & ~bench_live_add) ? 0 : kind;
+}
+
+static int q1000k_gwan_append_install(void *arg)
+{
+	struct q1000k_gwan_transaction *tx = arg;
+	const struct q1000k_gem_value empty = {};
+	unsigned int i;
+	int ret;
+	u8 closed;
+
+	for (i = 1; i < Q1000K_GWAN_CHANNELS; i++) {
+		if (!(tx->added_channels & BIT(i)))
+			continue;
+		ret = q1000k_transport_get_queue_close(i, &closed);
+		if (ret || closed != 0xff)
+			return ret ?: -EBUSY;
+		ret = q1000k_tcont_install(i, tx->next.alloc_id[i], tx->next.alloc_id[0]);
+		if (ret)
+			return ret;
+	}
+	for (i = 0; i < Q1000K_GWAN_GEMS; i++) {
+		const struct q1000k_gwan_entry *e = &tx->next.gem[i];
+		struct q1000k_gem_value value = {
+			.valid = 1, .multicast = e->multicast, .encrypted = e->encrypted,
+		};
+
+		if (tx->old.gem[i].valid || !e->valid)
+			continue;
+		/* Compare invalid -> valid in hardware, then verify readback. */
+		ret = q1000k_gem_replace(e->gem, &empty, &value);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 enum q1000k_gwan_edit { Q1000K_GWAN_APPLY, Q1000K_GWAN_DELETE_GEM,
 	Q1000K_GWAN_DELETE_TCONT, Q1000K_GWAN_ADD_TCONT, Q1000K_GWAN_REFRESH, Q1000K_GWAN_REGISTER, Q1000K_GWAN_COLD };
 
@@ -208,10 +280,12 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 {
 	struct q1000k_gwan_transaction *tx;
 	struct q1000k_pipeline_ops ops = q1000k_gwan_pipeline_ops;
-	unsigned int i;
+	unsigned int i, append;
 	bool found = all;
 	int ret, token;
 
+	if (bench_live_add & ~3U)
+		return -EINVAL;
 	/* Enter also supports a PLOAM callback already owning the executor:
 	 * no self-cancel/flush and no recursion into an OMCI session barrier.
 	 */
@@ -307,6 +381,26 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	ret = q1000k_gwan_validate(tx);
 	if (ret || (!install && !tx->registration && q1000k_gwan_table_equal(&tx->old, &tx->next)))
 		goto free;
+	append = q1000k_gwan_append_kind(tx);
+	if (append) {
+		/* Protocol producers are serialized and data binding acquisition
+		 * is closed. Existing entries and OMCC keep their native epochs;
+		 * no pending authenticated reply or existing DMA owner is retired.
+		 */
+		q1000k_trace(QT_GWAN_APPEND, 1, 0, append, tx->added_channels,
+			     tx->added_gems, tx->channels);
+		q1000k_activation_snapshot(20, append);
+		ret = q1000k_pipeline_append(q1000k_gwan_append_install, tx, tx->channels);
+		q1000k_activation_snapshot(21, append);
+		if (!ret)
+			ret = q1000k_protocol_status();
+		q1000k_trace(QT_GWAN_APPEND, 2, ret, append, tx->added_channels,
+			     tx->added_gems, tx->channels);
+		if (ret)
+			goto failed;
+		q1000k_gwan_table_publish(&tx->next);
+		goto free;
+	}
 	/* Preserve discovery as well as operational TX across profile/QoS
 	 * refreshes. ONU assignment alone cannot describe the O2/3 TX state.
 	 * Bootstrap and ONU removal always resume with the transmitter off.
@@ -328,6 +422,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 	q1000k_trace(QT_CONTROL, 4, 0, tx->registration, tx->cold, tx->channels, 0);
 	synchronize_rcu();
 	q1000k_trace(QT_CONTROL, 5, 0, tx->registration, tx->cold, tx->channels, 0);
+	q1000k_activation_snapshot(22, edit);
 	ret = q1000k_pipeline_reconfigure(&ops, tx, tx->channels);
 	if (ret)
 		goto failed;
@@ -353,6 +448,7 @@ static int q1000k_gwan_rebuild(const struct q1000k_gwan_table *expected,
 			goto failed;
 	}
 	ret = q1000k_protocol_status();
+	q1000k_activation_snapshot(23, edit);
 	if (ret)
 		goto failed;
 	goto free;

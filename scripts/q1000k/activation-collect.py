@@ -368,7 +368,7 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
-    if getattr(args, 'suite', 'legacy') == 'omci':
+    if getattr(args, 'suite', 'legacy') in ('omci', 'continuity'):
         if args.physical_only:
             raise ValueError('OMCI comparisons use connected fiber without physical cycling')
         cases = [dict(name='rx-startup', mode='rx', samples=30, ids=['T01','T02','T03'])]
@@ -376,10 +376,17 @@ def discovery_plan(args):
             for name, mode, minimum, revoke, samples in [
                     ('fixed',1,60,False,300), ('oem',3,60,False,300),
                     ('min48',1,48,False,300), ('revoke',1,60,True,300),
-                    ('repeat',1,60,False,600)]:
+                    ('repeat',1,60,False,600),
+                    ('live-gem',1,60,False,240), ('live-tcont',1,60,False,240),
+                    ('live-both',1,60,False,300), ('live-oem',3,60,False,300),
+                    ('live-repeat',1,60,False,600)]:
+                if args.suite == 'continuity' and name != 'fixed' and not name.startswith('live-'):
+                    continue
                 cases.append(dict(name='activation-omci-'+name, mode='activate', samples=samples,
                     ranging_mode=mode, key_inline=True, initial_key_readback=True,
-                    omci_min_len=minimum, alloc_revoke=revoke, ids=['O1','O2','O3','O4','O5','O6']))
+                    omci_min_len=minimum, alloc_revoke=revoke,
+                    live_add={'live-gem':1,'live-tcont':2,'live-both':3,'live-oem':3,'live-repeat':3}.get(name,0),
+                    ids=['O1','O2','O3','O4','O5','O6','O7','O8']))
         if getattr(args, 'cases', None):
             selected = set(args.cases.split(','))
             if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown OMCI case')
@@ -504,6 +511,8 @@ def test_outcomes(case, result, text):
                 'O3': 'allocation-session-preserved' if o.get('allocations_kept_session') and o.get('epoch_reconciles') else 'allocation-preservation-not-observed',
                 'O4': 'deferred-response-consumed' if o.get('deferred_native_consumed') else 'deferred-response-not-observed',
                 'O5': 'tx-auth-rejection-observed' if o.get('tx_auth_rejected') else 'no-tx-auth-rejection-observed',
+                'O7': 'native-descriptor-outcomes-observed' if o.get('native_tx',{}).get('events') else 'native-descriptor-path-not-observed',
+                'O8': 'live-addition-observed' if o.get('live_additions',{}).get('completed') else 'live-addition-not-observed',
                 'O6': 'provisioning-and-traffic-observed' if result.get('provisioned') and any(result.get('traffic', {}).values()) else 'service-not-verified',
             }[ident]
             if not o.get('critical_evidence_complete'): outcome[ident] += '; critical-evidence-incomplete'
@@ -704,6 +713,41 @@ def omci_provisioning_summary(events):
         note='Retained records only. Check critical evidence completeness; a successful ME operation does not prove a working data service.')
 
 
+def native_tx_summary(events):
+    names = {1:'admission-drop', 2:'submitted', 3:'dma-complete', 4:'hardware-drop',
+             5:'teardown-abort', 6:'dma-error', 7:'admission-retry'}
+    rows, counts, balance = [], {}, {}
+    for e in events:
+        if e['event'] != 30:
+            continue
+        stage=names.get(e['id'], 'unknown')
+        counts[stage]=counts.get(stage,0)+1
+        row=dict(stack_generation=e.get('stack_generation',1), generation=e['generation'],
+                 seq=e['seq'], ns=e['ns'], stage=stage, error=e['result'],
+                 tci=e['a']>>16, opcode=(e['a']>>8)&31, message_type=(e['a']>>8)&255,
+                 device_id=e['a']&255, me_class=e['b']>>16, entity_id=e['b']&65535,
+                 gem=e['c']>>16, length=e['c']&65535, native_epoch_low32=e['d'])
+        rows.append(row)
+        key=(row['stack_generation'],row['generation'],e['a'],e['b'],e['c'],e['d'])
+        b=balance.setdefault(key,dict(header=row,submitted=0,terminal=0))
+        if e['id']==2: b['submitted']+=1
+        elif e['id'] in (3,4,5): b['terminal']+=1
+    pending=[dict(b['header'],submitted=b['submitted'],terminal=b['terminal'])
+             for b in balance.values() if b['submitted']!=b['terminal']]
+    return dict(events=rows,counts=counts,unbalanced=pending,
+                optical_delivery_proven=False,
+                note='Header-only native events; DMA completion is not an OLT acknowledgement. Compare only with complete critical evidence.')
+
+
+def append_summary(events):
+    rows=[dict(stack_generation=e.get('stack_generation',1),seq=e['seq'],ns=e['ns'],
+               phase='begin' if e['id']==1 else 'end',error=e['result'],kind=e['a'],
+               added_channels=e['b'],added_gems=e['c'],channels=e['d'])
+          for e in events if e['event']==31]
+    return dict(events=rows,completed=sum(r['phase']=='end' and r['error']==0 for r in rows),
+                failed=sum(r['phase']=='end' and r['error']!=0 for r in rows))
+
+
 def omci_summary(records):
     """Deduplicate polling snapshots; never infer OLT receipt from local TX."""
     unique = {}
@@ -716,6 +760,7 @@ def omci_summary(records):
         return sum(e['id'] == ident and predicate(e) for e in control)
     return dict(
         provisioning=omci_provisioning_summary(events),
+        native_tx=native_tx_summary(events), live_additions=append_summary(events),
         ethernet_runt_omci_delivered=count(30, lambda e: bool(e['a'] & (1 << 12))),
         rx_descriptor_words=sorted({f"0x{e['a']:08x}" for e in control if e['id'] == 30}),
         rx_guard_rejected=count(31, lambda e: e['result'] != 0),
@@ -810,6 +855,7 @@ def summarize(text, returncode=0, events=None):
     result['trace'] = trace_summary(records)
     result['registration'] = registration_summary(records)
     result['omci_experiment'] = omci_summary(records)
+    result['interface_counters'] = [r for r in records if isinstance(r,dict) and r.get('interface_version')==1]
     winners = re.findall(r'^recovery_winner=([1-7])$', text, re.M)
     result['recovery_winner'] = winners[-1] if winners else None
     result['recovery_sequence'] = re.findall(r'^recovery_action=([1-7]) phase=applied$', text, re.M)
@@ -1116,13 +1162,19 @@ def execute(args, pin):
                     if stage not in active.get('stages', {}):
                         record['not_run'].append(stage)
             write_json(args.output/'collection.json', record)
-            if getattr(args, 'suite', 'legacy') == 'omci':
+            if getattr(args, 'suite', 'legacy') in ('omci', 'continuity'):
                 report = ['# OMCI runt and reconfiguration observations', '',
                     '| Case | Runt OMCI admitted | Authenticated RX | Replies queued | TX auth errors | Allocation sessions kept | Deferred / consumed | Drops | Evidence complete |',
                     '|---|---:|---:|---:|---:|---:|---|---:|---|']
                 for result in record['results']:
                     o = result.get('omci_experiment', {})
                     report.append(f"| {result['name']} | {o.get('ethernet_runt_omci_delivered',0)} | {o.get('authenticated_rx',0)} | {o.get('replies_queued',0)} | {o.get('tx_auth_rejected',0)} | {o.get('allocations_kept_session',0)} | {o.get('replies_deferred',0)} / {o.get('deferred_native_consumed',0)} | {o.get('reply_drops',0)} | {o.get('critical_evidence_complete',False)} |")
+                report += ['', '## Native transmit and live additions', '',
+                    '| Case | Submitted | DMA complete | HW drop | Admission drop | DMA error | Abort | Retry | Live adds | Evidence complete |',
+                    '|---|---:|---:|---:|---:|---:|---:|---:|---:|---|']
+                for result in record['results']:
+                    o=result.get('omci_experiment',{}); n=o.get('native_tx',{}).get('counts',{})
+                    report.append(f"| {result['name']} | {n.get('submitted',0)} | {n.get('dma-complete',0)} | {n.get('hardware-drop',0)} | {n.get('admission-drop',0)} | {n.get('dma-error',0)} | {n.get('teardown-abort',0)} | {n.get('admission-retry',0)} | {o.get('live_additions',{}).get('completed',0)} | {o.get('critical_evidence_complete',False)} |")
                 report += ['', 'Native consumption does not prove upstream optical delivery. An unobserved allocation/pause is an untested condition; use the raw logs and collection.json to distinguish it from success.']
                 report += ['', '## Managed-entity responses', '',
                     'Counts include duplicate replies and are limited to retained evidence. Details and provider errno/stage are in collection.json.', '',
@@ -1199,7 +1251,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('omci','registration','output','measurement','isolated','tx','legacy'), default='omci', help='Default: connected-fiber OMCI runt and pending-response comparisons, with one RX control and five activation cases. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='continuity', help='Default: connected-fiber native TX diagnostics and live GEM/T-CONT additions, with one RX control and six activation cases. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

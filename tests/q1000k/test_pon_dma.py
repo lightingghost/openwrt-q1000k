@@ -25,6 +25,8 @@ def function(name):
 class PonDmaTests(unittest.TestCase):
     def test_descriptor_metadata_busy_dma_failure_and_cleanup(self):
         source = Path(__file__).with_name('pon_tx_fixture.c').read_text()
+        api = (ETH.parents[3] / 'include/linux/soc/airoha/airoha_pon.h').read_text()
+        source = source.replace('/* TX_STATUS_API */', api[api.index('/* OMCI header only'):api.index('struct airoha_pon_ops {')])
         masks = '\n'.join(line for line in (ETH / 'airoha_regs.h').read_text().splitlines()
                           if re.match(r'#define (?:QDMA_(?:DESC_|ETH_TXMSG_)|IRQ_(?:HEAD|ENTRY|RING|DESC|CLEAR))', line))
         source = source.replace('/* MASKS */', masks)

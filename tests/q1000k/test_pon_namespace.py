@@ -15,4 +15,12 @@ class NamespaceTests(unittest.TestCase):
         source=re.sub(r'^#include[^\n]*\n','',source,flags=re.M)
         fixture=Path(__file__).with_name('pon_namespace_fixture.c').read_text()
         run_c(fixture.replace('/* PRODUCTION */',source))
+    def test_append_owner_context_channels_and_failure_containment(self):
+        from test_pon_identity import extract
+        header=(MAC/'inc/common/q1000k_pipeline.h').read_text()
+        header=re.sub(r'^#include[^\n]*\n','',header,flags=re.M)
+        text=(MAC/'src/q1000k_pipeline.c').read_text()
+        production=extract(text,'q1000k_pipeline_table_context')+extract(text,'q1000k_pipeline_append')
+        fixture=Path(__file__).with_name('pon_pipeline_append_fixture.c').read_text()
+        run_c(fixture.replace('/* HEADER */',header).replace('/* PRODUCTION */',production))
 if __name__=='__main__': unittest.main()

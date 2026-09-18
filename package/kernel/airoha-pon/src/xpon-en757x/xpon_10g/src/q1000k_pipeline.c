@@ -271,6 +271,51 @@ out:
 	return ret;
 }
 
+int q1000k_pipeline_append(int (*install)(void *), void *arg, u32 channels)
+{
+	unsigned int channel;
+	int ret;
+
+	if (!install || !(channels & BIT(0)))
+		return -EINVAL;
+	if (in_interrupt() || in_atomic() || irqs_disabled() || rcu_preempt_depth())
+		return -EWOULDBLOCK;
+	mutex_lock(&q1000k_pipeline_lock);
+	ret = q1000k_pipeline.error;
+	if (ret)
+		goto out;
+	if (q1000k_pipeline.stage != Q1000K_PIPELINE_UNDRAINED ||
+	    !(q1000k_pipeline.channels & BIT(0)) ||
+	    (q1000k_pipeline.channels & ~channels)) {
+		ret = -EBUSY;
+		goto out;
+	}
+	q1000k_table_phase = Q1000K_TABLE_APPEND;
+	WRITE_ONCE(q1000k_table_owner, current);
+	ret = install(arg);
+	WRITE_ONCE(q1000k_table_owner, NULL);
+	if (ret)
+		goto fail;
+	for (channel = 1; channel < 32; channel++) {
+		if (!(channels & ~q1000k_pipeline.channels & BIT(channel)))
+			continue;
+		/* The native owner verifies closed queues, no pending descriptors,
+		 * no retirement/quarantine and the FE enable register readback.
+		 */
+		ret = q1000k_transport_set_tx_channel(channel, true);
+		if (ret)
+			goto fail;
+	}
+	q1000k_pipeline.channels = channels;
+	goto out;
+fail:
+	q1000k_pipeline.error = ret;
+	q1000k_pipeline_contain();
+out:
+	mutex_unlock(&q1000k_pipeline_lock);
+	return ret;
+}
+
 int q1000k_pipeline_activate_checked(bool transmit, int (*ready)(void *), void *arg)
 {
 	int ret;

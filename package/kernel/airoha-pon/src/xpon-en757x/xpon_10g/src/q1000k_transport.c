@@ -225,9 +225,18 @@ static void q1000k_native_detached(void *priv)
 	spin_unlock_bh(&transport->lock);
 }
 
+static void q1000k_native_tx_status(void *priv, enum airoha_pon_tx_stage stage,
+				  int result, const struct airoha_pon_tx_status *status)
+{
+	/* Header fields only; asynchronous completion is not optical delivery. */
+	q1000k_trace(QT_OMCI_NATIVE_TX, stage, result, status->header, status->me,
+		     (u32)status->gem << 16 | status->len, status->epoch);
+}
+
 static const struct airoha_pon_ops q1000k_native_ops = {
 	.rx = q1000k_native_rx,
 	.tx_wake = q1000k_native_wake,
+	.tx_status = q1000k_native_tx_status,
 	.detached = q1000k_native_detached,
 };
 

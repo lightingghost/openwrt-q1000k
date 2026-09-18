@@ -1,0 +1,287 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] net: airoha: trace OMCI descriptor outcomes and preserve retries
+
+Distinguish native admission, descriptor submission, completion, hardware drop
+and teardown abort without retaining OMCI payloads. A temporary admission race
+must leave authenticated OMCI owned by its bounded retry worker. Data keeps its
+immutable namespace epoch and stale-drop behavior.
+
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -8,7 +8,7 @@
+ struct airoha_pon;
+ 
+ struct airoha_pon_tx_meta {
+-	u64 epoch; /* Set by prepare_tx; immutable across software retries. */
++	u64 epoch; /* Set by prepare_tx; data retries must retain this epoch. */
+ 	u16 gem;
+ 	u8 channel;
+ 	u8 queue;
+@@ -23,6 +23,23 @@
+ 	u8 channel;
+ 	bool omci;
+ 	bool no_mic; /* Presence only: this is NOT an authentication verdict. */
++};
++
++/* OMCI header only: no payload, MIC, key or subscriber identity. Completion
++ * means the QDMA descriptor was reclaimed; it does not prove optical delivery.
++ */
++struct airoha_pon_tx_status {
++	u32 header, me, epoch;
++	u16 gem, len;
++};
++enum airoha_pon_tx_stage {
++	AIROHA_PON_TX_ADMISSION_DROP = 1,
++	AIROHA_PON_TX_SUBMIT,
++	AIROHA_PON_TX_COMPLETE,
++	AIROHA_PON_TX_HW_DROP,
++	AIROHA_PON_TX_ABORT,
++	AIROHA_PON_TX_DMA_ERROR,
++	AIROHA_PON_TX_RETRY,
+ };
+ 
+ struct airoha_pon_ops {
+@@ -35,6 +52,12 @@
+ 	void (*rx)(void *priv, struct sk_buff *skb,
+ 		   const struct airoha_pon_rx_meta *meta);
+ 	void (*tx_wake)(void *priv);
++	/* Optional, atomic, under RCU, possibly admission/DMA queue locks.
++	 * Copy status before returning. Never sleep or reenter the native API.
++	 * No callbacks after detach/release; pending descriptors may outlive it.
++	 */
++	void (*tx_status)(void *priv, enum airoha_pon_tx_stage stage, int result,
++			  const struct airoha_pon_tx_status *status);
+ 	/* Lower netdev stopped/removed: called once, under RTNL, after packet
+ 	 * callbacks drain. Do not acquire RTNL or call this API from here.
+ 	 * The caller still owns the handle and must eventually release it.
+@@ -197,10 +220,12 @@
+ int airoha_pon_pause(struct airoha_pon *pon, unsigned int timeout_ms);
+ int airoha_pon_resume(struct airoha_pon *pon);
+ 
+-/* Capture admission for a fully prepared frame BEFORE enqueueing it. Returns
+- * -ESHUTDOWN for a closed queue. xmit drops stale epochs even after reopen;
+- * never call prepare_tx again for a frame returned as NETDEV_TX_BUSY. A new
+- * closure invalidates all software packets on that channel conservatively.
++/* Data captures admission before enqueue and must retain that epoch across
++ * retries: xmit consumes stale data even after reopening. Only authenticated
++ * OMCI may prepare again after verifying its immutable auth session and its
++ * original finite deadline. A prepare/xmit closure race returns BUSY for OMCI
++ * with the exact skb untouched; permanent faults still consume and report it.
++ * prepare_tx returns -ESHUTDOWN for a closed queue.
+  */
+ int airoha_pon_prepare_tx(struct airoha_pon *pon, struct airoha_pon_tx_meta *meta);
+ 
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -1402,6 +1402,10 @@
+ 		WRITE_ONCE(desc->msg1, 0);
+ 		q->queued--;
+ 
++		airoha_pon_tx_report(e->pon, &e->pon_status,
++				     desc_ctrl & QDMA_DESC_DROP_MASK ?
++				     AIROHA_PON_TX_HW_DROP : AIROHA_PON_TX_COMPLETE,
++				     desc_ctrl & QDMA_DESC_DROP_MASK ? -EIO : 0);
+ 		if (skb) {
+ 			struct airoha_gdm_dev *dev = netdev_priv(skb->dev);
+ 			struct netdev_queue *txq;
+@@ -1560,6 +1564,7 @@
+ 
+ 		dma_unmap_single(eth->dev, e->dma_addr, e->dma_len,
+ 				 DMA_TO_DEVICE);
++		airoha_pon_tx_report(e->pon, &e->pon_status, AIROHA_PON_TX_ABORT, -ECANCELED);
+ 		dev_kfree_skb_any(e->skb);
+ 		e->dma_addr = 0;
+ 		e->skb = NULL;
+@@ -2732,7 +2737,8 @@
+ 
+ static netdev_tx_t __airoha_dev_xmit(struct sk_buff *skb,
+ 				     struct net_device *netdev, const u32 *pon_msg,
+-				     struct airoha_pon *pon)
++				     struct airoha_pon *pon,
++				     const struct airoha_pon_tx_status *status)
+ {
+ 	unsigned long flags;
+ 	struct airoha_gdm_dev *dev = netdev_priv(netdev);
+@@ -2742,7 +2748,7 @@
+ 	struct netdev_queue *txq;
+ 	struct airoha_queue *q;
+ 	LIST_HEAD(tx_list);
+-	int i = 0, qid;
++	int i = 0, qid, tx_error = -EINVAL;
+ 	void *data;
+ 	u16 index;
+ 	u8 fport;
+@@ -2832,11 +2838,14 @@
+ 
+ 		addr = dma_map_single(netdev->dev.parent, data, len,
+ 				      DMA_TO_DEVICE);
+-		if (unlikely(dma_mapping_error(netdev->dev.parent, addr)))
++		if (unlikely(dma_mapping_error(netdev->dev.parent, addr))) {
++			tx_error = -EIO;
+ 			goto error_unmap;
++		}
+ 
+ 		list_move_tail(&e->list, &tx_list);
+ 		e->skb = i == nr_frags - 1 ? skb : NULL;
++		e->pon_status = status && e->skb ? *status : (struct airoha_pon_tx_status){};
+ 		e->pon = pon;
+ 		e->pon_channel = pon_msg ?
+ 			FIELD_GET(QDMA_ETH_TXMSG_CHAN_MASK, *pon_msg) : 0;
+@@ -2874,6 +2883,10 @@
+ 		q->txq_stopped = true;
+ 	}
+ 
++	/* Record accepted descriptors before the doorbell, under the queue
++	 * lock, so a fast completion cannot precede its submission record.
++	 */
++	airoha_pon_tx_report(pon, status, AIROHA_PON_TX_SUBMIT, 0);
+ 	if (pon_msg || netif_xmit_stopped(txq) || !netdev_xmit_more())
+ 		airoha_qdma_rmw(qdma, REG_TX_CPU_IDX(qid),
+ 				TX_RING_CPU_IDX_MASK,
+@@ -2897,6 +2910,7 @@
+ 
+ 	spin_unlock_irqrestore(&q->lock, flags);
+ error:
++	airoha_pon_tx_report(pon, status, AIROHA_PON_TX_DMA_ERROR, tx_error);
+ 	dev_kfree_skb_any(skb);
+ 	netdev->stats.tx_dropped++;
+ 	rcu_read_unlock();
+@@ -2906,13 +2920,14 @@
+ 
+ static netdev_tx_t airoha_dev_xmit(struct sk_buff *skb, struct net_device *netdev)
+ {
+-	return __airoha_dev_xmit(skb, netdev, NULL, NULL);
++	return __airoha_dev_xmit(skb, netdev, NULL, NULL, NULL);
+ }
+ 
+ netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *skb, struct net_device *netdev,
+-				u32 msg, struct airoha_pon *pon)
+-{
+-	return __airoha_dev_xmit(skb, netdev, &msg, pon);
++				u32 msg, struct airoha_pon *pon,
++				const struct airoha_pon_tx_status *status)
++{
++	return __airoha_dev_xmit(skb, netdev, &msg, pon, status);
+ }
+ 
+ static void airoha_ethtool_get_drvinfo(struct net_device *netdev,
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -12,6 +12,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/kernel.h>
+ #include <linux/netdevice.h>
++#include <linux/soc/airoha/airoha_pon.h>
+ #include <linux/reset.h>
+ #include <linux/soc/airoha/airoha_offload.h>
+ #include <net/dsa.h>
+@@ -193,6 +194,7 @@
+ 			struct sk_buff *skb;
+ 			struct airoha_pon *pon;
+ 			u8 pon_channel;
++			struct airoha_pon_tx_status pon_status;
+ 		};
+ 	};
+ 	dma_addr_t dma_addr;
+@@ -609,8 +611,12 @@
+ void airoha_pon_tx_wake(struct airoha_gdm_dev *dev);
+ void airoha_pon_tx_get(struct airoha_pon *pon, u8 channel);
+ void airoha_pon_tx_complete(struct airoha_pon *pon, u8 channel);
++void airoha_pon_tx_report(struct airoha_pon *pon,
++			  const struct airoha_pon_tx_status *status,
++			  enum airoha_pon_tx_stage stage, int result);
+ netdev_tx_t airoha_pon_dev_xmit(struct sk_buff *skb, struct net_device *netdev,
+-				u32 msg, struct airoha_pon *pon);
++				u32 msg, struct airoha_pon *pon,
++				const struct airoha_pon_tx_status *status);
+ 
+ #define AIROHA_RXD4_PPE_CPU_REASON	GENMASK(20, 16)
+ #define AIROHA_RXD4_FOE_ENTRY		GENMASK(15, 0)
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -1307,6 +1307,21 @@
+ }
+ EXPORT_SYMBOL_GPL(airoha_pon_prepare_tx);
+ 
++void airoha_pon_tx_report(struct airoha_pon *pon,
++			  const struct airoha_pon_tx_status *status,
++			  enum airoha_pon_tx_stage stage, int result)
++{
++	if (!pon || !status || !status->len)
++		return;
++	/* Descriptor references retain pon, not the consumer's callback data.
++	 * Detach clears netdev and waits for this RCU section before returning.
++	 */
++	rcu_read_lock();
++	if (rcu_dereference(pon->netdev) && pon->ops->tx_status)
++		pon->ops->tx_status(pon->priv, stage, result, status);
++	rcu_read_unlock();
++}
++
+ netdev_tx_t airoha_pon_xmit(struct airoha_pon *pon, struct sk_buff *skb,
+ 			    const struct airoha_pon_tx_meta *meta)
+ {
+@@ -1316,24 +1331,51 @@
+ 	unsigned long flags;
+ 	u16 old_queue;
+ 	u32 msg;
++	struct airoha_pon_tx_status status = {};
+ 
+ 	if (!skb)
+ 		return NETDEV_TX_OK;
++	if (meta && meta->omci && skb_headlen(skb) >= 8) {
++		const u8 *p = skb->data;
++
++		status.header = (u32)p[0] << 24 | (u32)p[1] << 16 | p[2] << 8 | p[3];
++		status.me = (u32)p[4] << 24 | (u32)p[5] << 16 | p[6] << 8 | p[7];
++		status.gem = meta->gem;
++		status.len = skb->len;
++		status.epoch = meta->epoch; /* Low 32 bits for bounded diagnostics. */
++	}
+ 	if (!pon || airoha_pon_tx_msg(meta, &msg) || !skb->len ||
+ 	    skb->len > AIROHA_MAX_RX_SIZE || !skb_headlen(skb) ||
+ 	    skb_has_frag_list(skb) || skb_is_gso(skb) ||
+ 	    skb->ip_summed == CHECKSUM_PARTIAL) {
++		airoha_pon_tx_report(pon, &status, AIROHA_PON_TX_ADMISSION_DROP, -EINVAL);
+ 		dev_kfree_skb_any(skb);
+ 		return NETDEV_TX_OK;
+ 	}
+ 	rcu_read_lock();
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	netdev = rcu_dereference(pon->netdev);
+-	if (!netdev || !netif_running(netdev) || pon->control_fault || pon->paused ||
+-	    !(pon->tx_enabled & BIT(meta->channel)) ||
++	if (!netdev || !netif_running(netdev) || pon->control_fault) {
++		airoha_pon_tx_report(pon, &status, AIROHA_PON_TX_ADMISSION_DROP,
++				     pon->control_fault ? -EIO : -ENODEV);
++		dev_kfree_skb_any(skb);
++		goto out;
++	}
++	if (pon->paused || !(pon->tx_enabled & BIT(meta->channel)) ||
+ 	    (pon->closed[meta->channel] & BIT(meta->queue)) ||
+ 	    meta->epoch != pon->epoch[meta->channel]) {
+-		dev_kfree_skb_any(skb);
++		int error = meta->epoch != pon->epoch[meta->channel] ? -ESTALE : -ESHUTDOWN;
++
++		/* A closure can race prepare_tx. Preserve OMCI for its owner's
++		 * bounded retry, which rechecks authentication and prepares again.
++		 * Data must still be discarded on an old namespace generation.
++		 */
++		airoha_pon_tx_report(pon, &status, meta->omci ? AIROHA_PON_TX_RETRY :
++				     AIROHA_PON_TX_ADMISSION_DROP, error);
++		if (meta->omci)
++			ret = NETDEV_TX_BUSY;
++		else
++			dev_kfree_skb_any(skb);
+ 		goto out;
+ 	}
+ 	txq = netdev_get_tx_queue(netdev, meta->cpu_queue);
+@@ -1349,7 +1391,7 @@
+ 	old_queue = skb_get_queue_mapping(skb);
+ 	skb->dev = netdev;
+ 	skb_set_queue_mapping(skb, meta->cpu_queue);
+-	ret = airoha_pon_dev_xmit(skb, netdev, msg, pon);
++	ret = airoha_pon_dev_xmit(skb, netdev, msg, pon, &status);
+ 	if (ret == NETDEV_TX_BUSY) {
+ 		skb->dev = old_dev;
+ 		skb_set_queue_mapping(skb, old_queue);
