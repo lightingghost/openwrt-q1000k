@@ -3,6 +3,9 @@ const fs = require('fs');
 const options = {};
 const section = {
     tab() {},
+    option(type, key) {
+        return this.taboption(null, type, key);
+    },
     taboption(tab, type, key) {
         const o = { value() {} };
         options[key] = o;

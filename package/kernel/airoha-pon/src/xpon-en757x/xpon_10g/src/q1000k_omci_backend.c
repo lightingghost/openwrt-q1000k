@@ -70,6 +70,8 @@ struct qomci_request {
 	u8 burst_mask;
 };
 struct qomci_backend {
+	struct omci_device_ops ops;
+	struct omci_identity identity;
 	struct xpon_device *xpon;
 	struct omci_device *omci;
 	struct crypto_lskcipher *cipher, *ecb_cipher;
@@ -1309,8 +1311,6 @@ int q1000k_omci_backend_init(struct net_device *dev)
 	q1000k_services_init();
 	b->xpon = xpon_device_register(get_xpon_dev(), &desc);
 	if (IS_ERR(b->xpon)) { ret = PTR_ERR(b->xpon); goto cipher; }
-	b->omci = omci_device_register(b->xpon, OMCI_CAP_PROVIDER_MIC, &qomci_ops, b);
-	if (IS_ERR(b->omci)) { ret = PTR_ERR(b->omci); goto xpon; }
 	identity.serial_source = identity.vendor_source = OMCI_CONFIG_SOURCE_DRIVER;
 	identity.valid = OMCI_IDENTITY_F_SERIAL_NUMBER | OMCI_IDENTITY_F_VENDOR_ID | OMCI_IDENTITY_F_EQUIPMENT_ID;
 	identity.equipment_source = OMCI_CONFIG_SOURCE_DRIVER;
@@ -1318,8 +1318,12 @@ int q1000k_omci_backend_init(struct net_device *dev)
 	memcpy(identity.serial_number, b->serial, 8);
 	memcpy(identity.vendor_id, b->serial, 4);
 	ret = q1000k_pon_get_omci_overrides(&identity);
-	if (ret) goto omci;
-	omci_device_set_identity_info(b->omci, &identity);
+	if (ret) goto xpon;
+	b->identity = identity;
+	b->ops = qomci_ops;
+	b->ops.initial_identity = &b->identity;
+	b->omci = omci_device_register(b->xpon, OMCI_CAP_PROVIDER_MIC, &b->ops, b);
+	if (IS_ERR(b->omci)) { ret = PTR_ERR(b->omci); goto xpon; }
 	ret = omci_device_start(b->omci);
 	if (ret)
 		goto omci;

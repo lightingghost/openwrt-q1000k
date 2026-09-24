@@ -10,12 +10,15 @@ static u32 get_unaligned_be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|
 static u32 registers[0x6000/4];
 static int phase, writes, reads, fail_write, fail_read, provider_error, polls, delays, complete_after;
 static bool switch_requested, owner=true;
+static u32 corrupt_control;
 static bool q1000k_protocol_owned(void) { return owner; }
 static int q1000k_pipeline_table_context(int wanted) { return wanted==phase ? 0 : -EPERM; }
 static int an7581_xpon_status(void) { return provider_error; }
 static void udelay(unsigned int delay) { assert(delay==1); delays++; }
 static void set_xpon_data(u32 reg,u32 value) {
     assert((phase==2 || phase==4 || (phase==3 && reg==0x5044)) && reg<0x6000 && !(reg&3));
+    /* Never revoke an active transmit key during a live rotation. */
+    if(phase==4 && reg==0x5200 && (registers[reg/4]&BIT(31))) assert(value&BIT(31));
     if(++writes==fail_write) { provider_error=-EIO; return; }
     if(reg>=0x5210 && reg<=0x522c) {
         unsigned int bank=(reg-0x5210)/16;
@@ -30,6 +33,7 @@ static u32 get_xpon_data(u32 reg) {
     assert(reg<0x6000 && !(reg&3));
     if(++reads==fail_read) { provider_error=-EIO; return ~0U; }
     if(phase>=3 && reg==0x5044 && switch_requested && ++polls==complete_after) registers[reg/4]|=BIT(7);
+    if(corrupt_control==reg && polls>=3) return registers[reg/4]^1;
     return registers[reg/4];
 }
 #define module_param(...) /* module parameter */
@@ -43,7 +47,7 @@ static void reset(void) {
     registers[0x5204/4]=0xa5a5fff3;
     registers[0x5044/4]=BIT(7)|BIT(0)|BIT(12);
     phase=2; writes=reads=fail_write=fail_read=provider_error=polls=delays=0;
-    switch_requested=false; complete_after=3; owner=true;
+    switch_requested=false; complete_after=3; owner=true; corrupt_control=0;
 }
 static void live_start(const struct q1000k_mac_data_keys *old) {
     reset(); phase=4;
@@ -105,8 +109,8 @@ int main(void)
     assert(q1000k_mac_data_keys_ready(true)==-EIO && !writes);
     reset(); phase=3; fail_read=1;
     assert(q1000k_mac_data_keys_ready(true)==-EIO && !writes);
-    /* A live Generate may touch only an inactive bank. Confirm switches
-     * atomically at the hardware completion, then retires the old RX key. */
+    /* A live Generate may touch only an inactive bank. Confirm verifies
+     * the new selector/material before retiring the old RX key. */
     struct q1000k_mac_data_keys old={.rx_valid=1,.tx_index=1}, next;
     memset(old.key[0],0x12,16); next=old;
     next.rx_valid=3; memset(next.key[1],0x34,16);
@@ -150,13 +154,40 @@ int main(void)
         assert(q1000k_mac_data_keys_live(&old,&next)==-EIO && reads==f);
     }
     live_start(&old); complete_after=0;
-    assert(q1000k_mac_data_keys_live(&old,&next)==-ETIMEDOUT && polls==3000);
-    assert((registers[0x5204/4]&3)==3); /* Do not retire old key without switch ACK. */
-    /* Missing switch IRQ may be accepted only for the first enable, after
-     * all control/material readbacks agree. Later switches still time out. */
+    assert(!q1000k_mac_data_keys_live(&old,&next) && polls==3000);
+    assert((registers[0x5204/4]&3)==2);
+    /* No encrypted upstream XGEM means no switch interrupt, even for a
+     * successful live rotation. Real read failures and corruption remain
+     * fatal, with both RX banks kept valid until verification succeeds. */
+    operations=writes; read_operations=reads;
+    for(int f=1;f<=operations;f++) {
+        live_start(&old); complete_after=0; fail_write=f;
+        assert(q1000k_mac_data_keys_live(&old,&next)==-EIO && writes==f);
+    }
+    for(int f=1;f<=read_operations;f++) {
+        live_start(&old); complete_after=0; fail_read=f;
+        assert(q1000k_mac_data_keys_live(&old,&next)==-EIO && reads==f);
+    }
+    for(int irq=0;irq<2;irq++) {
+        for(int bankword=0;bankword<4;bankword++) {
+            live_start(&old); complete_after=irq ? 3 : 0;
+            registers[0x5220/4+bankword]^=1;
+            assert(q1000k_mac_data_keys_live(&old,&next)==-EKEYREJECTED);
+            assert((registers[0x5204/4]&3)==3);
+        }
+        for(u32 reg=0x5200;reg<=0x5204;reg+=4) {
+            live_start(&old); complete_after=irq ? 3 : 0; corrupt_control=reg;
+            assert(q1000k_mac_data_keys_live(&old,&next)==-EUCLEAN);
+            assert((registers[0x5204/4]&3)==3);
+        }
+    }
+    memset(old.key[1],0xff,16); memcpy(next.key[1],old.key[1],16);
+    live_start(&old); complete_after=0;
+    assert(!q1000k_mac_data_keys_live(&old,&next)); /* Legitimate all-ones key. */
+    /* First enable retains its separate bench gate. */
     bench_initial_key_readback=true;
     live_start(&old); complete_after=0;
-    assert(q1000k_mac_data_keys_live(&old,&next)==-ETIMEDOUT);
+    assert(!q1000k_mac_data_keys_live(&old,&next));
     memset(&old,0,sizeof(old)); old.rx_valid=1; memset(old.key[0],0x39,16);
     next=old; next.tx_index=1;
     live_start(&old); complete_after=0;

@@ -59,6 +59,9 @@ struct omci_agent_config {
 	u8 equipment_id[20];
 	u8 password[10];
 	u8 logical_onu_id[24], logical_password[12];
+	u8 pon_slot;
+	bool iphost_enabled;
+	u8 iphost_mac[6], iphost_hostname[25], iphost_domain[25];
 	u8 logical_onu_id_source, logical_password_source;
 	u8 sync_circuit_pack, active_bank, committed_bank;
 	u8 sync_circuit_pack_source, active_bank_source, committed_bank_source;

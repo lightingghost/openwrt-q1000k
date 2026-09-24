@@ -1,3 +1,4 @@
+#define READ_ONCE(x) (x)
 // SPDX-License-Identifier: GPL-2.0-only
 #include <assert.h>
 #include <errno.h>
@@ -20,7 +21,7 @@ static unsigned int target;
 static bool unstable,never_done,never_idle,never_empty;
 struct airoha_qdma { u32 closed[8],status[8]; };
 struct airoha_eth { struct airoha_qdma qdma[2]; u32 tx,rx,forward,command,busy,loop; };
-struct airoha_gdm_dev { struct airoha_eth *eth; };
+struct airoha_gdm_dev { bool pon_flow_fault; struct airoha_eth *eth; };
 struct airoha_pon {
     void *netdev;
     struct airoha_gdm_dev *dma_dev;
@@ -90,6 +91,8 @@ static void usleep_range(unsigned int low,unsigned int high)
         eth.qdma[1].status[target/4]|=0xffU<<((target&3)*8);
     }
 }
+/* Full PPE retirement/fault containment is exercised by test_pon_transport. */
+static void airoha_pon_fault_locked(struct airoha_pon *p) { p->control_fault=true; }
 /* PRODUCTION */
 static void reset(unsigned int channel)
 {

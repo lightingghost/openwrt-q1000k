@@ -8,6 +8,7 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
 typedef uint16_t __be16;
 typedef uint16_t __sum16;
 typedef uintptr_t dma_addr_t;
@@ -197,6 +198,7 @@ int main(void) {
     for(int frags=0;frags<=3;frags++) for(int failure=0;failure<=frags+1;failure++) {
         msg=(msg & ~(31u<<3)) | (channel<<3);
         msg=(msg & ~(1u<<8)) | (management<<8);
+        gdm.nbq=31-channel; /* PON must use its channel, not the Ethernet default. */
         setup(&qdma,&eth,&dev,&skb,frags); memset(reports,0,sizeof(reports)); map_fail=failure; batching=true;
         assert(__airoha_dev_xmit(&skb,&dev,&msg,&consumer,&tx_status)==NETDEV_TX_OK && !rcu_readers && !q->lock && !dsa_calls);
         assert(orphans==1);
@@ -214,7 +216,11 @@ int main(void) {
             assert(free_entries(q)==8-frags-1 && dev.txq[31].sent==(int)skb.len);
             for(int i=0;i<=frags;i++) {
                 assert(q->entry[i].pon_channel==channel);
-                assert(q->desc[i].msg0==msg && q->desc[i].msg1==(0x7f2007ffu | ((u32)management<<31)));
+                /* The factory PON descriptor selects the output queue for
+                 * this T-CONT, independently of CPU ring 31.
+                 */
+                assert(q->desc[i].msg0==msg && q->desc[i].msg1==
+                       (0x7f2007ffu | ((u32)channel<<15) | ((u32)management<<31)));
                 assert(q->desc[i].msg2==0xffff && q->entry[i].skb==(i==frags?&skb:NULL));
                 assert(!!(q->desc[i].ctrl&(1u<<29))==(i<frags));
             }
@@ -238,10 +244,15 @@ int main(void) {
         assert(__airoha_dev_xmit(&skb,&dev,mode==1?NULL:&msg,&consumer,&tx_status)==NETDEV_TX_OK);
         assert(freed==1 && !maps && !orphans);
     }
-    setup(&qdma,&eth,&dev,&skb,0); gdm.pon_port=false; batching=false;
-    assert(!__airoha_dev_xmit(&skb,&dev,NULL,NULL,NULL));
-    assert(dsa_calls==1 && !orphans && q->desc[0].msg0==0x048d001f && doorbells==1);
-    airoha_qdma_cleanup_tx_queue(q); assert(freed==1 && maps==unmaps);
+    for(int output_queue=0;output_queue<32;output_queue++) {
+        setup(&qdma,&eth,&dev,&skb,0); gdm.pon_port=false; batching=false;
+        gdm.nbq=output_queue;
+        assert(!__airoha_dev_xmit(&skb,&dev,NULL,NULL,NULL));
+        assert(dsa_calls==1 && !orphans && q->desc[0].msg0==0x048d001f && doorbells==1);
+        assert(q->desc[0].msg1==(0x7f200000u | ((u32)output_queue<<15)));
+        airoha_qdma_cleanup_tx_queue(q); assert(freed==1 && maps==unmaps);
+    }
+    gdm.nbq=0;
     /* Mixed Ethernet/PON descriptors may complete out of order. A duplicate
      * completion must not unmap or release either owner twice.
      */

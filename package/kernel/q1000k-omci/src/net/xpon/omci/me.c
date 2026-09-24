@@ -359,6 +359,14 @@ static const struct omci_attr_desc omci_olt_g_attrs[] = {
 	OMCI_ATTR(12, 38, 14, OMCI_RW),
 };
 
+/* Identity-only ME 134. Do not acknowledge IP/DHCP configuration without
+ * a routed management backend. Compact storage offsets are internal. */
+static const struct omci_attr_desc omci_iphost_identity_attrs[] = {
+	OMCI_ATTR(14, 0, 6, OMCI_R),
+	OMCI_ATTR(2, 6, 25, OMCI_R),
+	OMCI_ATTR(1, 31, 25, OMCI_R),
+};
+
 /* The factory comparison implements the two validated configuration writes.
  * It does not advertise authenticator states or claim an EAP exchange.
  */
@@ -652,6 +660,11 @@ static const struct omci_attr_desc omci_attribute_attrs[] = {
 	  .attrs = (_attrs), .num_attrs = ARRAY_SIZE(_attrs) }
 
 static const struct omci_me_desc omci_me_descs[] = {
+	STANDARD_DESC(OMCI_CLASS_IP_HOST_CONFIG, "IP host config data",
+		      OMCI_ME_ACTION_GET, OMCI_ME_F_ONU_CREATED,
+		      OMCI_IPHOST_IDENTITY_MASK, OMCI_IPHOST_IDENTITY_MASK, 56,
+		      OMCI_CLASS_CATEGORY_MANAGEMENT, OMCI_CLASS_SUPPORT_NATIVE,
+		      omci_iphost_identity_attrs),
 	STANDARD_DESC(OMCI_CLASS_SOFTWARE_IMAGE, "Software image",
 		      OMCI_ME_ACTION_GET, OMCI_ME_F_ONU_CREATED,
 		      GENMASK(15, 12), GENMASK(15, 12), 17,

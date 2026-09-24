@@ -10,6 +10,11 @@ locked=0
 stage=preflight
 result=1
 controller=
+continuous=0
+lower_owned=0
+wan_owned=0
+provision_stable=0
+wan_ready=0
 modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
 
 report() {
@@ -22,7 +27,21 @@ report() {
 fail() {
 	echo "Q1000K XGS-PON: $1" >&2
 	result=1
+	[ "$stage" != fault ] || save_fault
 	exit 1
+}
+
+save_fault() {
+	# Protocol containment has already stopped admission. Preserve the cached
+	# trace before cleanup unloads the module that owns it. No reset or retry.
+	local destination="$run_dir/fault-$$" name
+	[ "$locked" = 1 ] || return 0
+	mkdir "$destination" || return 0
+	printf '{"schema_version":1,"stage":"%s","error":%d}\n' "$stage" "$result" > "$destination/cause.json"
+	for name in q1000k-pon-events q1000k-pon-last-snapshot q1000k-pon-mac xgpon/status uptime sys/kernel/random/boot_id; do
+		[ ! -r "/proc/$name" ] || timeout 2 cat "/proc/$name" > "$destination/${name##*/}" 2>/dev/null || :
+	done
+	[ ! -r "$controller/status" ] || timeout 2 cat "$controller/status" > "$destination/controller.json" 2>/dev/null || :
 }
 
 cleanup() {
@@ -30,6 +49,10 @@ cleanup() {
 	trap - EXIT
 	trap '' HUP INT TERM
 	[ "$locked" = 1 ] || return
+	if [ "$wan_owned" = 1 ]; then
+		ifdown q1000k_wan6 || failed=1
+		ifdown q1000k_wan || failed=1
+	fi
 	for module in $owned_modules; do
 		if [ "$module" = q1000k_pon_control ] && [ -n "$controller" ]; then
 			if ! printf 'off\n' > "$controller/operation"; then
@@ -43,6 +66,10 @@ cleanup() {
 			break
 		fi
 	done
+	# Never remove the DMA endpoint from a module that failed to unload.
+	if [ "$failed" = 0 ] && [ "$lower_owned" = 1 ]; then
+		ip link set dev "$lower" down || failed=1
+	fi
 	if [ "$failed" = 1 ]; then
 		stage=cleanup_failed
 		result=1
@@ -50,20 +77,22 @@ cleanup() {
 		stage=stopped
 	fi
 	report
+	rm -f "$run_dir/monitor"
 	rmdir "$run_dir/lock" || result=1
 	exit "$result"
 }
 
 load_module() {
-	local module="$1"
+	local module="$1" filename="$1"
 	shift
+	[ "$module" != q1000k_pon_control ] || filename=q1000k-pon-control
 	stage="loading_$module"
 	report || fail 'Cannot record startup state.'
 	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
 	# Do not expose a registration ID through a module loader's error output.
 	# OpenWrt modprobe ignores parameters; dependencies are already loaded.
 	if [ "$#" -gt 0 ]; then
-		insmod "$module" "$@" >/dev/null 2>&1 || fail "Loading $module failed."
+		insmod "$filename" "$@" >/dev/null 2>&1 || fail "Loading $module failed."
 	else
 		modprobe "$module" >/dev/null 2>&1 || fail "Loading $module failed."
 	fi
@@ -114,11 +143,105 @@ health() {
 	[ "$schema" = 1 ] && [ "$error" != -117 ]
 }
 
-[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] || fail 'Service is disabled.'
+network_tick() {
+	# health leaves the current OMCI object loaded. A dark fiber is a normal
+	# waiting state, not a reason to unload, exhaust retries or reset the PHY.
+	local key value ready=1
+	for key in state authenticated agent_operational service_rules mib_objects service_error; do
+		json_type "$key" int || { ready=0; break; }
+		json_get_var value "$key"
+		case "$key" in
+			state) [ "$value" = 5 ] || ready=0 ;;
+			authenticated|agent_operational) [ "$value" = 1 ] || ready=0 ;;
+			service_rules|mib_objects) [ "$value" -gt 0 ] || ready=0 ;;
+			service_error) [ "$value" = 0 ] || ready=0 ;;
+		esac
+	done
+	if [ "$ready" = 0 ]; then
+		provision_stable=0
+		wan_ready=0
+		stage=waiting_registration
+	else
+		[ "$provision_stable" -ge 3 ] || provision_stable=$((provision_stable + 1))
+		stage=waiting_provisioning
+		if [ "$provision_stable" -ge 3 ]; then
+			stage=running
+			if [ "$wan_ready" = 0 ]; then
+				# Direct netifd up preserves a running interface. The ifup
+				# wrapper would force down/up and discard DHCP state.
+				wan_owned=1
+				if ubus call network.interface.q1000k_wan up >/dev/null 2>&1 &&
+					ubus call network.interface.q1000k_wan6 up >/dev/null 2>&1; then
+					ubus call network.interface.q1000k_wan renew >/dev/null 2>&1 || :
+					ubus call network.interface.q1000k_wan6 renew >/dev/null 2>&1 || :
+					wan_ready=1
+				else
+					stage=waiting_network
+				fi
+			fi
+		fi
+	fi
+	report || fail 'Cannot record network startup state.'
+}
+
 [ "$(cat /tmp/sysinfo/board_name)" = quantum,q1000k-ubi ] || fail 'Unsupported board.'
+
+if [ "$1" = --monitor ]; then
+	[ "$(uci -q get q1000k-xgspon.service.monitor)" != 0 ] || exit 0
+	[ ! -d /var/run/q1000k-pon-bench.lock ] || fail 'A bench session owns the optics.'
+	for module in $modules; do
+		[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
+	done
+	mkdir -p "$run_dir" && mkdir "$run_dir/lock" || fail 'Another service instance owns the lifecycle.'
+	locked=1
+	trap cleanup EXIT
+	trap 'result=0; exit 0' HUP INT TERM
+	: > "$run_dir/monitor" || fail 'Cannot record monitor ownership.'
+	# No TX permission or MAC/PHY modules: the controller keeps TX disabled.
+	load_module q1000k_pon_control
+	controller=$(find_controller) || fail 'Matching controller DT resources are unavailable.'
+	printf 'detect\n' > "$controller/operation" || fail 'Controller detection failed.'
+	initialized=0
+	while :; do
+		if [ "$initialized" = 0 ]; then
+			read_identity
+			read_firmware
+			read_calibration
+			if [ "$pm_ready" != 1 ] || [ "$dm_ready" != 1 ]; then
+				stage=waiting_firmware
+			elif [ "$calibration_available" != 1 ]; then
+				stage=waiting_calibration
+			else
+				stage=initializing
+				report || fail 'Cannot record controller state.'
+				/usr/sbin/q1000k-xgspon initialize >/dev/null 2>&1 || fail 'Controller initialization failed.'
+				controller_ready initializing || fail 'Controller verification failed.'
+				initialized=1
+				stage=monitoring
+			fi
+		else
+			controller_ready initializing || fail 'Monitoring controller health check failed.'
+		fi
+		result=0
+		report || fail 'Cannot record monitoring state.'
+		sleep 5 || fail 'Monitoring interrupted.'
+	done
+fi
+
+[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] || fail 'Service is disabled.'
+[ ! -d /var/run/q1000k-pon-bench.lock ] || fail 'A bench session owns the optics.'
+if [ "$(uci -q get q1000k-xgspon.service.continuous_bench)" = 1 ]; then
+	# Explicit private image opt-in; neither a generic RAM bench nor the
+	# diagnostics checkbox grants transmitter permission on signal detection.
+	[ -f /etc/q1000k-private-autostart ] &&
+		[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] ||
+		fail 'Continuous activation requires the private activation RAM profile.'
+	continuous=1
+fi
 read_identity
 read_firmware
-[ "$identity_valid" = 1 ] && [ "$factory_available" = 1 ] &&
+read_calibration
+[ "$identity_valid" = 1 ] && [ "$calibration_available" = 1 ] &&
 	[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Validated identity, factory calibration and OEM firmware are required.'
 registration=
 identity_options || fail 'PON identity configuration is invalid.'
@@ -127,8 +250,16 @@ lower=$(uci -q get q1000k-xgspon.service.lower)
 [ -n "$lower" ] && [ "${#lower}" -le 15 ] && printf '%s\n' "$lower" | grep -Eq '^[A-Za-z0-9_.-]+$' ||
 	fail 'An explicit native PON lower device is required.'
 read -r flags < "/sys/class/net/$lower/flags" || fail 'PON lower device is unavailable.'
-printf '%s\n' "$flags" | grep -Eq '^0x[0-9A-Fa-f]{1,8}$' && [ "$((flags & 1))" = 1 ] ||
-	fail 'The native PON lower device must already be up.'
+printf '%s\n' "$flags" | grep -Eq '^0x[0-9A-Fa-f]{1,8}$' || fail 'Invalid lower-device flags.'
+if [ "$continuous" = 1 ]; then
+	[ "$lower" = ponraw ] || fail 'The private RAM profile requires the native ponraw device.'
+	for interface in q1000k_wan q1000k_wan6; do
+		[ "$(uci -q get network.$interface.q1000k_profile)" = 1 ] &&
+			[ "$(uci -q get network.$interface.device)" = pon ] || fail 'Owned WAN configuration is required.'
+	done
+else
+	[ "$((flags & 1))" = 1 ] || fail 'The native PON lower device must already be up.'
+fi
 for module in $modules; do
 	[ ! -d "/sys/module/$module" ] || fail "Module $module is already loaded; refusing to adopt it."
 done
@@ -137,29 +268,54 @@ locked=1
 trap cleanup EXIT
 trap 'result=0; exit 0' HUP INT TERM
 
-load_module q1000k_pon_control
+if [ "$continuous" = 1 ]; then
+	load_module q1000k_pon_control validation_tx=1
+else
+	load_module q1000k_pon_control
+fi
 controller=$(find_controller) || fail 'Matching controller DT resources are unavailable.'
+printf 'detect\n' > "$controller/operation" || fail 'Controller detection failed.'
 stage=initializing
 report || fail 'Cannot record controller state.'
 /usr/sbin/q1000k-xgspon initialize >/dev/null 2>&1 || fail 'Controller initialization failed.'
 controller_ready initializing || fail 'Controller verification failed.'
-for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci; do
+if [ "$continuous" = 1 ] && [ "$((flags & 1))" = 0 ]; then
+	ip link set dev "$lower" up || fail 'Cannot open the native PON DMA endpoint.'
+	lower_owned=1
+fi
+for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon; do
 	load_module "$module"
 done
+if [ "$continuous" = 1 ]; then
+	load_module omci bench_dot1x_oem=1
+else
+	load_module omci
+fi
 set -- "wan_mac=$wan_mac" "pon_serial=$serial" "pon_reg_id=$registration" "pon_lower=$lower"
+if [ "$continuous" = 1 ]; then
+	# The last Internet-tested bench recipe, now under a persistent owner.
+	# rx_bench=0 selects the driver's normal indefinite LOS/sync supervision.
+	set -- "$@" bench_vlan_untagged=1 bench_live_add=31 bench_initial_key_readback=1 \
+		bench_omci_min_len=60 bench_alloc_revoke=0 bench_profile_coalesce=1 \
+		bench_profile_live=1 bench_control_coalesce=1 bench_ranging_mode=1 \
+		bench_key_inline=1 bench_activation_diag=1 bench_sn_limit=40 rx_bench=0
+fi
 # identity_params contains fixed names and validated hex/scalars only.
 set -- "$@" $identity_params
 load_module xpon_10g "$@"
 registration=
 health || fail 'MAC/OMCI startup verification failed.'
 stage=running
+[ "$continuous" = 0 ] || stage=waiting_registration
 result=0
 report || fail 'Cannot record service state.'
+[ "$continuous" = 0 ] || network_tick
 while sleep 5; do
 	if ! health; then
 		stage=fault
 		fail 'Controller or MAC/OMCI health check failed.'
 	fi
+	[ "$continuous" = 0 ] || network_tick
 done
 stage=fault
 fail 'Supervision interrupted.'

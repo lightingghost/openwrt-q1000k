@@ -3,13 +3,161 @@
 #include <linux/bitfield.h>
 #include <q1000k_trace.h>
 #include <linux/if_vlan.h>
+#include <linux/etherdevice.h>
 #include <linux/jiffies.h>
 #include <linux/mutex.h>
+#include <linux/moduleparam.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <net/net_namespace.h>
 #include "common/q1000k_transport.h"
+#include "common/q1000k_services.h"
+#include "common/q1000k_dhcp6_diag.h"
+
+static bool dhcp6_diag;
+module_param(dhcp6_diag, bool, 0600);
+MODULE_PARM_DESC(dhcp6_diag, "Enable bounded DHCPv6 header-only bench counters (default off)");
+static DEFINE_SPINLOCK(q6d_lock);
+static struct {
+	u64 count, errors, busy;
+	struct q6d_sample last;
+	int result;
+} q6d_stats[Q6D_STAGES];
+
+bool q1000k_dhcp6_sample(const struct sk_buff *skb, struct q6d_sample *sample)
+{
+	u8 header[Q6D_HEADER_BYTES];
+	unsigned int length;
+
+	if (!READ_ONCE(dhcp6_diag) || !skb)
+		return false;
+	length = min_t(unsigned int, skb->len, sizeof(header));
+	if (skb_copy_bits(skb, 0, header, length))
+		return false;
+	return q6d_parse(header, length, skb->len, sample);
+}
+
+void q1000k_dhcp6_record(enum q6d_stage stage,
+		const struct q6d_sample *sample, int result)
+{
+	unsigned long flags;
+
+	if (!READ_ONCE(dhcp6_diag) || stage >= Q6D_STAGES)
+		return;
+	spin_lock_irqsave(&q6d_lock, flags);
+	q6d_stats[stage].count++;
+	q6d_stats[stage].errors += result < 0;
+	q6d_stats[stage].busy += stage == Q6D_TX_NATIVE && result == NETDEV_TX_BUSY;
+	q6d_stats[stage].last = *sample;
+	q6d_stats[stage].result = result;
+	spin_unlock_irqrestore(&q6d_lock, flags);
+}
+
+static int q6d_get_stats(char *buffer, const struct kernel_param *param)
+{
+	static const char *const names[] = {
+		"tx_select", "tx_service", "tx_native_return",
+		"rx_pre_consumer", "rx_select", "rx_consumer_return"
+	};
+	unsigned long flags;
+	unsigned int i;
+	int n = 0;
+
+	spin_lock_irqsave(&q6d_lock, flags);
+	n += scnprintf(buffer + n, PAGE_SIZE - n, "version=1 enabled=%u\n",
+		READ_ONCE(dhcp6_diag));
+	for (i = 0; i < Q6D_STAGES; i++) {
+		const struct q6d_sample *s = &q6d_stats[i].last;
+		n += scnprintf(buffer + n, PAGE_SIZE - n,
+			"%s count=%llu errors=%llu busy=%llu result=%d tx=%u type=%u gem=%u tags=%u tci=%u,%u length=%u\n",
+			names[i], q6d_stats[i].count, q6d_stats[i].errors,
+			q6d_stats[i].busy, q6d_stats[i].result, s->tx, s->type,
+			s->gem, s->tags, s->vlan[0], s->vlan[1], s->length);
+	}
+	spin_unlock_irqrestore(&q6d_lock, flags);
+	return n;
+}
+
+static const struct kernel_param_ops q6d_stats_ops = { .get = q6d_get_stats };
+module_param_cb(dhcp6_diag_stats, &q6d_stats_ops, NULL, 0400);
+MODULE_PARM_DESC(dhcp6_diag_stats, "DHCPv6 bench counters; native return is not optical delivery");
+
+static bool pon_rx_diag;
+module_param(pon_rx_diag, bool, 0600);
+MODULE_PARM_DESC(pon_rx_diag, "Enable IP receive header-only bench counters (default off)");
+static struct {
+	u64 count, ipv6, reason15, reason30, ifc_hits;
+	struct q6d_l2 l2;
+	u16 gem, hash, ifc_row;
+	u32 word2;
+	u8 reason;
+	bool pon_present, dmac_matches;
+} q4d_stats;
+
+static void q4d_receive(const struct sk_buff *skb,
+		const struct airoha_pon_rx_meta *meta)
+{
+	struct q6d_l2 l2;
+	struct net_device *pon;
+	u8 header[22], reason;
+	bool present, matches;
+	unsigned long flags;
+	unsigned int length;
+
+	if (!READ_ONCE(pon_rx_diag) || meta->omci)
+		return;
+	length = min_t(unsigned int, skb->len, sizeof(header));
+	if (skb_copy_bits(skb, 0, header, length) ||
+	    !q6d_parse_l2(header, length, &l2) ||
+	    (l2.proto != ETH_P_IP && l2.proto != ETH_P_IPV6))
+		return;
+	rcu_read_lock();
+	pon = dev_get_by_name_rcu(&init_net, "pon");
+	present = !!pon;
+	matches = pon && ether_addr_equal(header, pon->dev_addr);
+	rcu_read_unlock();
+	/* AN7581 QDMA RX word 1: reason bits 20:16, FOE hash bits 15:0. */
+	reason = (meta->words[1] >> 16) & 31;
+	spin_lock_irqsave(&q6d_lock, flags);
+	q4d_stats.count += l2.proto == ETH_P_IP;
+	q4d_stats.ipv6 += l2.proto == ETH_P_IPV6;
+	q4d_stats.reason15 += reason == 15;
+	q4d_stats.reason30 += reason == 30;
+	/* AN7581 qdma_dev_7581.h: hit bit 7, nine-bit rule ID 16:8. */
+	q4d_stats.ifc_hits += !!(meta->words[2] & BIT(7));
+	q4d_stats.ifc_row = (meta->words[2] >> 8) & 0x1ff;
+	q4d_stats.word2 = meta->words[2];
+	q4d_stats.l2 = l2;
+	q4d_stats.gem = meta->gem;
+	q4d_stats.hash = meta->words[1] & 0xffff;
+	q4d_stats.reason = reason;
+	q4d_stats.pon_present = present;
+	q4d_stats.dmac_matches = matches;
+	spin_unlock_irqrestore(&q6d_lock, flags);
+}
+
+static int q4d_get_stats(char *buffer, const struct kernel_param *param)
+{
+	unsigned long flags;
+	int n;
+
+	spin_lock_irqsave(&q6d_lock, flags);
+	n = scnprintf(buffer, PAGE_SIZE,
+		"version=2 enabled=%u ipv4=%llu reason15=%llu reason30=%llu gem=%u outer=%u inner=%u tags=%u tci=%u,%u reason=%u hash=%u pon_present=%u dmac_matches=%u ipv6=%llu ifc_hits=%llu ifc_row=%u word2=%#010x\n",
+		READ_ONCE(pon_rx_diag), q4d_stats.count, q4d_stats.reason15,
+		q4d_stats.reason30, q4d_stats.gem, q4d_stats.l2.outer,
+		q4d_stats.l2.proto, q4d_stats.l2.tags, q4d_stats.l2.vlan[0],
+		q4d_stats.l2.vlan[1], q4d_stats.reason, q4d_stats.hash,
+		q4d_stats.pon_present, q4d_stats.dmac_matches, q4d_stats.ipv6,
+		q4d_stats.ifc_hits, q4d_stats.ifc_row, q4d_stats.word2);
+	spin_unlock_irqrestore(&q6d_lock, flags);
+	return n;
+}
+
+static const struct kernel_param_ops q4d_stats_ops = { .get = q4d_get_stats };
+module_param_cb(pon_rx_diag_stats, &q4d_stats_ops, NULL, 0400);
+MODULE_PARM_DESC(pon_rx_diag_stats, "IP counters and latest GEM/VLAN/PPE/IFC sample; no addresses");
 
 #define Q1000K_TX_LIMIT		128
 #define Q1000K_TX_BUDGET		32
@@ -24,6 +172,8 @@ struct q1000k_tx_packet {
 	u64 auth_epoch;
 	unsigned long expires;
 	bool deferred;
+	bool dhcp6;
+	struct q6d_sample dhcp6_sample;
 };
 
 struct q1000k_transport {
@@ -98,7 +248,10 @@ static void q1000k_tx_work(struct work_struct *work)
 			return;
 		}
 		if (transport->active && !budget) {
-			mod_delayed_work(system_unbound_wq, &transport->work, 1);
+			/* Yield the worker after a bounded batch without imposing a
+			 * timer tick on a queue which can still make progress.
+			 */
+			queue_delayed_work(system_unbound_wq, &transport->work, 0);
 			spin_unlock_bh(&transport->lock);
 			return;
 		}
@@ -157,20 +310,28 @@ static void q1000k_tx_work(struct work_struct *work)
 			}
 			mutex_unlock(&transport->auth_lock);
 		} else if (!active || time_after_eq(jiffies, packet->expires)) {
+			if (packet->dhcp6)
+				q1000k_dhcp6_record(Q6D_TX_NATIVE,
+					&packet->dhcp6_sample, -ETIME);
 			dev_kfree_skb_any(packet->skb);
 		} else {
 			ret = airoha_pon_xmit(transport->pon, packet->skb,
 					      &packet->meta);
+			/* The native call may consume skb, so use saved numeric fields. */
+			if (packet->dhcp6)
+				q1000k_dhcp6_record(Q6D_TX_NATIVE,
+					&packet->dhcp6_sample, ret);
 		}
 
 		spin_lock_bh(&transport->lock);
 		if (ret == NETDEV_TX_BUSY && transport->active &&
 		    (!packet->meta.omci || packet->auth_epoch == transport->auth_epoch)) {
 			list_add(&packet->list, &transport->packets);
-			/* A completion can race the failed submission. Always arm a
-			 * bounded fallback; tx_wake can expedite it but isn't required.
+			/* A completion can race the failed submission and already
+			 * queue an immediate retry. Preserve that pending wake;
+			 * only arm the fallback when no retry is queued yet.
 			 */
-			mod_delayed_work(system_unbound_wq, &transport->work, 1);
+			queue_delayed_work(system_unbound_wq, &transport->work, 1);
 			spin_unlock_bh(&transport->lock);
 			return;
 		}
@@ -188,6 +349,9 @@ static void q1000k_native_rx(void *priv, struct sk_buff *skb,
 			      const struct airoha_pon_rx_meta *meta)
 {
 	struct q1000k_transport *transport = priv;
+	struct q6d_sample sample;
+	bool dhcp6;
+	int ret;
 	u32 words[4];
 
 	if (!READ_ONCE(transport->active)) {
@@ -198,7 +362,15 @@ static void q1000k_native_rx(void *priv, struct sk_buff *skb,
 	 * or retain its pointer beyond this call.
 	 */
 	memcpy(words, meta->words, sizeof(words));
-	transport->receive(words, sizeof(words), skb, skb->len);
+	q4d_receive(skb, meta);
+	dhcp6 = !meta->omci && q1000k_dhcp6_sample(skb, &sample) && !sample.tx;
+	if (dhcp6) {
+		sample.gem = meta->gem;
+		q1000k_dhcp6_record(Q6D_RX_PRE, &sample, 0);
+	}
+	ret = transport->receive(words, sizeof(words), skb, skb->len);
+	if (dhcp6)
+		q1000k_dhcp6_record(Q6D_RX_CONSUMER, &sample, ret);
 }
 
 static void q1000k_native_wake(void *priv)
@@ -233,7 +405,44 @@ static void q1000k_native_tx_status(void *priv, enum airoha_pon_tx_stage stage,
 		     (u32)status->gem << 16 | status->len, status->epoch);
 }
 
+static int q1000k_native_flow(void *priv, const struct net_device *upper,
+			      u16 ethertype, struct airoha_pon_flow *flow)
+{
+	struct q1000k_transport *transport = priv;
+
+	if (!q1000k_pwan_data_dev(upper))
+		return -ENOENT;
+	if (!READ_ONCE(transport->active))
+		return -ENOLINK;
+	return q1000k_services_flow(ethertype, flow);
+}
+
+static int q1000k_native_rx_flow(void *priv, const struct net_device *upper,
+				 u16 ethertype, struct airoha_pon_flow *flow)
+{
+	struct q1000k_transport *transport = priv;
+
+	if (!q1000k_pwan_data_dev(upper))
+		return -ENOENT;
+	if (!READ_ONCE(transport->active))
+		return -ENOLINK;
+	return q1000k_services_rx_flow(ethertype, flow);
+}
+
+void q1000k_transport_invalidate_flows(void)
+{
+	struct q1000k_transport *transport;
+
+	rcu_read_lock();
+	transport = rcu_dereference(q1000k_current);
+	if (transport)
+		airoha_pon_invalidate_flows(transport->pon);
+	rcu_read_unlock();
+}
+
 static const struct airoha_pon_ops q1000k_native_ops = {
+	.flow = q1000k_native_flow,
+	.rx_flow = q1000k_native_rx_flow,
 	.rx = q1000k_native_rx,
 	.tx_wake = q1000k_native_wake,
 	.tx_status = q1000k_native_tx_status,
@@ -596,6 +805,11 @@ static int q1000k_transport_queue(struct sk_buff *skb, u32 word0, u32 word1,
 	packet->auth_epoch = auth_epoch;
 	packet->expires = jiffies + msecs_to_jiffies(Q1000K_TX_AGE_MS);
 	packet->deferred = false;
+	packet->dhcp6 = !meta.omci &&
+		q1000k_dhcp6_sample(skb, &packet->dhcp6_sample) &&
+		packet->dhcp6_sample.tx;
+	if (packet->dhcp6)
+		packet->dhcp6_sample.gem = meta.gem;
 	rcu_read_lock();
 	transport = rcu_dereference(q1000k_current);
 	if (!transport) {

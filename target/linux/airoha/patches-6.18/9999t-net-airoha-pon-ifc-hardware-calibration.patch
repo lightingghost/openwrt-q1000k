@@ -1,0 +1,73 @@
+From: Q1000K development
+Subject: [PATCH] net: airoha: calibrate PON IFC admission against AN7581
+
+Pack the destination MAC in the observed four-plus-two wire layout,
+validate the full RX IFC identifiers, and retain the ingress PPE route
+without forcing matching traffic through PPE a second time. Keep the
+unmatched GDM2 fallback forced to CPU.
+
+--- a/drivers/net/ethernet/airoha/airoha_pon_ifc.h
++++ b/drivers/net/ethernet/airoha/airoha_pon_ifc.h
+@@ -1,8 +1,8 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+ /* Q1000K AN7581 ingress admission. Included by the native PPE owner only.
+- * Register layout checked against the factory AN7581 IFC encoder. The
+- * classifier checks each frame BEFORE PPE lookup; an IP tuple alone cannot
+- * represent the OMCI GEM/VLAN authorization boundary.
++ * Register layout calibrated on AN7581, with the factory IFC encoder as
++ * reference. Ingress admission must precede PPE lookup; an IP tuple alone
++ * cannot represent the OMCI GEM/VLAN authorization boundary.
+  */
+ #define PON_IFC_CMD		0x0204
+ #define PON_IFC_DATA(n)		(0x0210 + 4 * (n))
+@@ -16,7 +16,9 @@
+ #define PON_IFC_ROWS		64
+ #define PON_IFC_FALLBACK_ROW	(PON_IFC_ROWS - 1)
+ #define PON_IFC_RX_HIT		BIT(7)
+-#define PON_IFC_RX_ROW		GENMASK(16, 8)
++#define PON_IFC_RX_ID		GENMASK(16, 8)
++/* Type-zero rows 0/1 report full nine-bit identifiers 0x100/0x101. */
++#define PON_IFC_RX_ID_BASE	0x100
+ 
+ /* Type zero: Ethernet/GEM key, nine words in reverse hardware word order.
+  * VPM=1 denotes 802.1Q; VLAN0/1 validity distinguishes an untagged frame
+@@ -43,16 +45,19 @@
+ 	}
+ 	key[3] = ethertype;
+ 	mask[3] = 0xffff;
+-	key[5] = (u32)dmac[2] << 24 | (u32)dmac[3] << 16 |
+-		 (u32)dmac[4] << 8 | dmac[5];
++	/* The wire key stores the first four MAC octets, then the last two. */
++	key[5] = (u32)dmac[0] << 24 | (u32)dmac[1] << 16 |
++		 (u32)dmac[2] << 8 | dmac[3];
+ 	mask[5] = U32_MAX;
+-	key[6] = (u32)dmac[0] << 24 | (u32)dmac[1] << 16;
++	key[6] = (u32)dmac[4] << 24 | (u32)dmac[5] << 16;
+ 	mask[6] = GENMASK(31, 16);
+ 	key[8] = BIT(AIROHA_GDM2_IDX);
+ 	mask[8] = U32_MAX;
++	/* GDM2 already routes to PPE. Keep that destination: forcing PPE
++	 * again loses PON metadata and stalls matching traffic on AN7581.
++	 * Only the unmatched fallback overrides the destination to CPU.
++	 */
+ 	action[0] = PON_IFC_RULE_ENABLE | PON_IFC_RULE_END;
+-	action[2] = PON_IFC_FORCE_PORT;
+-	action[5] = FE_PSE_PORT_PPE1 << 8;
+ }
+ 
+ static int airoha_pon_ifc_command(struct airoha_eth *eth, u32 command)
+@@ -413,10 +418,12 @@
+ 	if (ethertype != ETH_P_IP && ethertype != ETH_P_IPV6)
+ 		return false;
+ 	/* A learning reason alone only proves PPE traversal. Require the
+-	 * AN7581 classifier hit and the correct admission row as well.
++	 * AN7581 classifier hit and the full admission identifier as well.
++	 * Do not truncate to a row: no-hit frames also carry ID 0x100.
+ 	 */
+ 	if (!(meta->words[2] & PON_IFC_RX_HIT) ||
+-	    FIELD_GET(PON_IFC_RX_ROW, meta->words[2]) != (ethertype == ETH_P_IPV6))
++	    FIELD_GET(PON_IFC_RX_ID, meta->words[2]) !=
++		(PON_IFC_RX_ID_BASE + (ethertype == ETH_P_IPV6)))
+ 		return false;
+ 	profile = &dev->pon_ingress[ethertype == ETH_P_IPV6];
+ 	return profile->valid && profile->flow.epoch == dev->pon_flow_epoch &&

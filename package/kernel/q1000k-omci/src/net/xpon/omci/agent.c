@@ -1147,7 +1147,7 @@ omci_agent_seed_nokia_locked(struct omci_device *odev, u8 profile)
 		memset(data, 0, sizeof(data));
 		ret = omci_mib_add_default_profile_mask(agent, profile,
 				OMCI_CLASS_NOKIA_UNI_SUPPLEMENTAL_V2,
-				OMCI_UNI_ENTITY_ID(OMCI_ETHERNET_SLOT,
+				OMCI_UNI_ENTITY_ID(agent->config.pon_slot,
 						   i + 1),
 				GENMASK(15, 9), data, sizeof(data));
 		if (ret)
@@ -1581,6 +1581,65 @@ static void omci_agent_apply_identity(struct omci_agent *agent,
 		       sizeof(agent->config.equipment_id));
 		agent->config.equipment_source = identity->equipment_source;
 	}
+	if (identity->valid & OMCI_IDENTITY_F_HARDWARE_VERSION) {
+		memcpy(agent->config.version, identity->hardware_version, sizeof(agent->config.version));
+		agent->config.version_source = identity->presentation_source;
+	}
+
+	if (identity->valid & OMCI_IDENTITY_F_SOFTWARE_VERSION_0) {
+		memcpy(agent->config.software_version[0], identity->software_version[0], sizeof(agent->config.software_version[0]));
+		agent->config.software_version_source[0] = identity->presentation_source;
+	}
+
+	if (identity->valid & OMCI_IDENTITY_F_SOFTWARE_VERSION_1) {
+		memcpy(agent->config.software_version[1], identity->software_version[1], sizeof(agent->config.software_version[1]));
+		agent->config.software_version_source[1] = identity->presentation_source;
+	}
+
+	if (identity->valid & OMCI_IDENTITY_F_LOGICAL_ONU_ID) {
+		memcpy(agent->config.logical_onu_id, identity->logical_onu_id, sizeof(agent->config.logical_onu_id));
+		agent->config.logical_onu_id_source = identity->presentation_source;
+	}
+
+	if (identity->valid & OMCI_IDENTITY_F_LOGICAL_PASSWORD) {
+		memcpy(agent->config.logical_password, identity->logical_password, sizeof(agent->config.logical_password));
+		agent->config.logical_password_source = identity->presentation_source;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_SYNC_CIRCUIT_PACK) {
+		agent->config.sync_circuit_pack = identity->sync_circuit_pack;
+		agent->config.sync_circuit_pack_source = identity->presentation_source;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_ACTIVE_BANK) {
+		agent->config.active_bank = identity->active_bank;
+		agent->config.active_bank_source = identity->presentation_source;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_COMMITTED_BANK) {
+		agent->config.committed_bank = identity->committed_bank;
+		agent->config.committed_bank_source = identity->presentation_source;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_OMCC_VERSION) {
+		agent->config.omcc_version = identity->omcc_version;
+		agent->config.omcc_version_source = identity->presentation_source;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_OLT_PROFILE) {
+		agent->config.olt_profile = identity->olt_profile;
+		agent->config.olt_profile_source = identity->presentation_source;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_PON_SLOT)
+		agent->config.pon_slot = identity->pon_slot;
+	if (identity->valid & OMCI_IDENTITY_F_IPHOST_MAC) {
+		memcpy(agent->config.iphost_mac, identity->iphost_mac, sizeof(agent->config.iphost_mac));
+		agent->config.iphost_enabled = true;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_IPHOST_HOSTNAME) {
+		memcpy(agent->config.iphost_hostname, identity->iphost_hostname, sizeof(agent->config.iphost_hostname));
+		agent->config.iphost_enabled = true;
+	}
+	if (identity->valid & OMCI_IDENTITY_F_IPHOST_DOMAIN) {
+		memcpy(agent->config.iphost_domain, identity->iphost_domain, sizeof(agent->config.iphost_domain));
+		agent->config.iphost_enabled = true;
+	}
+
 }
 
 static void
@@ -1804,7 +1863,7 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 	if (ret)
 		return ret;
 	ret = omci_agent_add_equipment_default(agent, &topology,
-					       OMCI_ETHERNET_SLOT,
+					       agent->config.pon_slot,
 					       OMCI_ETHERNET_UNIT_TYPE,
 					       agent->config.uni_count, false, data);
 	if (ret)
@@ -1813,6 +1872,17 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 		ret = omci_agent_add_equipment_default(agent, &topology,
 						       OMCI_VEIP_SLOT, OMCI_VEIP_UNIT_TYPE,
 						       1, false, data);
+		if (ret)
+			return ret;
+	}
+
+	if (agent->config.iphost_enabled) {
+		memset(data, 0, sizeof(data));
+		memcpy(data, agent->config.iphost_mac, 6);
+		memcpy(data + 6, agent->config.iphost_domain, 25);
+		memcpy(data + 31, agent->config.iphost_hostname, 25);
+		ret = omci_mib_add_default_mask(agent, OMCI_CLASS_IP_HOST_CONFIG,
+						0, OMCI_IPHOST_IDENTITY_MASK, data, 56);
 		if (ret)
 			return ret;
 	}
@@ -1833,7 +1903,7 @@ static int omci_agent_populate_defaults(struct omci_device *odev)
 		return ret;
 
 	for (i = 0; i < agent->config.uni_count; i++) {
-		u16 entity_id = OMCI_UNI_ENTITY_ID(OMCI_ETHERNET_SLOT, i + 1);
+		u16 entity_id = OMCI_UNI_ENTITY_ID(agent->config.pon_slot, i + 1);
 
 		memset(data, 0, sizeof(data));
 		data[4] = 0; /* Administrative state unlocked. */
@@ -1936,6 +2006,7 @@ int omci_agent_init(struct omci_device *odev)
 	agent->dying_gasp = false;
 	agent->config.dying_gasp_source = OMCI_CONFIG_SOURCE_DEFAULT;
 	agent->config.uni_count = odev->ops->uni_count ?: 4;
+	agent->config.pon_slot = OMCI_ETHERNET_SLOT;
 	/* Preserve native Circuit Pack synchronization unless explicitly disabled. */
 	agent->config.sync_circuit_pack = 1;
 	agent->config.sync_circuit_pack_source = OMCI_CONFIG_SOURCE_DEFAULT;
@@ -1974,7 +2045,19 @@ int omci_agent_init(struct omci_device *odev)
 	if (ret)
 		goto err_cleanup;
 	omci_agent_apply_identity(agent, &identity);
-	agent->identity_ready = identity.valid & OMCI_IDENTITY_F_SERIAL_NUMBER;
+	if (odev->ops->initial_identity) {
+		identity = *odev->ops->initial_identity;
+		if ((identity.valid & OMCI_IDENTITY_F_PON_SLOT) &&
+		    (!identity.pon_slot || identity.pon_slot == 255 ||
+		     identity.pon_slot == OMCI_GPON_SLOT ||
+		     (odev->ops->onu_type != OMCI_ONU_TYPE_SFU &&
+		      (identity.pon_slot == OMCI_VEIP_SLOT || identity.pon_slot == 6)))) {
+			ret = -EINVAL;
+			goto err_cleanup;
+		}
+		omci_agent_apply_identity(agent, &identity);
+	}
+	agent->identity_ready = agent->config.serial_source > OMCI_CONFIG_SOURCE_DEFAULT;
 
 	mutex_lock(&agent->lock);
 	ret = omci_agent_populate_defaults(odev);

@@ -37,6 +37,10 @@ static void *test_kzalloc(size_t size, gfp_t flags)
 #define kmalloc test_kmalloc
 #define kzalloc test_kzalloc
 #define q1000k_trace(...) ((void)0)
+static bool q1000k_pwan_data_dev(const struct net_device *dev) { return false; }
+static int q1000k_services_flow(u16 ethertype,struct airoha_pon_flow *flow) { return -EOPNOTSUPP; }
+static int q1000k_services_rx_flow(u16 ethertype,struct airoha_pon_flow *flow) { return -EOPNOTSUPP; }
+void airoha_pon_invalidate_flows(struct airoha_pon *pon) {}
 /* PRODUCTION */
 #pragma pop_macro("kzalloc")
 #pragma pop_macro("kmalloc")

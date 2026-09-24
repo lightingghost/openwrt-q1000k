@@ -1,3 +1,4 @@
+#define READ_ONCE(x) (x)
 // SPDX-License-Identifier: GPL-2.0-only
 #include <assert.h>
 #include <stdbool.h>
@@ -31,7 +32,7 @@ static int irq,rtnl, writes, fail_write, changed_other;
 #define spin_unlock_irqrestore(l,f) do { assert(*(l)); *(l)=0; (void)(f); } while(0)
 struct airoha_qdma { u32 global,closed[8]; };
 struct airoha_eth { struct airoha_qdma qdma[2]; u32 fe[3]; };
-struct airoha_gdm_dev { struct airoha_eth *eth; u64 pon_generation; };
+struct airoha_gdm_dev { bool pon_flow_fault; struct airoha_eth *eth; u64 pon_generation; };
 struct airoha_pon {
     void *netdev;
     struct airoha_gdm_dev *dma_dev;
@@ -74,6 +75,8 @@ static int airoha_pon_fe_write_checked(struct airoha_eth *e,unsigned int reg,u32
     if(++writes==fail_write) return -EIO;
     e->fe[reg]=value & 0xffff; return e->fe[reg]==value ? 0 : -EIO;
 }
+/* Full PPE retirement/fault containment is exercised by test_pon_transport. */
+static void airoha_pon_fault_locked(struct airoha_pon *p) { p->control_fault=true; }
 /* PRODUCTION */
 static void reset(void)
 {

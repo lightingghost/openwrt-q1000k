@@ -1,0 +1,50 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] xpon: identify and retire routed PON hardware flow leases
+
+--- a/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
++++ b/xpon-en757x/xpon_10g/src/pwan/xpon_netif.c
+@@ -1249,6 +1249,10 @@
+ ******************************************************************************/
+ static int pwan_net_stop(struct net_device *dev)
+ {
++#ifdef Q1000K_PON_IDENTITY
++	if (((PWAN_NetPriv_T *)netdev_priv(dev))->netIdx == PWAN_IF_DATA)
++		q1000k_transport_invalidate_flows();
++#endif
+ 	PON_MSG(MSG_TRACE, "%s entered\n", __FUNCTION__) ;
+ 	printk("*********************%s entered*********************\n", __FUNCTION__);
+ #if defined(TCSUPPORT_XPON_LED)
+@@ -1314,6 +1318,14 @@
+ 
+ 	/* Save the customize mac address */
+ 	eth_hw_addr_set(dev, addr->sa_data);
++#ifdef Q1000K_PON_IDENTITY
++	/* The new address is visible before old flow leases are retired. A
++	 * resolver racing this update either sees the new source or gets an
++	 * epoch which this invalidation makes stale before ndo returns.
++	 */
++	if (((PWAN_NetPriv_T *)netdev_priv(dev))->netIdx == PWAN_IF_DATA)
++		q1000k_transport_invalidate_flows();
++#endif
+ 
+ 	return 0;
+ }
+@@ -1383,6 +1395,18 @@
+ 	.ndo_do_ioctl          	 	= pwan_net_ioctl,
+ 	.ndo_set_mac_address		= pwan_net_set_macaddr,
+ };
++#ifdef Q1000K_PON_IDENTITY
++bool q1000k_pwan_data_dev(const struct net_device *dev)
++{
++	const PWAN_NetPriv_T *priv;
++
++	if (!dev || dev->netdev_ops != &xpon_netdev_ops)
++		return false;
++	priv = netdev_priv(dev);
++	return priv->netIdx == PWAN_IF_DATA && xpon_is_ready() &&
++	       netif_running(dev);
++}
++#endif
+ #endif /* KERNEL_VERSION(2,6,29) */
+ 
+ extern unsigned long flash_base;

@@ -46,6 +46,12 @@ static void capture_failure(const char *format, ...)
 #define PHY_UNKNOWN_CONFIG 0
 #define PHY_TRANS_NOT_FOUND_IN_IOT_LIST 255
 #define PHY_LINK_STATUS_UNKNOWN 0
+#define PHY_LINK_STATUS_LOS 1
+#define PHY_LINK_STATUS_READY 2
+#define PLUG_OUT 0
+typedef enum { PHY_EVENT_TRANS_LOS_INT, PHY_EVENT_PHY_LOF_INT, PHY_EVENT_PHYRDY_INT } PHY_Event_Type_t;
+#define PON_PHY_EVENT_SOURCE_SW_POLL 1
+typedef struct { PHY_Event_Type_t id; int src; } PON_PHY_Event_data_t;
 #define I2C_U2_CLK_DIV 255
 #define PHY_MSG_ERR 1
 #define SCU_WAN_CONF_REG_WAN_SEL_BITS 0xff
@@ -107,7 +113,7 @@ struct phy_private {
     int scu_hir_np_sys_hw_id,wan_sel,rx_fec_setting,trans_index,i2c_u2_clk_div,i2c_addr_num;
     int phy_status,trans_tx_enable,trans_tx_status,first_plugin_flag,trans_msg_print_cnt;
     int debugLevel,pon_stop_flag,event_poll_timer_value,event_handle_lock,pma_reset_lock;
-    int is_phy_start,is_irq_requested,phy_init_done,pma_init_done;
+    int is_phy_start,is_irq_requested,phy_init_done,pma_init_done,phy_unexpected_isr_flag;
     struct { struct { int mode,txPowerEnFlag; } flags; } phyCfg;
     struct timer_list event_poll_timer;
 };
@@ -192,7 +198,7 @@ static int q1000k_pon_get_tx_inhibit(struct q1000k_pon *p,bool *inhibited)
 }
 static int q1000k_pon_get_los(struct q1000k_pon *p)
 {
-    int ret=q1000k_pon_check(p); return ret ? ret : controller_los;
+    int ret=q1000k_pon_check(p); return ret ? ret : poll_error ? poll_error : controller_los;
 }
 static int q1000k_pon_set_tx(struct q1000k_pon *p,bool enable)
 {
@@ -216,7 +222,27 @@ static int manual_error, manual_calls, controller_reloads;
 int q1000k_phy_rx_bench_recipe(unsigned int action)
 { assert(!q1000k_phy_callback_context() && controller_inhibit && !controller.tx); manual_calls++; return manual_error; }
 static int q1000k_pon_bench_reinitialize(struct q1000k_pon *p) { assert(p->held && !p->tx); controller_reloads++; return 0; }
+static void phy_event_handler(PON_PHY_Event_data_t *event);
+static void fiber_plug_reset(int operation, int mode);
 /* PRODUCTION */
+static int link_events[3], pma_resets, plug_outs, pma_error;
+static bool stop_in_pma;
+static void fiber_plug_reset(int operation, int mode)
+{
+    assert(!q1000k_phy_callback_context() && !controller.tx);
+    assert(operation==PLUG_OUT && mode==10);
+    plug_outs++;
+}
+int q1000k_phy_pma_reset(void)
+{
+    assert(!q1000k_phy_callback_context() && !controller.tx);
+    pma_resets++;
+    if(pma_error) return pma_error;
+    gpPhyPriv->first_plugin_flag=false;
+    gpPhyPriv->pma_init_done=true;
+    if(stop_in_pma) qphy_active=false;
+    return q1000k_phy_trans_power(PHY_TX_DIS_RESTORE_BY_SW);
+}
 int q1000k_phy_rx_cleanup(void) {
     assert(!q1000k_phy_callback_context() && !qphy_active && !controller.tx);
     return gain_cleanup_error;
@@ -271,6 +297,11 @@ static int event(char *p)
 }
 static int poll_event(char *p) { polls++; event(p); return poll_error; }
 static int irq_event(char *p) { isrs++; event(p); return isr_error; }
+static void phy_event_handler(PON_PHY_Event_data_t *e)
+{
+    assert(e->src==PON_PHY_EVENT_SOURCE_SW_POLL && e->id<=PHY_EVENT_PHYRDY_INT);
+    link_events[e->id]++; polls++; event(NULL);
+}
 static void reset(void)
 {
     if(gpPhyPriv) q1000k_phy_exit();
@@ -285,6 +316,8 @@ static void reset(void)
     api_error=poll_error=isr_error=fw_error=reenter=cancel_run=0;
     memset(regs,0,sizeof(regs));
     reacquire_calls=reacquire_error=0; reacquire_bad_tx=false;
+    memset(link_events,0,sizeof(link_events));
+    pma_resets=plug_outs=pma_error=0; stop_in_pma=false; controller_los=true;
     en7581_xgpon_func[PHY_EVENT_POLL_FUNC]=poll_event;
     en7581_xgpon_func[PHY_ISR_FUNC]=irq_event;
 }
@@ -295,6 +328,113 @@ static void initialized(void)
     assert(!q1000k_phy_needs_configure());
     assert(gpPhyPriv->phy_init_done && !qphy_active && !allocated_irq);
     reads=writes=0;
+}
+static void live_poll(void)
+{
+    gpPhyPriv->event_poll_timer.armed=false;
+    q1000k_phy_poll();
+    assert(qphy_poll_job.queued);
+    qphy_poll_job.queued=false;
+    qphy_poll_job.fn(&qphy_poll_job);
+    if(qphy_active) assert(gpPhyPriv->event_poll_timer.armed);
+    jiffies+=1500;
+}
+static void live_link_tests(void)
+{
+    const unsigned int sfp=(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4;
+    const unsigned int sync=(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4;
+
+    /* Dark boot, a whole hour of missing fiber, and insertion with no IRQ.
+     * No attempts, events or register resets accumulate while waiting. */
+    initialized(); assert(!q1000k_phy_start());
+    gpPhyPriv->first_plugin_flag=true; gpPhyPriv->pma_init_done=false;
+    regs[sfp]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+    unsigned int before=writes;
+    for(int i=0;i<2400;i++) live_poll();
+    assert(qphy_active && !qphy_fault && qphy_rx_polls==2400);
+    assert(link_events[PHY_EVENT_TRANS_LOS_INT]==1 && !pma_resets && writes==before);
+    controller_los=false; regs[sfp]=0;
+    live_poll();
+    assert(pma_resets==1 && plug_outs==1 && !controller.tx);
+    struct q1000k_rx_sample sample;
+    struct q1000k_rx_diagnostics diagnostics;
+    assert(!q1000k_phy_snapshot(&sample,&diagnostics) && sample.service_acquire_attempts==1);
+    assert(sample.service_acquire_next_ms==jiffies-1500+15000 && sample.poll_calls==2401);
+    assert(gpPhyPriv->pma_init_done && !gpPhyPriv->first_plugin_flag);
+    assert(!link_events[PHY_EVENT_PHYRDY_INT]); /* Light alone is not ready. */
+    for(int i=0;i<9;i++) live_poll();
+    assert(pma_resets==1);
+    live_poll(); assert(pma_resets==2);
+    regs[sync]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+    live_poll();
+    assert(link_events[PHY_EVENT_PHYRDY_INT]==1 && !qphy_acquire_next_ms);
+    for(int i=0;i<100;i++) live_poll();
+    assert(pma_resets==2 && link_events[PHY_EVENT_PHYRDY_INT]==1);
+
+    /* Established-link loss is reported once; another hour of darkness
+     * cannot exhaust recovery. Repeated outages need no module reload. */
+    assert(!q1000k_phy_set_tx(true));
+    for(int outage=0;outage<3;outage++) {
+        controller_los=true; regs[sfp]=EN7581_XGPON_PHY_SFP_RX_LOS_ST;
+        for(int i=0;i<2400;i++) live_poll();
+        assert(link_events[PHY_EVENT_TRANS_LOS_INT]==outage+2 && pma_resets==outage+2);
+        assert(!q1000k_phy_set_tx(false)); /* Existing MAC loss policy. */
+        controller_los=false; regs[sfp]=regs[sync]=0;
+        live_poll(); assert(pma_resets==outage+3 && !controller.tx);
+        regs[sync]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+        live_poll(); assert(link_events[PHY_EVENT_PHYRDY_INT]==outage+2);
+        assert(!q1000k_phy_set_tx(true)); /* Fresh MAC activation. */
+    }
+
+    /* LODS with light must notify the MAC before any receiver reset, then
+     * retry indefinitely at the bounded cadence if framing never returns. */
+    regs[sync]=0;
+    int attempts=pma_resets;
+    live_poll(); assert(link_events[PHY_EVENT_PHY_LOF_INT]==1 && pma_resets==attempts);
+    for(int i=0;i<2400;i++) live_poll();
+    assert(pma_resets==attempts+240 && qphy_active && !qphy_fault && controller.tx);
+    assert(link_events[PHY_EVENT_PHY_LOF_INT]==1);
+
+    /* Either LOS source dominates stale framing; neither mixed observation
+     * is eligible for a reset. A later true sync needs no PMA reset at all. */
+    attempts=pma_resets;
+    regs[sync]=EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC;
+    controller_los=true; live_poll();
+    controller_los=false; regs[sfp]=EN7581_XGPON_PHY_SFP_RX_LOS_ST; live_poll();
+    assert(pma_resets==attempts && gpPhyPriv->phy_status==PHY_LINK_STATUS_LOS);
+    regs[sfp]=0; live_poll();
+    assert(gpPhyPriv->phy_status==PHY_LINK_STATUS_READY && pma_resets==attempts);
+
+    /* O7 / administratively disabled TX is never enabled by reacquisition. */
+    initialized(); assert(!q1000k_phy_start()); controller_los=false;
+    live_poll(); assert(pma_resets==1 && !controller.tx);
+    assert(!q1000k_phy_stop());
+    assert(!qphy_acquire_next_ms && qphy_acquire_attempts==1);
+    assert(!q1000k_phy_start()); live_poll();
+    assert(pma_resets==2 && !controller.tx && qphy_acquire_attempts==2);
+
+    /* Real MMIO/I2C/PMA errors still contain TX and stop polling; absence
+     * of light above never entered this sticky-fault path. */
+    for(int failure=0;failure<6;failure++) {
+        initialized(); assert(!q1000k_phy_start());
+        assert(!q1000k_phy_set_tx(true)); controller_los=false;
+        if(failure<2) fail_read=reads+failure+1;
+        if(failure==2) regs[sfp]=~0U;
+        if(failure==3) regs[sync]=~0U;
+        if(failure==4) poll_error=-EIO;
+        if(failure==5) pma_error=-EIO;
+        live_poll();
+        assert(qphy_fault==-EIO && !qphy_active && !controller.tx);
+        assert(!qphy_acquire_next_ms);
+        assert(!gpPhyPriv->event_poll_timer.armed);
+        assert(pma_resets==(failure==5));
+    }
+    initialized(); assert(!q1000k_phy_start()); assert(!q1000k_phy_set_tx(true));
+    controller_los=false; stop_in_pma=true;
+    live_poll();
+    assert(pma_resets==1 && !qphy_active && !qphy_fault && !controller.tx);
+    assert(!gpPhyPriv->event_poll_timer.armed && !q1000k_phy_stop());
+    reset();
 }
 static void shutdown_diagnostics(void)
 {
@@ -843,6 +983,7 @@ static void manual_recovery_tests(void)
 }
 int main(void)
 {
+    live_link_tests();
     manual_recovery_tests();
     coherent_snapshot_tests();
     shutdown_diagnostics();

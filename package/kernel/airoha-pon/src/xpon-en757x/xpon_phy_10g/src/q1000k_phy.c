@@ -50,6 +50,12 @@ static bool qphy_rx_seen_light;
 static u32 qphy_rx_irqs, qphy_rx_polls;
 static const char *qphy_repeat_reason;
 static u64 qphy_repeat_next_ms;
+/* Normal service has no acquisition-attempt limit. Keep its retry deadline
+ * separate from the deliberately finite RX-only bench experiments.
+ */
+#define QPHY_ACQUIRE_INTERVAL_MS 15000
+static u64 qphy_acquire_next_ms;
+static u32 qphy_acquire_attempts;
 #define QPHY_RX_BENCH_IRQS (EN7581_XGPON_PHY_RX_RDY_INT_EN | \
 	EN7581_XGPON_PHY_RX_LOF_INT_EN | EN7581_XGPON_PHY_RX_SYNC_OK_INT_EN | \
 	EN7581_XGPON_PHY_RX_LOS_INT_EN)
@@ -275,6 +281,7 @@ static void qphy_failed(int error)
 	if (!error)
 		return;
 	qphy_repeat_stop("error");
+	qphy_acquire_next_ms = 0;
 	WRITE_ONCE(qphy_active, false);
 	WRITE_ONCE(gpPhyPriv->pon_stop_flag, TRUE);
 	WRITE_ONCE(gpPhyPriv->is_phy_start, FALSE);
@@ -288,6 +295,91 @@ static void qphy_failed(int error)
 		q1000k_trace(QT_TX, 0, tx_error, qphy_rx_bench, qphy_active, 2, 0);
 	}
 	qphy_mask();
+}
+
+static void qphy_link_event(PHY_Event_Type_t id, int status)
+{
+	PON_PHY_Event_data_t event = {
+		.id = id,
+		.src = PON_PHY_EVENT_SOURCE_SW_POLL,
+	};
+
+	gpPhyPriv->phy_status = status;
+	gpPhyPriv->phy_unexpected_isr_flag = FALSE;
+	/* The MAC callback enqueues the event. It must not synchronously enter
+	 * the MAC reset path while we own the PHY callback mutex.
+	 */
+	phy_event_handler(&event);
+}
+
+/* IRQs handle prompt LOS/ready transitions; level polling also works when an
+ * insertion edge was missed, including boot without fiber. Darkness is a
+ * waiting state, not a hardware fault. Light without framing periodically
+ * retries the checked PMA out/in sequence, never a full SCU/PHY reset.
+ */
+static int qphy_link_poll(void)
+{
+	u32 sfp, sync;
+	u64 now;
+	int ret, los;
+
+	ret = an7581_pon_phy_read(EN7581_XGPON_PHY_SFP_STA, &sfp);
+	if (!ret)
+		ret = an7581_pon_phy_read(EN7581_XGPON_PHY_DBG_RX_SYNC_ST, &sync);
+	if (ret)
+		return ret;
+	if (sfp == ~0U || sync == ~0U)
+		return -EIO;
+	los = q1000k_pon_get_los(qphy_controller);
+	if (los < 0)
+		return los;
+	if (!READ_ONCE(qphy_active))
+		return 0;
+	if (los || (sfp & EN7581_XGPON_PHY_SFP_RX_LOS_ST)) {
+		qphy_acquire_next_ms = 0;
+		if (gpPhyPriv->phy_status != PHY_LINK_STATUS_LOS)
+			qphy_link_event(PHY_EVENT_TRANS_LOS_INT, PHY_LINK_STATUS_LOS);
+		return 0;
+	}
+	if ((sync & EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC) ==
+	    EN7581_XGPON_PHY_DBG_RX_SYNC_ST_SYNC) {
+		qphy_acquire_next_ms = 0;
+		if (gpPhyPriv->phy_status != PHY_LINK_STATUS_READY)
+			qphy_link_event(PHY_EVENT_PHYRDY_INT, PHY_LINK_STATUS_READY);
+		return 0;
+	}
+	if (gpPhyPriv->phy_status == PHY_LINK_STATUS_READY) {
+		/* Retire the old registration before attempting receiver recovery.
+		 * The MAC's existing loss path drains services and returns to O1.
+		 */
+		qphy_acquire_next_ms = 0;
+		qphy_link_event(PHY_EVENT_PHY_LOF_INT, PHY_LINK_STATUS_UNKNOWN);
+		return 0;
+	}
+	now = ktime_to_ms(ktime_get_boottime());
+	if (now < qphy_acquire_next_ms)
+		return 0;
+	qphy_acquire_next_ms = now + QPHY_ACQUIRE_INTERVAL_MS;
+	qphy_acquire_attempts++;
+	/* Preserve the MAC's TX policy (including O7), but inhibit the laser
+	 * for the entire analog sequence. PMA reset restores only that policy;
+	 * it also handles FIRST_PLUG_IN after a dark boot and reenables RX.
+	 */
+	ret = q1000k_phy_trans_power(PHY_TX_DIS_ON_HW_ONLY);
+	if (!ret) {
+		fiber_plug_reset(PLUG_OUT, gpPhyPriv->wan_sel);
+		ret = an7581_pon_phy_status();
+	}
+	if (!ret)
+		ret = q1000k_phy_controller_check();
+	if (!ret && READ_ONCE(qphy_active))
+		ret = q1000k_phy_pma_reset();
+	/* Stop can withdraw active while the PMA callback runs. Refusing its
+	 * final TX restore in that case is successful shutdown, not a fault.
+	 */
+	if (ret == -EACCES && !READ_ONCE(qphy_active))
+		ret = 0;
+	return ret;
 }
 
 static void qphy_poll_work(struct work_struct *work)
@@ -338,7 +430,8 @@ static void qphy_poll_work(struct work_struct *work)
 		if (ret == -EAGAIN && !READ_ONCE(qphy_active))
 			ret = 0;
 	} else if (!ret) {
-		ret = ponPhyFunc[PHY_EVENT_POLL_FUNC]((char *)gpPhyPriv);
+		qphy_rx_polls++;
+		ret = qphy_link_poll();
 	}
 	if (!ret)
 		ret = an7581_pon_phy_status();
@@ -403,6 +496,7 @@ static irqreturn_t qphy_irq_thread(int irq, void *data)
 			ret = qphy_rx_sample(&sample);
 		}
 	} else if (!ret) {
+		qphy_rx_irqs++;
 		ret = ponPhyFunc[PHY_ISR_FUNC]((char *)gpPhyPriv);
 	}
 	if (!ret)
@@ -610,6 +704,7 @@ int q1000k_phy_start(void)
 	/* The IRQ thread may run as soon as the mask is enabled. */
 	qphy_rx_no_sync = 0;
 	qphy_rx_seen_light = false;
+	qphy_acquire_next_ms = 0;
 	WRITE_ONCE(qphy_active, true);
 	ret = qphy_reg_write(EN7581_XGPON_PHY_XG_PON_INT_EN,
 		(qphy_rx_bench ? QPHY_RX_BENCH_IRQS :
@@ -683,6 +778,7 @@ static int qphy_stop(void)
 	/* A poll already running when stop began may have rearmed this timer. */
 	timer_delete_sync(&gpPhyPriv->event_poll_timer);
 	qphy_callback_lock();
+	qphy_acquire_next_ms = 0;
 	if (qphy_rx_attempts || qphy_rx_no_sync)
 		qphy_repeat_stop("shutdown");
 	if (qphy_controller) {
@@ -1183,6 +1279,8 @@ static int qphy_rx_sample(struct q1000k_rx_sample *sample)
 	result.pll_restore_enabled = qphy_rx_restore_pll;
 	result.gain_restore_enabled = qphy_rx_restore_gain;
 	result.reacquire_attempts = qphy_rx_attempts;
+	result.service_acquire_attempts = qphy_acquire_attempts;
+	result.service_acquire_next_ms = qphy_acquire_next_ms;
 	result.sampled_ms = ktime_to_ms(ktime_get_boottime());
 	if (result.synced)
 		qphy_repeat_stop("sync");
@@ -1500,6 +1598,8 @@ int q1000k_phy_init(void)
 	qphy_rx_seen_light = false;
 	qphy_repeat_reason = NULL;
 	qphy_repeat_next_ms = 0;
+	qphy_acquire_next_ms = 0;
+	qphy_acquire_attempts = 0;
 	qphy_rx_irqs = qphy_rx_polls = 0;
 	gpPhyPriv->scu_hir_np_sys_hw_id = 0xe;
 	gpPhyPriv->wan_sel = SCU_WAN_CONF_REG_WAN_SEL_XGSPON;

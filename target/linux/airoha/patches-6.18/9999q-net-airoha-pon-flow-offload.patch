@@ -1,0 +1,797 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] net: airoha: offload validated PON egress flows and retire leases
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -142,7 +142,8 @@
+ 	airoha_fe_wr(eth, REG_FE_MAC_LMIN(reg), lmin);
+ 	airoha_fe_wr(eth, REG_FE_MAC_LMAX(reg), lmax);
+ 
+-	airoha_ppe_init_upd_mem(dev, addr);
++	if (!dev->pon_port || !rcu_access_pointer(dev->pon))
++		airoha_ppe_init_upd_mem(dev, addr);
+ 
+ 	return 0;
+ }
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -512,6 +512,9 @@
+ 
+ 	struct rhash_head node;
+ 	unsigned long cookie;
++	struct list_head pon_list;
++	struct airoha_gdm_dev *pon_dev;
++	u64 pon_epoch;
+ 
+ 	/* Must be last --ends in a flexible-array member. */
+ 	struct airoha_foe_entry data;
+@@ -568,9 +571,10 @@
+ 
+ struct airoha_gdm_dev {
+ 	struct airoha_pon __rcu *pon;
+-	u64 pon_generation;
++	u64 pon_generation, pon_flow_epoch;
++	u8 pon_smac[ETH_ALEN];
+ 	atomic_t pon_tx_pending;
+-	bool pon_port;
++	bool pon_port, pon_flow_fault;
+ 	struct airoha_qdma __rcu *qdma;
+ 	struct airoha_gdm_port *port;
+ 	struct airoha_eth *eth;
+@@ -602,6 +606,11 @@
+ 
+ extern const struct net_device_ops airoha_netdev_ops;
+ int airoha_qdma_pon_drain_rx(struct airoha_qdma *qdma);
++int airoha_pon_resolve_flow(struct airoha_eth *eth, struct net_device *upper,
++			  u16 ethertype, const u8 *smac,
++			  struct airoha_pon_flow *flow,
++			  struct airoha_gdm_dev **owner);
++int airoha_ppe_pon_invalidate(struct airoha_gdm_dev *dev);
+ bool airoha_pon_qdma_busy(struct airoha_qdma *qdma);
+ u64 airoha_pon_generation(struct airoha_gdm_dev *dev);
+ void airoha_pon_stop(struct airoha_gdm_dev *dev);
+@@ -629,6 +638,8 @@
+ 	dma_addr_t foe_dma;
+ 
+ 	struct rhashtable l2_flows;
++	struct list_head pon_flows;
++	unsigned int pon_flow_count;
+ 
+ 	struct hlist_head *foe_flow;
+ 	u16 *foe_check_time;
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -39,6 +39,96 @@
+ 	wait_queue_head_t drained;
+ };
+ 
++static void airoha_pon_invalidate_flows_locked(struct airoha_pon *pon)
++{
++	lockdep_assert_held(&pon->admission_lock);
++	if (airoha_ppe_pon_invalidate(pon->dma_dev)) {
++		pon->control_fault = true;
++		airoha_fe_wr(pon->dma_dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), 0);
++		/* Flush the containment write. Never clear this fault on resume. */
++		airoha_fe_rr(pon->dma_dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX));
++	}
++}
++
++void airoha_pon_invalidate_flows(struct airoha_pon *pon)
++{
++	unsigned long flags;
++
++	if (!pon)
++		return;
++	rcu_read_lock();
++	spin_lock_irqsave(&pon->admission_lock, flags);
++	if (rcu_access_pointer(pon->netdev))
++		airoha_pon_invalidate_flows_locked(pon);
++	spin_unlock_irqrestore(&pon->admission_lock, flags);
++	rcu_read_unlock();
++}
++EXPORT_SYMBOL_GPL(airoha_pon_invalidate_flows);
++
++int airoha_pon_resolve_flow(struct airoha_eth *eth, struct net_device *upper,
++			  u16 ethertype, const u8 *smac,
++			  struct airoha_pon_flow *flow,
++			  struct airoha_gdm_dev **owner)
++{
++	struct airoha_gdm_port *port = eth->ports[AIROHA_GDM2_IDX - 1];
++	unsigned long flags;
++	int i, ret = -ENOENT;
++
++	/* GDM2's designated PON endpoint is the only candidate. Native port
++	 * indices are not netdev private layouts: never cast the upper here.
++	 */
++	if (!upper || !port)
++		return ret;
++	rcu_read_lock();
++	for (i = 0; i < ARRAY_SIZE(port->devs); i++) {
++		struct airoha_gdm_dev *dev = port->devs[i];
++		struct airoha_pon *pon;
++
++		if (!dev || !dev->pon_port)
++			continue;
++		pon = rcu_dereference(dev->pon);
++		if (!pon || !pon->ops->flow)
++			continue;
++		spin_lock_irqsave(&pon->admission_lock, flags);
++		ret = rcu_access_pointer(pon->netdev) == netdev_from_priv(dev) ?
++			pon->ops->flow(pon->priv, upper, ethertype, flow) : -ENODEV;
++		if (!ret && (pon->paused || pon->control_fault || READ_ONCE(dev->pon_flow_fault) || pon->rx_closed ||
++		    flow->channel == 0 || flow->channel >= 32 || flow->queue >= 8 ||
++		    !flow->gem || flow->num_vlans > 2 ||
++		    !(pon->tx_enabled & BIT(flow->channel)) ||
++		    (pon->retiring & BIT(flow->channel)) ||
++		    (pon->configuring & BIT(flow->channel)) ||
++		    (pon->closed[flow->channel] & BIT(flow->queue))))
++			ret = -ESHUTDOWN;
++		if (!ret && !ether_addr_equal(smac, upper->dev_addr))
++			ret = -EOPNOTSUPP;
++		if (!ret && !ether_addr_equal(dev->pon_smac, smac)) {
++			airoha_pon_invalidate_flows_locked(pon);
++			if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
++				ret = -EIO;
++			else {
++				airoha_ppe_init_upd_mem(dev, smac);
++				ether_addr_copy(dev->pon_smac, smac);
++			}
++		}
++		if (!ret) {
++			flow->epoch = dev->pon_flow_epoch;
++			*owner = dev;
++		}
++		spin_unlock_irqrestore(&pon->admission_lock, flags);
++		if (ret != -ENOENT)
++			break;
++	}
++	rcu_read_unlock();
++	return ret;
++}
++
++static void airoha_pon_fault_locked(struct airoha_pon *pon)
++{
++	pon->control_fault = true;
++	airoha_pon_invalidate_flows_locked(pon);
++}
++
+ static void airoha_pon_put(struct airoha_pon *pon)
+ {
+ 	if (refcount_dec_and_test(&pon->refs))
+@@ -164,7 +254,7 @@
+ 		return ERR_PTR(-ENOMEM);
+ 	rtnl_lock();
+ 	dev = netdev_priv(netdev);
+-	if (!dev->pon_port || netdev->reg_state != NETREG_REGISTERED ||
++	if (dev->pon_flow_fault || !dev->pon_port || netdev->reg_state != NETREG_REGISTERED ||
+ 	    !netif_running(netdev) ||
+ 	    rcu_access_pointer(dev->qdma) != &dev->eth->qdma[1])
+ 		goto out;
+@@ -204,6 +294,10 @@
+ 	atomic_set(&pon->pending, 0);
+ 	init_waitqueue_head(&pon->drained);
+ 	pon->dma_dev = dev;
++	err = airoha_ppe_pon_invalidate(dev);
++	if (err)
++		goto out;
++	eth_zero_addr(dev->pon_smac);
+ 	pon->ops = ops;
+ 	pon->priv = priv;
+ 	pon->generation = ++dev->pon_generation;
+@@ -230,6 +324,7 @@
+ 	if (!pon)
+ 		return;
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
++	airoha_pon_invalidate_flows_locked(pon);
+ 	rcu_assign_pointer(dev->pon, NULL);
+ 	rcu_assign_pointer(pon->netdev, NULL);
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+@@ -337,7 +432,7 @@
+ 	lockdep_assert_held(&pon->admission_lock);
+ 	if (!rcu_dereference_check(pon->netdev, lockdep_rtnl_is_held()))
+ 		return -ENODEV;
+-	if (pon->control_fault)
++	if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		return -EIO;
+ 	if (pon->configuring & BIT(channel))
+ 		return -EBUSY;
+@@ -352,7 +447,7 @@
+ 	airoha_qdma_rmw(qdma, REG_QUEUE_CLOSE_CFG(channel), mask, value);
+ 	/* Flush the posted write and fail closed on a register mismatch. */
+ 	if ((airoha_qdma_rr(qdma, REG_QUEUE_CLOSE_CFG(channel)) & mask) != value) {
+-		pon->control_fault = true;
++		airoha_pon_fault_locked(pon);
+ 		ret = -EIO;
+ 		return ret;
+ 	}
+@@ -361,8 +456,11 @@
+ 	 * descriptors and FE/optical FIFOs require a separate retirement step.
+ 	 */
+ 	if (closed & ~pon->closed[channel]) {
++		airoha_pon_invalidate_flows_locked(pon);
++		if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
++			ret = -EIO;
+ 		if (++pon->epoch[channel] == 0) {
+-			pon->control_fault = true;
++			airoha_pon_fault_locked(pon);
+ 			ret = -EOVERFLOW;
+ 		}
+ 	}
+@@ -390,7 +488,7 @@
+ 		goto out;
+ 	}
+ 	if (enabled) {
+-		if (pon->control_fault) {
++		if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault)) {
+ 			ret = -EIO;
+ 			goto out;
+ 		}
+@@ -421,15 +519,15 @@
+ 	 */
+ 	value = enabled ? pon->tx_enabled | BIT(channel) :
+ 			  pon->tx_enabled & ~BIT(channel);
+-	if (pon->control_fault)
++	if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		value = 0;
+ 	airoha_fe_wr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), value);
+ 	if (airoha_fe_rr(eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX)) != value) {
+-		pon->control_fault = true;
++		airoha_pon_fault_locked(pon);
+ 		ret = -EIO;
+ 	} else {
+ 		pon->tx_enabled = value;
+-		if (pon->control_fault)
++		if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 			ret = -EIO;
+ 	}
+ out:
+@@ -504,7 +602,7 @@
+ 		!pon->tx_enabled && !atomic_read_acquire(&pon->pending);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if ((pon->retiring & BIT(channel)) && !drained_read)
+ 		ret = -ESHUTDOWN;
+@@ -564,13 +662,13 @@
+ fault:
+ 	/* A partially written scheduler cannot be published or reopened. */
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+-	pon->control_fault = true;
++	airoha_pon_fault_locked(pon);
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ complete:
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	pon->configuring &= ~BIT(channel);
+ 	/* An unrelated concurrent IRQ control failure also invalidates this result. */
+-	if (!ret && pon->control_fault)
++	if (!ret && (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault)))
+ 		ret = -EIO;
+ 	if (!ret && (pon->retiring & BIT(channel)) && !drained_read)
+ 		ret = -ESHUTDOWN;
+@@ -633,7 +731,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring)
+ 		ret = -EBUSY;
+@@ -691,7 +789,7 @@
+ 	goto out;
+ fault:
+ 	/* Admission was already closed for a write; never reopen after ambiguity. */
+-	pon->control_fault = true;
++	airoha_pon_fault_locked(pon);
+ 	ret = -EIO;
+ out:
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+@@ -732,7 +830,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring)
+ 		ret = -EBUSY;
+@@ -742,12 +840,15 @@
+ 		memcpy(pon->paused_closed, pon->closed, sizeof(pon->closed));
+ 		pon->paused = true;
+ 		pon->pause_ready = false;
++		airoha_pon_invalidate_flows_locked(pon);
++		if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
++			ret = -EIO;
+ 		/* Invalidate all userspace/adapter retry packets before waiting.
+ 		 * Keep hardware queues as they are until CPU DMA has completed.
+ 		 */
+ 		for (i = 0; i < ARRAY_SIZE(pon->epoch); i++)
+ 			if (++pon->epoch[i] == 0) {
+-				pon->control_fault = true;
++				airoha_pon_fault_locked(pon);
+ 				ret = -EOVERFLOW;
+ 			}
+ 	}
+@@ -788,7 +889,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring || !pon->paused || !pon->pause_ready || pon->rx_closed)
+ 		ret = -EBUSY;
+@@ -850,7 +951,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring)
+ 		ret = -EBUSY;
+@@ -987,7 +1088,7 @@
+ 		pon->fe_retired |= BIT(channel);
+ 	}
+ 	if (ret && ret != -EBUSY)
+-		pon->control_fault = true;
++		airoha_pon_fault_locked(pon);
+ 	pon->configuring = 0;
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ out:
+@@ -1014,7 +1115,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring || !pon->paused || !pon->pause_ready ||
+ 		 pon->fe_retired != U32_MAX || atomic_read_acquire(&pon->pending))
+@@ -1067,7 +1168,7 @@
+ complete:
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (ret)
+-		pon->control_fault = true;
++		airoha_pon_fault_locked(pon);
+ 	else
+ 		pon->rx_drained = true;
+ 	pon->configuring = 0;
+@@ -1097,7 +1198,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring || !pon->paused || !pon->pause_ready ||
+ 		 !pon->rx_closed || !pon->rx_drained ||
+@@ -1138,7 +1239,7 @@
+ 	pon->epoch_ready = true;
+ 	goto out;
+ fault:
+-	pon->control_fault = true;
++	airoha_pon_fault_locked(pon);
+ out:
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ 	rtnl_unlock();
+@@ -1162,7 +1263,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_access_pointer(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->configuring || !pon->paused || !pon->pause_ready ||
+ 		 !pon->rx_closed || !pon->rx_drained || !pon->epoch_ready)
+@@ -1210,7 +1311,7 @@
+ 	 */
+ 	airoha_pon_fe_write_checked(eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), 0);
+ 	airoha_qdma_clear(qdma, REG_QDMA_GLOBAL_CFG, GLOBAL_CFG_RX_DMA_EN_MASK);
+-	pon->control_fault = true;
++	airoha_pon_fault_locked(pon);
+ out:
+ 	spin_unlock_irqrestore(&pon->admission_lock, flags);
+ 	rtnl_unlock();
+@@ -1269,7 +1370,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_dereference(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else
+ 		*closed = pon->closed[channel];
+@@ -1294,7 +1395,7 @@
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	if (!rcu_dereference(pon->netdev))
+ 		ret = -ENODEV;
+-	else if (pon->control_fault)
++	else if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 		ret = -EIO;
+ 	else if (pon->paused || !(pon->tx_enabled & BIT(meta->channel)) ||
+ 		 (pon->closed[meta->channel] & BIT(meta->queue)))
+@@ -1355,9 +1456,10 @@
+ 	rcu_read_lock();
+ 	spin_lock_irqsave(&pon->admission_lock, flags);
+ 	netdev = rcu_dereference(pon->netdev);
+-	if (!netdev || !netif_running(netdev) || pon->control_fault) {
++	if (!netdev || !netif_running(netdev) || pon->control_fault ||
++	    READ_ONCE(pon->dma_dev->pon_flow_fault)) {
+ 		airoha_pon_tx_report(pon, &status, AIROHA_PON_TX_ADMISSION_DROP,
+-				     pon->control_fault ? -EIO : -ENODEV);
++				     (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault)) ? -EIO : -ENODEV);
+ 		dev_kfree_skb_any(skb);
+ 		goto out;
+ 	}
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -22,6 +22,7 @@
+  */
+ DEFINE_MUTEX(flow_offload_mutex);
+ static DEFINE_SPINLOCK(ppe_lock);
++static DEFINE_SPINLOCK(updmem_lock);
+ 
+ static const struct rhashtable_params airoha_flow_table_params = {
+ 	.head_offset = offsetof(struct airoha_flow_table_entry, node),
+@@ -483,6 +484,33 @@
+ 	return 0;
+ }
+ 
++/* Factory AN7581 PpeSetPortInfo uses l2.etype as the PON special tag:
++ * GEM at byte 46 (IPv4) / 50 (IPv6); channel/QID at word 10; NBQ in IB2.
++ * Keep fast-path clear: upstream uses the QDMA1 service scheduler.
++ */
++static void airoha_ppe_foe_set_pon(struct airoha_foe_entry *hwe,
++				 const struct airoha_pon_flow *flow, bool ipv6)
++{
++	struct airoha_foe_mac_info_common *l2 = ipv6 ? &hwe->ipv6.l2 :
++						     &hwe->ipv4.l2.common;
++	u32 *ib2 = ipv6 ? &hwe->ipv6.ib2 : &hwe->ipv4.ib2;
++	u32 *qdata = ipv6 ? &hwe->ipv6.data : &hwe->ipv4.data;
++
++	*ib2 &= ~(AIROHA_FOE_IB2_PSE_PORT | AIROHA_FOE_IB2_NBQ |
++		  AIROHA_FOE_IB2_FAST_PATH);
++	*ib2 |= FIELD_PREP(AIROHA_FOE_IB2_PSE_PORT, AIROHA_GDM2_IDX) |
++		FIELD_PREP(AIROHA_FOE_IB2_NBQ, flow->channel) |
++		AIROHA_FOE_IB2_PSE_QOS;
++	*qdata &= ~(AIROHA_FOE_CHANNEL | AIROHA_FOE_QID);
++	*qdata |= FIELD_PREP(AIROHA_FOE_CHANNEL, flow->channel) |
++		  FIELD_PREP(AIROHA_FOE_QID, flow->queue);
++	l2->etype = flow->gem;
++	if (ipv6) {
++		l2->src_mac_hi &= ~AIROHA_FOE_MAC_SMAC_ID;
++		l2->src_mac_hi |= FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID, AIROHA_GDM2_IDX);
++	}
++}
++
+ static int airoha_ppe_foe_entry_set_ipv4_tuple(struct airoha_foe_entry *hwe,
+ 					       struct airoha_flow_data *data,
+ 					       bool egress)
+@@ -725,11 +753,12 @@
+ struct airoha_foe_entry *airoha_ppe_foe_get_entry(struct airoha_ppe *ppe,
+ 						  u32 hash)
+ {
++	unsigned long flags;
+ 	struct airoha_foe_entry *hwe;
+ 
+-	spin_lock_bh(&ppe_lock);
++	spin_lock_irqsave(&ppe_lock, flags);
+ 	hwe = airoha_ppe_foe_get_entry_locked(ppe, hash);
+-	spin_unlock_bh(&ppe_lock);
++	spin_unlock_irqrestore(&ppe_lock, flags);
+ 
+ 	return hwe;
+ }
+@@ -809,23 +838,74 @@
+ 	return err;
+ }
+ 
++/* An unacknowledged PPE write may have reached hardware. Keep this fault
++ * for the lower device's lifetime, across consumer detach/reattach. Only a
++ * new native FE instance may reopen the namespace after such a failure.
++ */
++static void airoha_ppe_pon_fault(struct airoha_gdm_dev *dev)
++{
++	WRITE_ONCE(dev->pon_flow_fault, true);
++	airoha_fe_wr(dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), 0);
++	airoha_fe_rr(dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX));
++}
++
+ static void airoha_ppe_foe_remove_flow(struct airoha_ppe *ppe,
+ 				       struct airoha_flow_table_entry *e)
+ {
+ 	lockdep_assert_held(&ppe_lock);
+ 
+ 	hlist_del_init(&e->list);
++	if (e->pon_dev && !list_empty(&e->pon_list)) {
++		list_del_init(&e->pon_list);
++		ppe->pon_flow_count--;
++	}
+ 	if (e->hash != 0xffff) {
+ 		e->data.ib1 &= ~AIROHA_FOE_IB1_BIND_STATE;
+ 		e->data.ib1 |= FIELD_PREP(AIROHA_FOE_IB1_BIND_STATE,
+ 					  AIROHA_FOE_STATE_INVALID);
+-		airoha_ppe_foe_commit_entry(ppe, &e->data, e->hash, false);
++		if (airoha_ppe_foe_commit_entry(ppe, &e->data, e->hash, false) &&
++		    e->pon_dev)
++			airoha_ppe_pon_fault(e->pon_dev);
+ 		e->hash = 0xffff;
+ 	}
+ 	if (e->type == FLOW_TYPE_L2_SUBFLOW) {
+ 		hlist_del_init(&e->l2_subflow_node);
+ 		kfree(e);
+ 	}
++}
++
++int airoha_ppe_pon_invalidate(struct airoha_gdm_dev *dev)
++{
++	struct airoha_ppe *ppe = dev->eth->ppe;
++	struct airoha_flow_table_entry *e, *tmp;
++	unsigned long flags;
++	int error = 0;
++
++	if (!ppe)
++		return 0;
++	spin_lock_irqsave(&ppe_lock, flags);
++	if (++dev->pon_flow_epoch == 0)
++		error = -EOVERFLOW;
++	list_for_each_entry_safe(e, tmp, &ppe->pon_flows, pon_list) {
++		int ret;
++
++		if (e->pon_dev != dev)
++			continue;
++		if (e->hash != 0xffff) {
++			e->data.ib1 &= ~AIROHA_FOE_IB1_BIND_STATE;
++			ret = airoha_ppe_foe_commit_entry(ppe, &e->data, e->hash, false);
++			if (ret)
++				error = ret;
++			e->hash = 0xffff;
++		}
++		hlist_del_init(&e->list);
++		list_del_init(&e->pon_list);
++		ppe->pon_flow_count--;
++	}
++	if (error)
++		airoha_ppe_pon_fault(dev);
++	spin_unlock_irqrestore(&ppe_lock, flags);
++	return error;
+ }
+ 
+ static void airoha_ppe_foe_remove_l2_flow(struct airoha_ppe *ppe,
+@@ -845,14 +925,15 @@
+ static void airoha_ppe_foe_flow_remove_entry(struct airoha_ppe *ppe,
+ 					     struct airoha_flow_table_entry *e)
+ {
+-	spin_lock_bh(&ppe_lock);
++	unsigned long flags;
++	spin_lock_irqsave(&ppe_lock, flags);
+ 
+ 	if (e->type == FLOW_TYPE_L2)
+ 		airoha_ppe_foe_remove_l2_flow(ppe, e);
+ 	else
+ 		airoha_ppe_foe_remove_flow(ppe, e);
+ 
+-	spin_unlock_bh(&ppe_lock);
++	spin_unlock_irqrestore(&ppe_lock, flags);
+ }
+ 
+ static int
+@@ -908,6 +989,7 @@
+ 					struct sk_buff *skb,
+ 					u32 hash, bool rx_wlan)
+ {
++	unsigned long flags;
+ 	struct airoha_flow_table_entry *e;
+ 	struct airoha_foe_bridge br = {};
+ 	struct airoha_foe_entry *hwe;
+@@ -915,7 +997,7 @@
+ 	struct hlist_node *n;
+ 	u32 index, state;
+ 
+-	spin_lock_bh(&ppe_lock);
++	spin_lock_irqsave(&ppe_lock, flags);
+ 
+ 	hwe = airoha_ppe_foe_get_entry_locked(ppe, hash);
+ 	if (!hwe)
+@@ -936,10 +1018,19 @@
+ 			continue;
+ 		}
+ 
++		if (e->pon_dev && (e->pon_dev->pon_flow_fault || e->pon_epoch != e->pon_dev->pon_flow_epoch ||
++		    (e->hash != 0xffff && e->hash != hash)))
++			continue;
+ 		if (!airoha_ppe_foe_compare_entry(e, hwe))
+ 			continue;
+ 
+-		airoha_ppe_foe_commit_entry(ppe, &e->data, hash, rx_wlan);
++		if (airoha_ppe_foe_commit_entry(ppe, &e->data, hash, rx_wlan)) {
++			if (e->pon_dev) {
++				e->hash = hash;
++				airoha_ppe_pon_fault(e->pon_dev);
++			}
++			continue;
++		}
+ 		commit_done = true;
+ 		e->hash = hash;
+ 	}
+@@ -953,7 +1044,7 @@
+ 	if (e)
+ 		airoha_ppe_foe_commit_subflow_entry(ppe, e, hash, rx_wlan);
+ unlock:
+-	spin_unlock_bh(&ppe_lock);
++	spin_unlock_irqrestore(&ppe_lock, flags);
+ }
+ 
+ static int
+@@ -979,6 +1070,7 @@
+ static int airoha_ppe_foe_flow_commit_entry(struct airoha_ppe *ppe,
+ 					    struct airoha_flow_table_entry *e)
+ {
++	unsigned long flags;
+ 	int type = FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, e->data.ib1);
+ 	u32 hash;
+ 
+@@ -989,9 +1081,22 @@
+ 	e->type = FLOW_TYPE_L4;
+ 	e->hash = 0xffff;
+ 
+-	spin_lock_bh(&ppe_lock);
++	spin_lock_irqsave(&ppe_lock, flags);
++	if (e->pon_dev) {
++		if (e->pon_dev->pon_flow_fault || e->pon_epoch != e->pon_dev->pon_flow_epoch) {
++			spin_unlock_irqrestore(&ppe_lock, flags);
++			return -ESTALE;
++		}
++		/* Bound hard-IRQ retirement work as well as hardware exposure. */
++		if (ppe->pon_flow_count >= 64) {
++			spin_unlock_irqrestore(&ppe_lock, flags);
++			return -ENOSPC;
++		}
++		list_add_tail(&e->pon_list, &ppe->pon_flows);
++		ppe->pon_flow_count++;
++	}
+ 	hlist_add_head(&e->list, &ppe->foe_flow[hash]);
+-	spin_unlock_bh(&ppe_lock);
++	spin_unlock_irqrestore(&ppe_lock, flags);
+ 
+ 	return 0;
+ }
+@@ -1055,9 +1160,10 @@
+ static void airoha_ppe_foe_flow_entry_update(struct airoha_ppe *ppe,
+ 					     struct airoha_flow_table_entry *e)
+ {
++	unsigned long flags;
+ 	struct airoha_foe_entry *hwe_p, hwe = {};
+ 
+-	spin_lock_bh(&ppe_lock);
++	spin_lock_irqsave(&ppe_lock, flags);
+ 
+ 	if (e->type == FLOW_TYPE_L2) {
+ 		airoha_ppe_foe_flow_l2_entry_update(ppe, e);
+@@ -1079,7 +1185,7 @@
+ 
+ 	e->data.ib1 = hwe.ib1;
+ unlock:
+-	spin_unlock_bh(&ppe_lock);
++	spin_unlock_irqrestore(&ppe_lock, flags);
+ }
+ 
+ static int airoha_ppe_entry_idle_time(struct airoha_ppe *ppe,
+@@ -1096,6 +1202,8 @@
+ 	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
+ 	struct airoha_flow_table_entry *e;
+ 	struct airoha_flow_data data = {};
++	struct airoha_pon_flow pon_flow = {};
++	struct airoha_gdm_dev *pon_dev = NULL;
+ 	struct net_device *odev = NULL;
+ 	struct flow_action_entry *act;
+ 	struct airoha_foe_entry hwe;
+@@ -1206,8 +1314,24 @@
+ 	    !is_valid_ether_addr(data.eth.h_dest))
+ 		return -EINVAL;
+ 
+-	err = airoha_ppe_foe_entry_prepare(eth, &hwe, odev, offload_type,
+-					   &data, l4proto, dsfield);
++	err = airoha_pon_resolve_flow(eth, odev,
++		addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS ? ETH_P_IPV6 : ETH_P_IP,
++		data.eth.h_source, &pon_flow, &pon_dev);
++	if (err && err != -ENOENT)
++		return err;
++	if (pon_dev) {
++		if (offload_type == PPE_PKT_TYPE_BRIDGE || keep_ttl ||
++		    data.vlan.num || data.pppoe.num ||
++		    (l4proto != IPPROTO_TCP && l4proto != IPPROTO_UDP))
++			return -EOPNOTSUPP;
++		data.vlan.num = pon_flow.num_vlans;
++		for (i = 0; i < data.vlan.num; i++) {
++			data.vlan.hdr[i].id = pon_flow.vlan[i];
++			data.vlan.hdr[i].proto = htons(ETH_P_8021Q);
++		}
++	}
++	err = airoha_ppe_foe_entry_prepare(eth, &hwe, pon_dev ? NULL : odev,
++					   offload_type, &data, l4proto, dsfield);
+ 	if (err)
+ 		return err;
+ 
+@@ -1293,6 +1417,12 @@
+ 		return -ENOMEM;
+ 
+ 	e->cookie = f->cookie;
++	e->pon_dev = pon_dev;
++	e->pon_epoch = pon_flow.epoch;
++	INIT_LIST_HEAD(&e->pon_list);
++	if (pon_dev)
++		airoha_ppe_foe_set_pon(&hwe, &pon_flow,
++			offload_type == PPE_PKT_TYPE_IPV6_ROUTE_5T);
+ 	memcpy(&e->data, &hwe, sizeof(e->data));
+ 
+ 	err = airoha_ppe_foe_flow_commit_entry(eth->ppe, e);
+@@ -1551,7 +1681,10 @@
+ {
+ 	struct airoha_gdm_port *port = dev->port;
+ 	struct airoha_eth *eth = dev->eth;
++	unsigned long flags;
+ 	u32 val;
++
++	spin_lock_irqsave(&updmem_lock, flags);
+ 
+ 	val = (addr[2] << 24) | (addr[3] << 16) | (addr[4] << 8) | addr[5];
+ 	airoha_fe_wr(eth, REG_UPDMEM_DATA(0), val);
+@@ -1565,6 +1698,7 @@
+ 		     FIELD_PREP(PPE_UPDMEM_ADDR_MASK, port->id) |
+ 		     FIELD_PREP(PPE_UPDMEM_OFFSET_MASK, 1) |
+ 		     PPE_UPDMEM_WR_MASK | PPE_UPDMEM_REQ_MASK);
++	spin_unlock_irqrestore(&updmem_lock, flags);
+ }
+ 
+ struct airoha_ppe_dev *airoha_ppe_get_dev(struct device *dev)
+@@ -1636,6 +1770,7 @@
+ 	ppe->dev.ops.check_skb = airoha_ppe_check_skb;
+ 	ppe->dev.priv = ppe;
+ 	ppe->eth = eth;
++	INIT_LIST_HEAD(&ppe->pon_flows);
+ 	eth->ppe = ppe;
+ 
+ 	ppe_num_entries = airoha_ppe_get_total_num_entries(ppe);
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -42,7 +42,23 @@
+ 	AIROHA_PON_TX_RETRY,
+ };
+ 
++/* Routed, untagged UNI IPv4/IPv6 egress only. The consumer resolves the
++ * actual OMCI classifier, including the output VLAN treatment. No OMCI,
++ * bridge, PPPoE, multicast or downstream classifier bypass is authorized.
++ */
++struct airoha_pon_flow {
++	u64 epoch;
++	u16 gem, vlan[2];
++	u8 channel, queue, num_vlans;
++};
++
+ struct airoha_pon_ops {
++	/* Atomic under RCU and native admission lock. Return -ENOENT unless
++	 * upper is this consumer's data netdev. Do not reenter the native API.
++	 * ethertype is host endian. An error leaves software forwarding intact.
++	 */
++	int (*flow)(void *priv, const struct net_device *upper, u16 ethertype,
++		    struct airoha_pon_flow *flow);
+ 	/* RX owns skb on entry, even when it rejects the frame. skb->data is
+ 	 * the unparsed frame; no Ethernet header has been pulled. Metadata is
+ 	 * valid only for this call. RX and tx_wake run under RCU in softirq
+@@ -77,6 +93,12 @@
+ struct airoha_pon *airoha_pon_attach(struct net_device *netdev,
+ 				     const struct airoha_pon_ops *ops, void *priv);
+ void airoha_pon_release(struct airoha_pon *pon);
++/* Synchronously retire every PON egress flow before changing any service
++ * classifier, UNI, GEM or T-CONT. IRQ-safe. A hardware retirement error
++ * latches admission closed and disables GDM2 TX, preventing identifier reuse
++ * from transmitting through a stale entry. Does not drain optical FIFOs.
++ */
++void airoha_pon_invalidate_flows(struct airoha_pon *pon);
+ 
+ /* Permanently disconnect callbacks/TX submission and wait up to timeout_ms
+  * for this attachment's mapped TX descriptors to be reaped by the native

@@ -76,6 +76,7 @@ int q1000k_phy_rx_sample(struct q1000k_rx_sample *s) {
     memset(s,0,sizeof(*s)); s->rx_bench=rx_bench; s->tx_inhibited=rx_bench; s->tx_enabled=!rx_bench; s->synced=true; s->frames=1234; s->sampled_ms=123456789012ULL;
     s->gain_restore_enabled=phy_restore_gain; s->rx_power_valid=power_valid; s->rx_power_nw=power_valid ? 19900 : 0;
     s->pll_restore_enabled=phy_restore_pll; s->reacquire_enabled=phy_reacquire; s->reacquire_attempts=phy_reacquire ? 1 : 0;
+    s->service_acquire_attempts=77; s->service_acquire_next_ms=123456804012ULL;
     s->receiver=(struct q1000k_rx_registers){
         .rx_control=1, .pcs_reset=2, .pma_reset=3, .clock_control=4,
         .cdr_control=5, .rx_frequency=6, .pll_status=7, .tdc_control=8,
@@ -133,6 +134,7 @@ int main(void) {
     assert(strstr(out,"\"frames\":1234") && strstr(out,"\"sampled_ms\":123456789012"));
     assert(strstr(out,"\"registration_enabled\":false") && strstr(out,"\"tx_enabled\":false"));
     assert(strstr(out,"\"reacquire_enabled\":true,\"reacquire_attempts\":1"));
+    assert(strstr(out,"\"service_acquire_attempts\":77,\"service_acquire_next_ms\":123456804012"));
     assert(strstr(out,"\"receiver\":{\"rx_control\":1,\"pcs_reset\":2,\"pma_reset\":3,"
                       "\"clock_control\":4,\"cdr_control\":5,\"rx_frequency\":6,\"pll_status\":7,"
                       "\"tdc_control\":8,\"rx_analog0\":9,\"rx_analog1\":10,\"rx_analog2\":11,"

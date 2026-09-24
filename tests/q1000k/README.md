@@ -1,5 +1,30 @@
 # Q1000K app checks
 
+## Build regression tests
+
+`scripts/q1000k/bench-build.py` runs the complete `test_pon_*.py` host suite
+with up to eight isolated Python workers by default (capped by `--jobs`).
+Use `--test-jobs N` to set test concurrency independently of make, or
+`--test-jobs 1` for serial debugging. Each discovered case runs once;
+individual cases are distributed across workers so the long activation
+scenarios can run concurrently. Class/module fixtures remain local to each
+worker, and the existing compiler flags, sanitizers and assertions are kept.
+
+To run the same regression suite without rebuilding the image:
+
+```sh
+python3 tests/q1000k/run_host_tests.py --jobs 8
+```
+
+The build saves all worker output in `host-tests.log`, and writes selected
+test IDs, outcomes and per-test timings to `host-tests.json`. The standalone
+runner accepts `--results PATH` to save that JSON report too. Failures,
+discovery errors and missing worker results fail the build; interrupting the
+runner stops its workers and their fixture subprocesses. Status, LuCI and
+image inspection checks still run after the PON suite.
+
+## RAM bench inspection
+
 For the separate TX-inhibited RAM bench image:
 
 ```sh
@@ -33,6 +58,25 @@ checksums and results. It does not test hardware, the initramfs's embedded
 rootfs at runtime or the normal boot/upgrade path.
 
 ## XGS-PON development
+
+Normal service retains the PHY IRQs and polls both controller/PHY LOS and
+downstream framing every 1.5 seconds. A dark boot or extended outage remains
+in the waiting state indefinitely. With light but no framing, acquisition uses
+the checked PMA out/in path at most once per 15 seconds, without a retry limit
+or escalation to a whole PHY/SCU reset. The MAC retains its existing fresh
+registration policy after loss, including service retirement and TX inhibition
+in O7. The opt-in RX-only bench's finite attempt budget is unchanged.
+The existing RX snapshot JSON adds `service_acquire_attempts` (poll-driven PMA
+attempts since module load) and `service_acquire_next_ms` (next permitted
+attempt in boot-time milliseconds; zero while dark, synced or stopped).
+`poll_calls` and `irq_calls` now also count normal-service callbacks. These
+counts show activity, not successful registration or traffic recovery.
+
+`python3 tests/q1000k/test_pon_phy_lifecycle.py` exercises the actual polling
+code with simulated hour-long dark boots/outages, repeated reconnects, missed
+IRQs, persistent no-sync, mixed LOS, MMIO/I2C/PMA failures and shutdown during
+reacquisition. Simulated time and mocked analog operations do not establish
+physical reconnect, registration or Internet recovery on the new firmware.
 
 ```sh
 python3 tests/q1000k/test_xgspon.py

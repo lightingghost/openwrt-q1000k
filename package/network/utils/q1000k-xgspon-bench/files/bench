@@ -328,6 +328,7 @@ registration=
 identity_options || fail 'Invalid staged OMCI identity.'
 # Receive tests never need the subscriber registration secret.
 registration=
+stop_diagnostic_monitor || fail 'Automatic diagnostics could not release the controller.'
 modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
 for module in $modules; do
 	[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."

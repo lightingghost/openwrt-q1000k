@@ -37,8 +37,18 @@ def cpio(data, start):
         records[name] = (mode, payload)
 
 
-def inspect(image, revision, profile='bench'):
+def inspect(image, revision, profile='bench', private_manifest=None):
     repo = Path(__file__).resolve().parents[2]
+    private = json.loads(private_manifest.read_text()) if private_manifest else None
+    if private:
+        assert profile == 'activation' and private['schema_version'] == 1
+        assert private['profile'] == 'continuous-activation-v1'
+        assert set(private['files']) == {
+            'etc/config/q1000k-xgspon', 'etc/q1000k-private-autostart',
+            'etc/uci-defaults/zz-q1000k-private-autostart',
+            'lib/firmware/airoha/q1000k/A60993.elf.pm',
+            'lib/firmware/airoha/q1000k/A60993.elf.dm',
+            'lib/firmware/airoha/q1000k/xgspon-calibration.bin'}
     blob = image.read_bytes()
     fit, size = fdt(blob)
     payloads, checked = {}, []
@@ -149,10 +159,16 @@ def inspect(image, revision, profile='bench'):
         ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config', 'etc/config/q1000k-xgspon'),
         ('package/network/utils/q1000k-xgspon/files/common.sh', 'lib/q1000k-xgspon/common.sh'),
         ('package/network/utils/q1000k-xgspon/files/omci-config', 'usr/libexec/q1000k-omci-config'),
-        ('package/network/utils/q1000k-xgspon-service/files/run', 'usr/libexec/q1000k-xgspon-run')):
+        ('package/network/utils/q1000k-xgspon-service/files/run', 'usr/libexec/q1000k-xgspon-run'),
+        ('package/network/utils/q1000k-xgspon-service/files/init', 'etc/init.d/q1000k-xgspon'),
+        ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon', 'usr/sbin/q1000k-xgspon'),
+        ('package/luci-app-econet-xpon/root/usr/share/luci/menu.d/luci-app-econet-xpon.json',
+         'usr/share/luci/menu.d/luci-app-econet-xpon.json')):
+        if private and dest == 'etc/config/q1000k-xgspon':
+            continue
         assert read(dest) == (repo / source).read_bytes(), dest
     assert stat.S_IMODE(records['etc/config/q1000k-xgspon'][0]) == 0o600
-    status = read('www/luci-static/resources/view/econet-xpon/status.js')
+    status = read('www/luci-static/resources/view/econet-xpon/status-v4.js')
     source = (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/status.js').read_bytes()
     # luci.mk applies this host tool when packaging JavaScript. Check the exact
     # packaged program, without mistaking whitespace removal for stale code.
@@ -160,11 +176,15 @@ def inspect(image, revision, profile='bench'):
     assert status in (source, minimized), 'LuCI status differs from packaged source'
     assert b'rx_power_nw' in status and b'Math.log10' in status
     assert b'rx_power_dbm' in read('usr/sbin/q1000k-omci')
-    settings = read('www/luci-static/resources/view/econet-xpon/settings.js')
+    settings = read('www/luci-static/resources/view/econet-xpon/settings-v4.js')
+    source = (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/settings.js').read_bytes()
+    minimized = subprocess.check_output([repo / 'staging_dir/hostpkg/bin/jsmin'], input=source)
+    assert settings in (source, minimized), 'LuCI settings differs from packaged source'
     for field in ('serial', 'vendor_id', 'equipment_id', 'hardware_version',
                   'sync_circuit_pack', 'software_version_a', 'software_version_b',
                   'active', 'committed', 'registration_id', 'logical_onu_id',
-                  'logical_password', 'mib_profile', 'fix_vlans'):
+                  'logical_password', 'fix_vlans', 'omcc_version', 'pon_slot',
+                  'olt_profile', 'iphost_mac', 'iphost_hostname', 'iphost_domain', 'monitor'):
         assert field.encode() in settings, ('missing LuCI identity field', field)
     # U-Boot may replace bootargs; userspace also overrides kernel.panic.
     # Evaluate the shipped sysctl files in the same order as init.d/sysctl.
@@ -181,7 +201,12 @@ def inspect(image, revision, profile='bench'):
     modules = ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu', 'airoha_ecnt_pon_phy',
                'airoha_ecnt_xpon', 'phy_10g', 'xpon_10g', 'xpon', 'omci')
     runtime_paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
-                     'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config']
+                     'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config',
+                     'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
+                     'usr/libexec/q1000k-xgspon-run', 'etc/init.d/q1000k-xgspon',
+                     'usr/share/luci/menu.d/luci-app-econet-xpon.json',
+                     'www/luci-static/resources/view/econet-xpon/status-v4.js',
+                     'www/luci-static/resources/view/econet-xpon/settings-v4.js']
     if profile == 'activation':
         runtime_paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/libexec/q1000k-pd-source', 'usr/libexec/q1000k-ipv6-bench', 'usr/libexec/q1000k-ipv6-client', 'usr/libexec/q1000k-udp6-probe', 'usr/share/q1000k-bench/capabilities.json'])
         assert read('usr/share/q1000k-bench/capabilities.json') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/capabilities.json').read_bytes()
@@ -263,7 +288,19 @@ def inspect(image, revision, profile='bench'):
             for line in read(name).decode().splitlines():
                 if line.strip() and not line.lstrip().startswith('#'):
                     assert line.split()[0].replace('-', '_') not in forbidden, name
-    assert not any(p.startswith('lib/firmware/airoha/q1000k/') for p in records)
+    if private:
+        for name, expected in private['files'].items():
+            assert hashlib.sha256(read(name)).hexdigest() == expected['sha256'], name
+            assert stat.S_IMODE(records[name][0]) == expected['mode'], name
+        assert read('etc/uci-defaults/zz-q1000k-private-autostart') == (
+            repo / 'package/network/utils/q1000k-xgspon-service/files/continuous-defaults').read_bytes()
+        assert read('etc/q1000k-private-autostart') == b'continuous-activation-v1\n'
+        assert 'etc/rc.d/S95q1000k-xgspon' in records
+        assert set(p for p in records if p.startswith('lib/firmware/airoha/q1000k/') and
+                   stat.S_ISREG(records[p][0])) == {p for p in private['files'] if p.startswith('lib/firmware/')}
+    else:
+        assert not any(p.startswith('lib/firmware/airoha/q1000k/') for p in records)
+        assert 'etc/q1000k-private-autostart' not in records
     return dict(revision=revision, file=image.name, bytes=len(blob),
                 sha256=hashlib.sha256(blob).hexdigest(), verified_fit_images=checked,
                 kernel_uncompressed_bytes=len(expanded), initramfs_entries=len(records),
@@ -271,7 +308,8 @@ def inspect(image, revision, profile='bench'):
                 nand_disabled=True, tx_inhibited=(profile == 'bench'), tx_inhibited_by_default=True, profile=profile, management_ip='192.168.255.1',
                 configured_panic_timeout=panic, runtime_panic_readback_required=True,
                 runtime_sha256sums={p: hashlib.sha256(read(p)).hexdigest() for p in runtime_paths},
-                rootfs_checks='passed', identity_configuration_checks='passed', device_access=False)
+                rootfs_checks='passed', identity_configuration_checks='passed',
+                private_continuous_service=bool(private), device_access=False)
 
 
 if __name__ == '__main__':
@@ -279,7 +317,8 @@ if __name__ == '__main__':
     parser.add_argument('image', type=Path)
     parser.add_argument('revision')
     parser.add_argument('--profile', choices=('bench', 'activation'), default='bench')
+    parser.add_argument('--private-manifest', type=Path)
     args = parser.parse_args()
     if not __debug__ or not re.fullmatch('[0-9a-f]{40}', args.revision):
         parser.error('Require a full lowercase commit and non-optimized Python')
-    print(json.dumps(inspect(args.image, args.revision, args.profile), indent=2))
+    print(json.dumps(inspect(args.image, args.revision, args.profile, args.private_manifest), indent=2))

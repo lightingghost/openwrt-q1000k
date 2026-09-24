@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon-service
-PKG_RELEASE:=4
+PKG_RELEASE:=8
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -15,10 +15,11 @@ define Package/q1000k-xgspon-service
 endef
 
 define Package/q1000k-xgspon-service/description
- Explicitly enabled procd supervision of the Q1000K controller, PHY, MAC
- and OMCI modules. Requires matching enabled board resources, OEM firmware,
- factory calibration, a registration ID and an explicit running native PON
- lower device. Disabled by default; no automatic restart after failure.
+ Automatic TX-disabled optical controller monitoring, waiting for verified
+ OEM firmware and unit calibration. Explicitly enabled registration adds
+ the PHY, MAC and OMCI modules and requires subscriber identity and an
+ explicit native PON lower device. Private activation RAM builds can provide
+ continuous LAN/WAN service. No restart after hardware failure.
 endef
 
 define Build/Compile

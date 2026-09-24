@@ -80,6 +80,7 @@ static int qrx_status_format(char *buffer, const struct q1000k_rx_sample *sample
 		"\"sync_status\":%u,\"frames\":%u,\"lof\":%u,"
 		"\"fec_total\":%u,\"fec_corrected\":%u,\"fec_uncorrected\":%u,"
 		"\"irq_calls\":%u,\"poll_calls\":%u,\"sampled_ms\":%llu,"
+		"\"service_acquire_attempts\":%u,\"service_acquire_next_ms\":%llu,"
 		"\"reacquire_enabled\":%s,\"reacquire_attempts\":%u,"
 		"\"pll_restore_enabled\":%s,\"gain_restore_enabled\":%s,"
 		"\"rx_power_valid\":%s,\"rx_power_nw\":%s,\"receiver_version\":5,"
@@ -105,6 +106,7 @@ static int qrx_status_format(char *buffer, const struct q1000k_rx_sample *sample
 		s.synced ? "true" : "false", s.sync_status, s.frames, s.lof,
 		s.fec_total, s.fec_corrected, s.fec_uncorrected,
 		s.irq_calls, s.poll_calls, (unsigned long long)s.sampled_ms,
+		s.service_acquire_attempts, (unsigned long long)s.service_acquire_next_ms,
 		s.reacquire_enabled ? "true" : "false", s.reacquire_attempts,
 		s.pll_restore_enabled ? "true" : "false",
 		s.gain_restore_enabled ? "true" : "false",

@@ -1,6 +1,6 @@
 {
     "luci-app-econet-xpon": {
-        "description": "Q1000K XGS-PON diagnostics and identity overrides",
+        "description": "Q1000K XGS-PON diagnostics and settings",
         "read": {
             "uci": [ "q1000k-xgspon" ],
             "ubus": { "econet-xpon": [ "status", "raw", "mib" ] }

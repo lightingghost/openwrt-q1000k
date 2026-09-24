@@ -123,6 +123,7 @@ struct net_device {
     const struct net_device_ops *netdev_ops;
     int reg_state,features;
     bool running,upper;
+    u8 dev_addr[6];
     struct airoha_gdm_dev *priv;
     struct netdev_queue txq[32];
     struct { int rx_dropped; } stats;
@@ -153,8 +154,9 @@ struct airoha_gdm_dev {
     struct airoha_eth *eth;
     struct airoha_qdma *qdma;
     struct airoha_pon *pon;
-    bool pon_port;
-    u64 pon_generation;
+    bool pon_port,pon_flow_fault;
+    u64 pon_generation,pon_flow_epoch;
+    u8 pon_smac[6];
     atomic_t pon_tx_pending;
 };
 struct airoha_gdm_port { struct airoha_gdm_dev *devs[2]; };
@@ -181,11 +183,25 @@ struct airoha_pon_tx_meta { u64 epoch; u16 gem; u8 channel,queue,cpu_queue,mic_i
 struct airoha_pon_rx_meta { u32 words[4]; u16 gem; u8 channel; bool omci,no_mic; };
 ''' + status_api + r'''
 struct airoha_pon_ops {
+    int (*flow)(void *,const struct net_device *,u16,struct airoha_pon_flow *);
+    int (*rx_flow)(void *,const struct net_device *,u16,struct airoha_pon_flow *);
     void (*rx)(void *,struct sk_buff *,const struct airoha_pon_rx_meta *);
     void (*tx_wake)(void *);
     void (*tx_status)(void *,enum airoha_pon_tx_stage,int,const struct airoha_pon_tx_status *);
     void (*detached)(void *);
 };
+static int airoha_ppe_pon_ingress(struct airoha_gdm_dev *dev,const struct airoha_pon_flow *flow,u16 type,const u8 *addr) { return -EOPNOTSUPP; }
+static void airoha_ppe_pon_check_skb(struct airoha_gdm_dev *dev,struct sk_buff *skb,const struct airoha_pon_rx_meta *meta) {}
+static bool is_valid_ether_addr(const u8 *addr) { return !(addr[0]&1) && memcmp(addr,"\0\0\0\0\0\0",6); }
+static unsigned int invalidations,smac_updates;
+static int invalidate_error;
+static int airoha_ppe_pon_invalidate(struct airoha_gdm_dev *dev) {
+    invalidations++; dev->pon_flow_epoch++; return invalidate_error;
+}
+static void airoha_ppe_init_upd_mem(struct airoha_gdm_dev *dev,const u8 *addr) { smac_updates++; }
+#define ether_addr_equal(a,b) (!memcmp(a,b,6))
+#define ether_addr_copy(a,b) memcpy(a,b,6)
+#define eth_zero_addr(a) memset(a,0,6)
 static struct airoha_gdm_dev *netdev_priv(struct net_device *d) { return d->priv; }
 static struct net_device *netdev_from_priv(struct airoha_gdm_dev *d) { return d->netdev; }
 static bool netif_running(struct net_device *d) { return d->running; }
@@ -229,6 +245,11 @@ static enum airoha_pon_tx_stage status_stage;
 static struct airoha_pon_tx_status last_status;
 static void tx_status(void *priv,enum airoha_pon_tx_stage stage,int result,const struct airoha_pon_tx_status *status) {
     assert(rcu_readers && priv==&context); status_calls++; status_stage=stage; last_status=*status;
+}
+static int test_flow(void *priv,const struct net_device *upper,u16 proto,struct airoha_pon_flow *flow) {
+    assert(rcu_readers);
+    *flow=(struct airoha_pon_flow){.gem=500,.channel=31,.queue=7};
+    return 0;
 }
 static struct airoha_pon_ops ops={.rx=rx,.tx_wake=wake,.detached=detached,.tx_status=tx_status};
 static void reset_skb(struct sk_buff *skb,struct net_device *dev) {
@@ -292,6 +313,17 @@ int main(void) {
         assert(eth.fe_tx==(UINT32_MAX>>(31-ch)) && pon->tx_enabled==eth.fe_tx);
     }
     assert(!airoha_pon_set_queue_close(pon,31,0));
+    ops.flow=test_flow; upper.dev_addr[0]=2;
+    struct airoha_pon_flow flow={}; struct airoha_gdm_dev *owner=NULL;
+    assert(!airoha_pon_resolve_flow(&eth,&upper,0x0800,upper.dev_addr,&flow,&owner));
+    assert(owner==&gdm && flow.epoch==gdm.pon_flow_epoch && smac_updates==1);
+    u64 old_flow_epoch=flow.epoch;
+    airoha_pon_invalidate_flows(pon); assert(gdm.pon_flow_epoch>old_flow_epoch);
+    assert(!airoha_pon_resolve_flow(&eth,&upper,0x86dd,upper.dev_addr,&flow,&owner));
+    assert(smac_updates==1 && flow.epoch==gdm.pon_flow_epoch);
+    pon->paused=true;
+    assert(airoha_pon_resolve_flow(&eth,&upper,0x0800,upper.dev_addr,&flow,&owner)==-ESHUTDOWN);
+    pon->paused=false; ops.flow=NULL;
     assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch==1);
     assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
     rtnl_lock(); assert(airoha_pon_qdma_busy(&eth.qdma[1]) && !airoha_pon_qdma_busy(&eth.qdma[0])); rtnl_unlock();
@@ -567,6 +599,13 @@ int main(void) {
     assert(airoha_pon_pause(pon,0)==-EOVERFLOW && reg_writes==writes);
     assert(pon->paused && pon->control_fault && airoha_pon_resume(pon)==-EIO);
     airoha_pon_release(pon);
+    pon=airoha_pon_attach(&dev,&ops,&context); assert(pon==gdm.pon);
+    assert(!airoha_pon_set_tx_channel(pon,1,true));
+    invalidate_error=-ETIMEDOUT;
+    airoha_pon_invalidate_flows(pon);
+    assert(pon->control_fault && !eth.fe_tx);
+    assert(airoha_pon_resume(pon)==-EIO);
+    invalidate_error=0; airoha_pon_release(pon);
     assert(allocations==releases && !rtnl_held && !rcu_readers);
     return 0;
 }

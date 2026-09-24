@@ -308,7 +308,11 @@ int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,
 	if (!ret) ret = q1000k_mac_key_write(0x5204, (rx & ~3U) | old->rx_valid | next->rx_valid);
 	if (!ret && next->tx_index != old->tx_index) {
 		ret = qdata_ack_switch();
-		tx = (tx & ~(BIT(31) | BIT(0))) | (next->tx_index - 1);
+		/* A live rotation changes the index with validity still asserted.
+		 * Clearing validity here interrupts encryption and turns the change
+		 * into a fresh enable instead of the hardware's active-key switch.
+		 */
+		tx = (tx & ~BIT(0)) | (next->tx_index - 1);
 		if (!ret) ret = q1000k_mac_key_write(0x5200, tx);
 		if (!ret) ret = q1000k_mac_key_write(0x5200, tx | BIT(31));
 		if (ret) return ret;
@@ -328,21 +332,29 @@ int q1000k_mac_data_keys_live(const struct q1000k_mac_data_keys *old,
 			q1000k_trace(QT_CONTROL, 21, retry == wait ? -ETIMEDOUT : 0,
 				status, seen_tx, seen_rx, retry);
 			q1000k_activation_snapshot(9, next->tx_index);
+			/* Bit 7 reports an upstream XGEM sent with the new index,
+			 * not completion of the register write. A downstream-only
+			 * service (or no upstream grant/traffic during this window)
+			 * need not produce it. Verify the programmed selector and
+			 * material before reporting success to the OLT; absence of
+			 * that traffic event must not tear down a live rotation.
+			 * Keep the separate bench gate for first-time activation.
+			 */
+			if ((seen_tx & (BIT(31) | BIT(0))) !=
+			    (BIT(31) | (next->tx_index - 1)) ||
+			    (seen_rx & 3) != (old->rx_valid | next->rx_valid))
+				return -EUCLEAN;
+			for (word = 0; word < 4; word++) {
+				material = get_xpon_data(0x5210 + 16 * (next->tx_index - 1) + 4 * word);
+				ret = an7581_xpon_status();
+				if (ret) return ret;
+				/* All-ones is legitimate key material, not a read-fault sentinel. */
+				if (material != get_unaligned_be32(next->key[next->tx_index - 1] + 12 - 4 * word))
+					return -EKEYREJECTED;
+			}
 			if (retry == wait) {
-				/* Narrow experiment: initial validity enable only. A later
-				 * switch away from an active key still requires its IRQ.
-				 */
-				if (!bench_initial_key_readback || old->tx_index ||
-				    (seen_tx & (BIT(31) | BIT(0))) !=
-				    (BIT(31) | (next->tx_index - 1)) ||
-				    (seen_rx & 3) != (old->rx_valid | next->rx_valid))
+				if (!old->tx_index && !bench_initial_key_readback)
 					return -ETIMEDOUT;
-				for (word = 0; word < 4; word++) {
-					ret = qdata_read(0x5210 + 16 * (next->tx_index - 1) + 4 * word, &material);
-					if (ret) return ret;
-					if (material != get_unaligned_be32(next->key[next->tx_index - 1] + 12 - 4 * word))
-						return -EKEYREJECTED;
-				}
 				q1000k_trace(QT_CONTROL, 22, 0, old->tx_index, next->tx_index, seen_tx, seen_rx);
 			}
 		}

@@ -133,7 +133,18 @@ static int an7581_pon_pbus_enable(void) { return pbus_error; }
 static int handle_event(char *p);
 int q1000k_phy_rx_bench_recipe(unsigned int action) { return handle_event(NULL); }
 static int q1000k_pon_bench_reinitialize(struct q1000k_pon *p) { return 0; }
+static void phy_event_handler(PON_PHY_Event_data_t *event);
+static void fiber_plug_reset(int operation, int mode)
+{
+    check(operation==PLUG_OUT && mode==10 && !controller.tx);
+}
 /* PRODUCTION */
+int q1000k_phy_pma_reset(void)
+{
+    check(!q1000k_phy_callback_context() && !controller.tx);
+    handle_event(NULL);
+    return q1000k_phy_trans_power(PHY_TX_DIS_RESTORE_BY_SW);
+}
 int q1000k_phy_rx_cleanup(void) {
     check(!q1000k_phy_callback_context() && !qphy_active && !controller.tx);
     return 0;
@@ -155,6 +166,11 @@ static int handle_event(char *p)
 }
 static int handle_poll(char *p) { polls++; return handle_event(p); }
 static int handle_irq(char *p) { irqs++; return handle_event(p); }
+static void phy_event_handler(PON_PHY_Event_data_t *event)
+{
+    check(event->src==PON_PHY_EVENT_SOURCE_SW_POLL);
+    polls++; handle_event(NULL);
+}
 static unsigned int reacquisitions;
 int q1000k_phy_rx_probe(u32 mode) { return q1000k_phy_rx_reacquire(false, false); }
 int q1000k_phy_rx_probe_cleanup(void) { return 0; }
@@ -221,6 +237,33 @@ static void stop_during_callback(bool irq, bool quiesce)
         q1000k_phy_exit();
     }
     check(!gpPhyPriv && !fake_irq_owned && !fake_irq_task && !work_busy(&qphy_poll_job));
+}
+static void stop_during_service_acquire(bool quiesce)
+{
+    struct task_struct *task;
+    unsigned int n;
+
+    controller_los=false;
+    registers[(EN7581_XGPON_PHY_SFP_STA&0x1ffff)/4]=0;
+    registers[(EN7581_XGPON_PHY_DBG_RX_SYNC_ST&0x1ffff)/4]=0;
+    start_session();
+    check(!q1000k_phy_set_tx(true));
+    reinit_completion(&event_entered); reinit_completion(&event_release); reinit_completion(&exit_done);
+    WRITE_ONCE(hold_event,true);
+    q1000k_phy_poll();
+    check(wait_for_completion_timeout(&event_entered,5*HZ));
+    check(!controller.tx && qphy_acquire_attempts==1);
+    task=kthread_run(exit_task,(void *)(unsigned long)quiesce,"qphy-acquire-exit");
+    check(!IS_ERR(task));
+    for(n=0;n<500 && READ_ONCE(qphy_active);n++) msleep(1);
+    check(!READ_ONCE(qphy_active) && !completion_done(&exit_done));
+    WRITE_ONCE(hold_event,false); complete(&event_release);
+    check(wait_for_completion_timeout(&exit_done,5*HZ));
+    kthread_stop(task);
+    check(!qphy_fault && !controller.tx && !qphy_acquire_next_ms);
+    if(quiesce) q1000k_phy_exit();
+    check(!gpPhyPriv && !fake_irq_owned && !work_busy(&qphy_poll_job));
+    controller_los=true;
 }
 static int tx_after_event(void *unused)
 {
@@ -405,6 +448,8 @@ static int __init phy_test_init(void)
     check(polls==54 && irqs==2 && qphy_rx_polls==50 && qphy_rx_irqs==50);
     q1000k_phy_exit();
     check(!controller.held && !gpPhyPriv);
+    stop_during_service_acquire(false);
+    stop_during_service_acquire(true);
     stop_during_reacquire(false, false, false, 0);
     stop_during_reacquire(false, true, false, 0);
     stop_during_reacquire(true, false, false, 0);

@@ -27,9 +27,20 @@ struct identity {
 	uint8_t cal[CAL_SIZE];
 };
 
+static bool valid_calibration(const uint8_t *cal)
+{
+	bool nonzero = false, nonff = false;
+	/* Check the payload, not just the OEM's trailing record byte. */
+	for (size_t i = 0; i < CAL_SIZE - 1; i++) {
+		nonzero |= cal[i] != 0;
+		nonff |= cal[i] != 0xff;
+	}
+	return nonzero && nonff;
+}
+
 static bool valid(struct identity *id)
 {
-	bool nonzero = false, nonff = false, mac = false;
+	bool mac = false;
 	size_t i;
 	if (id->serial[12])
 		return false;
@@ -41,12 +52,7 @@ static bool valid(struct identity *id)
 		mac |= id->mac[i] != 0;
 	if (!mac || (id->mac[0] & 1))
 		return false;
-	/* Check the 512-byte payload, not just the OEM's trailing record byte. */
-	for (i = 0; i < CAL_SIZE - 1; i++) {
-		nonzero |= id->cal[i] != 0;
-		nonff |= id->cal[i] != 0xff;
-	}
-	return nonzero && nonff;
+	return valid_calibration(id->cal);
 }
 
 static int read_image(const char *path, uint8_t *buf, size_t len, bool regular)
@@ -56,7 +62,8 @@ static int read_image(const char *path, uint8_t *buf, size_t len, bool regular)
 	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
 	if (fd < 0)
 		return -1;
-	if (fstat(fd, &st) || (regular ? !S_ISREG(st.st_mode) : !S_ISCHR(st.st_mode)))
+	if (fstat(fd, &st) || (regular ? !S_ISREG(st.st_mode) : !S_ISCHR(st.st_mode)) ||
+	    (regular && len == CAL_SIZE && st.st_size != CAL_SIZE))
 		goto fail;
 	while (done < len) {
 		ssize_t n = pread(fd, buf + done, len - done, (off_t)done);
@@ -189,6 +196,11 @@ int main(int argc, char **argv)
 	if (argc < 2 || (strcmp(argv[1], "inspect") && strcmp(argv[1], "calibration")))
 		goto usage;
 	cal = !strcmp(argv[1], "calibration");
+	if (cal && argc == 4 && !strcmp(argv[2], "--calibration-file")) {
+		if (read_image(argv[3], id.cal, CAL_SIZE, true) || !valid_calibration(id.cal))
+			goto unavailable;
+		return fwrite(id.cal, 1, CAL_SIZE, stdout) != CAL_SIZE || fflush(stdout) ? 1 : 0;
+	}
 	if (argc == 4 && (!strcmp(argv[2], "--factory-file") || !strcmp(argv[2], "--dsd-file"))) {
 		path = argv[3];
 		regular = true;
@@ -216,6 +228,7 @@ unavailable:
 		fputs("Factory identity or XGS-PON calibration unavailable or invalid\n", stderr);
 	return 1;
 usage:
-	fputs("Usage: q1000k-pon-factory inspect|calibration [--factory-file FILE|--dsd-file FILE]\n", stderr);
+	fputs("Usage: q1000k-pon-factory inspect|calibration [--factory-file FILE|--dsd-file FILE]\n"
+	      "       q1000k-pon-factory calibration --calibration-file FILE\n", stderr);
 	return 2;
 }

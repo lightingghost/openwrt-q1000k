@@ -6,7 +6,7 @@
 umask 077
 export LC_ALL=C
 mode=$1
-work='' native_owned='' ns_client='' ns_wan='' link_client='' link_wan='' dynamic='' dhcp_owned='' lan_member='' wan_member='' server_pid='' client_pid='' capture_pid='' real_dynamic='' real_dhcp='' real_address='' real_device='' resolver_owned=''
+work='' native_owned='' ns_client='' ns_wan='' link_client='' link_wan='' dynamic='' dhcp_owned='' lan_member='' wan_member='' server_pid='' client_pid='' capture_pid='' real_dynamic='' real_dhcp='' real_address='' real_prefix='' real_device='' resolver_owned=''
 now() { local up rest; read -r up rest < /proc/uptime; echo "${up%.*}"; }
 pause() { local remaining=$1; while [ "$remaining" -gt 0 ]; do sleep 1; remaining=$((remaining-1)); done; }
 result() { printf 'ipv6_check name=%s rc=%s\n' "$1" "$2"; }
@@ -40,6 +40,9 @@ cleanup() {
 				ip -6 address del "$real_address" dev "$real_device" || failed=1
 			fi
 		}
+		if [ -n "$real_prefix" ] && [ -n "$(ip -6 route show exact "$real_prefix" dev "$real_device" proto static)" ]; then
+			ip -6 route del "$real_prefix" dev "$real_device" proto static || failed=1
+		fi
 	fi
 	if [ -n "$lan_member$wan_member" ]; then
 		[ -z "$lan_member" ] || uci -q del_list "firewall.$lan_zone.device=q6router" || failed=1
@@ -95,10 +98,10 @@ restore_native() {
 }
 auto_probe() {
 	local label=$1 rc
-	ip -6 route get 2606:4700:4700::1111 oif pon
-	/usr/bin/ping -6 -I pon -c 2 -W 2 2606:4700:4700::1111
+	ip -6 route get 2001:4860:4860::8888 oif pon
+	/usr/bin/ping -6 -I pon -c 2 -W 2 2001:4860:4860::8888
 	result "$label-ping" "$?"
-	curl --fail -6 --interface pon --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	curl --noproxy '*' --fail -6 --interface pon --resolve 'dns.google:443:[2001:4860:4860::8888]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' 'https://dns.google/resolve?name=example.com&type=AAAA'
 	rc=$?; result "$label-https" "$rc"
 }
 source_test() {
@@ -110,7 +113,7 @@ source_test() {
 		ip -6 route get 2001:4860:4860::8888 from "$address" oif pon
 		/usr/bin/ping -6 -I pon -I "$address" -c 2 -W 2 2001:4860:4860::8888
 		result "$label-google-ping" "$?"
-		curl --fail -6 --interface "ifhost!pon!$address" --resolve 'dns.google:443:[2001:4860:4860::8888]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' 'https://dns.google/resolve?name=example.com&type=AAAA'
+		curl --noproxy '*' --fail -6 --interface "ifhost!pon!$address" --resolve 'dns.google:443:[2001:4860:4860::8888]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' 'https://dns.google/resolve?name=example.com&type=AAAA'
 		result "$label-google-https" "$?"
 	done
 	[ -n "$native" ] || { result native-preference-no-address 2; return; }
@@ -143,8 +146,16 @@ zone() {
 	printf '%s\n' "$found"
 }
 dynamic_lan() {
-	ubus call network add_dynamic "{\"name\":\"q6lan\",\"proto\":\"static\",\"device\":\"q6router\",\"ip6assign\":64,\"ip6hint\":\"$1\",\"ip6class\":[\"q1000k_wan6\"],\"ip6ifaceid\":\"::1\"}" || return 1
+	if [ -n "$dynamic" ]; then
+		ubus call network.interface.q6lan remove || return 1
+		dynamic=
+		! ubus -S list network.interface.q6lan | grep -q q6lan || return 1
+	fi
+	# Create, then update allocation: the prepared netifd needs an assignment
+	# change to distribute an already-live PD to a newly created interface.
+	ubus call network add_dynamic '{"name":"q6lan","proto":"static","device":"q6router"}' || return 1
 	dynamic=1
+	ubus call network add_dynamic "{\"name\":\"q6lan\",\"proto\":\"static\",\"device\":\"q6router\",\"ip6assign\":64,\"ip6hint\":\"$1\",\"ip6class\":[\"q1000k_wan6\"],\"ip6ifaceid\":\"::1\"}" || return 1
 	ubus call network.interface.q6lan up
 }
 client_address() {
@@ -167,7 +178,7 @@ client_probes() {
 	result "$label-ping" "$?"
 	ip netns exec q6client /usr/bin/ping -6 -I q6client -M 'do' -s 1452 -c 2 -W 2 2606:4700:4700::1111
 	result "$label-mtu1500" "$?"
-	ip netns exec q6client curl --fail -6 --interface q6client --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_client_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	ip netns exec q6client curl --noproxy '*' --fail -6 --interface q6client --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_client_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
 	result "$label-https" "$?"
 }
 lan_test() {
@@ -247,7 +258,7 @@ UCI
 	if [ -n "$dns" ]; then
 		printf 'nameserver %s\n' "$dns" > /etc/netns/q6client/resolv.conf
 		ip netns exec q6client nslookup "$domain" "$dns"; result lan-advertised-dns "$?"
-		ip netns exec q6client curl --fail -6 --interface q6client --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_client_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://example.com/
+		ip netns exec q6client curl --noproxy '*' --fail -6 --interface q6client --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'ipv6_client_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' https://example.com/
 		result lan-dns-https "$?"
 	else result lan-advertised-dns 2; fi
 	ip netns exec q6client nslookup "$domain" 2606:4700:4700::1111; result lan-direct-dns "$?"
@@ -302,8 +313,9 @@ physical_test() {
 	# Refuse preexisting global LAN addresses so ownership/removal is exact.
 	[ -z "$(ip -6 -o address show dev "$real_device" scope global | awk '/inet6 [23]/ {print $4}')" ] || { result physical-preexisting-global 2; return; }
 	work=$(mktemp -d /tmp/q1000k-ipv6.XXXXXX) || die 'physical work directory'
-	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan","ip6assign":64,"ip6hint":"d","ip6class":["q1000k_wan6"],"ip6ifaceid":"::1"}' || die 'physical delegated alias'
+	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan"}' || die 'physical delegated alias'
 	real_dynamic=1
+	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan","ip6assign":64,"ip6hint":"d","ip6class":["q1000k_wan6"],"ip6ifaceid":"::1"}' || die 'physical allocation refresh'
 	ubus call network.interface.q6real up || die 'physical alias up'
 	# shellcheck disable=SC2034
 	for attempt in $(seq 1 20); do
@@ -315,6 +327,11 @@ physical_test() {
 	done
 	[ -n "$real_address" ] && ip -6 -o address show dev "$real_device" | grep -F " $real_address " | grep -qvE 'tentative|dadfailed|deprecated' || { result physical-prefix-assignment 1; return; }
 	result physical-prefix-assignment 0
+	data=$(ubus call network.interface.q6real status) && json_load "$data" &&
+		json_select ipv6-prefix-assignment && json_select 1 || die 'physical prefix ownership'
+	json_get_var address address; json_get_var mask mask
+	[ "$mask" = 64 ] && [ -n "$address" ] || die 'physical prefix shape'
+	real_prefix=$address/$mask
 	uci -q set dhcp.q6real=dhcp || die 'physical DHCP section'; real_dhcp=1
 	uci -q batch <<'UCI' || die 'physical RA configuration'
 set dhcp.q6real.interface='q6real'
@@ -346,7 +363,124 @@ UCI
 	pause 8
 	result physical-window-complete 0
 }
+auto_state=/var/run/q1000k-pon-bench.lock/auto-ipv6
+auto_prepare() {
+	local config
+	[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || return 1
+	[ "$(uci -q get network.q1000k_wan6.q1000k_profile)" = 1 ] || return 1
+	[ -z "$(uci -q get network.lan.ip6assign)" ] || return 1
+	[ -z "$(ip -6 -o address show dev br-lan scope global | awk '/inet6 [23]/ {print $4}')" ] || return 1
+	for config in network dhcp; do
+		[ -z "$(uci -q changes "$config")" ] || return 1
+	done
+	mkdir "$auto_state" || return 1
+	for config in network dhcp; do
+		uci -q export "$config" > "$auto_state/$config.before" || return 1
+	done
+	# Define both consumers before DHCPv6 starts. netifd owns address lifetimes,
+	# prefix allocation and retirement; no static subscriber prefix is copied.
+	uci -q batch <<'UCI' || return 1
+set network.q1000k_wan6.reqaddress='none'
+set network.q1000k_wan6.ip6assign='64'
+set network.q1000k_wan6.ip6hint='f'
+set network.q1000k_wan6.ip6ifaceid='::1'
+delete network.q1000k_wan6.ip6class
+add_list network.q1000k_wan6.ip6class='q1000k_wan6'
+set network.lan.ip6assign='64'
+set network.lan.ip6hint='0'
+set network.lan.ip6ifaceid='::1'
+delete network.lan.ip6class
+add_list network.lan.ip6class='q1000k_wan6'
+set dhcp.lan.ra='server'
+set dhcp.lan.dhcpv6='server'
+set dhcp.lan.ra_slaac='1'
+delete dhcp.lan.ra_flags
+add_list dhcp.lan.ra_flags='managed-config'
+add_list dhcp.lan.ra_flags='other-config'
+set dhcp.lan.ra_mininterval='3'
+set dhcp.lan.ra_maxinterval='10'
+set dhcp.lan.ra_lifetime='30'
+commit network
+commit dhcp
+UCI
+	for config in network dhcp; do
+		uci -q export "$config" > "$auto_state/$config.applied" || return 1
+	done
+	ubus call network reload && /etc/init.d/odhcpd reload || return 1
+	result native-pd-configured 0
+}
+auto_cleanup() {
+	local config address prefix failed=0
+	[ -d "$auto_state" ] || return 0
+	# Never overwrite concurrent configuration edits made outside this test.
+	for config in network dhcp; do
+		[ -s "$auto_state/$config.before" ] || return 1
+		[ -z "$(uci -q changes "$config")" ] || return 1
+		if [ -f "$auto_state/$config.applied" ]; then
+			uci -q export "$config" > "$auto_state/$config.current" || return 1
+			cmp -s "$auto_state/$config.current" "$auto_state/$config.applied" || return 1
+		fi
+	done
+	# No delegated global address existed on this LAN at entry. Preserve the
+	# exact owned addresses/routes before netifd deprecates them on withdrawal.
+	ip -6 -o address show dev br-lan scope global | awk '/inet6 [23]/ {print $4}' > "$auto_state/lan-addresses"
+	ip -6 route show dev br-lan proto static | awk '$1 ~ /^[23].*\/64$/ {print $1}' > "$auto_state/lan-routes"
+	# Caller stops WAN first. Disabling RA emits its final withdrawal before
+	# restoring the original allocation-free LAN configuration.
+	uci -q set dhcp.lan.ra=disabled && uci -q commit dhcp && /etc/init.d/odhcpd reload || failed=1
+	for config in network dhcp; do
+		uci -q import "$config" < "$auto_state/$config.before" && uci -q commit "$config" || failed=1
+	done
+	ubus call network reload && /etc/init.d/odhcpd reload || failed=1
+	while read -r address; do
+		[ -n "$address" ] || continue
+		if ip -6 -o address show dev br-lan | grep -Fq " $address "; then
+			ip -6 address del "$address" dev br-lan || failed=1
+		fi
+	done < "$auto_state/lan-addresses"
+	while read -r prefix; do
+		[ -n "$prefix" ] || continue
+		if [ -n "$(ip -6 route show exact "$prefix" dev br-lan proto static)" ]; then
+			ip -6 route del "$prefix" dev br-lan proto static || failed=1
+		fi
+	done < "$auto_state/lan-routes"
+	[ "$failed" = 0 ] || return 1
+	rm -rf "$auto_state"
+	result native-pd-config-restored 0
+}
+auto_probes() {
+	local endpoint hostname url target router label=${2:-initial}
+	printf 'native_pd_probe phase=%s\n' "$label"
+	ubus call network.interface.q1000k_wan6 status
+	ubus call network.interface.lan status
+	ip -6 -j address show; ip -6 -j route show table all
+	for endpoint in google cloudflare; do
+		if [ "$endpoint" = google ]; then
+			hostname=dns.google; target=2001:4860:4860::8888; url='https://dns.google/resolve?name=example.com&type=AAAA'
+		else hostname=one.one.one.one; target=2606:4700:4700::1111; url=https://one.one.one.one/cdn-cgi/trace; fi
+		ip -6 route get "$target" oif pon
+		/usr/bin/ping -6 -I pon -c 3 -W 2 "$target"; result "native-$label-$endpoint-ping" "$?"
+		/usr/bin/ping -6 -I pon -M do -s 1452 -c 3 -W 2 "$target"; result "native-$label-$endpoint-mtu1500" "$?"
+		curl --noproxy '*' --fail -6 --interface pon --resolve "$hostname:443:[$target]" --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'native_http local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n' "$url"
+		result "native-$label-$endpoint-https" "$?"
+	done
+	# These two probes use the router's resolver and automatic IPv6 source.
+	nslookup downloads.openwrt.org; result "native-$label-dns" "$?"
+	curl --noproxy '*' --fail -6 --interface pon --connect-timeout 5 --max-time 20 --silent --show-error --output /dev/null --write-out 'native_download local=%{local_ip} remote=%{remote_ip} bytes=%{size_download} code=%{http_code}\n' https://downloads.openwrt.org/snapshots/targets/airoha/an7581/sha256sums
+	result "native-$label-download" "$?"
+	router=$(ip -6 -o address show dev br-lan scope global | awk '/inet6 [23]/ && !/tentative|dadfailed|deprecated/ {print $4; exit}')
+	if [ -n "$router" ]; then
+		printf 'physical_lan_ready router=%s window=150\n' "$router"
+		pause 150
+	else result "native-$label-lan-address" 1; fi
+}
 [ -d /var/run/q1000k-pon-bench.lock ] || die 'activation lease missing'
+# State is shared across the parent's finite lifecycle, not this invocation.
+case "$mode" in
+	auto-prepare) auto_prepare; exit "$?";;
+	auto-cleanup) auto_cleanup; exit "$?";;
+	auto-probe) auto_probes "$@"; exit "$?";;
+esac
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM

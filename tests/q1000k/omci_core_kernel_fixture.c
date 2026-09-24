@@ -503,6 +503,44 @@ int q1000k_omci_core_test(void)
 	xpon.class_dev = parent;
 	xpon.netdev = netdev;
 	dev_set_drvdata(parent, &xpon);
+	/* Startup presentation must be present before the very first MIB. */
+	{
+		struct omci_identity startup = identity;
+		struct omci_device_ops startup_ops = fixture_ops;
+		u8 response[80];
+		size_t length = 0;
+		u16 mask = 0;
+		startup.valid |= OMCI_IDENTITY_F_SERIAL_NUMBER | OMCI_IDENTITY_F_OMCC_VERSION |
+			OMCI_IDENTITY_F_PON_SLOT | OMCI_IDENTITY_F_IPHOST_MAC |
+			OMCI_IDENTITY_F_IPHOST_HOSTNAME | OMCI_IDENTITY_F_IPHOST_DOMAIN;
+		startup.serial_source = OMCI_CONFIG_SOURCE_DRIVER;
+		memcpy(startup.serial_number, serial, 8);
+		startup.pon_slot = 3; startup.omcc_version = 0xa3;
+		memcpy(startup.iphost_mac, "\x02\x11\x22\x33\x44\x55", 6);
+		memcpy(startup.iphost_hostname, "gateway", 7);
+		memcpy(startup.iphost_domain, "example.test", 12);
+		startup_ops.initial_identity = &startup;
+		odev = omci_device_register(&xpon, OMCI_CAP_PROVIDER_MIC, &startup_ops, NULL);
+		if (IS_ERR(odev)) { ret = PTR_ERR(odev); odev = NULL; goto out; }
+		CHECK(odev->agent.identity_ready);
+		CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_PPTP_ETHERNET_UNI, 0x301));
+		CHECK(!omci_mib_lookup(&odev->agent, OMCI_CLASS_PPTP_ETHERNET_UNI, 0x101));
+		CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_UNI_G, 0x301));
+		CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_DOT1X_PORT_EXTENSION, 0x301));
+		CHECK(omci_mib_lookup(&odev->agent, OMCI_CLASS_CARDHOLDER, 0x103));
+		identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU2_G, 0);
+		CHECK(identity_object && identity_object->data[20] == 0xa3);
+		identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_ONU_G, 0);
+		CHECK(identity_object && !memcmp(identity_object->data + 4, startup.hardware_version, 14));
+		identity_object = omci_mib_lookup(&odev->agent, OMCI_CLASS_IP_HOST_CONFIG, 0);
+		CHECK(identity_object && !memcmp(identity_object->data, startup.iphost_mac, 6));
+		CHECK(!memcmp(identity_object->data + 6, startup.iphost_domain, 25));
+		CHECK(!memcmp(identity_object->data + 31, startup.iphost_hostname, 25));
+		CHECK(omci_me_encode_attributes(omci_me_lookup(&odev->agent, OMCI_CLASS_IP_HOST_CONFIG), identity_object, BIT(1), response,
+			sizeof(response), &mask, &length) == 0);
+		CHECK(mask == BIT(1) && length == 25 && !memcmp(response, startup.iphost_hostname, 25));
+		omci_device_unregister(odev); odev = NULL;
+	}
 	odev = omci_device_register(&xpon, OMCI_CAP_PROVIDER_MIC, &fixture_ops, NULL);
 	if (IS_ERR(odev)) {
 		ret = PTR_ERR(odev);

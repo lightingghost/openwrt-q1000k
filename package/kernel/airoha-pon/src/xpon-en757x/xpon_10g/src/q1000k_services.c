@@ -13,6 +13,7 @@
 #include "common/q1000k_gwan.h"
 #include "common/q1000k_protocol.h"
 #include "common/q1000k_transport.h"
+#include "common/q1000k_dhcp6_diag.h"
 
 #define QS_TCONT_BASE 0x8000
 #define QS_TCONTS 31
@@ -47,7 +48,8 @@ static void qs_reset_schedulers(void)
 static int qs_uni_index(u16 entity)
 {
 	/* The core normalizes ordinary UNI entity IDs to their port byte. */
-	if ((entity >= 1 && entity <= 4) || (entity >= 0x101 && entity <= 0x104))
+	if ((entity >= 1 && entity <= 4) || ((entity >> 8) == q1000k_pon_uni_slot() &&
+	    (entity & 0xff) >= 1 && (entity & 0xff) <= 4))
 		return (entity & 0xff) - 1;
 	if (entity == 0xa01 || entity == 0x601)
 		return 0;
@@ -70,6 +72,7 @@ void q1000k_services_destroy(void)
 	struct qs_rules *old = rcu_access_pointer(qs_current);
 
 	WRITE_ONCE(qs_enabled, false);
+	q1000k_transport_invalidate_flows();
 	RCU_INIT_POINTER(qs_current, NULL);
 	synchronize_rcu();
 	kfree(old);
@@ -78,6 +81,8 @@ void q1000k_services_destroy(void)
 void q1000k_services_enable(bool enabled)
 {
 	WRITE_ONCE(qs_enabled, enabled);
+	if (!enabled)
+		q1000k_transport_invalidate_flows();
 }
 
 void q1000k_services_reset(void)
@@ -86,6 +91,7 @@ void q1000k_services_reset(void)
 
 	WARN_ON_ONCE(!q1000k_protocol_owned());
 	WRITE_ONCE(qs_changing, true);
+	q1000k_transport_invalidate_flows();
 	old = rcu_replace_pointer(qs_current, NULL, q1000k_protocol_owned());
 	synchronize_rcu();
 	kfree(old);
@@ -178,6 +184,7 @@ int q1000k_services_tcont(struct omci_device *odev, u16 entity, u16 alloc, bool 
 	}
 	was_changing = READ_ONCE(qs_changing);
 	WRITE_ONCE(qs_changing, true);
+	q1000k_transport_invalidate_flows();
 	ret = q1000k_gwan_apply(&tables[0], &tables[1]);
 	if (!ret) {
 		qs_alloc[index] = alloc;
@@ -256,6 +263,7 @@ int q1000k_services_gem(struct omci_device *odev, u16 entity, u16 gem, u16 tcont
 	}
 	was_changing = READ_ONCE(qs_changing);
 	WRITE_ONCE(qs_changing, true);
+	q1000k_transport_invalidate_flows();
 	ret = q1000k_gwan_apply(&tables[0], &tables[1]);
 	if (!ret) {
 		qs_gems[slot] = (struct qs_gem) {
@@ -367,6 +375,7 @@ int q1000k_services_uni(struct omci_device *odev, u16 entity, bool enabled)
 	if (token < 0)
 		return token;
 	WRITE_ONCE(qs_uni[index], enabled);
+	q1000k_transport_invalidate_flows();
 	q1000k_protocol_leave(token);
 	return 0;
 }
@@ -454,6 +463,7 @@ static int qs_scheduler_update(unsigned int index, const struct qs_scheduler *ca
 		update.channel = channel;
 		was_changing = READ_ONCE(qs_changing);
 		WRITE_ONCE(qs_changing, true);
+		q1000k_transport_invalidate_flows();
 		ret = q1000k_gwan_refresh(qs_qos_install, &update);
 		if (ret != -EUCLEAN)
 			WRITE_ONCE(qs_changing, was_changing);
@@ -846,6 +856,7 @@ int q1000k_services_replace(struct omci_device *odev,
 			closed[next->channels[i]] &= ~BIT(s->queue);
 	}
 	WRITE_ONCE(qs_changing, true);
+	q1000k_transport_invalidate_flows();
 	old = rcu_dereference_protected(qs_current, q1000k_protocol_owned());
 	classifier_reason = qs_classifier_reason(old, next);
 	q1000k_trace(QT_SERVICE_INSTALL, 1, 0, old ? old->count : 0,
@@ -1036,15 +1047,15 @@ static int qs_service_frame(const struct qs_rules *rules, size_t i, bool upstrea
 	return 0;
 }
 
-int q1000k_services_tx(struct sk_buff *skb)
+static int qs_select_tx(const struct q1000k_vlan_frame *frame,
+		struct q1000k_vlan_frame *result,
+		const struct omci_service_config **service, bool *rewrite)
 {
 	const struct omci_service_config *selected = NULL;
 	struct qs_rules *rules = rcu_dereference(qs_current);
-	struct q1000k_gwan_binding binding;
-	struct q1000k_vlan_frame input, original, output, selected_output = {};
+	struct q1000k_vlan_frame input = *frame, output, selected_output = {};
 	bool normalized = false;
 	int score = -1, ret, selected_result = 0;
-	unsigned int bytes;
 	size_t i;
 	bool ambiguous = false;
 	u16 winners[QS_MAX];
@@ -1053,9 +1064,6 @@ int q1000k_services_tx(struct sk_buff *skb)
 		return -ENOLINK;
 	if (!rules)
 		return -ENODATA;
-	ret = qs_frame(skb, &input);
-	if (ret) return ret;
-	original = input;
 retry:
 	qs_vlan_winners(rules, true, &input, winners);
 	for (i = 0; i < rules->count; i++) {
@@ -1092,7 +1100,73 @@ retry:
 	if (!selected) return -ENOENT;
 	if (selected_result) return selected_result;
 	if (ambiguous) return -EEXIST;
-	if (selected->vlan_treatment_valid || normalized) {
+	*service = selected;
+	*result = selected_output;
+	*rewrite = selected->vlan_treatment_valid || normalized;
+	return 0;
+}
+
+/* Use the identical OMCI selector for a routed, untagged IP flow. Resolve
+ * binding under the caller's RCU/admission lock, then let the native owner
+ * validate that channel/queue and stamp its immutable hardware-flow epoch.
+ */
+int q1000k_services_flow(u16 ethertype, struct airoha_pon_flow *flow)
+{
+	struct q1000k_vlan_frame input = { .ethertype = ethertype }, output;
+	const struct omci_service_config *selected;
+	struct q1000k_gwan_binding binding;
+	bool rewrite;
+	unsigned int i;
+	int ret;
+
+	if (ethertype != ETH_P_IP && ethertype != ETH_P_IPV6)
+		return -EOPNOTSUPP;
+	ret = qs_select_tx(&input, &output, &selected, &rewrite);
+	if (ret)
+		return ret;
+	if (output.count > 2 || output.ethertype != ethertype)
+		return -EOPNOTSUPP;
+	for (i = 0; i < output.count; i++)
+		if (output.tag[i].tpid != ETH_P_8021Q)
+			return -EOPNOTSUPP;
+	ret = q1000k_gwan_binding(selected->gem_port_id, true, &binding);
+	if (ret)
+		return ret;
+	if (binding.alloc_id != selected->alloc_id)
+		return -ESTALE;
+	*flow = (struct airoha_pon_flow) {
+		.gem = binding.gem, .channel = binding.channel,
+		.queue = selected->queue, .num_vlans = output.count,
+	};
+	for (i = 0; i < output.count; i++)
+		flow->vlan[i] = output.tag[i].tci;
+	return 0;
+}
+
+static int qs_tx(struct sk_buff *skb)
+{
+	const struct omci_service_config *selected;
+	struct q1000k_gwan_binding binding;
+	struct q1000k_vlan_frame original, selected_output;
+	unsigned int bytes;
+	bool rewrite;
+	struct q6d_sample sample;
+	bool dhcp6;
+	int ret;
+
+	dhcp6 = q1000k_dhcp6_sample(skb, &sample) && sample.tx;
+	if (!READ_ONCE(qs_enabled) || READ_ONCE(qs_changing) || q1000k_protocol_status())
+		return -ENOLINK;
+	ret = qs_frame(skb, &original);
+	if (ret) return ret;
+	ret = qs_select_tx(&original, &selected_output, &selected, &rewrite);
+	if (dhcp6) {
+		if (!ret)
+			sample.gem = selected->gem_port_id;
+		q1000k_dhcp6_record(Q6D_TX_SELECT, &sample, ret);
+	}
+	if (ret) return ret;
+	if (rewrite) {
 		ret = qs_rewrite(skb, &original, &selected_output);
 		if (ret) return ret;
 	}
@@ -1129,13 +1203,25 @@ retry:
 	return ret;
 }
 
-int q1000k_services_rx(struct sk_buff *skb, u16 gem)
+int q1000k_services_tx(struct sk_buff *skb)
+{
+	struct q6d_sample sample;
+	bool dhcp6 = q1000k_dhcp6_sample(skb, &sample) && sample.tx;
+	int ret = qs_tx(skb);
+
+	/* Successful enqueue transfers skb ownership; do not inspect it here. */
+	if (dhcp6)
+		q1000k_dhcp6_record(Q6D_TX_SERVICE, &sample, ret);
+	return ret;
+}
+
+static int qs_select_rx(const struct q1000k_vlan_frame *frame, u16 gem,
+		struct q1000k_vlan_frame *result, bool *rewrite)
 {
 	struct qs_rules *rules = rcu_dereference(qs_current);
 	const struct omci_service_config *selected = NULL;
 	struct q1000k_gwan_binding binding;
-	struct q1000k_vlan_frame input, output, selected_output = {};
-	unsigned int bytes = skb->len;
+	struct q1000k_vlan_frame input = *frame, output, selected_output = {};
 	size_t i;
 	bool ambiguous = false;
 	u16 winners[QS_MAX];
@@ -1143,8 +1229,6 @@ int q1000k_services_rx(struct sk_buff *skb, u16 gem)
 
 	if (!READ_ONCE(qs_enabled) || READ_ONCE(qs_changing) || q1000k_protocol_status())
 		return -ENOLINK;
-	ret = qs_frame(skb, &input);
-	if (ret) return ret;
 	ret = q1000k_gwan_binding(gem, false, &binding);
 	if (ret) return ret;
 	if (rules) qs_vlan_winners(rules, false, &input, winners);
@@ -1174,9 +1258,78 @@ int q1000k_services_rx(struct sk_buff *skb, u16 gem)
 		selected_output.count = 0;
 		memset(selected_output.tag, 0, sizeof(selected_output.tag));
 	}
-	if (selected->vlan_treatment_valid || input.count != selected_output.count) {
-		ret = qs_rewrite(skb, &input, &selected_output);
-		if (ret) return ret;
+	*result = selected_output;
+	*rewrite = selected->vlan_treatment_valid || input.count != selected_output.count;
+	return 0;
+}
+
+/* The first IFC profile covers one symmetric Internet GEM, zero or one
+ * 802.1Q tag, and an untagged routed UNI. Validate the exact TCI through the downstream selector; wildcard priority
+ * only when every PCP/DEI variant reaches the same untagged UNI.
+ * More complex or asymmetric services continue through software.
+ */
+int q1000k_services_rx_flow(u16 ethertype, struct airoha_pon_flow *flow)
+{
+	struct airoha_pon_flow candidate;
+	struct q1000k_vlan_frame input = { .ethertype = ethertype }, output;
+	bool rewrite, all = true;
+	unsigned int p;
+	int ret;
+
+	ret = q1000k_services_flow(ethertype, &candidate);
+	if (ret)
+		return ret;
+	if (candidate.num_vlans > 1)
+		return -EOPNOTSUPP;
+	input.count = candidate.num_vlans;
+	if (input.count) {
+		input.tag[0].tpid = ETH_P_8021Q;
+		input.tag[0].tci = candidate.vlan[0];
+	}
+	ret = qs_select_rx(&input, candidate.gem, &output, &rewrite);
+	if (ret)
+		return ret;
+	if (output.count || output.ethertype != ethertype)
+		return -EOPNOTSUPP;
+	if (input.count) {
+		for (p = 0; p < 16; p++) {
+			input.tag[0].tci = (candidate.vlan[0] & VLAN_VID_MASK) | (p << 12);
+			ret = qs_select_rx(&input, candidate.gem, &output, &rewrite);
+			if (ret || output.count || output.ethertype != ethertype) {
+				all = false;
+				break;
+			}
+		}
+		candidate.rx_tci_mask = all ? VLAN_VID_MASK : 0xffff;
+		candidate.vlan[0] &= candidate.rx_tci_mask;
+	}
+	*flow = candidate;
+	return 0;
+}
+
+int q1000k_services_rx(struct sk_buff *skb, u16 gem)
+{
+	struct q1000k_vlan_frame input, output;
+	struct q6d_sample sample;
+	unsigned int bytes = skb->len;
+	bool rewrite;
+	bool dhcp6 = q1000k_dhcp6_sample(skb, &sample) && !sample.tx;
+	int ret;
+
+	ret = qs_frame(skb, &input);
+	if (ret)
+		return ret;
+	ret = qs_select_rx(&input, gem, &output, &rewrite);
+	if (dhcp6) {
+		sample.gem = gem;
+		q1000k_dhcp6_record(Q6D_RX_SELECT, &sample, ret);
+	}
+	if (ret)
+		return ret;
+	if (rewrite) {
+		ret = qs_rewrite(skb, &input, &output);
+		if (ret)
+			return ret;
 	}
 	q1000k_gwan_account(gem, false, bytes);
 	return 0;

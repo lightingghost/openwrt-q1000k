@@ -17,7 +17,8 @@ function harness(file) {
         dom: { content: (node, children) => { node.children = children; } },
         uci: { load: () => Promise.resolve() },
         form: { NamedSection: {}, Value: {}, Flag: {}, ListValue: {}, Map: class {
-            section() { return { tab() {}, taboption(tab, type, name) { return options[name] = { value() {} }; } }; }
+            section() { return { tab() {}, option(type, name) { return options[name] = { value() {} }; },
+                taboption(tab, type, name) { return this.option(type, name); } }; }
             render() { return {}; }
         } }
     };
@@ -38,7 +39,7 @@ async function main() {
     h.state.result = sample;
     const tree = h.view.render(await h.view.load());
     assert.match(text(tree), /Unavailable/);
-    assert.match(text(tree), /Not available in this build/);
+    assert.match(text(tree), /Not installed/);
     assert.doesNotMatch(text(tree), /Signal detected|Signal lost/);
     h.state.result = { ...sample, controller: { available: true, mode: 'xgspon',
         gpon_detected: true, xgspon_detected: true, md32_enabled: true,
@@ -71,6 +72,30 @@ async function main() {
         await h.polls[0]();
         assert.doesNotMatch(text(tree), /dBm/);
     }
+    h.state.result = { ...sample, optical: { readings: {
+        temperature: { value: -12500, unit: 'mC' }, supply: { value: 3300100, unit: 'uV' },
+        bias: { value: 0, unit: 'uA' }, tx_power: { value: 4700000, unit: 'nW' },
+        rx_power: { value: 19900, unit: 'nW' }
+    } } };
+    await h.polls[0]();
+    assert.match(text(tree), /-12.50 °C/);
+    assert.match(text(tree), /3.300 V/);
+    assert.match(text(tree), /0.000 mA/);
+    assert.match(text(tree), /6.72 dBm/);
+    assert.doesNotMatch(text(tree), /Low alarm|Low warning|High warning|High alarm|Thresholds/);
+    function tags(node) {
+        if (!node || typeof node !== 'object') return [];
+        return Array.isArray(node) ? node.flatMap(tags) : [node.tag, ...tags(node.children)];
+    }
+    assert.ok(!tags(tree).includes('details'));
+    assert.match(text(tree), /Module information.*PON, OMCI and firmware details/);
+    assert.doesNotMatch(text(tree), /Clear|Active/);
+    h.state.result = { ...sample, activation_supported: true, ram_bench: true,
+        supervisor: { last_stage: 'waiting_calibration' } };
+    await h.polls[0]();
+    assert.match(text(tree), /Waiting for this unit’s optical calibration/);
+    assert.match(text(tree), /This RAM image disables NAND access/);
+    assert.match(text(tree), /Installed/);
     h.state.fail = true;
     await h.polls[0]();
     assert.match(text(tree), /last sample could not be refreshed/);
@@ -104,6 +129,20 @@ async function main() {
 
     const s = harness('settings.js');
     s.view.render();
+    for (const field of ['vendor_id', 'equipment_id', 'hardware_version', 'software_version_a',
+        'software_version_b', 'registration_id', 'logical_onu_id', 'logical_password', 'active_bank',
+        'committed_bank', 'sync_circuit_pack', 'omcc_version', 'pon_slot', 'olt_profile',
+        'iphost_mac', 'iphost_hostname', 'iphost_domain', 'monitor', 'enabled']) assert.ok(s.options[field], field);
+    assert.equal(s.options._iop_mask, undefined);
+    assert.equal(s.options.mib_profile, undefined);
+    assert.doesNotMatch(fs.readFileSync(path.join(base, 'settings.js'), 'utf8'), /Q1000K|AT&T|BGW320|prx300|WAS-110|MaxLinear/);
+    const menu = JSON.parse(fs.readFileSync(path.resolve(base, '../../../../../root/usr/share/luci/menu.d/luci-app-econet-xpon.json')));
+    assert.equal(menu['admin/network/econet-xpon/configuration'].title, 'Settings');
+    for (const name of ['settings', 'status']) {
+        const route = menu['admin/network/econet-xpon/' + (name === 'settings' ? 'configuration' : name)];
+        assert.equal(route.action.path, 'econet-xpon/' + name + '-v4');
+        assert.equal(fs.readFileSync(path.join(base, name + '-v4.js'), 'utf8'), fs.readFileSync(path.join(base, name + '.js'), 'utf8'));
+    }
     for (const v of ['', 'TEST00112233', 'ABCDaabbccdd'])
         assert.equal(s.options.serial.validate('identity', v), true);
     for (const v of ['TEST0011223', 'AB C00112233', 'TEST00112233\n', 'TESTxyz12233'])

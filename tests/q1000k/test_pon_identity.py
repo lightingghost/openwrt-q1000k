@@ -233,6 +233,26 @@ int main(void) {
         pon_fix_vlans=1; assert(!q1000k_pon_identity_init() && q1000k_pon_fix_vlans());
         pon_fix_vlans=0; assert(!q1000k_pon_identity_init() && !q1000k_pon_fix_vlans());
     }
+    pon_omcc_version=0xa3; pon_uni_slot=3; pon_olt_profile=3;
+    pon_iphost_hostname_hex="67617465776179"; pon_iphost_domain_hex="6578616d706c65";
+    assert(!q1000k_pon_identity_init());
+    struct omci_identity initial={};
+    assert(!q1000k_pon_get_omci_overrides(&initial));
+    assert(initial.omcc_version==0xa3 && initial.pon_slot==3 && initial.olt_profile==3);
+    assert(!memcmp(initial.iphost_mac,mac,6) && !memcmp(initial.iphost_hostname,"gateway",7));
+    for(int slot=0;slot<256;slot++) {
+        pon_uni_slot=slot;
+        assert((q1000k_pon_identity_init()==0)==(slot>=1 && slot<=254 && slot!=128));
+    }
+    pon_uni_slot=1;
+    for(int version=0;version<256;version++) {
+        pon_omcc_version=version;
+        assert((q1000k_pon_identity_init()==0)==(version>=0x80 && version<=0xbf));
+    }
+    pon_omcc_version=-1; pon_olt_profile=-1;
+    pon_iphost_hostname_hex=pon_iphost_domain_hex=NULL;
+    pon_iphost_mac="01:11:22:33:44:55"; assert(q1000k_pon_identity_init()==-EINVAL);
+    pon_iphost_mac=NULL; assert(!q1000k_pon_identity_init());
     /* Cached bytes must not alias the module parameter buffers. */
     valid_mac[0]='4'; valid_sn[0]='Z';
     assert(!get_ethaddr(out,6) && !memcmp(out,mac,6));

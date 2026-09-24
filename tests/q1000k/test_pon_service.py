@@ -44,6 +44,9 @@ class ServiceTests(unittest.TestCase):
 case "$*" in
 *service.enabled) printf '%s' "$TEST_ENABLED" ;;
 *service.lower) printf '%s' "$TEST_LOWER" ;;
+*service.continuous_bench) printf '%s' "$TEST_CONTINUOUS" ;;
+*network.*.q1000k_profile) printf '%s' "${TEST_WAN_PROFILE:-1}" ;;
+*network.*.device) printf pon ;;
 *identity.registration_id) printf '%s' "$TEST_REG" ;;
 *identity.equipment_id) printf '%s\n' "$TEST_EQUIPMENT" ;;
 *identity.omci_version) printf '%s\n' "$TEST_VERSION" ;;
@@ -69,6 +72,7 @@ with (root / 'calls').open('a') as log:
 if os.environ.get('FAIL') == action + ':' + args[0]:
     sys.exit(1)
 if action in ('modprobe', 'insmod'):
+    args[0] = args[0].replace('-', '_')
     if args[0] == 'xpon_10g':
         # Model ubox: only insmod forwards command-line parameters.
         params = dict(arg.split('=', 1) for arg in args[1:]) if action == 'insmod' else {}
@@ -82,10 +86,20 @@ elif action == 'rmmod':
     (root / 'sys/module' / args[0]).rmdir()
 elif action == 'initialize':
     assert args == ['initialize']
+    assert (root / 'sys/bus/i2c/drivers/q1000k-pon-control/0-0051/operation').read_text() == 'detect\\n'
+elif action == 'ip':
+    assert args[:3] == ['link', 'set', 'dev'] and args[3] == 'ponraw'
+    (root / 'sys/class/net/ponraw/flags').write_text('0x1003' if args[4] == 'up' else '0x1002')
+elif action == 'ubus':
+    assert args[0] == 'call' and args[1] in ('network.interface.q1000k_wan', 'network.interface.q1000k_wan6')
+    assert args[2] in ('up', 'renew')
+    if (root / 'block-network').exists(): sys.exit(1)
+elif action == 'ifdown':
+    assert args[0] in ('q1000k_wan', 'q1000k_wan6')
 else:
     raise AssertionError(action)
 '''
-        for name in ('modprobe', 'insmod', 'rmmod', 'initialize', 'omci'):
+        for name in ('modprobe', 'insmod', 'rmmod', 'initialize', 'omci', 'ip', 'ubus', 'ifdown'):
             self.write(name, '#!' + sys.executable + '\n' + fake).chmod(0o755)
         self.write('sleep', '#!/bin/sh\nexec /bin/sleep 0.05\n').chmod(0o755)
         source = (REPO / 'package/network/utils/q1000k-xgspon-service/files/run').read_text()
@@ -94,14 +108,104 @@ else:
                         lambda m: str(self.root) + '/' + m[1] + '/', source)
         source = source.replace('/usr/sbin/q1000k-xgspon', str(self.root / 'initialize'))
         source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
+        source = source.replace('/etc/q1000k-private-autostart', str(self.root / 'etc/q1000k-private-autostart'))
         source = source.replace('modprobe "$module"', '"' + str(self.root / 'modprobe') + '" "$module"')
-        source = source.replace('insmod "$module"', '"' + str(self.root / 'insmod') + '" "$module"')
+        source = source.replace('insmod "$filename"', '"' + str(self.root / 'insmod') + '" "$filename"')
         source = source.replace('rmmod "$module"', '"' + str(self.root / 'rmmod') + '" "$module"')
-        source = source.replace('while sleep 5', 'while "' + str(self.root / 'sleep') + '" 5')
+        source = source.replace('sleep 5', '"' + str(self.root / 'sleep') + '" 5')
+        for name in ('ip', 'ubus', 'ifdown'):
+            source = re.sub(r'(?<![A-Za-z0-9_-])' + name + r'(?= (?:link|call|q1000k_))',
+                            '"' + str(self.root / name) + '"', source)
         self.script = self.write('supervisor', source)
 
     def sample(self, path, value):
-        path.write_text(json.dumps(value))
+        new = path.with_suffix('.new')
+        new.write_text(json.dumps(value))
+        new.replace(path)
+
+    def continuous(self):
+        self.env.update(TEST_CONTINUOUS='1', TEST_LOWER='ponraw')
+        self.write('etc/q1000k-private-autostart', 'continuous-activation-v1\n')
+        self.write('sys/firmware/devicetree/base/quantum,xgspon-activation-bench', '')
+        self.write('sys/class/net/ponraw/flags', '0x1002\n')
+
+    def provisioned(self, **changes):
+        self.sample(self.root / 'omci.json', dict(dict(schema_version=1, service_error=0,
+            state=5, authenticated=1, agent_operational=1, service_rules=2, mib_objects=40), **changes))
+
+    def test_private_cold_start_dark_wait_recovery_and_owned_cleanup(self):
+        self.continuous()
+        p = self.launch()
+        self.await_stage(p, 'waiting_registration')
+        time.sleep(0.3)
+        before = self.calls()
+        self.assertEqual(before[0], ['insmod', 'q1000k-pon-control', 'validation_tx=1'])
+        self.assertIn(['ip', 'link', 'set', 'dev', 'ponraw', 'up'], before)
+        self.assertIn(['insmod', 'omci', 'bench_dot1x_oem=1'], before)
+        params = next(c[2:] for c in before if c[:2] == ['insmod', 'xpon_10g'])
+        self.assertTrue({'rx_bench=0', 'bench_live_add=31', 'bench_initial_key_readback=1',
+                         'bench_key_inline=1', 'bench_ranging_mode=1'} <= set(params))
+        self.assertFalse(any(c[0] in ('ubus', 'ifdown', 'rmmod') for c in before))
+        self.provisioned()
+        self.await_stage(p, 'running')
+        network = [c for c in self.calls() if c[0] == 'ubus']
+        self.assertEqual(len(network), 4)
+        time.sleep(0.3)
+        self.assertEqual([c for c in self.calls() if c[0] == 'ubus'], network)
+        # Signal loss keeps the stack and DHCP clients; no timer expiry or
+        # network teardown. Returning O5/provisioning triggers one renewal.
+        self.provisioned(state=1, authenticated=0, agent_operational=0, service_rules=0)
+        self.await_stage(p, 'waiting_registration')
+        time.sleep(0.3)
+        self.assertFalse(any(c[0] in ('rmmod', 'ifdown') for c in self.calls()))
+        self.provisioned()
+        self.await_stage(p, 'running')
+        self.assertEqual(len([c for c in self.calls() if c[0] == 'ubus']), 8)
+        self.assertEqual([c for c in self.calls() if c[0] in ('insmod', 'modprobe')],
+                         [c for c in before if c[0] in ('insmod', 'modprobe')])
+        p.terminate(); out, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual([c[1] for c in self.calls() if c[0] == 'rmmod'], MODULES[::-1])
+        self.assertEqual(self.calls()[-1], ['ip', 'link', 'set', 'dev', 'ponraw', 'down'])
+        self.assertNotIn(self.env['TEST_REG'], out + err)
+
+    def test_private_profile_guards_before_optical_changes(self):
+        self.continuous()
+        for name in ('etc/q1000k-private-autostart', 'sys/firmware/devicetree/base/quantum,xgspon-activation-bench'):
+            path = self.root / name
+            data = path.read_bytes(); path.unlink()
+            self.failed(); self.assertEqual(self.calls(), [])
+            path.write_bytes(data)
+        path = self.root / 'var/run/q1000k-pon-bench.lock'; path.mkdir(parents=True)
+        self.failed(); self.assertEqual(self.calls(), [])
+        path.rmdir()
+        self.env['TEST_WAN_PROFILE'] = 'foreign'
+        self.failed(); self.assertEqual(self.calls(), [])
+
+    def test_private_network_retry_and_hardware_fault_have_distinct_lifecycles(self):
+        self.continuous(); self.provisioned()
+        events = '{"trace_version":1,"event":1,"result":-110}\n'
+        self.write('proc/q1000k-pon-events', events)
+        block = self.write('block-network', '')
+        p = self.launch()
+        self.await_stage(p, 'waiting_network')
+        time.sleep(0.3)
+        self.assertEqual(len([c for c in self.calls() if c[:2] == ['insmod', 'xpon_10g']]), 1)
+        block.unlink()
+        self.await_stage(p, 'running')
+        self.sample(self.controller / 'status', dict(self.status, last_error=-5))
+        out, err = p.communicate(timeout=5)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.last()['stage'], 'fault')
+        faults = list((self.root / 'var/run/q1000k-xgspon').glob('fault-*'))
+        self.assertEqual(len(faults), 1)
+        self.assertEqual((faults[0] / 'q1000k-pon-events').read_text(), events)
+        self.assertEqual((faults[0] / 'q1000k-pon-events').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads((faults[0] / 'cause.json').read_text())['error'], 1)
+        calls = self.calls()
+        first_unload = next(i for i, c in enumerate(calls) if c[0] == 'rmmod')
+        self.assertEqual([c for c in calls[:first_unload] if c[0] == 'ifdown'],
+                         [['ifdown', 'q1000k_wan6'], ['ifdown', 'q1000k_wan']])
 
     def calls(self):
         p = self.root / 'calls'
@@ -110,8 +214,8 @@ else:
     def last(self):
         return json.loads((self.root / 'var/run/q1000k-xgspon/status.json').read_text())
 
-    def launch(self):
-        p = subprocess.Popen(['busybox', 'ash', str(self.script)], env=self.env,
+    def launch(self, *args):
+        p = subprocess.Popen(['busybox', 'ash', str(self.script), *args], env=self.env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         def stop():
             if p.poll() is None:
@@ -210,6 +314,57 @@ else:
         self.assertFalse((self.root / 'var/run/q1000k-xgspon/lock').exists())
         self.assertEqual((self.root / 'var/run/q1000k-xgspon/status.json').stat().st_mode & 0o777, 0o600)
 
+    def await_stage(self, process, stage):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.fail('Early monitor exit: ' + process.communicate()[1])
+            try:
+                if self.last()['stage'] == stage:
+                    return
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            time.sleep(0.02)
+        self.fail('Monitor never reached ' + stage)
+
+    def test_monitor_waits_for_inputs_without_subscriber_identity_or_tx(self):
+        self.env['TEST_ENABLED'] = '0'
+        self.write('factory.json', '{"available":false}')
+        pm = self.root / 'lib/firmware/airoha/q1000k/A60993.elf.pm'
+        saved = pm.read_bytes(); pm.unlink()
+        p = self.launch('--monitor')
+        self.await_stage(p, 'waiting_firmware')
+        self.assertEqual(self.calls(), [['modprobe', 'q1000k_pon_control']])
+        pm.write_bytes(saved)
+        self.await_stage(p, 'waiting_calibration')
+        self.assertEqual(self.calls(), [['modprobe', 'q1000k_pon_control']])
+        # The fixture factory's calibration operation models a staged record.
+        self.write('calibration.bin', 'unit calibration')
+        self.await_stage(p, 'monitoring')
+        self.assertEqual(self.calls(), [['modprobe', 'q1000k_pon_control'], ['initialize', 'initialize']])
+        self.assertTrue((self.root / 'var/run/q1000k-xgspon/monitor').exists())
+        p.terminate(); p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(self.calls()[-1], ['rmmod', 'q1000k_pon_control'])
+        self.assertFalse((self.root / 'var/run/q1000k-xgspon/monitor').exists())
+
+    def test_monitor_refuses_existing_bench_or_module_ownership(self):
+        for name in ('var/run/q1000k-pon-bench.lock', 'sys/module/q1000k_pon_control'):
+            with self.subTest(name=name):
+                path = self.root / name; path.mkdir(parents=True)
+                p = self.launch('--monitor'); p.communicate(timeout=5)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(self.calls(), [])
+                self.assertTrue(path.exists()); path.rmdir()
+
+    def test_monitor_fault_releases_controller(self):
+        p = self.launch('--monitor')
+        self.await_stage(p, 'monitoring')
+        self.sample(self.controller / 'status', dict(self.status, tx_disabled=False))
+        p.communicate(timeout=5)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.calls()[-1], ['rmmod', 'q1000k_pon_control'])
+
     def test_omci_overrides_are_encoded_before_module_loading(self):
         equipment = "Q \"'`$()\\;=".ljust(20, '.')
         version = 'TEST-version'.ljust(14, ' ')
@@ -307,8 +462,8 @@ else:
             self.assertEqual(r.stdout, action + '\n')
         self.write('run/status.json', json.dumps(dict(schema_version=1, stage='running', error=0)))
         _, data = self.backend.call()
-        self.assertEqual(data['supervisor'], dict(available=True, enabled=True, last_stage='running', last_error=0))
-        self.assertFalse(data['activation_supported'])
+        self.assertEqual(data['supervisor'], dict(available=True, enabled=True, monitor_enabled=True, last_stage='running', last_error=0))
+        self.assertTrue(data['activation_supported'])
         self.assertIsNone(data['service_ready'])
         self.write('run/status.json', '{"schema_version":"1","stage":"running","error":0}')
         self.assertIsNone(self.backend.call()[1]['supervisor']['last_stage'])

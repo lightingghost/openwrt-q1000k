@@ -46,6 +46,34 @@ read_firmware() {
 		21618dc3694a1e6f6b28c7da7141964dea1d6e57f2d2956bbe72a780ca6166a4 && dm_ready=1
 }
 
+# RAM images cannot read NAND. A separately staged, unit-specific calibration
+# record enables monitoring without inventing a factory or subscriber identity.
+read_calibration() {
+	calibration_available=0 calibration_source=
+	if [ "$factory_available" = 1 ]; then
+		calibration_available=1 calibration_source=factory
+	elif /usr/sbin/q1000k-pon-factory calibration --calibration-file \
+		/lib/firmware/airoha/q1000k/xgspon-calibration.bin >/dev/null 2>&1; then
+		calibration_available=1 calibration_source=staged
+	fi
+}
+
+calibration_read() {
+	if [ "$calibration_source" = factory ]; then
+		/usr/sbin/q1000k-pon-factory calibration
+	elif [ "$calibration_source" = staged ]; then
+		/usr/sbin/q1000k-pon-factory calibration --calibration-file \
+			/lib/firmware/airoha/q1000k/xgspon-calibration.bin
+	else
+		return 1
+	fi
+}
+
+# Called only by explicit lifecycle operations, never by status polling.
+stop_diagnostic_monitor() {
+	[ ! -x /etc/init.d/q1000k-xgspon ] || /etc/init.d/q1000k-xgspon stop_monitor
+}
+
 find_controller() {
 	local path found=
 	for path in /sys/bus/i2c/drivers/q1000k-pon-control/*-0051; do
@@ -106,6 +134,80 @@ read_omci() {
 	json_set_namespace "$previous"
 }
 
+# Passive, fixed sysfs operation. Each request starts with an empty namespace;
+# a failed refresh must never reuse the previous sample. The published DDMI
+# values are asynchronous and do not prove power at the optical connector.
+read_optical() {
+	local path data previous type version
+	optical_available=0
+	json_set_namespace q1000k_optical previous
+	json_init
+	path=$(find_controller)
+	if [ -n "$path" ] && data=$(cat "$path/transmitter_status" 2>/dev/null) && json_load "$data"; then
+		json_get_type type transmitter_version
+		json_get_var version transmitter_version
+		[ "$type" = int ] && [ "$version" = 1 ] && optical_available=1
+	fi
+	json_set_namespace "$previous"
+}
+
+optical_reading() {
+	local name="$1" unit="$2" previous type valid error actual number=
+	json_set_namespace q1000k_optical previous
+	if json_select fields && json_select "$name"; then
+		json_get_type type valid
+		json_get_var valid valid
+		if [ "$type" = boolean ] && [ "$valid" = 1 ]; then
+			json_get_type type error
+			json_get_var error error
+			if [ "$type" = int ] && [ "$error" = 0 ]; then
+				json_get_var actual unit
+				json_get_type type value
+				[ "$actual" != "$unit" ] || [ "$type" != int ] || json_get_var number value
+			fi
+		fi
+	fi
+	# Always restore the namespace's root, even after an absent child.
+	json_select
+	json_set_namespace "$previous"
+	json_add_object "$name"
+	json_add_string unit "$unit"
+	if [ -n "$number" ]; then json_add_int value "$number"; else json_add_null value; fi
+	# No verified EN7573 threshold/alarm ABI: unknown is not a clear alarm.
+	json_add_null thresholds
+	json_add_null alarms
+	json_close_object
+}
+
+optical_status() {
+	if [ "$optical_available" != 1 ]; then json_add_null optical; return; fi
+	json_add_object optical
+	json_add_string source 'EN7573 published DDMI'
+	json_add_boolean sensor_refresh_verified 0
+	json_add_boolean connector_emission_verified 0
+	json_add_string thresholds_status 'unavailable'
+	json_add_object readings
+	optical_reading temperature mC
+	optical_reading supply uV
+	optical_reading bias uA
+	optical_reading tx_power nW
+	optical_reading rx_power nW
+	json_close_object
+	json_close_object
+}
+
+link_status() {
+	local carrier
+	json_add_object link
+	# A carrier indication describes the netdevice, not end-to-end Internet.
+	carrier=$(cat /sys/class/net/pon/carrier 2>/dev/null) || carrier=
+	case "$carrier" in
+		0|1) json_add_boolean carrier "$carrier" ;;
+		*) json_add_null carrier ;;
+	esac
+	json_close_object
+}
+
 omci_field() {
 	local name="$1" expected="$2" output="${3:-$1}" previous type value
 	json_set_namespace q1000k_omci previous
@@ -123,9 +225,10 @@ omci_field() {
 }
 
 supervisor_status() {
-	local available=0 enabled=0 data version type stage= error= previous
+	local available=0 enabled=0 monitor=1 data version type stage= error= previous
 	[ -x /etc/init.d/q1000k-xgspon ] && available=1
 	[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] && enabled=1
+	[ "$(uci -q get q1000k-xgspon.service.monitor)" != 0 ] || monitor=0
 	# This is the last recorded state, which can survive an abrupt process exit.
 	# It does not prove that a supervisor is alive or that optical service works.
 	json_set_namespace q1000k_supervisor previous
@@ -144,17 +247,20 @@ supervisor_status() {
 	json_add_object supervisor
 	json_add_boolean available "$available"
 	json_add_boolean enabled "$enabled"
+	json_add_boolean monitor_enabled "$monitor"
 	if [ -n "$stage" ]; then json_add_string last_stage "$stage"; else json_add_null last_stage; fi
 	if [ -n "$error" ]; then json_add_int last_error "$error"; else json_add_null last_error; fi
 	json_close_object
 }
 
 xgspon_status() {
-	local phy=0 mac=0 uptime=0
+	local phy=0 mac=0 uptime=0 supported=0 ram=0
 	read_identity
 	read_firmware
+	read_calibration
 	read_controller
 	read_omci
+	read_optical
 	[ -d /sys/module/phy_10g ] && phy=1
 	[ -d /sys/module/xpon_10g ] && mac=1
 	read -r uptime ignored < /proc/uptime
@@ -165,9 +271,17 @@ xgspon_status() {
 	json_add_string soc 'AN7581SIT'
 	json_add_string optics '2 × EN7573AN'
 	json_add_string mode 'XGS-PON'
-	json_add_boolean activation_supported 0
-	json_add_string limitation 'The optional supervisor supports explicit experimental startup; optical operation and hardware acceptance remain unverified.'
+	[ -x /etc/init.d/q1000k-xgspon ] && supported=1
+	[ -f /sys/firmware/devicetree/base/quantum,xgspon-bench ] && ram=1
+	json_add_boolean activation_supported "$supported"
+	json_add_boolean ram_bench "$ram"
+	json_add_string limitation 'Optical readings require the controller, verified OEM firmware and unit calibration. Registration also requires a configured subscriber identity and MAC/OMCI startup.'
 	supervisor_status
+	link_status
+	json_add_object calibration
+	json_add_boolean available "$calibration_available"
+	json_add_string source "$calibration_source"
+	json_close_object
 	json_add_object factory
 	json_add_boolean available "${factory_available:-0}"
 	json_add_string source "$factory_source"
@@ -198,6 +312,7 @@ xgspon_status() {
 	controller_field checked_uptime int
 	controller_field md32_enabled boolean
 	controller_field tx_disabled boolean
+	controller_field tx_inhibited boolean
 	controller_field firmware_verified boolean
 	controller_field calibration_supplied boolean
 	controller_field last_error int
@@ -208,7 +323,7 @@ xgspon_status() {
 		json_add_object omci
 		for field in device_id ifindex onu_id gem_port_id authenticated agent_enabled \
 		             agent_operational service_rules service_error mib_sync mib_objects olt_profile \
-		             telemetry_valid rx_power_nw tx_power_nw; do
+		             telemetry_valid temperature_mc voltage_uv bias_ua rx_power_nw tx_power_nw; do
 			omci_field "$field" int
 		done
 		for field in rx_packets rx_dropped tx_packets tx_errors responses unsupported; do
@@ -220,7 +335,7 @@ xgspon_status() {
 	fi
 	# Configured rules may be dormant: they do not establish Internet service.
 	json_add_null service_ready
-	json_add_null optical
+	optical_status
 	json_dump
 }
 
@@ -234,7 +349,7 @@ xgspon_validate() {
 }
 
 # Identity schema shared by the staged OMCI CLI and both launchers.
-identity_keys='serial vendor_id equipment_id hardware_version sync_circuit_pack software_version_a software_version_b active_bank committed_bank registration_id logical_onu_id logical_password wan_mac omci_version mib_profile fix_vlans'
+identity_keys='serial vendor_id equipment_id hardware_version sync_circuit_pack software_version_a software_version_b active_bank committed_bank registration_id logical_onu_id logical_password wan_mac omci_version mib_profile fix_vlans omcc_version pon_slot iphost_mac iphost_hostname iphost_domain olt_profile'
 identity_option_valid() {
 	local key="$1" value="$2" maximum
 	case " $identity_keys " in *" $key "*) ;; *) return 1 ;; esac
@@ -243,7 +358,12 @@ identity_option_valid() {
 '*) return 1 ;; esac
 	case "$key" in
 		serial) valid_serial "$value" ;;
-		wan_mac) valid_mac "$value" ;;
+		wan_mac|iphost_mac) valid_mac "$value" ;;
+		omcc_version) printf '%s\n' "$value" | grep -Eq '^0x[89aAbB][0-9a-fA-F]$' ;;
+		pon_slot)
+			printf '%s\n' "$value" | grep -Eq '^[1-9][0-9]{0,2}$' &&
+				[ "$value" -le 254 ] && [ "$value" != 128 ] ;;
+		olt_profile) case "$value" in auto|generic|nokia|dasan|huawei|fiberhome|zte) return 0 ;; *) return 1 ;; esac ;;
 		vendor_id) [ "${#value}" = 4 ] && printf '%s\n' "$value" | grep -Eq '^[A-Za-z0-9]{4}$' ;;
 		registration_id)
 			[ "${#value}" -le 72 ] && [ "$(( ${#value} % 2 ))" = 0 ] &&
@@ -255,6 +375,7 @@ identity_option_valid() {
 				equipment_id) maximum=20 ;;
 				logical_onu_id) maximum=24 ;;
 				logical_password) maximum=12 ;;
+				iphost_hostname|iphost_domain) maximum=25 ;;
 				*) maximum=14 ;;
 			esac
 			[ "${#value}" -le "$maximum" ] &&
@@ -278,6 +399,16 @@ identity_options() {
 		[ -n "$identity_value" ] || continue
 		case "$key" in
 			serial|wan_mac|mib_profile) continue ;;
+			olt_profile)
+				case "$identity_value" in generic) param=1 ;; auto) param=2 ;; nokia) param=3 ;; dasan) param=4 ;; huawei) param=5 ;; fiberhome) param=6 ;; zte) param=7 ;; esac
+				identity_params="$identity_params pon_olt_profile=$param"
+				continue ;;
+			pon_slot)
+				identity_params="$identity_params pon_uni_slot=$identity_value"
+				continue ;;
+			omcc_version|iphost_mac)
+				identity_params="$identity_params pon_$key=$identity_value"
+				continue ;;
 			registration_id)
 				registration=$identity_value
 				while [ "${#registration}" -lt 72 ]; do registration="${registration}00"; done

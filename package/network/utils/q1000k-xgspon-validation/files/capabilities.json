@@ -1320,5 +1320,19 @@
       "curl"
     ],
     "no_fiber_actions": true
+  },
+  "next_bench": {
+    "suite": "next",
+    "hardware_tested": false,
+    "native_pd_only": true,
+    "lan_configured_before_dhcpv6": true,
+    "fiber_dark_start": true,
+    "post_o5_outage_seconds": 3600,
+    "automatic_recovery_no_module_reload": true,
+    "normal_phy_poll_ms": 1500,
+    "normal_phy_reacquire_min_ms": 15000,
+    "throughput_requires_numeric_server": true,
+    "isp_prefix_replacement_separate_from_local_renumber": true,
+    "wire_encryption_proven": false
   }
 }

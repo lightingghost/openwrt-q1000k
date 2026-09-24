@@ -42,6 +42,25 @@ static int pon_fix_vlans;
 module_param(pon_fix_vlans, int, 0);
 MODULE_PARM_DESC(pon_fix_vlans, "Enable subscriber VLAN-0 normalization (0 or 1)");
 
+static int pon_omcc_version = -1;
+module_param(pon_omcc_version, int, 0);
+MODULE_PARM_DESC(pon_omcc_version, "Immutable OMCI omcc_version presentation");
+static int pon_uni_slot = 1;
+module_param(pon_uni_slot, int, 0);
+MODULE_PARM_DESC(pon_uni_slot, "Immutable OMCI pon_slot presentation");
+static int pon_olt_profile = -1;
+module_param(pon_olt_profile, int, 0);
+MODULE_PARM_DESC(pon_olt_profile, "Immutable OMCI olt_profile presentation");
+static char *pon_iphost_mac;
+module_param(pon_iphost_mac, charp, 0);
+MODULE_PARM_DESC(pon_iphost_mac, "Optional OMCI IP host identity");
+static char *pon_iphost_hostname_hex;
+module_param(pon_iphost_hostname_hex, charp, 0);
+MODULE_PARM_DESC(pon_iphost_hostname_hex, "Optional OMCI IP host identity");
+static char *pon_iphost_domain_hex;
+module_param(pon_iphost_domain_hex, charp, 0);
+MODULE_PARM_DESC(pon_iphost_domain_hex, "Optional OMCI IP host identity");
+
 static char *wan_mac;
 static char *pon_serial;
 static char *pon_reg_id;
@@ -91,6 +110,31 @@ int q1000k_pon_identity_init(void)
 	if (!of_machine_is_compatible("quantum,q1000k-ubi"))
 		return -ENODEV;
 	if (pon_fix_vlans < 0 || pon_fix_vlans > 1) return -EINVAL;
+	if (pon_omcc_version != -1 && (pon_omcc_version < 0x80 || pon_omcc_version > 0xbf)) return -EINVAL;
+	if (pon_uni_slot < 1 || pon_uni_slot > 254 || pon_uni_slot == 128) return -EINVAL;
+	if (pon_olt_profile != -1 && (pon_olt_profile < 1 || pon_olt_profile > 7)) return -EINVAL;
+	overrides.pon_slot = pon_uni_slot;
+	if (pon_uni_slot != 1) overrides.valid |= OMCI_IDENTITY_F_PON_SLOT;
+	if (pon_omcc_version >= 0) {
+		overrides.omcc_version = pon_omcc_version;
+		overrides.valid |= OMCI_IDENTITY_F_OMCC_VERSION;
+	}
+	if (pon_olt_profile >= 0) {
+		overrides.olt_profile = pon_olt_profile;
+		overrides.valid |= OMCI_IDENTITY_F_OLT_PROFILE;
+	}
+	if (pon_iphost_mac && *pon_iphost_mac) {
+		if (strlen(pon_iphost_mac) != 17 || !mac_pton(pon_iphost_mac, overrides.iphost_mac) ||
+		    !is_valid_ether_addr(overrides.iphost_mac)) return -EINVAL;
+		overrides.valid |= OMCI_IDENTITY_F_IPHOST_MAC;
+	}
+	ret = q1000k_identity_text(pon_iphost_hostname_hex, overrides.iphost_hostname, sizeof(overrides.iphost_hostname));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_IPHOST_HOSTNAME;
+	ret = q1000k_identity_text(pon_iphost_domain_hex, overrides.iphost_domain, sizeof(overrides.iphost_domain));
+	if (ret < 0) return ret;
+	if (ret) overrides.valid |= OMCI_IDENTITY_F_IPHOST_DOMAIN;
+
 	if (!wan_mac || !pon_serial || !pon_reg_id)
 		return -ENODATA;
 	if (strlen(wan_mac) != 17 || !mac_pton(wan_mac, mac) ||
@@ -166,6 +210,11 @@ int q1000k_pon_identity_init(void)
 	memcpy(identity_mac, mac, sizeof(mac));
 	memcpy(identity_serial, serial, sizeof(serial));
 	memcpy(identity_registration, registration, sizeof(registration));
+	if ((overrides.valid & (OMCI_IDENTITY_F_IPHOST_HOSTNAME | OMCI_IDENTITY_F_IPHOST_DOMAIN)) &&
+	    !(overrides.valid & OMCI_IDENTITY_F_IPHOST_MAC)) {
+		memcpy(overrides.iphost_mac, mac, sizeof(mac));
+		overrides.valid |= OMCI_IDENTITY_F_IPHOST_MAC;
+	}
 	identity_overrides = overrides;
 	memzero_explicit(registration, sizeof(registration));
 	identity_ready = true;
@@ -237,6 +286,18 @@ int q1000k_pon_get_omci_overrides(struct omci_identity *identity)
 		identity->vendor_source = OMCI_CONFIG_SOURCE_DRIVER;
 	if (identity_overrides.valid & ~0x1fU)
 		identity->presentation_source = OMCI_CONFIG_SOURCE_DRIVER;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_OMCC_VERSION)
+		identity->omcc_version = identity_overrides.omcc_version;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_PON_SLOT)
+		identity->pon_slot = identity_overrides.pon_slot;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_OLT_PROFILE)
+		identity->olt_profile = identity_overrides.olt_profile;
+	if (identity_overrides.valid & OMCI_IDENTITY_F_IPHOST_MAC)
+		memcpy(identity->iphost_mac, identity_overrides.iphost_mac, sizeof(identity->iphost_mac));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_IPHOST_HOSTNAME)
+		memcpy(identity->iphost_hostname, identity_overrides.iphost_hostname, sizeof(identity->iphost_hostname));
+	if (identity_overrides.valid & OMCI_IDENTITY_F_IPHOST_DOMAIN)
+		memcpy(identity->iphost_domain, identity_overrides.iphost_domain, sizeof(identity->iphost_domain));
 	identity->valid |= identity_overrides.valid;
 	return 0;
 }
@@ -253,4 +314,9 @@ char get_onutype(void)
 int q1000k_pon_fix_vlans(void)
 {
 	return identity_ready && pon_fix_vlans;
+}
+
+int q1000k_pon_uni_slot(void)
+{
+	return pon_uni_slot;
 }

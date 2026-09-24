@@ -420,6 +420,16 @@ else: raise AssertionError((action,args))
 
 
 class CollectorTests(unittest.TestCase):
+    def test_extended_settings_match_native_validation(self):
+        extra = dict(omcc_version='0xBF', pon_slot='3', olt_profile='nokia',
+                     iphost_mac='02:11:22:33:44:55', iphost_hostname='H' * 25, iphost_domain='D' * 25)
+        self.assertEqual(COLLECT.validate_identity(dict(IDENTITY, **extra)), dict(IDENTITY, **extra))
+        for key, value in [('omcc_version','0xC0'), ('pon_slot','128'), ('pon_slot','255'),
+                           ('pon_slot','-1'), ('iphost_mac','00:00:00:00:00:00'),
+                           ('iphost_hostname','H'*26), ('olt_profile','18')]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                COLLECT.validate_identity(dict(IDENTITY, **{key:value}))
+
     def test_optional_registration_default_reaches_existing_launcher(self):
         for supplied in (dict(serial=IDENTITY['serial'], wan_mac=IDENTITY['wan_mac']),
                          dict(IDENTITY, registration_id='')):

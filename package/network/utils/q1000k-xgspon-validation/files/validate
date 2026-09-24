@@ -40,6 +40,7 @@ preflight() {
 	[ "$(cat /proc/sys/kernel/panic)" = 0 ] || fail 'Panic timeout must be zero.'
 }
 owned_modules= controller= locked=0 lower_owned=0 wan_owned=0 pd_owned=
+auto_config=0
 manual_recovery=0 stack_generation=0 isolated_pid= ipv6_pid= packet_pid= packet_file=
 cleanup() {
 	local result=$? module failed=0
@@ -52,6 +53,9 @@ cleanup() {
 	if [ "$wan_owned" = 1 ]; then
 		ifdown q1000k_wan6 || failed=1
 		ifdown q1000k_wan || failed=1
+	fi
+	if [ "$auto_config" = 1 ]; then
+		/usr/libexec/q1000k-ipv6-bench auto-cleanup || failed=1
 	fi
 	# A synchronous kernel test retains ownership until TX-off/restoration.
 	# Wait for that finite operation before unloading any dependency.
@@ -109,7 +113,7 @@ source_probes() {
 	printf 'source_result origin=%s kind=ping rc=%s\n' "$origin" "$rc"
 	/usr/bin/ping -6 -I pon -I "$address" -M do -s 1452 -c 3 -W 2 2606:4700:4700::1111; rc=$?
 	printf 'source_result origin=%s kind=mtu1500 rc=%s\n' "$origin" "$rc"
-	curl -6 --interface "ifhost!pon!$address" --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	curl --noproxy '*' --fail -6 --interface "ifhost!pon!$address" --resolve 'one.one.one.one:443:[2606:4700:4700::1111]' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'local=%{local_ip} remote=%{remote_ip} http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
 	printf 'source_result origin=%s kind=https rc=%s\n' "$origin" "$?"
 }
 pd_probes() {
@@ -382,7 +386,7 @@ case "$1" in
 esac
 case "$limit" in ''|*[!0-9]*) fail 'Invalid sample count.' ;; esac
 [ "$limit" -ge 15 ] && [ "$limit" -le 600 ] || fail 'Samples must be 15..600.'
-case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-wan-source|activation-omci-wan-lan|activation-omci-wan-soak|activation-omci-wan-renew|activation-omci-wan-repeat|activation-omci-discovery-probe|activation-omci-discovery-full|activation-omci-discovery-repeat|activation-omci-vlan-control|activation-omci-vlan-narrow|activation-omci-vlan-combined|activation-omci-vlan-oem|activation-omci-vlan-eqd|activation-omci-vlan-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
+case "$phase" in rx|rx-startup|rx-repeat-1|rx-repeat-2|rx-soak|rx-reconnect|rx-confirm|rx-dark-start|rx-short-outage|rx-long-outage|activation|activation-quiet|activation-long-sn|activation-reconnect|activation-tx-baseline|activation-tx-coalesced|activation-tx-repeat|activation-tx-quiet|activation-reg-reference|activation-reg-range|activation-reg-keys|activation-reg-combined|activation-reg-resync-retain|activation-reg-oem-direct|activation-reg-repeat|activation-omci-fixed|activation-omci-oem|activation-omci-min48|activation-omci-revoke|activation-omci-repeat|activation-omci-live-gem|activation-omci-live-tcont|activation-omci-live-both|activation-omci-live-oem|activation-omci-live-repeat|activation-omci-topology-strict|activation-omci-topology-oem|activation-omci-topology-eqd|activation-omci-topology-repeat|activation-omci-wan-auto|activation-omci-wan-auto-renew|activation-omci-wan-fiber|activation-omci-wan-dark|activation-omci-wan-source|activation-omci-wan-lan|activation-omci-wan-soak|activation-omci-wan-renew|activation-omci-wan-repeat|activation-omci-discovery-probe|activation-omci-discovery-full|activation-omci-discovery-repeat|activation-omci-vlan-control|activation-omci-vlan-narrow|activation-omci-vlan-combined|activation-omci-vlan-oem|activation-omci-vlan-eqd|activation-omci-vlan-repeat|activation-omci-filter-control|activation-omci-filter-live|activation-omci-filter-eqd|activation-omci-filter-repeat|activation-omci-service-control|activation-omci-service-initial|activation-omci-service-eqd|activation-omci-service-repeat|isolated-1|isolated-2|isolated-3|isolated-4|isolated-5|isolated-6|isolated-7|isolated-8|isolated-9|isolated-10|isolated-11|isolated-12|isolated-13|isolated-14|isolated-15|isolated-16|isolated-17|isolated-18|isolated-19|isolated-20|isolated-21|isolated-22|isolated-23|isolated-24|isolated-25|isolated-26|isolated-27|isolated-28|isolated-29|isolated-30|isolated-31|isolated-32|isolated-33|isolated-34|isolated-35|isolated-36|isolated-37|isolated-38|isolated-39|isolated-40|isolated-41|isolated-42|isolated-43|isolated-44|isolated-45|isolated-46|isolated-47|isolated-48) ;; *) fail 'Invalid phase.' ;; esac
 # Host accepts only numeric IPv4/IPv6; refuse shell syntax and command options here too.
 case "$iperf_server" in none) ;; *[!0-9a-fA-F:.]*|'') fail 'Invalid throughput server.' ;; esac
 case "$recovery_actions" in
@@ -457,6 +461,7 @@ if [ "$mode" = activate ]; then
 fi
 [ "$mode" != isolated ] || { allow_tx=1; inhibit=0; }
 [ -n "$registration" ] || registration=000000000000000000000000000000000000000000000000000000000000000000000000
+stop_diagnostic_monitor || fail 'Automatic diagnostics could not release the controller.'
 modules='q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'
 for module in $modules; do [ ! -d "/sys/module/$module" ] || fail "Module $module already loaded."; done
 read -r flags < /sys/class/net/ponraw/flags || fail 'Missing native endpoint.'
@@ -490,6 +495,12 @@ load_module omci bench_dot1x_oem="$dot1x_oem"
 # Only fixed names and validated hexadecimal/scalar module values are expanded.
 load_module xpon_10g bench_vlan_untagged="$vlan_untagged" bench_live_add="$live_add" bench_initial_key_readback="$initial_key_readback" bench_omci_min_len="$omci_min_len" bench_alloc_revoke="$alloc_revoke" bench_profile_coalesce="$coalesce" bench_profile_live="$live_profiles" bench_control_coalesce="$control_coalesce" bench_ranging_mode="$ranging_mode" bench_key_inline="$key_inline" bench_activation_diag="$activation_diag" bench_sn_limit="$sn_limit" rx_bench="$inhibit" wan_mac="$wan_mac" pon_serial="$serial" pon_reg_id="$registration" pon_lower=ponraw $identity_params
 }
+case "$phase" in
+ activation-omci-wan-auto*|activation-omci-wan-fiber|activation-omci-wan-dark)
+  auto_config=1
+  /usr/libexec/q1000k-ipv6-bench auto-prepare || fail 'Native PD configuration failed.'
+ ;;
+esac
 start_stack
 if [ "$mode" = isolated ]; then
  case "$phase" in isolated-*) test_id=${phase#isolated-} ;; *) fail 'Wrong isolated phase.' ;; esac
@@ -599,6 +610,39 @@ if [ "$mode" = rx ]; then
 	event "$phase" passed
 	exit 0
 fi
+# A service outage never unloads modules, restarts DHCP, or invokes bench_recover.
+# Continue taking health/LOS/OMCI evidence while the driver polls indefinitely.
+fiber_wait() {
+ local kind=$1 count=0 start_time=$(now) dark_since=0 dark_elapsed=0 recovered=0 control=
+ local deadline=$(( $(now) + 4800 ))
+ event fiber-watch started
+ printf 'fiber_ready kind=%s\n' "$kind"
+ while [ "$(now)" -lt "$deadline" ]; do
+  snapshot
+  count=$((count+1))
+  [ ! -r /var/run/q1000k-pon-bench.lock/control ] || control=$(cat /var/run/q1000k-pon-bench.lock/control)
+  if [ "$ctl_los" = 1 ] && [ "$phy_los" = 1 ] && [ "$rx_synced" = 0 ]; then
+   [ "$dark_since" != 0 ] || dark_since=$(now)
+   dark_elapsed=$(( $(now) - dark_since ))
+   printf 'fiber_dark_elapsed seconds=%s\n' "$dark_elapsed"
+  elif [ "$dark_since" != 0 ] && [ "$kind" = outage ] && [ "$dark_elapsed" -lt 3600 ]; then
+   event fiber-watch short-outage
+   negative
+  fi
+  if [ "$control" = RECONNECTED ] && [ "$ctl_los" = 0 ] && [ "$phy_los" = 0 ] && [ "$rx_synced" = 1 ]; then
+   if [ "$kind" = dark ]; then event fiber-sync recovered; return; fi
+   if [ "$dark_elapsed" -lt 3600 ]; then event fiber-watch short-outage; negative; fi
+   if [ "$state" = 5 ] && [ "$authenticated" = 1 ] && [ "$operational" = 1 ] && [ "$rules" -gt 0 ]; then
+    recovered=$((recovered+1))
+    [ "$recovered" -lt 5 ] || { event fiber-service recovered; return; }
+   else recovered=0; fi
+  fi
+  sleep 1
+ done
+ event fiber-watch timeout
+ negative
+}
+[ "$phase" != activation-omci-wan-dark ] || fiber_wait dark
 # Every timeout is bounded and recorded independently; later stages need the
 # preceding stage's actual hardware state, never a timer-based assumption.
 event activation started
@@ -660,17 +704,20 @@ for family in 4 6; do
 	/usr/bin/ping -"$family" -I pon -M do -s "$size" -c 3 -W 2 "$target"; printf 'traffic_result family=%s kind=mtu1500 rc=%s\n' "$family" "$?"
 	# Fixed numeric endpoint avoids resolver traffic escaping over management.
 	[ "$family" = 4 ] && resolve_target=$target || resolve_target="[$target]"
-	curl -"$family" --interface pon --resolve "one.one.one.one:443:$resolve_target" --connect-timeout 10 --max-time 20 --silent --show-error --output /dev/null --write-out 'http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+	curl --noproxy '*' --fail -"$family" --interface pon --resolve "one.one.one.one:443:$resolve_target" --connect-timeout 10 --max-time 20 --silent --show-error --output /dev/null --write-out 'local=%{local_ip} remote=%{remote_ip} http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
 	printf 'traffic_result family=%s kind=https rc=%s\n' "$family" "$?"
 done
 case "$phase" in
+ activation-omci-wan-auto*|activation-omci-wan-fiber|activation-omci-wan-dark)
+  ipv6_experiment auto-probe initial
+ ;;
  activation-omci-wan-*) pd_probes initial ;;
 esac
 if [ "$phase" = activation-omci-wan-lan ]; then
  ipv6_experiment lan
  ipv6_experiment physical
 fi
-if [ "$phase" = activation-omci-wan-renew ]; then
+if [ "$phase" = activation-omci-wan-renew ] || [ "$phase" = activation-omci-wan-auto-renew ]; then
  event wan-renew started
  for interface in q1000k_wan q1000k_wan6; do
   ubus call network.interface.$interface renew; renew_rc=$?
@@ -686,16 +733,23 @@ if [ "$phase" = activation-omci-wan-renew ]; then
  printf 'source_result origin=ipv4_wan kind=ping rc=%s\n' "$?"
  /usr/bin/ping -4 -I pon -M do -s 1472 -c 3 -W 2 1.1.1.1
  printf 'source_result origin=ipv4_wan kind=mtu1500 rc=%s\n' "$?"
- curl -4 --interface pon --resolve 'one.one.one.one:443:1.1.1.1' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
+ curl --noproxy '*' --fail -4 --interface pon --resolve 'one.one.one.one:443:1.1.1.1' --connect-timeout 5 --max-time 10 --silent --show-error --output /dev/null --write-out 'local=%{local_ip} remote=%{remote_ip} http_bytes=%{size_download} http_code=%{http_code}\n' https://one.one.one.one/cdn-cgi/trace
  printf 'source_result origin=ipv4_wan kind=https rc=%s\n' "$?"
- pd_probes after-renew
+ if [ "$auto_config" = 1 ]; then ipv6_experiment auto-probe after-renew; else pd_probes after-renew; fi
  event wan-renew observed
+fi
+if [ "$phase" = activation-omci-wan-fiber ]; then
+ fiber_wait outage
+ observe post-fiber-dhcp 120
+ /usr/bin/ping -4 -I pon -c 3 -W 2 1.1.1.1
+ printf 'source_result origin=post_fiber_ipv4 kind=ping rc=%s\n' "$?"
+ ipv6_experiment auto-probe after-fiber
 fi
 wan_network_snapshot after-traffic
 if [ "$iperf_server" != none ]; then
 	for direction in upstream downstream; do
 		case "$iperf_server" in *:*) family=6 ;; *) family=4 ;; esac
-		bound=$(ip -"$family" -o address show dev pon scope global | awk 'NR==1 { split($4,a,"/"); print a[1] }')
+		bound=$(ip -"$family" route get "$iperf_server" oif pon | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
 		[ -n "$bound" ] || { event throughput no-address; break; }
 		printf 'throughput direction=%s\n' "$direction"
 		if [ "$direction" = downstream ]; then reverse=-R; else reverse=; fi

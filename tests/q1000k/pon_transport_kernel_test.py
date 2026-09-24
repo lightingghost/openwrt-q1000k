@@ -82,7 +82,9 @@ struct airoha_gdm_dev {
     struct airoha_eth *eth;
     struct airoha_qdma __rcu *qdma;
     struct airoha_pon __rcu *pon;
-    u64 pon_generation;
+    u64 pon_generation,pon_flow_epoch;
+    u8 pon_smac[ETH_ALEN];
+    bool pon_flow_fault;
     atomic_t pon_tx_pending;
     bool pon_port;
 };
@@ -185,6 +187,10 @@ print(re.search(r'#define CDM_BASE\(_n\).*?(?=\n(?:#|\n))', regs, re.S).group())
 print('\n'.join(line for line in regs.splitlines() if re.match(
     r'#define (?:CDM[12]_BASE|GDM_RXCHN_EN_MASK|REG_CDM_HWFWD|REG_GDM_(?:RXCHN|CHN_|RETIRE_STS)|MBI_.*AGE_SEL|REG_CHAN_QUEUE_STATUS)', line)))
 print('static int rx_drain_calls;\nstatic int airoha_qdma_pon_drain_rx(struct airoha_qdma *q) { ASSERT_RTNL(); rx_drain_calls++; return 0; }')
+print('static int airoha_ppe_pon_ingress(struct airoha_gdm_dev *d,const struct airoha_pon_flow *f,u16 t,const u8 *a) { return -EOPNOTSUPP; }')
+print('static void airoha_ppe_pon_check_skb(struct airoha_gdm_dev *d,struct sk_buff *s,const struct airoha_pon_rx_meta *m) {}')
+print('static int airoha_ppe_pon_invalidate(struct airoha_gdm_dev *d) { d->pon_flow_epoch++; return 0; }')
+print('static void airoha_ppe_init_upd_mem(struct airoha_gdm_dev *d,const u8 *addr) {}')
 source = (eth / 'airoha_pon.c').read_text()
 print(re.sub(r'^#include[^\n]*\n', '', source, flags=re.M))
 print(r'''

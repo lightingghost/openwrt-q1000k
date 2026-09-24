@@ -24,6 +24,12 @@ struct sk_buff;
 #define OMCI_IDENTITY_F_COMMITTED_BANK BIT(10)
 #define OMCI_IDENTITY_F_LOGICAL_ONU_ID BIT(11)
 #define OMCI_IDENTITY_F_LOGICAL_PASSWORD BIT(12)
+#define OMCI_IDENTITY_F_OMCC_VERSION BIT(13)
+#define OMCI_IDENTITY_F_PON_SLOT BIT(14)
+#define OMCI_IDENTITY_F_IPHOST_MAC BIT(15)
+#define OMCI_IDENTITY_F_IPHOST_HOSTNAME BIT(16)
+#define OMCI_IDENTITY_F_IPHOST_DOMAIN BIT(17)
+#define OMCI_IDENTITY_F_OLT_PROFILE BIT(18)
 
 
 /**
@@ -61,6 +67,8 @@ struct omci_identity {
 	u8 committed_bank;
 	u8 logical_onu_id[24];
 	u8 logical_password[12];
+	u8 omcc_version, pon_slot, olt_profile;
+	u8 iphost_mac[6], iphost_hostname[25], iphost_domain[25];
 };
 
 /**
@@ -408,6 +416,9 @@ struct omci_diagnostic {
  *	if needed. The fault is permanent for this device registration.
  */
 struct omci_device_ops {
+	/* Immutable provider identity, copied before the initial MIB is built.
+	 * The provider owns this storage for the registration lifetime. */
+	const struct omci_identity *initial_identity;
 	/* Optional observational callback. No payload/identity/key bytes. Called
 	 * outside agent locks; provider must not re-enter OMCI lifecycle APIs. */
 	void (*diagnostic)(struct omci_device *odev, const struct omci_diagnostic *event);

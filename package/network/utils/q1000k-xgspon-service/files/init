@@ -3,19 +3,39 @@
 START=95
 STOP=10
 USE_PROCD=1
+EXTRA_COMMANDS="stop_monitor"
+EXTRA_HELP="        stop_monitor    Release automatic diagnostics for a bench session"
 
 start_service() {
-	local enabled
+	local enabled monitor
 	config_load q1000k-xgspon
 	config_get_bool enabled service enabled 0
-	[ "$enabled" = 1 ] || return 0
+	config_get_bool monitor service monitor 1
+	[ "$enabled" = 1 ] || [ "$monitor" = 1 ] || return 0
 	procd_open_instance
-	procd_set_param command /usr/libexec/q1000k-xgspon-run
-	procd_set_param stdout 1
+	if [ "$enabled" = 1 ]; then
+		procd_set_param command /usr/libexec/q1000k-xgspon-run
+	else
+		procd_set_param command /usr/libexec/q1000k-xgspon-run --monitor
+	fi
+	# stdout logging injects libsetlbf into ash and splits builtin printf writes
+	# to sysfs command attributes. Reports use status.json; keep stderr logging.
+	procd_set_param stdout 0
 	procd_set_param stderr 1
 	procd_set_param term_timeout 120
 	# Hardware faults require an explicit restart after diagnosis.
 	procd_close_instance
+}
+
+stop_monitor() {
+	local count=0
+	[ -f /var/run/q1000k-xgspon/monitor ] || return 0
+	stop
+	while [ -d /var/run/q1000k-xgspon/lock ] && [ "$count" -lt 15 ]; do
+		sleep 1
+		count=$((count + 1))
+	done
+	[ ! -d /var/run/q1000k-xgspon/lock ]
 }
 
 reload_service() {

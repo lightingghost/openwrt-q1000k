@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon
-PKG_RELEASE:=7
+PKG_RELEASE:=9
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -16,8 +16,9 @@ endef
 
 define Package/q1000k-xgspon/description
  Factory-data access, diagnostics and explicit EN7573 controller bring-up.
- The optional q1000k-xgspon-service package supervises experimental MAC/OMCI
- startup. Installing this diagnostics package does not load PON modules.
+ The companion q1000k-xgspon-service package automatically loads TX-disabled
+ optical monitoring and supervises explicitly enabled experimental MAC/OMCI
+ startup. Installing this base package alone does not load PON modules.
 endef
 
 define Package/q1000k-xgspon/conffiles

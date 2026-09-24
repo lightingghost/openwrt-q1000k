@@ -43,7 +43,7 @@ FIRMWARE = '/lib/firmware/airoha/q1000k'
 SSH = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
        '-o', 'ServerAliveCountMax=2', 'root@' + HOST]
-KEYS = 'serial vendor_id equipment_id hardware_version sync_circuit_pack software_version_a software_version_b active_bank committed_bank registration_id logical_onu_id logical_password wan_mac omci_version mib_profile fix_vlans'.split()
+KEYS = 'serial vendor_id equipment_id hardware_version sync_circuit_pack software_version_a software_version_b active_bank committed_bank registration_id logical_onu_id logical_password wan_mac omci_version mib_profile fix_vlans omcc_version pon_slot olt_profile iphost_mac iphost_hostname iphost_domain'.split()
 
 
 def digest(data):
@@ -61,12 +61,21 @@ def validate_identity(value):
         pattern = {'serial': r'[A-Za-z0-9]{4}[0-9A-Fa-f]{8}', 'vendor_id': r'[A-Za-z0-9]{4}',
                    'wan_mac': r'[0-9a-fA-F][02468aAcCeE](:[0-9a-fA-F]{2}){5}',
                    'registration_id': r'(?:[0-9a-fA-F]{2}){1,36}',
+                   'iphost_mac': r'[0-9a-fA-F][02468aAcCeE](:[0-9a-fA-F]{2}){5}',
+                   'omcc_version': r'0x[89aAbB][0-9a-fA-F]',
+                   'pon_slot': r'[1-9][0-9]{0,2}',
+                   'olt_profile': r'auto|generic|nokia|dasan|huawei|fiberhome|zte',
                    'mib_profile': 'native-pptp'}.get(key)
         if key in ('sync_circuit_pack', 'active_bank', 'committed_bank', 'fix_vlans'):
             pattern = '[01]'
-        maximum = {'equipment_id': 20, 'logical_onu_id': 24, 'logical_password': 12}.get(key, 14)
+        maximum = {'equipment_id': 20, 'logical_onu_id': 24, 'logical_password': 12,
+                   'iphost_hostname': 25, 'iphost_domain': 25}.get(key, 14)
         if (pattern and not re.fullmatch(pattern, text)) or (not pattern and len(text) > maximum):
             raise ValueError('Invalid identity field: ' + key)
+        if key == 'pon_slot' and (int(text) > 254 or int(text) == 128):
+            raise ValueError('Invalid PON slot')
+        if key == 'iphost_mac' and text == '00:00:00:00:00:00':
+            raise ValueError('IP-host MAC must be nonzero')
     if any(not value.get(k) for k in ('serial', 'wan_mac')):
         raise ValueError('Explicit subscriber serial and wan_mac are required for TX')
     if value['wan_mac'] == '00:00:00:00:00:00':
@@ -114,6 +123,21 @@ def runtime_manifest(text):
              '/usr/libexec/q1000k-ipv6-client', '/usr/libexec/q1000k-udp6-probe', '/usr/sbin/q1000k-pon-bench',
              '/lib/q1000k-xgspon/common.sh', '/usr/share/libubox/jshn.sh',
              '/usr/sbin/q1000k-omci', '/usr/libexec/q1000k-omci-config', '/usr/share/q1000k-bench/capabilities.json'}
+    # Older pinned images have no versioned LuCI/startup hashes. New images
+    # include this complete group so stale browser assets cannot pass inspection.
+    diagnostics = {'/usr/sbin/q1000k-pon-factory', '/usr/sbin/q1000k-xgspon',
+                   '/usr/libexec/q1000k-xgspon-run', '/etc/init.d/q1000k-xgspon',
+                   '/usr/share/luci/menu.d/luci-app-econet-xpon.json'}
+    if diagnostics & entries.keys():
+        views = [{'/www/luci-static/resources/view/econet-xpon/' + name + '-v' + version + '.js'
+                  for name in ('status', 'settings')} for version in ('3', '4')]
+        matching = [group for group in views if group <= entries.keys()]
+        if len(matching) != 1:
+            raise ValueError('Incomplete or ambiguous versioned diagnostics hashes')
+        diagnostics |= matching[0]
+        if not diagnostics <= entries.keys():
+            raise ValueError('Incomplete diagnostics runtime hashes')
+        fixed |= diagnostics
     modules = set(entries) - fixed
     if not fixed <= entries.keys() or len(modules) != 9 or {
             Path(p).stem.replace('-', '_') for p in modules} != set(MODULES):
@@ -200,7 +224,7 @@ def plan(skip_physical=False, rx_only=False, soak=180, physical_only=False):
 
 # Names describe sessions; IDs map to the published hypothesis/test matrix.
 PHYSICAL = {'rx-reconnect', 'rx-confirm', 'activation-reconnect', 'rx-dark-start',
-            'rx-short-outage', 'rx-long-outage'}
+            'rx-short-outage', 'rx-long-outage', 'activation-omci-wan-dark', 'activation-omci-wan-fiber'}
 
 ISOLATED_TESTS = [
  'normal-gate-no-producer', 'prbs7-existing-clock', 'prbs7-native-clock',
@@ -415,6 +439,33 @@ def ipv6_experiment_summary(text):
         note='Local /64 renumbering is distinct from ISP prefix replacement. A no-reply firewall result needs working listener and outbound controls. Packet observation on pon does not itself prove arrival at the OLT.')
 
 
+def native_pd_summary(text):
+    """Accept each automatic source only against the PD present in that cycle."""
+    cycles = {}
+    blocks = re.split(r'^native_pd_probe phase=(\S+)\n', text, flags=re.M)
+    for label, block in zip(blocks[1::2], blocks[2::2]):
+        prefixes = []
+        for row in json_records(block):
+            if isinstance(row, dict) and row.get('proto') == 'dhcpv6':
+                for p in row.get('ipv6-prefix', []):
+                    try:
+                        if p.get('preferred', 0) > 0:
+                            prefixes.append(ipaddress.IPv6Network(f"{p['address']}/{p['mask']}"))
+                    except (KeyError, ValueError, TypeError): pass
+        http = []
+        for local, remote, code in re.findall(r'^native_http local=(\S+) remote=(\S+) code=(\d+)$', block, re.M):
+            try: valid = any(ipaddress.IPv6Address(local) in p for p in prefixes)
+            except ValueError: valid = False
+            http.append(dict(local=local, remote=remote, code=int(code), source_in_pd=valid))
+        checks = dict((k,int(v)) for k,v in re.findall(r'^ipv6_check name=(\S+) rc=(\d+)$', block, re.M))
+        endpoints = {'2001:4860:4860::8888', '2606:4700:4700::1111'}
+        cycles[label] = dict(http=http, checks=checks,
+            router_https_verified=endpoints <= {r['remote'] for r in http if r['code']==200 and r['source_in_pd']})
+    return dict(cycles=cycles,
+        configuration_restored='ipv6_check name=native-pd-config-restored rc=0' in text,
+        all_router_https_verified=bool(cycles) and all(c['router_https_verified'] for c in cycles.values()))
+
+
 def ipv6_source_summary(text):
     """Keep default/IA_NA and delegated-prefix outcomes distinct."""
     cycle = 'unspecified'
@@ -446,7 +497,8 @@ def service_summary(results):
     def ipv6_address(r):
         return bool(r.get('dhcpv6_address') and r.get('traffic', {}).get('ipv6_https'))
     def ipv6_prefix(r):
-        return bool(r.get('dhcpv6_prefix') and r.get('ipv6_sources', {}).get('delegated_https'))
+        return bool(r.get('dhcpv6_prefix') and (r.get('ipv6_sources', {}).get('delegated_https') or
+            (r.get('native_pd', {}).get('all_router_https_verified') and r.get('native_pd', {}).get('configuration_restored'))))
     return dict(ipv4=any(ipv4(r) for r in eligible),
         ipv6_wan_address=any(ipv6_address(r) for r in eligible),
         ipv6_delegated_prefix=any(ipv6_prefix(r) for r in eligible),
@@ -506,6 +558,19 @@ def discovery_plan(args):
             cases = [c for c in cases if c['name'] in selected]
         return cases
     rx_only = args.rx_only or args.physical_only or not args.identity
+    if getattr(args, 'suite', 'legacy') == 'next':
+        if args.physical_only or rx_only:
+            raise ValueError('Next-bench suite requires subscriber identity and full service')
+        names = ['source', 'auto', 'auto-renew', 'lan', 'repeat', 'dark', 'fiber', 'soak']
+        if args.skip_physical:
+            names = [n for n in names if n not in ('dark', 'fiber')]
+        cases = [dict(name='activation-omci-wan-'+n, mode='activate', samples=600,
+                      ids=[], native_pd=n in ('auto','auto-renew','dark','fiber')) for n in names]
+        if getattr(args, 'cases', None):
+            selected = set(args.cases.split(','))
+            if not selected <= {c['name'] for c in cases}: raise ValueError('Unknown next-bench case')
+            cases = [c for c in cases if c['name'] in selected]
+        return cases
     if getattr(args, 'suite', 'legacy') == 'wan':
         if args.physical_only:
             raise ValueError('WAN comparisons keep the fiber connected')
@@ -1329,6 +1394,7 @@ def summarize(text, returncode=0, events=None):
                   throughput={direction: int(code) == 0 for direction, code in re.findall(
                       r'^throughput_result direction=(\S+) rc=(\d+)$', text, re.M)})
     result['ipv6_sources'] = ipv6_source_summary(text)
+    result['native_pd'] = native_pd_summary(text)
     result['ipv6_experiments'] = ipv6_experiment_summary(text)
     prefix_sets = []
     for row in network:
@@ -1478,11 +1544,13 @@ def host_lan_probe(router):
             record['tests'][kind] = p.returncode
         # curl before 8.9 has no ifhost! syntax. Explicit source plus verified
         # route keeps this compatible with the collection computer's 8.5.
-        p = run(['curl','--fail','-6','--interface',address,'--resolve',f'one.one.one.one:443:[{target}]',
+        p = run(['curl','--noproxy','*','--fail','-6','--interface',address,'--resolve',f'one.one.one.one:443:[{target}]',
                  '--connect-timeout','5','--max-time','10','--silent','--show-error','--output','/dev/null',
                  '--write-out','local=%{local_ip} remote=%{remote_ip} code=%{http_code}\n',
                  'https://one.one.one.one/cdn-cgi/trace'], 12)
         record['tests']['https'] = p.returncode
+        record['https_source_verified'] = bool(re.search(
+            r'local=' + re.escape(address) + r' remote=' + re.escape(target) + r' code=200(?:\s|$)', p.stdout))
         # Numeric router DNS over IPv6; no lookup can escape through Wi-Fi or
         # the host resolver. Keep RA/DHCP advertisement evidence separately.
         txid = os.urandom(2)
@@ -1502,7 +1570,7 @@ def host_lan_probe(router):
         p = run(['ip','-6','-j','route','get',target,'from',address])
         record['route_still_ethernet'] = not p.returncode and json.loads(p.stdout)[0].get('dev') == dev
         record['status'] = 'observed'
-        record['internet_verified'] = record['tests'].get('https') == 0 and record['route_still_ethernet']
+        record['internet_verified'] = record['tests'].get('https') == 0 and record['route_still_ethernet'] and record['https_source_verified']
     except (OSError, ValueError, KeyError, IndexError, subprocess.TimeoutExpired) as error:
         record['reason'] = str(error)
     return record
@@ -1521,14 +1589,16 @@ def capture(pin, case, iperf, directory, redact):
         case['mode'], STAGE + '/xgspon-calibration.bin', STAGE, str(case['samples']), iperf, name, case.get('recovery_actions','1,2,3,4,5,6,7')]) + '\n'
     physical = name in PHYSICAL
     events, samples, lines = [], [], []
-    host_pool = None; host_future = None
+    host_pool = None; host_future = None; host_cycles = []; native_phase = None
     trace_seen = set(); stack_generation = 0; in_postmortem = False
-    dark_start = name == 'rx-dark-start'
+    dark_start = name in ('rx-dark-start', 'activation-omci-wan-dark')
+    service_fiber = name in ('activation-omci-wan-dark', 'activation-omci-wan-fiber')
+    fiber_ready = False; fiber_dark_seconds = 0
     if dark_start:
         print('Disconnect fiber before initialization, then type DISCONNECTED.', flush=True)
         if input().strip() != 'DISCONNECTED': raise ValueError('Dark initialization needs explicit confirmation')
         dark_confirmed_at = time.time()
-    deadline = time.monotonic() + (3600 if name == 'activation-omci-wan-soak' else 0) + (1500 if physical else case['samples'] * (8 if case['mode'] == 'activate' else 3) + 180)
+    deadline = time.monotonic() + (7200 if service_fiber else 3600 if name == 'activation-omci-wan-soak' else 0) + (1500 if physical else case['samples'] * (8 if case['mode'] == 'activate' else 3) + 180)
     process = subprocess.Popen(SSH + ['sh', '-s'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, bufsize=0, start_new_session=True)
     process.stdin.write(script.encode()); process.stdin.close(); process.stdin = None
@@ -1559,10 +1629,14 @@ def capture(pin, case, iperf, directory, redact):
                     while b'\n' in pending:
                         chunk, pending = pending.split(b'\n', 1)
                         line = chunk.decode(errors='replace') + '\n'
+                        if line.startswith('native_pd_probe phase='):
+                            native_phase = line.strip().split('=',1)[1]
                         if match := re.fullmatch(r'physical_lan_ready router=(\S+) window=150\n', line):
-                            if host_future is None:
-                                host_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                            if host_future is None or host_future.done():
+                                if host_pool is None:
+                                    host_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                                 host_future = host_pool.submit(host_lan_probe, match[1])
+                                host_cycles.append((native_phase or 'physical', host_future))
                                 print('Testing IPv6 from the Ethernet-connected collection computer.', flush=True)
                         if line.startswith('stack_generation='):
                             stack_generation = int(line.split('=')[1]); trace_seen.clear()
@@ -1583,6 +1657,10 @@ def capture(pin, case, iperf, directory, redact):
                             record['stack_generation'] = stack_generation
                             line = json.dumps(record)+'\n'
                         lines.append(line); output.write(redact(line)); output.flush()
+                        if line.startswith('fiber_ready kind='):
+                            fiber_ready = True
+                        if match := re.fullmatch(r'fiber_dark_elapsed seconds=(\d+)\n', line):
+                            fiber_dark_seconds = int(match[1])
                         if isinstance(record, dict) and 'receiver_version' in record and not in_postmortem:
                             samples.append(record)
                             if dark_start and not disconnected:
@@ -1590,11 +1668,11 @@ def capture(pin, case, iperf, directory, redact):
                                 disconnected = True
                             if len(samples) == 1 and record.get('rx_power_valid') and record.get('rx_power_nw', 0) > 0:
                                 print(f"RX power: {10*math.log10(record['rx_power_nw']/1000000):.2f} dBm; LOS={record.get('controller_los')}, sync={record.get('synced')}.", flush=True)
-                if physical and not waiting and samples:
+                if physical and not waiting and samples and (not service_fiber or fiber_ready):
                     if not disconnected and len(samples) >= 15 and all(r.get('synced') for r in samples[-15:]):
                         waiting = 'DISCONNECTED'
                         print('Disconnect fiber now, then type DISCONNECTED. Capture continues.', flush=True)
-                    elif disconnected and not reconnected and len(samples) >= (dark_min := 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15) and all(
+                    elif disconnected and not reconnected and (not service_fiber or fiber_dark_seconds >= (20 if dark_start else 3600)) and len(samples) >= (dark_min := 3 if name == 'rx-short-outage' else 30 if name == 'rx-long-outage' else 15) and all(
                             r.get('controller_los') is True and r.get('phy_los') is True and not r.get('synced')
                             and r['sampled_ms'] > events[-1]['sampled_ms'] for r in samples[-dark_min:]):
                         waiting = 'RECONNECTED'
@@ -1628,7 +1706,8 @@ def capture(pin, case, iperf, directory, redact):
     result = summarize(''.join(lines), code, events if physical else None)
     result['name'] = name
     if host_future is not None:
-        result['physical_lan'] = host_future.result()
+        result['physical_lan_cycles'] = [dict(phase=phase, **future.result()) for phase, future in host_cycles]
+        result['physical_lan'] = result['physical_lan_cycles'][-1]
         host_pool.shutdown(wait=True)
         after = result['physical_lan']['after_router_cleanup'] = {}
         if dev := result['physical_lan'].get('interface'):
@@ -1695,6 +1774,14 @@ def capture(pin, case, iperf, directory, redact):
     if case['mode'] == 'rx' and not physical and result['returncode'] == 0 and result['rx_samples'] != case['samples']:
         result.update(status='failed', sample_count_error=True)
     result['test_outcomes'] = test_outcomes(case, result, ''.join(lines))
+    if service_fiber:
+        dark = [int(v) for v in re.findall(r'^fiber_dark_elapsed seconds=(\d+)$', ''.join(lines), re.M)]
+        result['fiber_service'] = dict(dark_seconds=max(dark, default=0),
+            same_stack=stack_generation == 1 and not result.get('recovery_sequence'),
+            fresh_service_recovered=result['stages'].get('fiber-service') == 'recovered',
+            router_after_reconnect=result.get('native_pd',{}).get('cycles',{}).get('after-fiber',{}).get('router_https_verified',False),
+            client_after_reconnect=any(c['phase']=='after-fiber' and c.get('internet_verified') for c in result.get('physical_lan_cycles',[])))
+
     return result
 
 
@@ -1731,6 +1818,9 @@ def execute(args, pin):
                           os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
+            # Release only the automatically owned TX-disabled monitor before
+            # the existing exclusive-idle checks. Do not adopt active service.
+            ssh('set -eu; if [ -f /var/run/q1000k-xgspon/monitor ]; then /etc/init.d/q1000k-xgspon stop_monitor; fi')
             (args.output/'preflight.log').write_text(ssh(guards(pin)))
             record['boot_id'] = ssh('cat /proc/sys/kernel/random/boot_id').strip()
             if prior:
@@ -1749,6 +1839,9 @@ def execute(args, pin):
             ssh(f'set -eu; umask 077; test ! -e {STAGE}; test ! -e {FIRMWARE}; mkdir {STAGE}')
             staged = True
             ssh(f'set -eu; tar -x -C {STAGE}; cd {STAGE}; sha256sum -c sha256sums >/dev/null; mkdir -p {FIRMWARE}; cp A60993.elf.pm A60993.elf.dm {FIRMWARE}/', payload=payload)
+            clock = int(time.time())
+            record['router_clock_set_from_host'] = clock
+            (args.output/'clock.log').write_text(ssh('set -eu; date -u; date -u -s ' + shlex.quote('@'+str(clock)) + '; date -u'))
             for case in cases:
                 reason = discovery_skip(case, record['results'])
                 if reason:
@@ -1955,7 +2048,7 @@ def main():
     parser.add_argument('--identity', type=Path, help='Private subscriber JSON; permits TX activation after RX checks')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--serial-log', type=Path, default=Path('/tmp/serial_output.log'))
-    parser.add_argument('--suite', choices=('wan','discovery','vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='wan', help='Default: working VLAN/key-ring policies, IPv6 source preference, virtual/real Ethernet LAN clients, renewal and repeat. Optional --cases activation-omci-wan-soak observes 70 minutes for natural renewal. discovery: passive TX feedback and bounded discovery controls, then VLAN/key-ring comparisons only after authenticated OMCI. vlan: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
+    parser.add_argument('--suite', choices=('next','wan','discovery','vlan','filter','service','topology','continuity','omci','registration','output','measurement','isolated','tx','legacy'), default='wan', help='next: baseline, native PD router/LAN, renewal, repeat, dark startup, 1-hour loaded-service fiber outage and 70-minute soak. Default: working VLAN/key-ring policies, IPv6 source preference, virtual/real Ethernet LAN clients, renewal and repeat. Optional --cases activation-omci-wan-soak observes 70 minutes for natural renewal. discovery: passive TX feedback and bounded discovery controls, then VLAN/key-ring comparisons only after authenticated OMCI. vlan: RX, strict/narrow/OEM VLAN policies, RX-only GEM metadata continuity, EqD and repeat; filter selects earlier classifier comparisons; service selects the earlier first-install comparisons; no fiber cycling. topology selects earlier queue/Dot1X controls. continuity selects earlier live-addition controls. omci includes earlier runt/revocation controls. registration selects the earlier hypotheses 1–5. output/measurement/isolated select disconnected tests; tx selects earlier discovery comparisons; legacy selects recovery tests')
     parser.add_argument('--rx-only', action='store_true')
     parser.add_argument('--skip-physical', action='store_true')
     parser.add_argument('--physical-only', action='store_true', help='Run only the TX-inhibited disconnect/reconnect control')

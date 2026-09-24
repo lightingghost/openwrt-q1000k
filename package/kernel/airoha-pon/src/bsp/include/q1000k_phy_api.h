@@ -151,6 +151,12 @@ struct q1000k_rx_sample {
 	u32 sync_status, frames, lof, fec_total, fec_corrected, fec_uncorrected;
 	u32 irq_calls, poll_calls;
 	u32 reacquire_attempts;
+	/* Normal-service polling recovery, separate from the RX bench budget.
+	 * Attempts count across PHY restarts until module unload. The deadline
+	 * is CLOCK_BOOTTIME milliseconds, zero while dark/synced or stopped.
+	 */
+	u32 service_acquire_attempts;
+	u64 service_acquire_next_ms;
 	u64 sampled_ms;
 	struct q1000k_rx_registers receiver;
 	struct q1000k_pcs_counters pcs_counters;

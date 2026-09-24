@@ -23,6 +23,14 @@ class IsolatedTests(unittest.TestCase):
         source, regs=production_source(extra=isolated)
         source+='\n'+isolated
         fixture=Path(__file__).with_name('pon_phy_lifecycle_fixture.c').read_text()
+        # This suite supplies a reset mock that accepts both FIRST_PLUG_IN
+        # and PLUG_OUT. Replace the normal-service-only mock in the shared
+        # lifecycle fixture while retaining its forward declaration.
+        fixture=fixture.replace('#define PLUG_OUT 0', '#define PLUG_OUT 2')
+        fixture, removed=re.subn(
+            r'\nstatic void fiber_plug_reset\(int operation, int mode\)\n\{.*?\n\}\n',
+            '\n', fixture, count=1, flags=re.S)
+        self.assertEqual(removed, 1)
         extra=r"""
 #include "en7573_mpd.h"
 #include "en7573_output.h"
@@ -32,7 +40,6 @@ class IsolatedTests(unittest.TestCase):
 #define MODULE_PARM_DESC(a,b)
 #define module_param_cb(a,b,c,d)
 #define FIRST_PLUG_IN 0
-#define PLUG_OUT 2
 struct kernel_param { int unused; };
 struct kernel_param_ops { int (*get)(char *, const struct kernel_param *); int (*set)(const char *, const struct kernel_param *); };
 static int kstrtouint(const char *s, int base, unsigned int *v) { char *end; *v=strtoul(s,&end,base); return *end ? -EINVAL : 0; }

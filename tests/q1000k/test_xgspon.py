@@ -97,6 +97,23 @@ class FactoryTests(unittest.TestCase):
             if valid:
                 self.assertEqual(self.run_reader('calibration', image=dsd, dsd=True).stdout, self.cal)
 
+    def test_staged_calibration_without_identity(self):
+        calibration = self.root / 'calibration.bin'
+        def read(path=calibration):
+            return subprocess.run([str(self.reader), 'calibration', '--calibration-file', str(path)], capture_output=True)
+        calibration.write_bytes(self.cal)
+        self.assertEqual(read().stdout, self.cal)
+        for invalid in (self.cal[:-1], self.cal + b'X', bytes(513), bytes([255]) * 513,
+                        bytes(512) + b'X', bytes([255]) * 512 + b'X'):
+            calibration.write_bytes(invalid)
+            result = read()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b'')
+        calibration.write_bytes(self.cal)
+        link = self.root / 'calibration-link'
+        link.symlink_to(calibration)
+        self.assertNotEqual(read(link).returncode, 0)
+
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
@@ -122,7 +139,7 @@ class BackendTests(unittest.TestCase):
         self.write('proc/uptime', '123.25 20.00\n')
         self.write('factory', '#!/bin/sh\ncase "$1" in\ninspect) cat "' + str(self.root / 'factory.json') +
                    '" ;;\ncalibration) cat "' + str(self.root / 'calibration.bin') +
-                   '"; [ "$CAL_FAIL" != 1 ] ;;\nesac\n').chmod(0o755)
+                   '" && [ "$CAL_FAIL" != 1 ] ;;\nesac\n').chmod(0o755)
         self.write('uci', '#!/bin/sh\ncase "$*" in\n*identity.serial) printf "%s" "$TEST_SN" ;;\n*identity.wan_mac) printf "%s" "$TEST_MAC" ;;\nesac\n').chmod(0o755)
         self.write('factory.json', json.dumps({'available': False}))
         cli = (PACKAGE / 'files/q1000k-xgspon').read_text()
@@ -155,6 +172,48 @@ class BackendTests(unittest.TestCase):
         for field in ('los', 'registration', 'omci', 'service_ready', 'optical'):
             self.assertIsNone(d[field])
         self.assertFalse(d['firmware']['program_verified'])
+
+    def test_passive_optical_readings_and_failed_refresh(self):
+        base = 'sys/bus/i2c/drivers/q1000k-pon-control/0-0051/'
+        self.write(base + 'operation', '')
+        self.write(base + 'status', '{"schema_version":1}')
+        fields = {name: dict(value=value, unit=unit, valid=True, error=0)
+                  for name, value, unit in [('temperature', -12500, 'mC'), ('supply', 3300100, 'uV'),
+                                            ('bias', 0, 'uA'), ('tx_power', 4700000, 'nW'),
+                                            ('rx_power', 19900, 'nW')]}
+        path = self.write(base + 'transmitter_status', json.dumps(dict(transmitter_version=1, fields=fields)))
+        _, data = self.call()
+        optical = data['optical']
+        self.assertFalse(optical['sensor_refresh_verified'])
+        self.assertFalse(optical['connector_emission_verified'])
+        for name, sample in fields.items():
+            self.assertEqual(optical['readings'][name]['value'], sample['value'])
+            self.assertIsNone(optical['readings'][name]['thresholds'])
+            self.assertIsNone(optical['readings'][name]['alarms'])
+        for update in [dict(valid=False), dict(error=-5), dict(value='123'), dict(unit='V'), dict(valid=1)]:
+            bad = {**fields, 'temperature': {**fields['temperature'], **update}}
+            path.write_text(json.dumps(dict(transmitter_version=1, fields=bad)))
+            _, data = self.call()
+            self.assertIsNone(data['optical']['readings']['temperature']['value'])
+            self.assertEqual(data['optical']['readings']['rx_power']['value'], 19900)
+        for payload in ['{}', '{"transmitter_version":"1"}', '{"transmitter_version":99}', 'broken']:
+            path.write_text(payload)
+            _, data = self.call()
+            self.assertIsNone(data['optical'])
+        path.unlink()
+        _, data = self.call()
+        self.assertIsNone(data['optical'])
+
+    def test_carrier_is_not_service_readiness(self):
+        path = self.write('sys/class/net/pon/carrier', '1\n')
+        for sample, expected in [('1\n', True), ('0\n', False), ('bad', None)]:
+            path.write_text(sample)
+            _, data = self.call()
+            self.assertIs(data['link']['carrier'], expected)
+            self.assertIsNone(data['service_ready'])
+        path.unlink()
+        _, data = self.call()
+        self.assertIsNone(data['link']['carrier'])
 
     def test_modules_do_not_prove_service(self):
         (self.root / 'sys/module/phy_10g').mkdir(parents=True)

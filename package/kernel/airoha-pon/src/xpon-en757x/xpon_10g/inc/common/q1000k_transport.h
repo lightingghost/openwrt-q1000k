@@ -16,6 +16,7 @@ typedef int (*q1000k_pon_receive_t)(void *msg, unsigned int msg_len,
 int q1000k_transport_start(const char *lower, q1000k_pon_receive_t receive);
 int q1000k_transport_stop(void);
 bool q1000k_transport_running(void);
+void q1000k_transport_invalidate_flows(void);
 
 /* IRQ-safe; no consumer callback lock may be held. One bit per queue, with
  * all queues closed on attachment. Opening requires the MAC's provisioning

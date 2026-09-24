@@ -178,13 +178,10 @@ static int reported_los=-1;
 static void xpon_device_report_optical(struct xpon_device *x,bool signal,bool los) { assert(!owned && signal!=los); reported_los=los; }
 static void xpon_device_report_carrier(struct xpon_device *x,bool up) { assert(!owned); }
 static struct omci_device *omci_device_register(struct xpon_device *x,u32 caps,const struct omci_device_ops *ops,void *priv) {
-    struct omci_device *o=calloc(1,sizeof(*o)); o->ops=ops; o->priv=priv; identity_was_set=false; return o;
+    struct omci_device *o=calloc(1,sizeof(*o)); o->ops=ops; o->priv=priv; assert(ops->initial_identity);
+    identity_seen=*ops->initial_identity; identity_was_set=true; return o;
 }
 static void *omci_device_priv(struct omci_device *o) { return o->priv; }
-static void omci_device_set_identity_info(struct omci_device *o,const struct omci_identity *id) {
-    assert(id->serial_source==OMCI_CONFIG_SOURCE_DRIVER && id->vendor_source==OMCI_CONFIG_SOURCE_DRIVER);
-    identity_seen=*id; identity_was_set=true;
-}
 static int omci_device_start(struct omci_device *o) {
     assert(identity_was_set);
     if(identity_override.valid&OMCI_IDENTITY_F_VERSION) assert(!memcmp(identity_seen.version,identity_override.version,sizeof(identity_seen.version)));

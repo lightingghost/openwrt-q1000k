@@ -1,0 +1,664 @@
+From: Q1000K development
+Subject: [PATCH] net: airoha: gate downstream PON PPE flows with IFC
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -515,6 +515,7 @@
+ 	struct list_head pon_list;
+ 	struct airoha_gdm_dev *pon_dev;
+ 	u64 pon_epoch;
++	bool pon_ingress;
+ 
+ 	/* Must be last --ends in a flexible-array member. */
+ 	struct airoha_foe_entry data;
+@@ -569,10 +570,18 @@
+ 	AIROHA_PRIV_F_QOS = BIT(1),
+ };
+ 
++struct airoha_pon_ingress {
++	struct airoha_pon_flow flow;
++	u8 dmac[ETH_ALEN];
++	bool valid;
++};
++
+ struct airoha_gdm_dev {
+ 	struct airoha_pon __rcu *pon;
+ 	u64 pon_generation, pon_flow_epoch;
+ 	u8 pon_smac[ETH_ALEN];
++	struct airoha_pon_ingress pon_ingress[2];
++	bool pon_ifc_initialized, pon_ifc_failed;
+ 	atomic_t pon_tx_pending;
+ 	bool pon_port, pon_flow_fault;
+ 	struct airoha_qdma __rcu *qdma;
+@@ -611,6 +620,14 @@
+ 			  struct airoha_pon_flow *flow,
+ 			  struct airoha_gdm_dev **owner);
+ int airoha_ppe_pon_invalidate(struct airoha_gdm_dev *dev);
++int airoha_pon_resolve_ingress(struct airoha_eth *eth, struct net_device *upper,
++			     u16 ethertype, struct airoha_pon_flow *flow,
++			     struct airoha_gdm_dev **owner);
++int airoha_ppe_pon_ingress(struct airoha_gdm_dev *dev,
++			 const struct airoha_pon_flow *flow, u16 ethertype,
++			 const u8 *dmac);
++void airoha_ppe_pon_check_skb(struct airoha_gdm_dev *dev, struct sk_buff *skb,
++			    const struct airoha_pon_rx_meta *meta);
+ bool airoha_pon_qdma_busy(struct airoha_qdma *qdma);
+ u64 airoha_pon_generation(struct airoha_gdm_dev *dev);
+ void airoha_pon_stop(struct airoha_gdm_dev *dev);
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -123,6 +123,56 @@
+ 	return ret;
+ }
+ 
++int airoha_pon_resolve_ingress(struct airoha_eth *eth, struct net_device *upper,
++			     u16 ethertype, struct airoha_pon_flow *flow,
++			     struct airoha_gdm_dev **owner)
++{
++	struct airoha_gdm_port *port = eth->ports[AIROHA_GDM2_IDX - 1];
++	unsigned long flags;
++	int i, ret = -ENOENT;
++
++	if (!upper || !port)
++		return ret;
++	rcu_read_lock();
++	for (i = 0; i < ARRAY_SIZE(port->devs); i++) {
++		struct airoha_gdm_dev *dev = port->devs[i];
++		struct airoha_pon *pon;
++
++		if (!dev || !dev->pon_port)
++			continue;
++		pon = rcu_dereference(dev->pon);
++		if (!pon || !pon->ops->rx_flow)
++			continue;
++		spin_lock_irqsave(&pon->admission_lock, flags);
++		ret = rcu_access_pointer(pon->netdev) == netdev_from_priv(dev) ?
++			pon->ops->rx_flow(pon->priv, upper, ethertype, flow) : -ENODEV;
++		if (!ret && (pon->paused || pon->control_fault || dev->pon_flow_fault ||
++		    pon->rx_closed || !netif_running(upper) ||
++		    !is_valid_ether_addr(upper->dev_addr)))
++			ret = -ESHUTDOWN;
++		if (!ret && !ether_addr_equal(dev->pon_smac, upper->dev_addr)) {
++			airoha_pon_invalidate_flows_locked(pon);
++			if (pon->control_fault || dev->pon_flow_fault)
++				ret = -EIO;
++			else {
++				airoha_ppe_init_upd_mem(dev, upper->dev_addr);
++				ether_addr_copy(dev->pon_smac, upper->dev_addr);
++			}
++		}
++		if (!ret) {
++			flow->epoch = dev->pon_flow_epoch;
++			ret = airoha_ppe_pon_ingress(dev, flow, ethertype, upper->dev_addr);
++			if (!ret)
++				*owner = dev;
++		}
++		spin_unlock_irqrestore(&pon->admission_lock, flags);
++		if (ret != -ENOENT)
++			break;
++	}
++	rcu_read_unlock();
++	return ret;
++}
++
+ static void airoha_pon_fault_locked(struct airoha_pon *pon)
+ {
+ 	pon->control_fault = true;
+@@ -400,6 +450,11 @@
+ 	pon = rcu_dereference(dev->pon);
+ 	if (pon && !smp_load_acquire(&pon->rx_closed) && pon->generation == generation &&
+ 	    !airoha_pon_rx_meta(words, &meta)) {
++		/* Only IFC-authorized, validated PON metadata can train a downstream
++		 * lease. The original frame still follows the consumer RX path.
++		 */
++		if (!meta.omci)
++			airoha_ppe_pon_check_skb(dev, skb, &meta);
+ 		pon->ops->rx(pon->priv, skb, &meta);
+ 	} else {
+ 		netdev_from_priv(dev)->stats.rx_dropped++;
+--- /dev/null
++++ b/drivers/net/ethernet/airoha/airoha_pon_ifc.h
+@@ -0,0 +1,354 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Q1000K AN7581 ingress admission. Included by the native PPE owner only.
++ * Register layout checked against the factory AN7581 IFC encoder. The
++ * classifier checks each frame BEFORE PPE lookup; an IP tuple alone cannot
++ * represent the OMCI GEM/VLAN authorization boundary.
++ */
++#define PON_IFC_CMD		0x0204
++#define PON_IFC_DATA(n)		(0x0210 + 4 * (n))
++#define PON_IFC_ACK		BIT(31)
++#define PON_IFC_REQUEST		BIT(0)
++#define PON_IFC_WRITE		BIT(1)
++#define PON_IFC_ACTION		(2 << 4)
++#define PON_IFC_RULE_ENABLE	BIT(31)
++#define PON_IFC_RULE_END		BIT(30)
++#define PON_IFC_FORCE_PORT	BIT(28)
++#define PON_IFC_ROWS		64
++
++/* Type zero: Ethernet/GEM key, nine words in reverse hardware word order.
++ * VPM=1 denotes 802.1Q; VLAN0/1 validity distinguishes an untagged frame
++ * from VID zero and rejects stacked tags. PCP/DEI are intentionally wildcard
++ * only after the consumer proves all sixteen variants reach the same UNI.
++ */
++static void airoha_pon_ifc_encode(const struct airoha_pon_flow *flow,
++				u16 ethertype, const u8 *dmac,
++				u32 key[9], u32 mask[9], u32 action[6])
++{
++	memset(key, 0, 9 * sizeof(*key));
++	memset(mask, 0, 9 * sizeof(*mask));
++	memset(action, 0, 6 * sizeof(*action));
++	mask[0] = GENMASK(7, 6);
++	key[1] = (u32)flow->gem << 16;
++	mask[1] = GENMASK(31, 16) | BIT(11) | BIT(10) | BIT(5) | BIT(4);
++	/* LLC and PPPoE must both be absent. */
++	if (flow->num_vlans) {
++		key[1] |= BIT(5) | BIT(2);
++		mask[1] |= GENMASK(3, 2);
++		key[2] = ((u32)flow->vlan[0] & VLAN_VID_MASK) << 20 |
++			 (u32)(flow->vlan[0] >> 12) << 16;
++		mask[2] = GENMASK(31, 20) | (u32)(flow->rx_tci_mask >> 12) << 16;
++	}
++	key[3] = ethertype;
++	mask[3] = 0xffff;
++	key[5] = (u32)dmac[2] << 24 | (u32)dmac[3] << 16 |
++		 (u32)dmac[4] << 8 | dmac[5];
++	mask[5] = U32_MAX;
++	key[6] = (u32)dmac[0] << 24 | (u32)dmac[1] << 16;
++	mask[6] = GENMASK(31, 16);
++	key[8] = BIT(AIROHA_GDM2_IDX);
++	mask[8] = U32_MAX;
++	action[0] = PON_IFC_RULE_ENABLE | PON_IFC_RULE_END;
++	action[2] = PON_IFC_FORCE_PORT;
++	action[5] = FE_PSE_PORT_PPE1 << 8;
++}
++
++static int airoha_pon_ifc_command(struct airoha_eth *eth, u32 command)
++{
++	u32 value;
++	int err;
++
++	airoha_fe_wr(eth, PON_IFC_CMD, command | PON_IFC_REQUEST);
++	err = read_poll_timeout_atomic(airoha_fe_rr, value, value & PON_IFC_ACK,
++					1, 100, false, eth, PON_IFC_CMD);
++	if (err)
++		dev_err(eth->dev, "PON IFC command timeout: cmd=%#010x read=%#010x\n",
++			(u32)(command | PON_IFC_REQUEST), value);
++	return err;
++}
++
++/* Every indirect word is read back. A timeout or mismatch leaves the port
++ * closed and is treated as an uncertain hardware transaction.
++ */
++static int airoha_pon_ifc_word(struct airoha_eth *eth, unsigned int row,
++			     unsigned int word, bool action,
++			     const u32 *data, unsigned int count)
++{
++	u32 cmd = row << 16 | word << 8 | (action ? PON_IFC_ACTION : 0);
++	unsigned int i;
++	int err;
++
++	for (i = 0; i < count; i++)
++		airoha_fe_wr(eth, PON_IFC_DATA(i), data[i]);
++	err = airoha_pon_ifc_command(eth, cmd | PON_IFC_WRITE);
++	if (err)
++		return err;
++	err = airoha_pon_ifc_command(eth, cmd);
++	if (err)
++		return err;
++	for (i = 0; i < count; i++) {
++		u32 value = airoha_fe_rr(eth, PON_IFC_DATA(i));
++		/* TCAM key bits outside the match mask are don't-care. AN7581
++		 * reads 0x3f for a type-zero key of 0 with mask 0xc0. Check
++		 * significant key bits, but every mask/action bit verbatim.
++		 */
++		u32 verify_mask = !action && !i ? data[1] : U32_MAX;
++
++		if ((value ^ data[i]) & verify_mask) {
++			dev_err(eth->dev,
++				"PON IFC readback: %s row=%u word=%u reg=%#06x expected=%#010x read=%#010x verify=%#010x cmd=%#010x\n",
++				action ? "action" : "rule", row, word,
++				PON_IFC_DATA(i), data[i], value, verify_mask,
++				airoha_fe_rr(eth, PON_IFC_CMD));
++			return -EIO;
++		}
++	}
++	return 0;
++}
++
++static int airoha_pon_ifc_action(struct airoha_eth *eth, unsigned int row,
++			       const u32 action[6])
++{
++	u32 data[3];
++	int err;
++
++	data[0] = action[5]; data[1] = action[4];
++	err = airoha_pon_ifc_word(eth, row, 0, true, data, 2);
++	if (err)
++		return err;
++	data[0] = action[3]; data[1] = action[2]; data[2] = action[1];
++	err = airoha_pon_ifc_word(eth, row, 1, true, data, 3);
++	if (err)
++		return err;
++	/* The rule enable/end word is published last. */
++	return airoha_pon_ifc_word(eth, row, 2, true, action, 1);
++}
++
++static int airoha_pon_ifc_register(struct airoha_eth *eth, u32 reg,
++				 u32 mask, u32 expected)
++{
++	u32 value;
++
++	airoha_fe_rmw(eth, reg, mask, expected);
++	value = airoha_fe_rr(eth, reg);
++	if ((value & mask) == expected)
++		return 0;
++	dev_err(eth->dev,
++		"PON IFC register: reg=%#06x mask=%#010x expected=%#010x read=%#010x\n",
++		reg, mask, expected, value);
++	return -EIO;
++}
++
++static int airoha_pon_ifc_port(struct airoha_eth *eth, bool enable)
++{
++	u32 bit = BIT(AIROHA_GDM2_IDX);
++
++	return airoha_pon_ifc_register(eth, REG_FE_IFC_PORT_EN, bit,
++				     enable ? bit : 0);
++}
++
++static int airoha_ppe_pon_ifc_close(struct airoha_gdm_dev *dev)
++{
++	int ret;
++
++	lockdep_assert_held(&ppe_lock);
++	ret = airoha_pon_ifc_port(dev->eth, false);
++	dev->pon_ingress[0].valid = false;
++	dev->pon_ingress[1].valid = false;
++	return ret;
++}
++
++int airoha_ppe_pon_ingress(struct airoha_gdm_dev *dev,
++			 const struct airoha_pon_flow *flow, u16 ethertype,
++			 const u8 *dmac)
++{
++	struct airoha_eth *eth = dev->eth;
++	struct airoha_pon_ingress *profile;
++	u32 key[9], mask[9], action[6], empty[6] = {};
++	unsigned int row = ethertype == ETH_P_IPV6, i;
++	unsigned long flags;
++	const char *stage = "close-port";
++	u32 saved_ports = 0;
++	bool initializing = false;
++	int err;
++
++	if (!airoha_is_7581(eth) || !airoha_ppe_is_enabled(eth, 0) ||
++	    (ethertype != ETH_P_IP && ethertype != ETH_P_IPV6) ||
++	    !flow->gem || flow->gem >= 0x4000 || flow->num_vlans > 1 ||
++	    (flow->num_vlans && flow->rx_tci_mask != VLAN_VID_MASK &&
++	     flow->rx_tci_mask != 0xffff) || !is_valid_ether_addr(dmac))
++		return -EOPNOTSUPP;
++	spin_lock_irqsave(&ppe_lock, flags);
++	if (dev->pon_flow_fault || flow->epoch != dev->pon_flow_epoch) {
++		err = -ESTALE;
++		goto unlock;
++	}
++	if (dev->pon_ifc_failed) {
++		err = -EOPNOTSUPP;
++		goto unlock;
++	}
++	profile = &dev->pon_ingress[row];
++	if (profile->valid) {
++		/* Never replace an admitted namespace while its flows exist. */
++		err = profile->flow.gem == flow->gem &&
++			profile->flow.num_vlans == flow->num_vlans &&
++			profile->flow.vlan[0] == flow->vlan[0] &&
++			profile->flow.rx_tci_mask == flow->rx_tci_mask &&
++			ether_addr_equal(profile->dmac, dmac) ? 0 : -EBUSY;
++		goto unlock;
++	}
++	err = airoha_pon_ifc_port(eth, false);
++	if (err)
++		goto fault;
++	if (!dev->pon_ifc_initialized) {
++		/* Native FE starts IFC disabled. Refuse ownership if another
++		 * consumer has enabled it; do not clear someone else's rules.
++		 */
++		if (airoha_fe_rr(eth, REG_FE_CSR_IFC_CFG) & FE_IFC_EN_MASK) {
++			err = -EBUSY;
++			goto unlock;
++		}
++		/* Factory init_module enables IFC before touching its tables.
++		 * Isolate ALL inputs while the table contents are untrusted;
++		 * native LAN ports may already have their per-port bit set.
++		 */
++		saved_ports = airoha_fe_rr(eth, REG_FE_IFC_PORT_EN);
++		initializing = true;
++		stage = "isolate-inputs";
++		err = airoha_pon_ifc_register(eth, REG_FE_IFC_PORT_EN, U32_MAX, 0);
++		if (err)
++			goto fault;
++		stage = "enable-table-access";
++		err = airoha_pon_ifc_register(eth, REG_FE_CSR_IFC_CFG,
++					    FE_IFC_EN_MASK, FE_IFC_EN_MASK);
++		if (err)
++			goto fault;
++		stage = "clear-actions";
++		for (i = 0; i < PON_IFC_ROWS; i++) {
++			err = airoha_pon_ifc_action(eth, i, empty);
++			if (err)
++				goto fault;
++		}
++		stage = "restore-inputs";
++		err = airoha_pon_ifc_register(eth, REG_FE_IFC_PORT_EN, U32_MAX,
++					    saved_ports & ~BIT(AIROHA_GDM2_IDX));
++		if (err)
++			goto fault;
++		initializing = false;
++		dev->pon_ifc_initialized = true;
++	}
++	/* A closed epoch may still have enabled action words in RAM. Clear
++	 * every stale family before reopening the shared ingress port.
++	 */
++	stage = "clear-stale-profiles";
++	for (i = 0; i < 2; i++) {
++		if (dev->pon_ingress[i].valid)
++			continue;
++		err = airoha_pon_ifc_action(eth, i, empty);
++		if (err)
++			goto fault;
++	}
++	airoha_pon_ifc_encode(flow, ethertype, dmac, key, mask, action);
++	stage = "clear-profile";
++	err = airoha_pon_ifc_action(eth, row, empty);
++	if (err)
++		goto fault;
++	stage = "write-rule";
++	for (i = 0; i < 9; i++) {
++		u32 data[2] = { key[i], mask[i] };
++
++		err = airoha_pon_ifc_word(eth, row, 8 - i, false, data, 2);
++		if (err)
++			goto fault;
++	}
++	stage = "write-action";
++	err = airoha_pon_ifc_action(eth, row, action);
++	if (err)
++		goto fault;
++	/* A PPE miss must return to the exclusive PON QDMA1 owner. */
++	stage = "cpu-port";
++	airoha_ppe_set_cpu_port(dev, 0, AIROHA_GDM2_IDX);
++	if (FIELD_GET(DFT_CPORT_MASK(AIROHA_GDM2_IDX),
++		      airoha_fe_rr(eth, REG_PPE_DFT_CPORT(0, AIROHA_GDM2_IDX))) !=
++	    FE_PSE_PORT_CDM2) {
++		dev_err(eth->dev,
++			"PON IFC CPU port: reg=%#06x expected=%u read=%#010x\n",
++			REG_PPE_DFT_CPORT(0, AIROHA_GDM2_IDX), FE_PSE_PORT_CDM2,
++			airoha_fe_rr(eth, REG_PPE_DFT_CPORT(0, AIROHA_GDM2_IDX)));
++		err = -EIO;
++		goto fault;
++	}
++	stage = "enable-classifier";
++	err = airoha_pon_ifc_register(eth, REG_FE_CSR_IFC_CFG,
++				    FE_IFC_EN_MASK, FE_IFC_EN_MASK);
++	if (err)
++		goto fault;
++	*profile = (struct airoha_pon_ingress) { .flow = *flow, .valid = true };
++	ether_addr_copy(profile->dmac, dmac);
++	stage = "open-port";
++	err = airoha_pon_ifc_port(eth, true);
++	if (!err) {
++		netdev_info(netdev_from_priv(dev),
++			    "PON IFC IPv%u enabled: GEM %u tags %u TCI %#06x/%#06x epoch %llu\n",
++			    row ? 6 : 4, flow->gem, flow->num_vlans,
++			    flow->vlan[0], flow->rx_tci_mask, flow->epoch);
++		goto unlock;
++	}
++ fault:
++	netdev_err(netdev_from_priv(dev),
++		   "PON IFC transaction failed: stage=%s IPv%u error=%d\n",
++		   stage, row ? 6 : 4, err);
++	/* Never retry or reopen IFC in this FE lifetime after a failed
++	 * transaction. With GDM2 disconnected, even a late table write or
++	 * an existing downstream PPE entry cannot admit another PON frame.
++	 * Upstream PPE and the existing CPU receive path remain usable.
++	 */
++	dev->pon_ifc_failed = true;
++	if (initializing &&
++	    !airoha_pon_ifc_register(eth, REG_FE_CSR_IFC_CFG, FE_IFC_EN_MASK, 0))
++		airoha_pon_ifc_register(eth, REG_FE_IFC_PORT_EN, U32_MAX,
++					saved_ports & ~BIT(AIROHA_GDM2_IDX));
++	if (airoha_ppe_pon_ifc_close(dev)) {
++		netdev_err(netdev_from_priv(dev),
++			   "PON IFC isolation failed; stopping PON traffic\n");
++		airoha_ppe_pon_fault(dev);
++	} else {
++		netdev_warn(netdev_from_priv(dev),
++			    "PON IFC disabled until reboot; downstream remains in software\n");
++	}
++ unlock:
++	spin_unlock_irqrestore(&ppe_lock, flags);
++	return err;
++}
++
++/* Recheck the raw software frame when training, including metadata rejected
++ * by the PON boundary before this call. No skb mutation or service accounting
++ * occurs here. An IFC miss or an old hash must never train a generic LAN flow.
++ */
++static bool airoha_ppe_pon_ifc_frame(struct airoha_gdm_dev *dev,
++				   struct sk_buff *skb,
++				   const struct airoha_pon_rx_meta *meta)
++{
++	struct airoha_pon_ingress *profile;
++	u8 header[ETH_HLEN + VLAN_HLEN];
++	u16 ethertype, vid = 0;
++	bool tagged;
++
++	lockdep_assert_held(&ppe_lock);
++	if (dev->pon_flow_fault || meta->omci || skb_vlan_tag_present(skb) ||
++	    skb_copy_bits(skb, 0, header, sizeof(header)))
++		return false;
++	ethertype = get_unaligned_be16(header + 12);
++	tagged = ethertype == ETH_P_8021Q;
++	if (tagged) {
++		vid = get_unaligned_be16(header + 14);
++		ethertype = get_unaligned_be16(header + 16);
++	}
++	if (ethertype != ETH_P_IP && ethertype != ETH_P_IPV6)
++		return false;
++	profile = &dev->pon_ingress[ethertype == ETH_P_IPV6];
++	return profile->valid && profile->flow.epoch == dev->pon_flow_epoch &&
++		profile->flow.gem == meta->gem &&
++		profile->flow.num_vlans == tagged &&
++		profile->flow.vlan[0] == (vid & profile->flow.rx_tci_mask) &&
++		ether_addr_equal(profile->dmac, header);
++}
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -847,7 +847,12 @@
+ 	WRITE_ONCE(dev->pon_flow_fault, true);
+ 	airoha_fe_wr(dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX), 0);
+ 	airoha_fe_rr(dev->eth, REG_GDM_TXCHN_EN(AIROHA_GDM2_IDX));
+-}
++	airoha_fe_clear(dev->eth, REG_FE_IFC_PORT_EN, BIT(AIROHA_GDM2_IDX));
++	airoha_fe_wr(dev->eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX), 0);
++	airoha_fe_rr(dev->eth, REG_GDM_RXCHN_EN(AIROHA_GDM2_IDX));
++}
++
++#include "airoha_pon_ifc.h"
+ 
+ static void airoha_ppe_foe_remove_flow(struct airoha_ppe *ppe,
+ 				       struct airoha_flow_table_entry *e)
+@@ -884,6 +889,8 @@
+ 	if (!ppe)
+ 		return 0;
+ 	spin_lock_irqsave(&ppe_lock, flags);
++	if (airoha_ppe_pon_ifc_close(dev))
++		error = -EIO;
+ 	if (++dev->pon_flow_epoch == 0)
+ 		error = -EOVERFLOW;
+ 	list_for_each_entry_safe(e, tmp, &ppe->pon_flows, pon_list) {
+@@ -987,7 +994,9 @@
+ 
+ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
+ 					struct sk_buff *skb,
+-					u32 hash, bool rx_wlan)
++					u32 hash, bool rx_wlan,
++					struct airoha_gdm_dev *pon_dev,
++					const struct airoha_pon_rx_meta *meta)
+ {
+ 	unsigned long flags;
+ 	struct airoha_flow_table_entry *e;
+@@ -998,6 +1007,9 @@
+ 	u32 index, state;
+ 
+ 	spin_lock_irqsave(&ppe_lock, flags);
++
++	if (pon_dev && !airoha_ppe_pon_ifc_frame(pon_dev, skb, meta))
++		goto unlock;
+ 
+ 	hwe = airoha_ppe_foe_get_entry_locked(ppe, hash);
+ 	if (!hwe)
+@@ -1018,6 +1030,9 @@
+ 			continue;
+ 		}
+ 
++		if (e->pon_ingress != !!pon_dev ||
++		    (pon_dev && e->pon_dev != pon_dev))
++			continue;
+ 		if (e->pon_dev && (e->pon_dev->pon_flow_fault || e->pon_epoch != e->pon_dev->pon_flow_epoch ||
+ 		    (e->hash != 0xffff && e->hash != hash)))
+ 			continue;
+@@ -1035,7 +1050,7 @@
+ 		e->hash = hash;
+ 	}
+ 
+-	if (commit_done)
++	if (commit_done || pon_dev)
+ 		goto unlock;
+ 
+ 	airoha_ppe_foe_set_bridge_addrs(&br, eth_hdr(skb));
+@@ -1210,7 +1225,7 @@
+ 	u8 dsfield = 0, l4proto = 0;
+ 	int err, i, offload_type;
+ 	u16 addr_type = 0;
+-	bool keep_ttl = false;
++	bool keep_ttl = false, pon_ingress = false;
+ 
+ 	if (rhashtable_lookup(&eth->flow_table, &f->cookie,
+ 			      airoha_flow_table_params))
+@@ -1319,18 +1334,35 @@
+ 		data.eth.h_source, &pon_flow, &pon_dev);
+ 	if (err && err != -ENOENT)
+ 		return err;
++	if (!pon_dev && odev) {
++		struct flow_match_meta meta;
++		struct net_device *idev;
++
++		flow_rule_match_meta(rule, &meta);
++		if (meta.mask->ingress_ifindex != U32_MAX)
++			return -EOPNOTSUPP;
++		rcu_read_lock();
++		idev = dev_get_by_index_rcu(dev_net(odev), meta.key->ingress_ifindex);
++		err = airoha_pon_resolve_ingress(eth, idev,
++			addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS ? ETH_P_IPV6 : ETH_P_IP,
++			&pon_flow, &pon_dev);
++		rcu_read_unlock();
++		if (err && err != -ENOENT)
++			return err;
++		pon_ingress = !!pon_dev;
++	}
+ 	if (pon_dev) {
+ 		if (offload_type == PPE_PKT_TYPE_BRIDGE || keep_ttl ||
+ 		    data.vlan.num || data.pppoe.num ||
+ 		    (l4proto != IPPROTO_TCP && l4proto != IPPROTO_UDP))
+ 			return -EOPNOTSUPP;
+-		data.vlan.num = pon_flow.num_vlans;
++		data.vlan.num = pon_ingress ? 0 : pon_flow.num_vlans;
+ 		for (i = 0; i < data.vlan.num; i++) {
+ 			data.vlan.hdr[i].id = pon_flow.vlan[i];
+ 			data.vlan.hdr[i].proto = htons(ETH_P_8021Q);
+ 		}
+ 	}
+-	err = airoha_ppe_foe_entry_prepare(eth, &hwe, pon_dev ? NULL : odev,
++	err = airoha_ppe_foe_entry_prepare(eth, &hwe, pon_dev && !pon_ingress ? NULL : odev,
+ 					   offload_type, &data, l4proto, dsfield);
+ 	if (err)
+ 		return err;
+@@ -1419,8 +1451,9 @@
+ 	e->cookie = f->cookie;
+ 	e->pon_dev = pon_dev;
+ 	e->pon_epoch = pon_flow.epoch;
++	e->pon_ingress = pon_ingress;
+ 	INIT_LIST_HEAD(&e->pon_list);
+-	if (pon_dev)
++	if (pon_dev && !pon_ingress)
+ 		airoha_ppe_foe_set_pon(&hwe, &pon_flow,
+ 			offload_type == PPE_PKT_TYPE_IPV6_ROUTE_5T);
+ 	memcpy(&e->data, &hwe, sizeof(e->data));
+@@ -1674,7 +1707,22 @@
+ 		return;
+ 
+ 	ppe->foe_check_time[hash] = now;
+-	airoha_ppe_foe_insert_entry(ppe, skb, hash, rx_wlan);
++	airoha_ppe_foe_insert_entry(ppe, skb, hash, rx_wlan, NULL, NULL);
++}
++
++void airoha_ppe_pon_check_skb(struct airoha_gdm_dev *dev, struct sk_buff *skb,
++			    const struct airoha_pon_rx_meta *meta)
++{
++	struct airoha_ppe *ppe = dev->eth->ppe;
++	u32 hash = FIELD_GET(AIROHA_RXD4_FOE_ENTRY, meta->words[1]);
++
++	if (!ppe || meta->omci ||
++	    FIELD_GET(AIROHA_RXD4_PPE_CPU_REASON, meta->words[1]) !=
++		PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED ||
++	    hash >= airoha_ppe_get_total_num_entries(ppe))
++		return;
++	skb_reset_mac_header(skb);
++	airoha_ppe_foe_insert_entry(ppe, skb, hash, false, dev, meta);
+ }
+ 
+ void airoha_ppe_init_upd_mem(struct airoha_gdm_dev *dev, const u8 *addr)
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -44,11 +44,13 @@
+ 
+ /* Routed, untagged UNI IPv4/IPv6 egress only. The consumer resolves the
+  * actual OMCI classifier, including the output VLAN treatment. No OMCI,
+- * bridge, PPPoE, multicast or downstream classifier bypass is authorized.
++ * bridge, PPPoE or multicast forwarding is authorized. For rx_flow, vlan[]
++ * describes the admitted wire tags and the UNI result must be untagged.
+  */
+ struct airoha_pon_flow {
+ 	u64 epoch;
+ 	u16 gem, vlan[2];
++	u16 rx_tci_mask; /* rx_flow only: full TCI or VID-only comparison. */
+ 	u8 channel, queue, num_vlans;
+ };
+ 
+@@ -59,6 +61,12 @@
+ 	 */
+ 	int (*flow)(void *priv, const struct net_device *upper, u16 ethertype,
+ 		    struct airoha_pon_flow *flow);
++	/* Same ownership and locking as flow. Prove that every frame selected by rx_tci_mask
++	 * passes the current downstream service rules
++	 * and reaches an untagged UNI. Unsupported policies return an error.
++	 */
++	int (*rx_flow)(void *priv, const struct net_device *upper, u16 ethertype,
++		       struct airoha_pon_flow *flow);
+ 	/* RX owns skb on entry, even when it rejects the frame. skb->data is
+ 	 * the unparsed frame; no Ethernet header has been pulled. Metadata is
+ 	 * valid only for this call. RX and tx_wake run under RCU in softirq
+@@ -93,9 +101,9 @@
+ struct airoha_pon *airoha_pon_attach(struct net_device *netdev,
+ 				     const struct airoha_pon_ops *ops, void *priv);
+ void airoha_pon_release(struct airoha_pon *pon);
+-/* Synchronously retire every PON egress flow before changing any service
++/* Synchronously close downstream IFC admission and retire every PON flow before changing any service
+  * classifier, UNI, GEM or T-CONT. IRQ-safe. A hardware retirement error
+- * latches admission closed and disables GDM2 TX, preventing identifier reuse
++ * latches admission closed and disables GDM2 RX/TX, preventing identifier reuse
+  * from transmitting through a stale entry. Does not drain optical FIFOs.
+  */
+ void airoha_pon_invalidate_flows(struct airoha_pon *pon);

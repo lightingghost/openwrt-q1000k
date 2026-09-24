@@ -24,7 +24,7 @@ static int irq, rtnl, graces, ticks, drain_calls, drain_error, shared, unstable,
 #define spin_unlock_irqrestore(l,f) do { assert(*(l)); *(l)=0; (void)(f); } while(0)
 struct airoha_qdma { int n; };
 struct airoha_eth { struct airoha_qdma qdma[2]; u32 regs[5]; };
-struct airoha_gdm_dev { struct airoha_eth *eth; };
+struct airoha_gdm_dev { bool pon_flow_fault; struct airoha_eth *eth; };
 struct airoha_pon {
     void *netdev;
     struct airoha_gdm_dev *dma_dev;
@@ -52,6 +52,8 @@ static int airoha_qdma_pon_drain_rx(struct airoha_qdma *q)
     assert(q==&eth.qdma[1] && rtnl && !pon.admission_lock && pon.rx_closed && pon.configuring==U32_MAX);
     drain_calls++; return drain_error;
 }
+/* Full PPE retirement/fault containment is exercised by test_pon_transport. */
+static void airoha_pon_fault_locked(struct airoha_pon *p) { p->control_fault=true; }
 /* PRODUCTION */
 static void reset(void)
 {

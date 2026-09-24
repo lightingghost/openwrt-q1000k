@@ -1,0 +1,25 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] net: airoha: select the PON output queue for its T-CONT
+
+The native PON API validates that its output queue matches the T-CONT channel,
+but the descriptor submission path used the Ethernet device's fixed queue.
+Derive the PON output queue from the validated channel in message word zero,
+matching the Q1000K factory descriptor path. Keep the per-device selection for
+ordinary Ethernet traffic. CPU DMA ring selection is independent of this field.
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -2789,7 +2789,12 @@
+ 	}
+ 
+ 	fport = airoha_get_fe_port(dev);
+-	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK, dev->nbq) |
++	/* Preserve the vendor PON output-queue selection for each T-CONT,
++	 * independently of the CPU DMA ring used for submission.
++	 */
++	msg1 = FIELD_PREP(QDMA_ETH_TXMSG_NBOQ_MASK, pon_msg ?
++			 FIELD_GET(QDMA_ETH_TXMSG_CHAN_MASK, *pon_msg) :
++			 dev->nbq) |
+ 	       FIELD_PREP(QDMA_ETH_TXMSG_FPORT_MASK, fport) |
+ 	       FIELD_PREP(QDMA_ETH_TXMSG_METER_MASK, 0x7f);
+ 	if (pon_msg) {

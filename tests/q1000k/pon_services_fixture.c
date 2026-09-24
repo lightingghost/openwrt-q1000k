@@ -20,6 +20,10 @@
 #define CHECKSUM_NONE 0
 #define CHECKSUM_PARTIAL 1
 #define ETH_P_8021Q 0x8100
+#define ETH_P_IP 0x0800
+#define ETH_P_IPV6 0x86dd
+static unsigned int flow_invalidations;
+static void q1000k_transport_invalidate_flows(void) { flow_invalidations++; }
 #define ETH_P_8021AD 0x88a8
 #define VLAN_VID_MASK 4095
 #define VLAN_PRIO_SHIFT 13
@@ -56,6 +60,8 @@ static int __skb_vlan_pop(struct sk_buff *skb,u16 *tci) {
     skb->protocol=get_unaligned_be16(skb->data+12); return 0;
 }
 static bool fixture_fix_vlans;
+static int fixture_uni_slot=1;
+static int q1000k_pon_uni_slot(void) { return fixture_uni_slot; }
 static int q1000k_pon_fix_vlans(void) { return fixture_fix_vlans; }
 #undef q1000k_trace
 #define QT_OMCI_GEM 28
@@ -237,6 +243,8 @@ static void test_classifier_update(void)
 
 int main(void)
 {
+    fixture_uni_slot=3; assert(qs_uni_index(0x301)==0 && qs_uni_index(0x101)==-EOPNOTSUPP);
+    fixture_uni_slot=1;
     struct omci_priority_queue_config q={.configuration=1,.maximum_size=0xffff,
         .tcont_entity_id=0x8000,.priority=4,.scheduler_entity_id=0x8000,
         .weight=17,.backpressure_occur=0xffff};
@@ -389,7 +397,23 @@ int main(void)
         assert(q1000k_services_replace(NULL,&tag,1)==-EINVAL);
         assert(qs_current==unchanged && physical_ops==ops && !protocol_error);
         bench_vlan_untagged=1;
+        unsigned int invalidated=flow_invalidations;
         assert(!q1000k_services_replace(NULL,&tag,1));
+        assert(flow_invalidations>invalidated);
+        struct airoha_pon_flow flow={.gem=0xdead}, saved=flow;
+        assert(q1000k_services_flow(0x0806,&flow)==-EOPNOTSUPP && !memcmp(&flow,&saved,sizeof(flow)));
+        for(unsigned int family=0;family<2;family++) {
+            assert(!q1000k_services_flow(family ? ETH_P_IPV6 : ETH_P_IP,&flow));
+            assert(!q1000k_services_rx_flow(family ? ETH_P_IPV6 : ETH_P_IP,&flow));
+            assert(flow.gem==500 && flow.channel==1 && flow.queue==3);
+            assert(flow.num_vlans==1 && flow.vlan[0]==123);
+        }
+        saved=flow; qs_changing=true;
+        assert(q1000k_services_flow(ETH_P_IP,&flow)==-ENOLINK && !memcmp(&flow,&saved,sizeof(flow)));
+        qs_changing=false; invalidated=flow_invalidations;
+        q1000k_services_enable(false);
+        assert(flow_invalidations>invalidated && q1000k_services_flow(ETH_P_IP,&flow)==-ENOLINK);
+        q1000k_services_enable(true);
         memset(&skb,0,sizeof(skb)); skb.len=60; skb.data[12]=8; skb.data[13]=6;
         for(unsigned int j=0;j<12;j++) skb.data[j]=j+7;
         memset(skb.data+14,0x5a,46);
@@ -416,7 +440,11 @@ int main(void)
         /* Optional AT&T priority-tag fallback uses the same OLT mapping. */
         memset(&skb,0,sizeof(skb)); skb.len=60; skb.data[12]=8; skb.data[13]=6;
         assert(q1000k_services_tx(&skb)==-ENOENT);
+        assert(q1000k_services_flow(ETH_P_IP,&flow)==-ENOENT);
+        assert(q1000k_services_rx_flow(ETH_P_IP,&flow)<0);
         fixture_fix_vlans=true;
+        assert(!q1000k_services_rx_flow(ETH_P_IP,&flow) && flow.gem==500 && flow.vlan[0]==123);
+        assert(!q1000k_services_flow(ETH_P_IP,&flow) && flow.vlan[0]==123);
         assert(!q1000k_services_tx(&skb) && get_unaligned_be16(skb.data+14)==123);
         assert(!q1000k_services_rx(&skb,500) && skb.len==60 && skb.data[12]==8);
         make_tag(&skb,42,0); assert(q1000k_services_tx(&skb)==-ENOENT);

@@ -5,6 +5,7 @@
 #ifdef Q1000K_PON_IDENTITY
 #include <net/xpon/omci.h>
 #include <linux/skbuff.h>
+#include <linux/soc/airoha/airoha_pon.h>
 
 void q1000k_services_init(void);
 /* Module teardown, after core callbacks and packet producers have stopped. */
@@ -30,6 +31,9 @@ int q1000k_services_replace(struct omci_device *, const struct omci_service_conf
  * caller holds RCU across classification, binding lookup and native enqueue.
  * tx consumes skb only on success. rx leaves ownership with the caller.
  */
+bool q1000k_pwan_data_dev(const struct net_device *dev);
+int q1000k_services_flow(u16 ethertype, struct airoha_pon_flow *flow);
+int q1000k_services_rx_flow(u16 ethertype, struct airoha_pon_flow *flow);
 int q1000k_services_tx(struct sk_buff *skb);
 int q1000k_services_rx(struct sk_buff *skb, u16 gem);
 #endif

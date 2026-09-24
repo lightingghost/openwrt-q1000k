@@ -1,3 +1,4 @@
+#define READ_ONCE(x) (x)
 // SPDX-License-Identifier: GPL-2.0-only
 #include <assert.h>
 #include <errno.h>
@@ -27,7 +28,7 @@ static void rtnl_unlock(void) { assert(rtnl); rtnl=false; }
 #define atomic_read_acquire(p) (*(p))
 struct airoha_qdma { u32 command, mode[4], global; u16 weights[32][8]; };
 struct airoha_eth { struct airoha_qdma qdma[2]; };
-struct airoha_gdm_dev { struct airoha_eth *eth; };
+struct airoha_gdm_dev { bool pon_flow_fault; struct airoha_eth *eth; };
 struct airoha_pon {
     void *netdev;
     struct airoha_gdm_dev *dma_dev;
@@ -76,6 +77,8 @@ static void airoha_qdma_wr(struct airoha_qdma *q,u32 reg,u32 value)
     for(unsigned int attempt=0;attempt<10;attempt++) { \
         (val)=op(args); if(condition) { result=0; break; } \
     } result; })
+/* Full PPE retirement/fault containment is exercised by test_pon_transport. */
+static void airoha_pon_fault_locked(struct airoha_pon *p) { p->control_fault=true; }
 /* PRODUCTION */
 static void reset_fixture(void)
 {

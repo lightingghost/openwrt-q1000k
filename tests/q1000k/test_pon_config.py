@@ -44,7 +44,9 @@ os.execv(uci, [uci, '-c', str(root/'config'), '-C', str(root/'overrides'),
                       software_version_a='BGW320_4.27.7', software_version_b='other-version',
                       active_bank='1', committed_bank='0', registration_id='0123',
                       logical_onu_id='logical-identity24-bytes', logical_password='password-12!',
-                      wan_mac='02:00:00:00:00:01', mib_profile='native-pptp', fix_vlans='1')
+                      wan_mac='02:00:00:00:00:01', mib_profile='native-pptp', fix_vlans='1',
+                      omcc_version='0xA3', pon_slot='3', olt_profile='nokia',
+                      iphost_mac='02:11:22:33:44:55', iphost_hostname='gateway', iphost_domain='example.test')
         for key, value in values.items():
             result = self.call('set', key, value)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -62,9 +64,14 @@ os.execv(uci, [uci, '-c', str(root/'config'), '-C', str(root/'overrides'),
         for key, parameter in [('vendor_id', 'vendor_id'), ('equipment_id', 'equipment_id'),
                                ('hardware_version', 'hardware_version'), ('software_version_a', 'software0'),
                                ('software_version_b', 'software1'), ('logical_onu_id', 'logical_onu_id'),
-                               ('logical_password', 'logical_password')]:
+                               ('logical_password', 'logical_password'), ('iphost_hostname', 'iphost_hostname'),
+                               ('iphost_domain', 'iphost_domain')]:
             self.assertEqual(params['pon_' + parameter + '_hex'], values[key].encode().hex())
         self.assertEqual(params['pon_fix_vlans'], '1')
+        self.assertEqual(params['pon_uni_slot'], '3')
+        self.assertEqual(params['pon_omcc_version'], '0xA3')
+        self.assertEqual(params['pon_iphost_mac'], values['iphost_mac'])
+        self.assertEqual(params['pon_olt_profile'], '3')
         self.assertNotIn('pon_serial', params)
         self.assertNotIn('pon_reg_id', params)
         self.assertEqual(self.call('clear', 'logical_password').returncode, 0)
@@ -73,7 +80,8 @@ os.execv(uci, [uci, '-c', str(root/'config'), '-C', str(root/'overrides'),
     def test_validation_shared_with_luci_and_uci_injection_rejected(self):
         cases = []
         for key, limit in [('equipment_id', 20), ('hardware_version', 14), ('software_version_a', 14),
-                           ('software_version_b', 14), ('logical_onu_id', 24), ('logical_password', 12)]:
+                           ('software_version_b', 14), ('logical_onu_id', 24), ('logical_password', 12),
+                           ('iphost_hostname', 25), ('iphost_domain', 25)]:
             for value, valid in [('', True), ('x' * limit, True), ('x' * (limit + 1), False),
                                   ('quote\'"$();', True), ('bad\nvalue', False), ('end\n', False),
                                   ('\t', False), ('é', False), ('x\x7f', False)]:
@@ -81,6 +89,9 @@ os.execv(uci, [uci, '-c', str(root/'config'), '-C', str(root/'overrides'),
         cases += [['serial', v, ok] for v, ok in [('HUMA12345678', True), ('HUMA12345678\n', False), ('HUMA...', False)]]
         cases += [['vendor_id', v, ok] for v, ok in [('HUMA', True), ('HUM', False), ('HUMA\n', False), ('HU-A', False)]]
         cases += [['registration_id', v, ok] for v, ok in [('00', True), ('a1' * 36, True), ('a1' * 37, False), ('1', False), ('0x00', False), ('00\n', False)]]
+        cases += [['omcc_version', v, ok] for v, ok in [('0x80', True), ('0xbf', True), ('0xA3', True), ('0x7f', False), ('0xc0', False), ('163', False), ('0xA3\n', False)]]
+        cases += [['pon_slot', v, ok] for v, ok in [('1', True), ('254', True), ('128', False), ('255', False), ('0', False), ('03', False), ('1\n', False), ('1.0', False)]]
+        cases += [['iphost_mac', v, ok] for v, ok in [('02:11:22:33:44:55', True), ('01:11:22:33:44:55', False), ('00:00:00:00:00:00', False), ('02:11:22:33:44:55\n', False)]]
         for key, value, valid in cases:
             with self.subTest(key=key, value=value):
                 result = self.call('set', key, value)
