@@ -18,7 +18,7 @@ done
 # A completed installation is never reapplied over user edits. Pending
 # markers let a failed cross-config commit finish without enabling interfaces.
 complete=0
-for interface in q1000k_wan q1000k_wan6; do
+for interface in wan wan6; do
 	existing=$(uci -q get "network.$interface") || existing=''
 	[ -n "$existing" ] || continue
 	[ "$existing" = interface ] || fail "$interface is not an interface"
@@ -45,31 +45,56 @@ done
 
 # Each new section is committed with autostart off. Even an interrupted
 # cross-config commit cannot bring up DHCP or start the PON modules.
-if ! uci -q get network.q1000k_wan >/dev/null; then
+if ! uci -q get network.wan >/dev/null; then
 	uci -q batch <<'UCI'
-set network.q1000k_wan=interface
-set network.q1000k_wan.q1000k_profile='pending'
-set network.q1000k_wan.proto='dhcp'
-set network.q1000k_wan.device='pon'
-set network.q1000k_wan.auto='0'
-set network.q1000k_wan.ipv6='1'
+set network.wan=interface
+set network.wan.q1000k_profile='pending'
+set network.wan.proto='dhcp'
+set network.wan.device='pon'
+set network.wan.auto='0'
+set network.wan.ipv6='1'
 UCI
 fi
-if ! uci -q get network.q1000k_wan6 >/dev/null; then
+if ! uci -q get network.wan6 >/dev/null; then
 	uci -q batch <<'UCI'
-set network.q1000k_wan6=interface
-set network.q1000k_wan6.q1000k_profile='pending'
-set network.q1000k_wan6.proto='dhcpv6'
-set network.q1000k_wan6.device='pon'
-set network.q1000k_wan6.auto='0'
-set network.q1000k_wan6.reqaddress='try'
-set network.q1000k_wan6.reqprefix='auto'
+set network.wan6=interface
+set network.wan6.q1000k_profile='pending'
+set network.wan6.proto='dhcpv6'
+set network.wan6.device='pon'
+set network.wan6.auto='0'
+set network.wan6.reqaddress='try'
+set network.wan6.reqprefix='auto'
 UCI
+fi
+
+# Normal images use the IPv6 topology exercised by the continuous RAM image.
+# Apply only on first installation, before the completion markers above can
+# return early on subsequent boots/upgrades. Existing LAN DHCP remains active.
+if [ -f /sys/firmware/devicetree/base/quantum,xgspon-service ]; then
+	uci -q batch <<'UCI'
+set network.wan6.reqaddress='none'
+set network.wan6.ip6assign='64'
+set network.wan6.ip6hint='f'
+set network.wan6.ip6ifaceid='::1'
+delete network.wan6.ip6class
+add_list network.wan6.ip6class='wan6'
+set network.lan.ip6assign='64'
+set network.lan.ip6hint='0'
+set network.lan.ip6ifaceid='::1'
+delete network.lan.ip6class
+add_list network.lan.ip6class='wan6'
+UCI
+	# Match the validated image's PPE mode on fresh installs. Preserve explicit
+	# choices, and never reapply defaults after this profile is installed.
+	for option in flow_offloading flow_offloading_hw; do
+		uci -q get "firewall.@defaults[0].$option" >/dev/null ||
+			uci -q set "firewall.@defaults[0].$option=1"
+	done
 fi
 uci -q commit network
 
 networks=$(uci -q get "firewall.$wan_zone.network") || networks=''
-for interface in q1000k_wan q1000k_wan6; do
+for interface in wan wan6; do
 	case " $networks " in
 		*" $interface "*) ;;
 		*) uci -q add_list "firewall.$wan_zone.network=$interface" ;;
@@ -78,6 +103,6 @@ done
 uci -q commit firewall
 
 # Mark completion only after both configurations were committed successfully.
-uci -q set network.q1000k_wan.q1000k_profile=1
-uci -q set network.q1000k_wan6.q1000k_profile=1
+uci -q set network.wan.q1000k_profile=1
+uci -q set network.wan6.q1000k_profile=1
 uci -q commit network

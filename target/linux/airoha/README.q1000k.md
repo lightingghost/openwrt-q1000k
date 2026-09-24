@@ -1,6 +1,6 @@
 # Quantum Fiber Q1000K
 
-The `quantum_q1000k` profile targets the AN7581SIT with 512 MiB RAM,
+The `quantum_q1000k-ubi` profile targets the AN7581SIT with 512 MiB RAM,
 512 MiB SPI NAND, one internal-switch 1 GbE LAN port (`lan1`) and one
 RTL8261N 10 GbE LAN port (`lan2`, MDIO address 8, reset GPIO 27).
 Both copper ports belong to `br-lan`. The optical PON connection is the
@@ -20,24 +20,28 @@ inversion, matching the Q1000K OEM driver and W1700K. These corrections
 still require hardware validation; see the
 [Ethernet investigation](../../../../Q1000K-ethernet-bringup.md), including
 the LED configuration update needed when retaining existing settings.
-PON/OMCI/ISP provisioning is not provided
-by this profile, and GDM2/PON remains disabled.
+On `q1000k-xgspon`, this profile includes the validated XGS-PON runtime,
+its optical board wiring, OMCI, continuous service and LuCI. Both normal
+image formats use the same PON implementation. See the
+[normal PON image guide](XGSPON-NORMAL-IMAGES.q1000k.md) for build commands,
+shared firmware, UBI factory data, private RAM overlays and remaining hardware checks.
+`q1000k-dev` and the upstream support branch are unchanged.
 
 ## Build outputs
 
-Select `CONFIG_TARGET_airoha_an7581_DEVICE_quantum_q1000k=y`,
+Select `CONFIG_TARGET_airoha_an7581_DEVICE_quantum_q1000k-ubi=y`,
 `CONFIG_TARGET_ROOTFS_INITRAMFS=y` and `CONFIG_TARGET_ROOTFS_SQUASHFS=y`,
 then run `make defconfig` and `make -j$(nproc)` in the OpenWrt checkout.
 Select `CONFIG_PACKAGE_luci-ssl=y` to include the LuCI web interface, uHTTPd
 and the required RPC modules. The `q1000k-build/user/q1000k/config.diff`
 profile enables this bundle. Without it, a source/snapshot build can boot
-and provide LAN/SSH access while having no web interface at `192.168.1.1`.
+and provide LAN/SSH access while having no web interface at `192.168.0.1`.
 The images in `bin/targets/airoha/an7581/` are:
 
-- `openwrt-airoha-an7581-quantum_q1000k-initramfs-recovery.itb`: Linux and
+- `openwrt-airoha-an7581-quantum_q1000k-ubi-initramfs-recovery.itb`: Linux and
   a RAM root filesystem for bring-up/recovery. This is not an automatic
   installer and does not contain the persistent SquashFS root filesystem.
-- `openwrt-airoha-an7581-quantum_q1000k-squashfs-sysupgrade.itb`: a FIT with
+- `openwrt-airoha-an7581-quantum_q1000k-ubi-squashfs-sysupgrade.itb`: a FIT with
   a gzip-compressed kernel, Q1000K DTB, external SquashFS data and OpenWrt
   metadata. This is the firmware upload for the Q1000K HTTP loader and the
   image for subsequent OpenWrt sysupgrades.

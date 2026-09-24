@@ -77,20 +77,20 @@ class PrivateBootTests(unittest.TestCase):
         self.run_defaults(overlay / 'etc/uci-defaults/zz-q1000k-private-autostart')
         expected = {
             'q1000k-xgspon.service.enabled': '1', 'q1000k-xgspon.service.lower': 'ponraw',
-            'network.lan.ipaddr': '192.168.255.1', 'dhcp.lan.ignore': '0',
+            'network.lan.ipaddr': '192.168.0.1', 'dhcp.lan.ignore': '0',
             'dhcp.lan.ra': 'server', 'dhcp.lan.dhcpv6': 'server',
-            'network.q1000k_wan.auto': '0', 'network.q1000k_wan6.auto': '0',
-            'network.q1000k_wan.ipv6': '1',
-            'network.q1000k_wan6.reqaddress': 'none', 'network.q1000k_wan6.reqprefix': 'auto',
-            'network.q1000k_wan6.ip6hint': 'f', 'network.lan.ip6hint': '0',
-            'network.lan.ip6class': 'q1000k_wan6', 'network.lan.ip6assign': '64',
+            'network.wan.auto': '0', 'network.wan6.auto': '0',
+            'network.wan.ipv6': '1',
+            'network.wan6.reqaddress': 'none', 'network.wan6.reqprefix': 'auto',
+            'network.wan6.ip6hint': 'f', 'network.lan.ip6hint': '0',
+            'network.lan.ip6class': 'wan6', 'network.lan.ip6assign': '64',
             'firewall.@zone[1].masq': '1', 'firewall.@forwarding[0].src': 'lan',
             'firewall.@defaults[0].flow_offloading': '1',
             'firewall.@defaults[0].flow_offloading_hw': '1',
             'firewall.@forwarding[0].dest': 'wan', 'network.br_lan.ports': 'lan1 lan2'}
         for key, value in expected.items():
             self.assertEqual(self.uci_cmd('get', key), value, key)
-        self.assertIn('q1000k_wan6', self.uci_cmd('get', 'firewall.@zone[1].network'))
+        self.assertIn('wan6', self.uci_cmd('get', 'firewall.@zone[1].network'))
         self.assertEqual(self.uci_cmd('changes'), '')
         self.assertEqual(self.uci_cmd('get', 'q1000k-xgspon.identity.equipment_id'), self.identity['equipment_id'])
 

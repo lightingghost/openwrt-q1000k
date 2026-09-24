@@ -209,7 +209,7 @@ int main(void) {
 }
 ''')
 
-    def test_q1000k_wan_creation_defers_hardware_until_cold_transaction(self):
+    def test_wan_creation_defers_hardware_until_cold_transaction(self):
         production = ''.join(function('pwan/gpon_wan.c', name) for name in
                              ['gwan_deinit', 'gwan_init'])
         run_c(r'''

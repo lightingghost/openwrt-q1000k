@@ -62,7 +62,7 @@ class PortableTests(unittest.TestCase):
                                        capture_output=True, text=True)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             result = json.loads(completed.stdout)
-            self.assertEqual(result['host'], '192.168.255.1')
+            self.assertEqual(result['host'], '192.168.0.1')
             self.assertEqual(result['mode'], 'experiments')
             self.assertEqual(result['artifact']['revision'], 'a'*40)
             self.assertEqual(result['artifact']['diagnostics_version'], 5)

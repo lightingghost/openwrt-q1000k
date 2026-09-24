@@ -46,7 +46,7 @@ class BenchTests(unittest.TestCase):
             self.write('lib/firmware/airoha/q1000k/A60993.elf.' + suffix, data.decode())
         self.write('uci', '''#!/bin/sh
 case "$*" in
-*network.lan.ipaddr) echo "${BENCH_IP:-192.168.255.1}" ;;
+*network.lan.ipaddr) echo "${BENCH_IP:-192.168.0.1}" ;;
 *dhcp.lan.ignore) echo 1 ;;
 *service.enabled) echo 0 ;;
 esac
@@ -192,7 +192,7 @@ else: raise AssertionError(action)
                 path = self.write(name, content)
                 self.run_bench(success=False)
                 path.unlink()
-        for address in ('192.168.1.1', '192.168.0.1'):
+        for address in ('192.168.1.1', '192.168.255.1'):
             self.env['BENCH_IP'] = address
             self.run_bench(success=False)
         self.assertEqual(self.calls(), [])
@@ -404,7 +404,7 @@ class BenchNetworkTests(unittest.TestCase):
         script = fixture.root / 'defaults'
         script.write_text(source)
         subprocess.run(['/bin/sh', str(script)], env=fixture.env, check=True, capture_output=True)
-        for key, value in [('network.lan.ipaddr', '192.168.255.1'), ('dhcp.lan.ignore', '1'),
+        for key, value in [('network.lan.ipaddr', '192.168.0.1'), ('dhcp.lan.ignore', '1'),
                            ('dhcp.lan.ra', 'disabled'), ('dhcp.lan.dhcpv6', 'disabled'),
                            ('network.br_lan.ports', 'lan1 lan2'), ('q1000k-xgspon.service.enabled', '0'),
                            ('firewall.@defaults[0].flow_offloading', '1'),

@@ -117,7 +117,7 @@ class RunnerTests(unittest.TestCase):
                         RUN.runtime_manifest(manifest)
 
     def test_default_command_cannot_contact_working_router(self):
-        self.assertEqual(RUN.SSH[-1], 'root@192.168.255.1')
+        self.assertEqual(RUN.SSH[-1], 'root@192.168.0.1')
         self.assertNotIn('192.168.1.1', ' '.join(RUN.SSH))
 
     def test_sample_bounds_and_context_are_checked_before_ssh(self):

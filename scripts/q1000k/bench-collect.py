@@ -26,7 +26,7 @@ import time
 import zlib
 
 EMBEDDED = None
-HOST = '192.168.255.1'
+HOST = '192.168.0.1'
 IMAGE = 'openwrt-airoha-an7581-quantum_q1000k-xgspon-bench-initramfs-bench.itb'
 COMPANIONS = ('bench-run', 'bench-report', 'bench-receiver-report', 'bench-probe-report',
               'bench-hypotheses', 'bench-suite', 'bench-control-report', 'bench-serial')

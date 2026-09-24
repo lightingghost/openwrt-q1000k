@@ -148,10 +148,10 @@ def inspect(image, revision, profile='bench', private_manifest=None):
     assert read('build_info').decode().splitlines()[3] == 'Revision: ' + revision
     assert ('(' + profile + ')').encode() in read('build_info')
     preinit = read('lib/preinit/00_preinit.conf')
-    assert b'pi_ip="192.168.255.1"\n' in preinit
-    assert b'pi_broadcast="192.168.255.255"\n' in preinit
+    assert b'pi_ip="192.168.0.1"\n' in preinit
+    assert b'pi_broadcast="192.168.0.255"\n' in preinit
     assert b'192.168.1.' not in preinit
-    assert b'json_add_string ipaddr "192.168.255.1"' in read('etc/board.d/99-lan-ip')
+    assert b'json_add_string ipaddr "192.168.0.1"' in read('etc/board.d/99-lan-ip')
     for source, dest in (
         ('package/network/utils/q1000k-xgspon-bench/files/defaults', 'etc/uci-defaults/99-q1000k-xgspon-bench'),
         ('package/network/utils/q1000k-xgspon-bench/files/bench', 'usr/sbin/q1000k-pon-bench'),
@@ -305,7 +305,7 @@ def inspect(image, revision, profile='bench', private_manifest=None):
                 sha256=hashlib.sha256(blob).hexdigest(), verified_fit_images=checked,
                 kernel_uncompressed_bytes=len(expanded), initramfs_entries=len(records),
                 unloadable_pon_modules=list(modules),
-                nand_disabled=True, tx_inhibited=(profile == 'bench'), tx_inhibited_by_default=True, profile=profile, management_ip='192.168.255.1',
+                nand_disabled=True, tx_inhibited=(profile == 'bench'), tx_inhibited_by_default=True, profile=profile, management_ip='192.168.0.1',
                 configured_panic_timeout=panic, runtime_panic_readback_required=True,
                 runtime_sha256sums={p: hashlib.sha256(read(p)).hexdigest() for p in runtime_paths},
                 rootfs_checks='passed', identity_configuration_checks='passed',

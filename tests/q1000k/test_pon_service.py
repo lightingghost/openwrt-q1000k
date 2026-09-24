@@ -91,11 +91,11 @@ elif action == 'ip':
     assert args[:3] == ['link', 'set', 'dev'] and args[3] == 'ponraw'
     (root / 'sys/class/net/ponraw/flags').write_text('0x1003' if args[4] == 'up' else '0x1002')
 elif action == 'ubus':
-    assert args[0] == 'call' and args[1] in ('network.interface.q1000k_wan', 'network.interface.q1000k_wan6')
+    assert args[0] == 'call' and args[1] in ('network.interface.wan', 'network.interface.wan6')
     assert args[2] in ('up', 'renew')
     if (root / 'block-network').exists(): sys.exit(1)
 elif action == 'ifdown':
-    assert args[0] in ('q1000k_wan', 'q1000k_wan6')
+    assert args[0] in ('wan', 'wan6')
 else:
     raise AssertionError(action)
 '''
@@ -114,7 +114,7 @@ else:
         source = source.replace('rmmod "$module"', '"' + str(self.root / 'rmmod') + '" "$module"')
         source = source.replace('sleep 5', '"' + str(self.root / 'sleep') + '" 5')
         for name in ('ip', 'ubus', 'ifdown'):
-            source = re.sub(r'(?<![A-Za-z0-9_-])' + name + r'(?= (?:link|call|q1000k_))',
+            source = re.sub(r'(?<![A-Za-z0-9_-])' + name + r'(?= (?:link|call|wan))',
                             '"' + str(self.root / name) + '"', source)
         self.script = self.write('supervisor', source)
 
@@ -132,6 +132,50 @@ else:
     def provisioned(self, **changes):
         self.sample(self.root / 'omci.json', dict(dict(schema_version=1, service_error=0,
             state=5, authenticated=1, agent_operational=1, service_rules=2, mib_objects=40), **changes))
+
+    def test_normal_board_uses_validated_recipe_without_bench_permission(self):
+        self.env.update(TEST_LOWER='ponraw')
+        self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
+        self.write('sys/class/net/ponraw/flags', '0x1002\n')
+        p = self.launch()
+        self.await_stage(p, 'waiting_registration')
+        before = self.calls()
+        self.assertEqual(before[0], ['modprobe', 'q1000k_pon_control'])
+        self.assertIn(['ip', 'link', 'set', 'dev', 'ponraw', 'up'], before)
+        self.assertIn(['modprobe', 'omci'], before)
+        params = next(c[2:] for c in before if c[:2] == ['insmod', 'xpon_10g'])
+        self.assertTrue({'rx_bench=0', 'bench_live_add=31', 'bench_initial_key_readback=1',
+                         'bench_key_inline=1', 'bench_ranging_mode=1'} <= set(params))
+        self.assertFalse(any(c[0] == 'ubus' for c in before))
+        self.provisioned()
+        self.await_stage(p, 'running')
+        self.assertEqual(len([c for c in self.calls() if c[0] == 'ubus']), 4)
+        self.provisioned(state=1, authenticated=0, agent_operational=0, service_rules=0)
+        self.await_stage(p, 'waiting_registration')
+        self.assertFalse(any(c[0] in ('rmmod', 'ifdown') for c in self.calls()))
+        self.provisioned()
+        self.await_stage(p, 'running')
+        self.assertEqual(len([c for c in self.calls() if c[0] == 'ubus']), 8)
+        p.terminate(); out, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual([c[1] for c in self.calls() if c[0] == 'rmmod'], MODULES[::-1])
+        self.assertEqual(self.calls()[-1], ['ip', 'link', 'set', 'dev', 'ponraw', 'down'])
+        self.assertNotIn(self.env['TEST_REG'], out + err)
+
+    def test_normal_board_still_requires_enabled_service_and_complete_inputs(self):
+        self.env.update(TEST_LOWER='ponraw')
+        self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
+        self.write('sys/class/net/ponraw/flags', '0x1002\n')
+        for key, bad in [('TEST_ENABLED', '0'), ('TEST_REG', ''), ('TEST_WAN_PROFILE', 'foreign')]:
+            previous = self.env.get(key)
+            self.env[key] = bad
+            self.failed(); self.assertEqual(self.calls(), [])
+            if previous is None:
+                del self.env[key]
+            else:
+                self.env[key] = previous
+        (self.root / 'lib/firmware/airoha/q1000k/A60993.elf.pm').unlink()
+        self.failed(); self.assertEqual(self.calls(), [])
 
     def test_private_cold_start_dark_wait_recovery_and_owned_cleanup(self):
         self.continuous()
@@ -205,7 +249,7 @@ else:
         calls = self.calls()
         first_unload = next(i for i, c in enumerate(calls) if c[0] == 'rmmod')
         self.assertEqual([c for c in calls[:first_unload] if c[0] == 'ifdown'],
-                         [['ifdown', 'q1000k_wan6'], ['ifdown', 'q1000k_wan']])
+                         [['ifdown', 'wan6'], ['ifdown', 'wan']])
 
     def calls(self):
         p = self.root / 'calls'

@@ -155,7 +155,7 @@ dynamic_lan() {
 	# change to distribute an already-live PD to a newly created interface.
 	ubus call network add_dynamic '{"name":"q6lan","proto":"static","device":"q6router"}' || return 1
 	dynamic=1
-	ubus call network add_dynamic "{\"name\":\"q6lan\",\"proto\":\"static\",\"device\":\"q6router\",\"ip6assign\":64,\"ip6hint\":\"$1\",\"ip6class\":[\"q1000k_wan6\"],\"ip6ifaceid\":\"::1\"}" || return 1
+	ubus call network add_dynamic "{\"name\":\"q6lan\",\"proto\":\"static\",\"device\":\"q6router\",\"ip6assign\":64,\"ip6hint\":\"$1\",\"ip6class\":[\"wan6\"],\"ip6ifaceid\":\"::1\"}" || return 1
 	ubus call network.interface.q6lan up
 }
 client_address() {
@@ -281,9 +281,9 @@ UCI
 	ip -n q6client -6 route get 2001:db8:610::2
 	# Observe an actual Renew/Reply in the PON capture and exercise the same
 	# client's service across it; a ubus method return alone is insufficient.
-	ubus call network.interface.q1000k_wan6 renew; result lan-wan-renew-request "$?"
+	ubus call network.interface.wan6 renew; result lan-wan-renew-request "$?"
 	pause 60
-	ubus call network.interface.q1000k_wan6 status
+	ubus call network.interface.wan6 status
 	client_snapshot after-renew
 	client_probes lan-after-renew
 	# Change the LAN /64 allocation within the live delegation. This is a
@@ -315,7 +315,7 @@ physical_test() {
 	work=$(mktemp -d /tmp/q1000k-ipv6.XXXXXX) || die 'physical work directory'
 	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan"}' || die 'physical delegated alias'
 	real_dynamic=1
-	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan","ip6assign":64,"ip6hint":"d","ip6class":["q1000k_wan6"],"ip6ifaceid":"::1"}' || die 'physical allocation refresh'
+	ubus call network add_dynamic '{"name":"q6real","proto":"static","device":"br-lan","ip6assign":64,"ip6hint":"d","ip6class":["wan6"],"ip6ifaceid":"::1"}' || die 'physical allocation refresh'
 	ubus call network.interface.q6real up || die 'physical alias up'
 	# shellcheck disable=SC2034
 	for attempt in $(seq 1 20); do
@@ -367,7 +367,7 @@ auto_state=/var/run/q1000k-pon-bench.lock/auto-ipv6
 auto_prepare() {
 	local config
 	[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || return 1
-	[ "$(uci -q get network.q1000k_wan6.q1000k_profile)" = 1 ] || return 1
+	[ "$(uci -q get network.wan6.q1000k_profile)" = 1 ] || return 1
 	[ -z "$(uci -q get network.lan.ip6assign)" ] || return 1
 	[ -z "$(ip -6 -o address show dev br-lan scope global | awk '/inet6 [23]/ {print $4}')" ] || return 1
 	for config in network dhcp; do
@@ -380,17 +380,17 @@ auto_prepare() {
 	# Define both consumers before DHCPv6 starts. netifd owns address lifetimes,
 	# prefix allocation and retirement; no static subscriber prefix is copied.
 	uci -q batch <<'UCI' || return 1
-set network.q1000k_wan6.reqaddress='none'
-set network.q1000k_wan6.ip6assign='64'
-set network.q1000k_wan6.ip6hint='f'
-set network.q1000k_wan6.ip6ifaceid='::1'
-delete network.q1000k_wan6.ip6class
-add_list network.q1000k_wan6.ip6class='q1000k_wan6'
+set network.wan6.reqaddress='none'
+set network.wan6.ip6assign='64'
+set network.wan6.ip6hint='f'
+set network.wan6.ip6ifaceid='::1'
+delete network.wan6.ip6class
+add_list network.wan6.ip6class='wan6'
 set network.lan.ip6assign='64'
 set network.lan.ip6hint='0'
 set network.lan.ip6ifaceid='::1'
 delete network.lan.ip6class
-add_list network.lan.ip6class='q1000k_wan6'
+add_list network.lan.ip6class='wan6'
 set dhcp.lan.ra='server'
 set dhcp.lan.dhcpv6='server'
 set dhcp.lan.ra_slaac='1'
@@ -451,7 +451,7 @@ auto_cleanup() {
 auto_probes() {
 	local endpoint hostname url target router label=${2:-initial}
 	printf 'native_pd_probe phase=%s\n' "$label"
-	ubus call network.interface.q1000k_wan6 status
+	ubus call network.interface.wan6 status
 	ubus call network.interface.lan status
 	ip -6 -j address show; ip -6 -j route show table all
 	for endpoint in google cloudflare; do

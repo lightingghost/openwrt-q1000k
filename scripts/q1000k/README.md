@@ -1,7 +1,7 @@
 # Reusable Q1000K RAM bench tools
 
 These tools never flash, reboot, or boot a device. Keep the fiber disconnected
-for controller/stack tests. The management address is fixed at 192.168.255.1;
+for controller/stack tests. The management address for new images is fixed at 192.168.0.1;
 192.168.1.1 belongs to the working router.
 
 From the OpenWrt source checkout:

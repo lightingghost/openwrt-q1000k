@@ -13,17 +13,28 @@ valid_mac() {
 	[ "$1" != '00:00:00:00:00:00' ]
 }
 
+factory_only() {
+	[ -f /sys/firmware/devicetree/base/quantum,xgspon-service ] &&
+		[ ! -f /sys/firmware/devicetree/base/quantum,xgspon-bench ]
+}
+
 read_identity() {
 	factory_available=0 factory_serial= factory_mac= factory_source=
+	factory_lan_mac= factory_unit_serial=
 	factory_json=$(/usr/sbin/q1000k-pon-factory inspect 2>/dev/null)
 	if json_load "$factory_json"; then
 		json_get_var factory_available available
 		json_get_var factory_serial serial
 		json_get_var factory_mac wan_mac
 		json_get_var factory_source source
+		json_get_var factory_lan_mac lan_mac
+		json_get_var factory_unit_serial unit_serial
 	fi
-	serial=$(uci -q get q1000k-xgspon.identity.serial)
-	wan_mac=$(uci -q get q1000k-xgspon.identity.wan_mac)
+	serial= wan_mac=
+	if ! factory_only; then
+		serial=$(uci -q get q1000k-xgspon.identity.serial)
+		wan_mac=$(uci -q get q1000k-xgspon.identity.wan_mac)
+	fi
 	serial_source=override mac_source=override
 	[ -n "$serial" ] || { serial=$factory_serial; serial_source=factory; }
 	[ -n "$wan_mac" ] || { wan_mac=$factory_mac; mac_source=factory; }
@@ -52,7 +63,7 @@ read_calibration() {
 	calibration_available=0 calibration_source=
 	if [ "$factory_available" = 1 ]; then
 		calibration_available=1 calibration_source=factory
-	elif /usr/sbin/q1000k-pon-factory calibration --calibration-file \
+	elif ! factory_only && /usr/sbin/q1000k-pon-factory calibration --calibration-file \
 		/lib/firmware/airoha/q1000k/xgspon-calibration.bin >/dev/null 2>&1; then
 		calibration_available=1 calibration_source=staged
 	fi
@@ -287,6 +298,8 @@ xgspon_status() {
 	json_add_string source "$factory_source"
 	json_add_string serial "$factory_serial"
 	json_add_string wan_mac "$factory_mac"
+	json_add_string lan_mac "$factory_lan_mac"
+	json_add_string unit_serial "$factory_unit_serial"
 	json_close_object
 	json_add_object identity
 	json_add_boolean valid "$identity_valid"

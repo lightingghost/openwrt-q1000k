@@ -76,7 +76,7 @@ class MatrixTests(unittest.TestCase):
 
 class DiagnosticTests(unittest.TestCase):
     def fixture(self, path, count=30, version=2):
-        record=dict(schema_version=1, action='receive', host='192.168.255.1', fiber='connected',
+        record=dict(schema_version=1, action='receive', host='192.168.0.1', fiber='connected',
                     status='failed', postflight='passed', input_cleanup='passed', revision='a'*40,
                     samples=count, started=0, finished=200)
         names = MATRIX.RECEIVER.PHY_WORDS + (MATRIX.RECEIVER.EXTENDED_PHY_WORDS if version >= 2 else ())

@@ -25,15 +25,15 @@ optical carrier. The controller caches `quantum,tx-inhibit` at probe and
 rejects all consumer TX-enable requests with power-off containment.
 
 The explicit builder `--profile bench` selects this target and
-`192.168.255.1/24`, including preinit/failsafe. LAN DHCP, DHCPv6 and RA servers
+`192.168.0.1/24`, including preinit/failsafe. LAN DHCP, DHCPv6 and RA servers
 are disabled, both copper ports remain LAN, and the normal PON service is
-disabled. Connect a dedicated host at e.g. `192.168.255.2/24`, with no gateway
+disabled. Connect a dedicated host at e.g. `192.168.0.2/24`, with no gateway
 on that link. **192.168.1.1 belongs to the user's working router and must
 not be used for Q1000K SSH.** No default WAN or OLT identity is inferred.
 
-The user changed the requested default from 192.168.0.1 to **192.168.255.1**
-after the stack-test checkpoint. New images use the new subnet; the older
-images and runtime logs below retain their original 192.168.0.1 address.
+The requested default is **192.168.0.1** as of the normal-image integration
+on 2026-09-24. Historical images and runtime logs below keep their recorded
+addresses, including 192.168.255.1 for the intervening bench checkpoints.
 
 ## Staged device tests
 

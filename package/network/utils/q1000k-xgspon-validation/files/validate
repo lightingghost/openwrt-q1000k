@@ -51,8 +51,8 @@ cleanup() {
 	packet_stop
 	pd_cleanup || failed=1
 	if [ "$wan_owned" = 1 ]; then
-		ifdown q1000k_wan6 || failed=1
-		ifdown q1000k_wan || failed=1
+		ifdown wan6 || failed=1
+		ifdown wan || failed=1
 	fi
 	if [ "$auto_config" = 1 ]; then
 		/usr/libexec/q1000k-ipv6-bench auto-cleanup || failed=1
@@ -119,7 +119,7 @@ source_probes() {
 pd_probes() {
 	local data up l3_device keys key address mask preferred valid source native= existing count=0 attempt line pd_mask
 	printf 'source_cycle name=%s\n' "$1"
-	data=$(ubus call network.interface.q1000k_wan6 status) || fail 'IPv6 status unavailable.'
+	data=$(ubus call network.interface.wan6 status) || fail 'IPv6 status unavailable.'
 	json_load "$data" || fail 'Malformed IPv6 status.'
 	json_get_vars up l3_device
 	[ "$up" = 1 ] && [ "$l3_device" = pon ] || { echo 'source_unavailable origin=delegated_prefix reason=wan-down'; return; }
@@ -357,7 +357,7 @@ observe() {
 }
 wan_idle() {
 	local interface data
-	for interface in q1000k_wan q1000k_wan6; do
+	for interface in wan wan6; do
 		[ "$(uci -q get network.$interface.q1000k_profile)" = 1 ] &&
 		[ "$(uci -q get network.$interface.auto)" = 0 ] &&
 		[ "$(uci -q get network.$interface.device)" = pon ] || return 1
@@ -674,14 +674,14 @@ wan_idle || fail 'WAN ownership changed.'
 event wan started
 wan_owned=1
 packet_start
-ifup q1000k_wan || fail 'DHCP startup failed.'
-ifup q1000k_wan6 || fail 'DHCPv6 startup failed.'
+ifup wan || fail 'DHCP startup failed.'
+ifup wan6 || fail 'DHCPv6 startup failed.'
 wan_limit=$limit
 [ "$phase" != activation-omci-wan-soak ] || wan_limit=4200
 count=0 deadline=$(( $(now) + wan_limit ))
 while [ "$count" -lt "$wan_limit" ] && [ "$(now)" -lt "$deadline" ]; do
 	snapshot
-	for interface in q1000k_wan q1000k_wan6; do
+	for interface in wan wan6; do
 		printf 'wan_status interface=%s\n' "$interface"
 		ubus call network.interface.$interface status || fail 'WAN status unavailable.'
 	done
@@ -719,12 +719,12 @@ if [ "$phase" = activation-omci-wan-lan ]; then
 fi
 if [ "$phase" = activation-omci-wan-renew ] || [ "$phase" = activation-omci-wan-auto-renew ]; then
  event wan-renew started
- for interface in q1000k_wan q1000k_wan6; do
+ for interface in wan wan6; do
   ubus call network.interface.$interface renew; renew_rc=$?
   printf 'renew_result interface=%s rc=%s\n' "$interface" "$renew_rc"
  done
  observe wan-renew 60
- for interface in q1000k_wan q1000k_wan6; do
+ for interface in wan wan6; do
   printf 'wan_status interface=%s\n' "$interface"
   ubus call network.interface.$interface status || fail 'Post-renew WAN status unavailable.'
  done

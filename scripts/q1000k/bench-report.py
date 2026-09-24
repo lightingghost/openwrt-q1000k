@@ -105,7 +105,7 @@ def summarize(capture, allow_downstream_failure=False):
     capture = capture.resolve(strict=True)
     record = json.loads((capture / 'checkpoint.json').read_text())
     for field, expected in {
-        'schema_version': 1, 'host': '192.168.255.1',
+        'schema_version': 1, 'host': '192.168.0.1',
         'postflight': 'passed', 'input_cleanup': 'passed',
     }.items():
         if record.get(field) != expected:

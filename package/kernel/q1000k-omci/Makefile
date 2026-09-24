@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=q1000k-omci
-PKG_RELEASE:=20
+PKG_RELEASE:=21
 PKG_EXTMOD_SUBDIRS:=net/xpon
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Matheus Sampaio Queiroga <srherobrine20@gmail.com>
@@ -14,7 +14,7 @@ include $(INCLUDE_DIR)/package.mk
 define KernelPackage/q1000k-omci
   SUBMENU:=Network Devices
   TITLE:=Experimental Q1000K PON and OMCI core
-  DEPENDS:=@BROKEN @TARGET_airoha_an7581
+  DEPENDS:=@TARGET_airoha_an7581
   KCONFIG:=CONFIG_LEDS_CLASS=y
   FILES:= \
 	$(PKG_BUILD_DIR)/net/xpon/xpon.ko \

@@ -37,9 +37,9 @@ class NativeConfigTests(unittest.TestCase):
     def test_native_pd_uses_two_allocations_and_restores_configuration(self):
         before={c:self.uci_cmd('export',c) for c in ('network','dhcp')}
         p=self.run_mode('auto-prepare'); self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-        self.assertEqual(self.uci_cmd('get','network.q1000k_wan6.reqaddress'),'none')
-        self.assertEqual(self.uci_cmd('get','network.lan.ip6class'),'q1000k_wan6')
-        self.assertNotEqual(self.uci_cmd('get','network.lan.ip6hint'),self.uci_cmd('get','network.q1000k_wan6.ip6hint'))
+        self.assertEqual(self.uci_cmd('get','network.wan6.reqaddress'),'none')
+        self.assertEqual(self.uci_cmd('get','network.lan.ip6class'),'wan6')
+        self.assertNotEqual(self.uci_cmd('get','network.lan.ip6hint'),self.uci_cmd('get','network.wan6.ip6hint'))
         self.assertEqual(self.uci_cmd('get','network.lan.ipaddr'),'192.168.1.1')
         p=self.run_mode('auto-cleanup'); self.assertEqual(p.returncode,0,p.stdout+p.stderr)
         self.assertEqual({c:self.uci_cmd('export',c) for c in before},before)

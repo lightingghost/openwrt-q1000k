@@ -20,7 +20,7 @@ class ReportTests(unittest.TestCase):
 
     def fixture(self, action='receive', fiber='disconnected', count=None):
         count = count or (30 if action == 'receive' else 5)
-        record = dict(schema_version=1, action=action, fiber=fiber, host='192.168.255.1',
+        record = dict(schema_version=1, action=action, fiber=fiber, host='192.168.0.1',
                       status='passed', postflight='passed', input_cleanup='passed',
                       revision='a' * 40, serial_start=0, started=1, finished=50)
         if action == 'receive':

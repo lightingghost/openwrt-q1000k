@@ -49,7 +49,7 @@ class Remote:
 
 
 def arguments(output, probes=(), samples=1):
-    return argparse.Namespace(output=output, host='192.168.255.1', samples=samples, interval=5, probe_ip=list(probes))
+    return argparse.Namespace(output=output, host='192.168.0.1', samples=samples, interval=5, probe_ip=list(probes))
 
 
 class LiveCollectionTests(unittest.TestCase):

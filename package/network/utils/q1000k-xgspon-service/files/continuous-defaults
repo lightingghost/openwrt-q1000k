@@ -6,28 +6,28 @@ set -eu
 [ -f /etc/q1000k-private-autostart ] || exit 0
 [ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || exit 1
 [ "$(uci -q get q1000k-xgspon.service.continuous_bench)" = 1 ] || exit 1
-for interface in q1000k_wan q1000k_wan6; do
+for interface in wan wan6; do
 	[ "$(uci -q get network.$interface.q1000k_profile)" = 1 ] || exit 1
 done
 # netifd starts at S20, before the optical owner at S95. The owner starts the
 # inactive WAN clients once O5/authentication/OMCI provisioning are stable.
 # LAN DHCP remains available even with the fiber disconnected.
 uci -q batch <<'UCI'
-set network.q1000k_wan.auto='0'
-set network.q1000k_wan.ipv6='1'
-set network.q1000k_wan6.auto='0'
-set network.q1000k_wan6.reqaddress='none'
-set network.q1000k_wan6.reqprefix='auto'
-set network.q1000k_wan6.ip6assign='64'
-set network.q1000k_wan6.ip6hint='f'
-set network.q1000k_wan6.ip6ifaceid='::1'
-delete network.q1000k_wan6.ip6class
-add_list network.q1000k_wan6.ip6class='q1000k_wan6'
+set network.wan.auto='0'
+set network.wan.ipv6='1'
+set network.wan6.auto='0'
+set network.wan6.reqaddress='none'
+set network.wan6.reqprefix='auto'
+set network.wan6.ip6assign='64'
+set network.wan6.ip6hint='f'
+set network.wan6.ip6ifaceid='::1'
+delete network.wan6.ip6class
+add_list network.wan6.ip6class='wan6'
 set network.lan.ip6assign='64'
 set network.lan.ip6hint='0'
 set network.lan.ip6ifaceid='::1'
 delete network.lan.ip6class
-add_list network.lan.ip6class='q1000k_wan6'
+add_list network.lan.ip6class='wan6'
 set dhcp.lan.ignore='0'
 set dhcp.lan.start='100'
 set dhcp.lan.limit='150'

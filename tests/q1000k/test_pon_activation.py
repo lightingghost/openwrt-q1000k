@@ -462,7 +462,7 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaises(ValueError): COLLECT.plan(skip_physical=True, physical_only=True)
 
     def test_management_lease_cannot_pass_wan(self):
-        report=COLLECT.summarize(json.dumps(dict(l3_device='br-lan',up=True,proto='dhcp',**{'ipv4-address':['192.168.255.1']})))
+        report=COLLECT.summarize(json.dumps(dict(l3_device='br-lan',up=True,proto='dhcp',**{'ipv4-address':['192.168.0.1']})))
         self.assertFalse(report['dhcp_ipv4'])
 
 if __name__=='__main__': unittest.main()

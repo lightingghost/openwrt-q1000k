@@ -2,7 +2,8 @@
 
 The user authorized one image containing the five next stages, including optical
 TX when needed. Work stays on `q1000k-xgspon`. This image remains RAM-only,
-with NAND disabled and management at 192.168.255.1.
+with NAND disabled. New images use management address 192.168.0.1; historical
+bench captures below retain their recorded address.
 
 ## Implementation and acceptance plan
 

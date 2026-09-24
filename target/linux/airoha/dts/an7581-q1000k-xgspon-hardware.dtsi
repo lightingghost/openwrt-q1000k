@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/* Shared by the normal UBI image and the validated activation RAM profile.
+ * The native Ethernet driver owns DMA; the vendor PHY owns the optical PCS.
+ */
+&pon_phy {
+	status = "okay";
+};
+
+&pon_mac {
+	status = "okay";
+};
+
+&gdm2 {
+	/delete-property/ pcs-handle;
+	phy-mode = "internal";
+	openwrt,netdev-name = "ponraw";
+	status = "okay";
+
+	/* DMA availability, not optical carrier. */
+	fixed-link {
+		speed = <10000>;
+		full-duplex;
+	};
+};
+
+/* NAND OEM: LED_PHY_TX_POWER_DISABLE 42 -> GPIO38, active high.
+ * Latch high before forcing GPIO, and keep the other PON pins peripheral.
+ */
+&pon_phy_pins {
+	groups = "pon-sw-tx";
+};
+
+&en7581_pinctrl {
+	pon_board_tx_pins: pon-board-tx-pins {
+		level { pins = "gpio38"; output-high; };
+		mux { function = "gpio"; groups = "gpio38"; };
+	};
+};
+
+&pon_control {
+	pinctrl-0 = <&pon_control_pins &pon_board_tx_pins>;
+	tx-disable-gpios = <&en7581_pinctrl 38 GPIO_ACTIVE_HIGH>;
+};

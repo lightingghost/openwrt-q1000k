@@ -24,8 +24,29 @@
 struct identity {
 	char serial[13];
 	uint8_t mac[6];
+	uint8_t lan_mac[6];
+	char unit_serial[128];
 	uint8_t cal[CAL_SIZE];
 };
+
+static bool valid_mac(const uint8_t *mac)
+{
+	bool nonzero = false;
+	for (size_t i = 0; i < 6; i++)
+		nonzero |= mac[i] != 0;
+	return nonzero && !(mac[0] & 1);
+}
+
+static void json_string(const char *value)
+{
+	putchar('"');
+	for (; *value; value++) {
+		if (*value == '"' || *value == '\\')
+			putchar('\\');
+		putchar(*value);
+	}
+	putchar('"');
+}
 
 static bool valid_calibration(const uint8_t *cal)
 {
@@ -127,6 +148,19 @@ static int load(const char *path, bool dsd, bool regular, struct identity *id)
 	} else {
 		memcpy(id->serial, buf + 0x9000, sizeof(id->serial));
 		memcpy(id->mac, buf + 0x5000, sizeof(id->mac));
+		memcpy(id->lan_mac, buf + 0x6000, sizeof(id->lan_mac));
+		memcpy(id->unit_serial, buf + 0x8000, sizeof(id->unit_serial));
+		/* Additional inventory fields never invalidate otherwise usable PON
+		 * data in an older factory volume. Publish only bounded printable text.
+		 */
+		if (!memchr(id->unit_serial, 0, sizeof(id->unit_serial)))
+			id->unit_serial[0] = 0;
+		for (size_t i = 0; id->unit_serial[i]; i++)
+			if ((unsigned char)id->unit_serial[i] < 0x20 ||
+			    (unsigned char)id->unit_serial[i] > 0x7e) {
+				id->unit_serial[0] = 0;
+				break;
+			}
 		memcpy(id->cal, buf + 0xb000, CAL_SIZE);
 	}
 	ret = valid(id) ? 0 : -1;
@@ -218,8 +252,15 @@ int main(int argc, char **argv)
 	if (cal)
 		return fwrite(id.cal, 1, sizeof(id.cal), stdout) != sizeof(id.cal) || fflush(stdout) ? 1 : 0;
 	printf("{\"available\":true,\"source\":\"%s\",\"serial\":\"%s\","
-	       "\"wan_mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"calibration_bytes\":%u}\n",
+	       "\"wan_mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"calibration_bytes\":%u,",
 	       source, id.serial, id.mac[0], id.mac[1], id.mac[2], id.mac[3], id.mac[4], id.mac[5], CAL_SIZE);
+	printf("\"unit_serial\":");
+	json_string(id.unit_serial);
+	printf(",\"lan_mac\":\"");
+	if (valid_mac(id.lan_mac))
+		printf("%02x:%02x:%02x:%02x:%02x:%02x", id.lan_mac[0], id.lan_mac[1],
+		       id.lan_mac[2], id.lan_mac[3], id.lan_mac[4], id.lan_mac[5]);
+	puts("\"}");
 	return fflush(stdout) ? 1 : 0;
 unavailable:
 	if (!cal)

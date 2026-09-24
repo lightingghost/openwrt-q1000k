@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon-wan
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -11,7 +11,7 @@ define Package/q1000k-xgspon-wan
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Optional Q1000K optical DHCP WAN configuration
-  DEPENDS:=@BROKEN @TARGET_airoha_an7581 +q1000k-xgspon-service +netifd +firewall4 +odhcp6c +uci
+  DEPENDS:=@TARGET_airoha_an7581 +q1000k-xgspon-service +netifd +firewall4 +odhcp6c +uci
 endef
 
 define Package/q1000k-xgspon-wan/description

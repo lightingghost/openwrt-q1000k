@@ -30,7 +30,7 @@ import time
 
 PIN = None
 TIMING_SLEEP = None
-HOST = '192.168.255.1'
+HOST = '192.168.0.1'
 IMAGE = 'openwrt-airoha-an7581-quantum_q1000k-xgspon-activation-initramfs-bench.itb'
 MODULES = 'q1000k_pon_control airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon omci xpon_10g'.split()
 INPUTS = {

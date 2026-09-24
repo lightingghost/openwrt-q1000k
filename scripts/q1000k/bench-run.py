@@ -20,7 +20,7 @@ PROBES = ('bit-order', 'descrambler', 'fec-oc', 'fec-off', 'gain-auto', 'gain-lo
           'rx-sequence-auto', 'post-eye-ready', 'oem-clock-cycle', 'oem-rx-acquire',
           'oem-peaking', 'checker-dark', 'combined-auto', 'prcal-rerun',
           'eye-current', 'oem-analog', 'oem-full-reset', 'oem-cal-reset', 'oem-cal-auto', 'oem-eye-0', 'oem-eye-1', 'oem-eye-2', 'oem-eye-3', 'oem-eye-4', 'oem-eye-5', 'oem-eye-6', 'oem-eye-7', 'oem-post-init', 'oem-post-cal', 'oem-reset-repeat')
-HOST = '192.168.255.1'
+HOST = '192.168.0.1'
 SSH = ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
        '-o', 'ServerAliveCountMax=2', 'root@' + HOST]

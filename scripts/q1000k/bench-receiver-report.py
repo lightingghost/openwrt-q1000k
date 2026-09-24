@@ -127,7 +127,7 @@ def summarize(capture):
     capture = capture.resolve(strict=True)
     record = json.loads((capture / 'checkpoint.json').read_text())
     if (record.get('schema_version') != 1 or record.get('action') != 'receive' or
-            record.get('host') != '192.168.255.1' or
+            record.get('host') != '192.168.0.1' or
             record.get('fiber') not in ('connected', 'disconnected') or
             record.get('status') not in ('passed', 'failed')):
         raise ValueError('A completed receive capture is required')

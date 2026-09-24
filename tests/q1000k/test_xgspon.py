@@ -36,6 +36,8 @@ class FactoryTests(unittest.TestCase):
         self.image = self.root / 'factory.bin'
         self.data = bytearray(65536)
         self.data[0x5000:0x5006] = bytes.fromhex('001122334455')
+        self.data[0x6000:0x6006] = bytes.fromhex('001122334456')
+        self.data[0x8000:0x800a] = b'UNIT"TEST\0'
         self.data[0x9000:0x900d] = b'TEST01234567\0'
         self.cal = bytes(i % 251 for i in range(513))
         self.data[0xb000:0xb201] = self.cal
@@ -59,6 +61,8 @@ class FactoryTests(unittest.TestCase):
         d = json.loads(r.stdout)
         self.assertEqual(d['serial'], 'TEST01234567')
         self.assertEqual(d['wan_mac'], '00:11:22:33:44:55')
+        self.assertEqual(d['lan_mac'], '00:11:22:33:44:56')
+        self.assertEqual(d['unit_serial'], 'UNIT"TEST')
         self.assertEqual(d['calibration_bytes'], 513)
         self.assertEqual(self.run_reader('calibration').stdout, self.cal)
 
@@ -321,6 +325,24 @@ class BackendTests(unittest.TestCase):
             r, d = self.call('validate')
             self.assertEqual(d['valid'], expected)
             self.assertEqual(r.returncode == 0, expected)
+
+    def test_normal_board_requires_factory_and_ignores_private_bench_overrides(self):
+        self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
+        self.env.update(TEST_SN='ABCD00112233', TEST_MAC='02:11:22:33:44:55')
+        self.write('calibration.bin', 'synthetic staged calibration')
+        _, data = self.call()
+        self.assertFalse(data['identity']['valid'])
+        self.assertFalse(data['calibration']['available'])
+        self.write('factory.json', json.dumps({'available': True, 'source': 'factory',
+            'serial': 'TEST01234567', 'wan_mac': '00:11:22:33:44:55',
+            'lan_mac': '00:11:22:33:44:56', 'unit_serial': 'UNIT-TEST'}))
+        _, data = self.call()
+        self.assertEqual(data['identity']['serial_source'], 'factory')
+        self.assertEqual(data['identity']['serial'], 'TEST01234567')
+        self.assertEqual(data['identity']['wan_mac'], '00:11:22:33:44:55')
+        self.assertEqual(data['calibration']['source'], 'factory')
+        self.assertEqual(data['factory']['lan_mac'], '00:11:22:33:44:56')
+        self.assertEqual(data['factory']['unit_serial'], 'UNIT-TEST')
 
     def test_firmware_integrity_and_private_calibration_staging(self):
         def prepare():

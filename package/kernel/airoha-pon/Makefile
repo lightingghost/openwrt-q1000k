@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=airoha-pon
-PKG_RELEASE:=98
+PKG_RELEASE:=99
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=coolsnowwolf <coolsnowwolf@gmail.com>
 
@@ -33,7 +33,7 @@ endef
 
 define KernelPackage/airoha-xpon-en757x
   $(call KernelPackage/airoha-pon/Default)
-  DEPENDS+=@BROKEN @(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-crypto-ecb +TARGET_airoha_an7581:kmod-q1000k-pon-control +TARGET_airoha_an7581:kmod-q1000k-omci
+  DEPENDS+=@(TARGET_airoha_an7581||(TARGET_airoha_an7583&&BROKEN)) +kmod-crypto-ecb +TARGET_airoha_an7581:kmod-q1000k-pon-control +TARGET_airoha_an7581:kmod-q1000k-omci
   KCONFIG+=CONFIG_CRYPTO_AES=y
   TITLE:=Airoha EN757x xPON driver (v2)
   VARIANT:=v2
@@ -50,13 +50,13 @@ define KernelPackage/airoha-xpon-en757x
 	$(PKG_BUILD_DIR)/xpon-en757x/xpon_phy_10g/phy_10g.ko \
 	$(PKG_BUILD_DIR)/xpon-en757x/xpon_10g/xpon_10g.ko
   # Board initialization and factory calibration must precede module loading.
-  # No autoload until the AN7581 datapath and optical startup are integrated.
+  # The Q1000K supervisor owns loading and reverse-order teardown.
 endef
 
 define KernelPackage/airoha-xpon-en757x/description
  Experimental vendor source for the v2 Airoha EN7581 and AN7583 PON MAC and
- PHY. Requires Linux 6.18 API fixes, optical initialization and integration
- with the upstream Airoha Ethernet driver. Do not load on a running Q1000K.
+ PHY. Q1000K uses the native Ethernet consumer and the optical supervisor
+ for ordered controller, PHY, MAC and OMCI startup. AN7583 remains experimental.
 endef
 
 PON_BSP_DIR:=$(PKG_BUILD_DIR)/bsp

@@ -43,8 +43,8 @@ emit ponraw_link ip -j -s link show dev ponraw
 emit addresses ip -j address show dev pon
 emit routes4 ip -4 -j route show table all dev pon
 emit routes6 ip -6 -j route show table all dev pon
-emit wan4 ubus call network.interface.q1000k_wan status
-emit wan6 ubus call network.interface.q1000k_wan6 status
+emit wan4 ubus call network.interface.wan status
+emit wan6 ubus call network.interface.wan6 status
 '''
 TEXT_FIELDS = {'board', 'boot_id', 'uptime', 'build_info'}
 FIELDS = TEXT_FIELDS | {'status', 'supervisor', 'pon_link', 'ponraw_link',
@@ -257,7 +257,7 @@ def collect(args, remote, sleep=time.sleep):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='192.168.255.1', help='Router IP address')
+    parser.add_argument('--host', default='192.168.0.1', help='Router IP address')
     parser.add_argument('--known-hosts', type=Path, help='Existing SSH known-hosts file; default is your normal SSH configuration')
     parser.add_argument('--output', type=Path, help='New evidence directory under build-artifacts/')
     parser.add_argument('--samples', type=int, default=6)

@@ -112,7 +112,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(C.ipv6_experiment_summary(sample)['renew_reply_xids'],['12ac'])
         self.assertFalse(C.ipv6_experiment_summary(sample)['packet_capture_complete'])
         self.assertTrue(C.ipv6_experiment_summary(sample+'ipv6_packet_capture rc=0\n')['packet_capture_complete'])
-        self.assertEqual(C.ipv6_experiment_summary('renew_result interface=q1000k_wan6 rc=0\n')['renew_reply_xids'],[])
+        self.assertEqual(C.ipv6_experiment_summary('renew_result interface=wan6 rc=0\n')['renew_reply_xids'],[])
 
     def test_firewall_negative_needs_positive_controls(self):
         sample='ipv6_check name=firewall-unsolicited-raw rc=1\n'

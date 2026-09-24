@@ -27,6 +27,12 @@ an7581_setup_interfaces()
 	quantum,q1000k-ubi)
 		# Both copper ports are LAN; the upstream connection is PON.
 		ucidef_set_interface_lan "lan1 lan2"
+		ucidef_set_interface "lan" ipaddr "192.168.0.1" netmask "255.255.255.0"
+		# UBI is already attached on a normal persistent boot. The factory
+		# helper validates the volume and MAC; never synthesize a unit address.
+		local factory_mac
+		factory_mac=$(/usr/sbin/q1000k-pon-factory inspect 2>/dev/null | jsonfilter -e '@.lan_mac')
+		[ -z "$factory_mac" ] || ucidef_set_interface_macaddr "lan" "$factory_mac"
 		;;
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"
