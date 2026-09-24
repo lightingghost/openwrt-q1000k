@@ -8,6 +8,7 @@ import json
 import lzma
 from pathlib import Path
 import posixpath
+import re
 import stat
 import struct
 import subprocess
@@ -96,7 +97,11 @@ def squash_records(data, workspace):
     image = workspace / 'rootfs.squashfs'
     image.write_bytes(data)
     root = workspace / 'root'
-    subprocess.run([REPO / 'staging_dir/host/bin/unsquashfs4', '-no-progress', '-d', root, image],
+    unpacker = REPO / 'staging_dir/host/bin/unsquashfs4'
+    # Inspect the only static device inode without requiring host mknod/root.
+    listing = subprocess.check_output([unpacker, '-lln', image, 'dev/console'], text=True)
+    assert re.search(r'^crw-------\s+0/0\s+5,\s+1\s.+/dev/console$', listing, re.M), listing
+    subprocess.run([unpacker, '-no-progress', '-d', root, '-excludes', image, 'dev/console'],
                    check=True, capture_output=True)
     records = {}
     for p in root.rglob('*'):
