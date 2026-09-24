@@ -201,7 +201,7 @@ define Device/quantum_q1000k-ubi
   DEVICE_ALT1_VARIANT := UBI
   DEVICE_DTS := an7581-q1000k-xgspon
   DEVICE_PACKAGES := fitblk nand-utils rtl826x-firmware bridge-hw-offload \
-	q1000k-xgspon-wan luci-app-econet-xpon
+	q1000k-xgspon-wan q1000k-pon-firmware luci-app-econet-xpon
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048

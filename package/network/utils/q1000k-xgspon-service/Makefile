@@ -11,7 +11,7 @@ define Package/q1000k-xgspon-service
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Q1000K XGS-PON lifecycle service
-  DEPENDS:=@TARGET_airoha_an7581 +q1000k-xgspon +q1000k-omci-tools +kmod-airoha-xpon-en757x +q1000k-pon-firmware
+  DEPENDS:=@TARGET_airoha_an7581 +q1000k-xgspon +q1000k-omci-tools +kmod-airoha-xpon-en757x
 endef
 
 define Package/q1000k-xgspon-service/description
