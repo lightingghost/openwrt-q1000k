@@ -213,6 +213,25 @@ else:
         self.assertEqual(self.calls()[-1], ['ip', 'link', 'set', 'dev', 'ponraw', 'down'])
         self.assertNotIn(self.env['TEST_REG'], out + err)
 
+    def test_passthrough_keeps_optics_and_restarts_router_leases_after_restore(self):
+        self.continuous()
+        self.write('var/run/q1000k-pon-passthrough/active', '')
+        self.provisioned()
+        p = self.launch()
+        self.await_stage(p, 'running')
+        time.sleep(0.3)
+        self.assertFalse(any(c[0] in ('ubus', 'ifdown', 'rmmod') for c in self.calls()))
+        loaded = [c for c in self.calls() if c[0] in ('insmod', 'modprobe')]
+        (self.root / 'var/run/q1000k-pon-passthrough/active').unlink()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and len([c for c in self.calls() if c[0] == 'ubus']) < 4:
+            time.sleep(0.02)
+        self.assertEqual(len([c for c in self.calls() if c[0] == 'ubus']), 4)
+        self.assertEqual([c for c in self.calls() if c[0] in ('insmod', 'modprobe')], loaded)
+        p.terminate()
+        _, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, 0, err)
+
     def test_private_profile_guards_before_optical_changes(self):
         self.continuous()
         for name in ('etc/q1000k-private-autostart', 'sys/firmware/devicetree/base/quantum,xgspon-activation-bench'):

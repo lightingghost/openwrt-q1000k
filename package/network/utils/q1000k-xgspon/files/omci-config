@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
-# Staging only: no module, controller, network or bootloader operations.
+# Commits settings; the service watcher applies valid changes asynchronously.
 . /lib/q1000k-xgspon/common.sh
 umask 077
 command=$1
@@ -31,19 +31,19 @@ case "$command" in
 			if [ "$command" = set ]; then
 				[ "$#" = 2 ] || error 'Usage: q1000k-omci config set KEY VALUE'
 				identity_option_valid "$key" "$2" || error "Invalid PON identity option: $key"
-				uci -q set "q1000k-xgspon.identity.$key=$2" || exit 1
+				uci -q set "xgspon.identity.$key=$2" || exit 1
 			else
 				[ "$#" = 1 ] || error 'Usage: q1000k-omci config clear KEY'
-				uci -q set "q1000k-xgspon.identity.$key=" || exit 1
+				uci -q set "xgspon.identity.$key=" || exit 1
 			fi
-			uci -q commit q1000k-xgspon || exit 1
-			echo 'Saved; takes effect at the next explicit PON stack startup.'
+			uci -q commit xgspon || exit 1
+			echo 'Saved; the running PON service will apply committed changes automatically.'
 		fi
 		;;
 	validate)
 		[ "$#" = 0 ] || error 'Usage: q1000k-omci config validate'
 		identity_options || exit 1
-		echo '{"valid":true,"activation":"next-explicit-startup"}'
+		echo '{"valid":true,"activation":"automatic-on-commit"}'
 		;;
 	*) error "Commands: list, get KEY, set KEY VALUE, clear KEY, validate. Keys: $identity_keys" ;;
 esac

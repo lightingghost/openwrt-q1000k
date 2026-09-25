@@ -7,19 +7,27 @@ const vm = require('node:vm');
 const base = path.resolve(__dirname, '../../package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon');
 function harness(file) {
     const polls = [], options = {};
-    const state = { result: null, fail: false };
+    const state = { result: null, fail: false, calls: [], saveFails: false };
     const context = {
         _: x => x,
         E: (tag, attrs, children) => ({ tag, attrs, children }),
         view: { extend: x => x },
-        rpc: { declare: () => () => state.fail ? Promise.reject(new Error('offline')) : Promise.resolve(state.result) },
+        rpc: { declare: spec => (...args) => {
+            state.calls.push([spec.object, spec.method, ...args]);
+            return state.fail ? Promise.reject(new Error('offline')) : Promise.resolve(state.result);
+        } },
+        ui: { changes: { init: () => { state.calls.push(['refresh-changes']); return Promise.resolve(); } } },
         poll: { add: fn => polls.push(fn) },
         dom: { content: (node, children) => { node.children = children; } },
         uci: { load: () => Promise.resolve() },
         form: { NamedSection: {}, Value: {}, Flag: {}, ListValue: {}, Map: class {
-            section() { return { tab() {}, option(type, name) { return options[name] = { value() {} }; },
+            section() { return { tab() {}, option(type, name) { return options[name] = { value() {}, depends() {} }; },
                 taboption(tab, type, name) { return this.option(type, name); } }; }
             render() { return {}; }
+            save() {
+                state.calls.push(['save-form']);
+                return state.saveFails ? Promise.reject(new Error('invalid')) : Promise.resolve();
+            }
         } }
     };
     const view = vm.runInNewContext('(function(){' + fs.readFileSync(path.join(base, file), 'utf8') + '\n})()', context);
@@ -32,6 +40,24 @@ function text(node) {
     return String(node);
 }
 async function main() {
+    const settings = harness('settings.js');
+    settings.view.render();
+    for (const action of ['handleSave', 'handleSaveApply']) {
+        settings.state.calls = [];
+        await settings.view[action]();
+        assert.deepEqual(settings.state.calls, [
+            ['save-form'], ['uci', 'commit', 'xgspon'], ['refresh-changes']
+        ]);
+    }
+    settings.state.saveFails = true;
+    settings.state.calls = [];
+    await assert.rejects(settings.view.handleSave(), /invalid/);
+    assert.deepEqual(settings.state.calls, [['save-form']]);
+    settings.state.saveFails = false;
+    settings.state.fail = true;
+    settings.state.calls = [];
+    await assert.rejects(settings.view.handleSave(), /offline/);
+    assert.deepEqual(settings.state.calls, [['save-form'], ['uci', 'commit', 'xgspon']]);
     const sample = { schema_version: 1, model: 'Quantum Fiber Q1000K',
         activation_supported: false, los: null, registration: null, omci: null,
         factory: { available: false }, firmware: {}, modules: { phy_loaded: true, mac_loaded: true } };
@@ -132,7 +158,11 @@ async function main() {
     for (const field of ['vendor_id', 'equipment_id', 'hardware_version', 'software_version_a',
         'software_version_b', 'registration_id', 'logical_onu_id', 'logical_password', 'active_bank',
         'committed_bank', 'sync_circuit_pack', 'omcc_version', 'pon_slot', 'olt_profile',
-        'iphost_mac', 'iphost_hostname', 'iphost_domain', 'monitor', 'enabled']) assert.ok(s.options[field], field);
+        'iphost_mac', 'iphost_hostname', 'iphost_domain', 'monitor', 'enabled', 'mode', 'client_mac']) assert.ok(s.options[field], field);
+    assert.equal(s.options.mode.default, 'router');
+    assert.equal(s.options.client_mac.validate('passthrough', '02:11:22:33:44:55'), true);
+    for (const v of ['', '01:11:22:33:44:55', '00:00:00:00:00:00', '02:11:22:33:44:55\n'])
+        assert.notEqual(s.options.client_mac.validate('passthrough', v), true);
     assert.equal(s.options._iop_mask, undefined);
     assert.equal(s.options.mib_profile, undefined);
     assert.doesNotMatch(fs.readFileSync(path.join(base, 'settings.js'), 'utf8'), /Q1000K|AT&T|BGW320|prx300|WAS-110|MaxLinear/);
@@ -140,8 +170,9 @@ async function main() {
     assert.equal(menu['admin/network/econet-xpon/configuration'].title, 'Settings');
     for (const name of ['settings', 'status']) {
         const route = menu['admin/network/econet-xpon/' + (name === 'settings' ? 'configuration' : name)];
-        assert.equal(route.action.path, 'econet-xpon/' + name + '-v4');
-        assert.equal(fs.readFileSync(path.join(base, name + '-v4.js'), 'utf8'), fs.readFileSync(path.join(base, name + '.js'), 'utf8'));
+        const version = name === 'settings' ? 'v5' : 'v4';
+        assert.equal(route.action.path, 'econet-xpon/' + name + '-' + version);
+        assert.equal(fs.readFileSync(path.join(base, name + '-' + version + '.js'), 'utf8'), fs.readFileSync(path.join(base, name + '.js'), 'utf8'));
     }
     for (const v of ['', 'TEST00112233', 'ABCDaabbccdd'])
         assert.equal(s.options.serial.validate('identity', v), true);

@@ -73,7 +73,8 @@ def main():
                             'PACKAGE_q1000k-xgspon-wan', 'PACKAGE_q1000k-xgspon-service',
                             'PACKAGE_kmod-airoha-xpon-en757x', 'PACKAGE_kmod-q1000k-omci',
                             'PACKAGE_kmod-q1000k-pon-control', 'PACKAGE_luci-app-econet-xpon',
-                            'PACKAGE_q1000k-pon-firmware')
+                            'PACKAGE_q1000k-pon-firmware', 'PACKAGE_q1000k-passthrough',
+                            'PACKAGE_bridge-hw-offload')
                 for key in required:
                     if f'CONFIG_{key}=y\n' not in config:
                         raise ValueError('Kconfig dropped required ' + key)

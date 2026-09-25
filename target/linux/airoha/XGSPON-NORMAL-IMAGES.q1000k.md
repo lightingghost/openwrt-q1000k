@@ -81,8 +81,10 @@ Generic images have empty subscriber/OMCI identity fields, no calibration
 file, no AT&T profile and no private-autostart marker. Optical monitoring is
 enabled, while service activation defaults to disabled. A registration ID and
 ISP provisioning values are not inferred from the factory layout. Configure
-those explicitly in `/etc/config/q1000k-xgspon`, then enable the service when
-appropriate. Setting identity fields in LuCI alone does not start transmission.
+those explicitly in `/etc/config/xgspon`, then enable the service when
+appropriate. Committing changed identity/service settings through LuCI or
+`uci commit xgspon` restarts the optical stack after validation. Identity edits
+alone do not enable registration while `service.enabled=0`.
 
 The private RAM-bench patch is held outside this repository under workspace
 `build-artifacts/q1000k-xgspon/private-ram-patch-20260924/`. Its README describes

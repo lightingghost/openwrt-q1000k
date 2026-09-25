@@ -87,8 +87,8 @@ with tempfile.TemporaryDirectory(prefix='q1000k-image-inspection.') as temporary
                     str(filesystem), 'build_info', 'etc', 'usr', 'lib', 'www'],
                    check=True, stdout=subprocess.DEVNULL)
     assert (root / 'build_info').read_text().splitlines()[3] == 'Revision: ' + revision
-    config = repo / 'package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config'
-    assert (root / 'etc/config/q1000k-xgspon').read_bytes() == config.read_bytes()
+    config = repo / 'package/network/utils/q1000k-xgspon/files/xgspon.config'
+    assert (root / 'etc/config/xgspon').read_bytes() == config.read_bytes()
     for name in ('usr/sbin/q1000k-xgspon', 'usr/sbin/q1000k-omci', 'usr/sbin/q1000k-pon-factory',
                  'usr/libexec/q1000k-xgspon-run', 'etc/init.d/q1000k-xgspon',
                  'etc/uci-defaults/90-q1000k-xgspon-wan',

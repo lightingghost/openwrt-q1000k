@@ -7,22 +7,13 @@ EXTRA_COMMANDS="stop_monitor"
 EXTRA_HELP="        stop_monitor    Release automatic diagnostics for a bench session"
 
 start_service() {
-	local enabled monitor
-	config_load q1000k-xgspon
-	config_get_bool enabled service enabled 0
-	config_get_bool monitor service monitor 1
-	[ "$enabled" = 1 ] || [ "$monitor" = 1 ] || return 0
 	procd_open_instance
-	if [ "$enabled" = 1 ]; then
-		procd_set_param command /usr/libexec/q1000k-xgspon-run
-	else
-		procd_set_param command /usr/libexec/q1000k-xgspon-run --monitor
-	fi
+	procd_set_param command /usr/libexec/q1000k-xgspon-watch-config
 	# stdout logging injects libsetlbf into ash and splits builtin printf writes
 	# to sysfs command attributes. Reports use status.json; keep stderr logging.
 	procd_set_param stdout 0
 	procd_set_param stderr 1
-	procd_set_param term_timeout 120
+	procd_set_param term_timeout 150
 	# Hardware faults require an explicit restart after diagnosis.
 	procd_close_instance
 }
@@ -43,5 +34,5 @@ reload_service() {
 	start
 }
 
-# Configuration edits take effect only after an explicit start/restart/reload.
-# In particular, saving identity overrides in LuCI does not activate hardware.
+# The wrapper observes committed settings, including plain CLI uci commit.
+# No config.change reload trigger: that would duplicate the wrapper's restart.

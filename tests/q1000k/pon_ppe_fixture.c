@@ -71,6 +71,27 @@ int main(void)
      * macros used to encode them. Ordinary tuple/MAC/VLAN bytes stay intact.
      */
     assert(sizeof(struct airoha_foe_entry)==80);
+    for(unsigned int ipv6=0;ipv6<2;ipv6++) for(int bridge=0;bridge<2;bridge++)
+        for(int ingress=0;ingress<2;ingress++) {
+            struct airoha_foe_entry before,after;
+            struct airoha_pon_flow flow={.gem=1023,.channel=31,.queue=2};
+            memset(&before,0xa5,sizeof(before));
+            before.ib1 |= 1u<<24;
+            after=finish(before,flow,bridge,ipv6 ? PPE_PKT_TYPE_IPV6_ROUTE_5T : PPE_PKT_TYPE_IPV4_HNAPT,ingress);
+            assert(after.ib1==(bridge ? before.ib1 & ~(1u<<24) : before.ib1));
+            if(ipv6) {
+                unsigned int expected=bridge ? 15 : ingress ? (word(&before,15)>>16)&31 : 2;
+                assert(((word(&after,15)>>16)&31)==expected);
+                assert((word(&after,15)&~(31u<<16))==(word(&before,15)&~(31u<<16)));
+            } else {
+                assert(after.ipv4.l2.common.src_mac_hi==before.ipv4.l2.common.src_mac_hi);
+                assert(after.ipv4.l2.src_mac_lo==before.ipv4.l2.src_mac_lo);
+            }
+            if(!ingress) {
+                assert(((word(&after,ipv6 ? 11 : 4)>>5)&15)==2);
+                assert(((word(&after,10)>>11)&31)==31);
+            }
+        }
     for(unsigned int ipv6=0;ipv6<2;ipv6++)
         for(unsigned int ch=1;ch<32;ch++) for(unsigned int q=0;q<8;q++) {
             struct airoha_pon_flow f={.gem=0xabcd,.channel=ch,.queue=q};

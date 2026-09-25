@@ -30,8 +30,9 @@ def generate(archive, identity_path, destination):
         value = identity.get(key, defaults.get(key, ''))
         lines.append('\toption ' + key + ' ' + shlex.quote(value))
     lines += ['', "config service 'service'", "\toption monitor '1'", "\toption enabled '1'",
-              "\toption lower 'ponraw'", "\toption continuous_bench '1'", '']
-    files['etc/config/q1000k-xgspon'] = ('\n'.join(lines).encode(), 0o600)
+              "\toption lower 'ponraw'", "\toption continuous_bench '1'", '',
+              "config passthrough 'passthrough'", "\toption mode 'router'", "\toption client_mac ''", '']
+    files['etc/config/xgspon'] = ('\n'.join(lines).encode(), 0o600)
     files['etc/q1000k-private-autostart'] = (b'continuous-activation-v1\n', 0o600)
     files['etc/uci-defaults/zz-q1000k-private-autostart'] = (
         (REPO / 'package/network/utils/q1000k-xgspon-service/files/continuous-defaults').read_bytes(), 0o755)

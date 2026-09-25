@@ -1,0 +1,353 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Reversible single-client RAM test. Default firmware startup stays routed.
+set -eu
+umask 077
+STATE=/var/run/q1000k-pon-passthrough
+SELF=/usr/sbin/q1000k-pon-passthrough
+
+fail() { echo "PON passthrough: $*" >&2; exit 1; }
+now() { read -r uptime rest < /proc/uptime; echo "${uptime%.*}"; }
+stop_captures() {
+	local file pid started current
+	for file in "$STATE"/capture-*.pid; do
+		[ -f "$file" ] || continue
+		read -r pid started < "$file"
+		case "$pid:$started" in *[!0-9:]*|:*) return 1;; esac
+		if [ -r "/proc/$pid/stat" ]; then
+			current=$(awk '{print $22}' "/proc/$pid/stat")
+			[ "$current" = "$started" ] || return 1
+			tr '\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "$STATE/dhcp-" || return 1
+			kill -INT "$pid"
+			for n in 1 2 3; do [ -r "/proc/$pid/stat" ] || break; sleep 1; done
+			[ ! -r "/proc/$pid/stat" ] || return 1
+		fi
+		rm -f "$file"
+	done
+}
+start_capture() {
+	local iface=$1 label=$2 pid started
+	(trap '' HUP; exec tcpdump -i "$iface" -nn -s 512 -U -c 512 \
+		-w "$STATE/dhcp-$label.pcap" 'arp or (udp and (port 67 or port 68 or port 546 or port 547)) or icmp6') \
+		</dev/null >"$STATE/capture-$label.log" 2>&1 9>&- &
+	pid=$!
+	started=$(awk '{print $22}' /proc/$pid/stat) || fail 'Packet capture exited during startup.'
+	echo "$pid $started" > "$STATE/capture-$label.pid"
+	for n in 1 2 3; do
+		[ ! -f "$STATE/dhcp-$label.pcap" ] || break
+		sleep 1
+	done
+	kill -0 "$pid" && [ -f "$STATE/dhcp-$label.pcap" ] || fail "Packet capture failed on $iface."
+}
+stop_sampler() {
+	local pid started current
+	[ -f "$STATE/sampler.pid" ] || return 0
+	read -r pid started < "$STATE/sampler.pid"
+	case "$pid:$started" in *[!0-9:]*|:*) return 1;; esac
+	if [ -r "/proc/$pid/stat" ]; then
+		current=$(awk '{print $22}' "/proc/$pid/stat")
+		[ "$current" = "$started" ] || return 1
+		tr '\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "$SELF sample" || return 1
+		kill -TERM "$pid"
+		for n in 1 2 3 4 5; do
+			[ -r "/proc/$pid/stat" ] || break
+			sleep 1
+		done
+		[ ! -r "/proc/$pid/stat" ] || return 1
+	fi
+	rm -f "$STATE/sampler.pid"
+}
+snapshot() {
+	echo '=== BUILD ==='
+	cat /build_info /proc/sys/kernel/random/boot_id
+	sha256sum /sys/kernel/notes
+	echo '=== CPU ==='
+	cat /proc/uptime /proc/stat
+	echo '=== NETWORK ==='
+	ip -details link show
+	ip address show
+	ip neigh show
+	ip route show table all
+	cat /proc/net/dev
+	echo '=== BRIDGE ==='
+	bridge link show
+	bridge fdb show br br-lan
+	echo '=== NFT ==='
+	nft list table bridge fw4 2>&1 || :
+	nft list table bridge q1000k_pon_test 2>&1 || :
+	echo '=== CONNTRACK ==='
+	cat /proc/net/nf_conntrack
+	echo '=== PPE ==='
+	cat /sys/kernel/debug/ppe/bind
+	echo '=== PON ==='
+	cat /proc/xgpon/status
+	q1000k-omci -i pon status
+	echo '=== LOG ==='
+	dmesg | tail -80
+}
+
+restore() {
+	[ -f "$STATE/saved" ] || return 0
+	local failed=0 token
+	token=$(cat "$STATE/token")
+	stop_sampler || failed=1
+	stop_captures || failed=1
+	# Retire flowtable leases before changing either topology or policy.
+	/etc/init.d/bridge-hw-offload stop || failed=1
+	if [ -f "$STATE/pon-original-mac" ]; then
+		ip link set dev pon address "$(cat "$STATE/pon-original-mac")" || failed=1
+	fi
+	for config in network dhcp firewall; do
+		uci -q revert "$config" || :
+		cp -p "$STATE/$config" "/etc/config/$config" || failed=1
+	done
+	/etc/init.d/network reload || failed=1
+	/etc/init.d/dnsmasq restart || failed=1
+	/etc/init.d/odhcpd restart || failed=1
+	for n in 1 2 3 4 5; do
+		[ -e /sys/class/net/br-lan/brif/pon ] || break
+		sleep 1
+	done
+	# Only remove provider-side management isolation after pon left br-lan.
+	if [ -e /sys/class/net/br-lan/brif/pon ]; then
+		echo 'PON is still bridged; retaining the guard and isolation.' >&2
+		return 1
+	fi
+	nft destroy table bridge q1000k_pon_test || failed=1
+	/etc/init.d/bridge-hw-offload restart || failed=1
+	for config in network dhcp firewall; do
+		cmp -s "$STATE/$config" "/etc/config/$config" || failed=1
+	done
+	[ "$failed" = 0 ] || return 1
+	if [ -f "$STATE/management-neighbor" ]; then
+		read -r management_client management_mac < "$STATE/management-neighbor"
+		# The restore reload also recreates br-lan. Keep management reachable
+		# until the host has rolled back and removed its dedicated link.
+		ip neigh replace "$management_client" lladdr "$management_mac" nud permanent dev br-lan || return 1
+	fi
+	# Moving the active marker releases networking back to the optical owner.
+	mv "$STATE" "/tmp/q1000k-pon-passthrough-finished-$token"
+	echo "/tmp/q1000k-pon-passthrough-finished-$token" > /var/run/q1000k-pon-passthrough-last
+	echo 'Router configuration restored; the optical owner will restart WAN DHCP.'
+}
+
+case "${1:-}" in
+	snapshot) snapshot; exit ;;
+	sample)
+		[ -f "$STATE/active" ] || fail 'No active test.'
+		[ ! -e "$STATE/sampler.pid" ] || fail 'A sampler is already present.'
+		echo "$$ $(awk '{print $22}' /proc/$$/stat)" > "$STATE/sampler.pid"
+		trap 'rm -f "$STATE/sampler.pid"' EXIT
+		trap 'exit 0' HUP INT TERM
+		for n in $(seq 1 120); do
+			echo SAMPLE "$n"
+			cat /proc/uptime /proc/stat
+			cat /sys/kernel/debug/ppe/bind /proc/net/nf_conntrack
+			sleep 1
+		done
+		exit ;;
+	stop-sample) stop_sampler; exit ;;
+	guard)
+		token=${2:?}
+		trap '' HUP
+		echo "$token" > "$STATE/guard.ready"
+		# Independently bounded even if the SSH session or host collector dies.
+		while [ -f "$STATE/active" ] && [ "$(cat "$STATE/token")" = "$token" ]; do
+			if [ "$(now)" -ge "$(cat "$STATE/deadline")" ]; then
+				"$SELF" stop "$token" && exit 0
+			fi
+			sleep 2
+		done
+		exit ;;
+esac
+
+[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || fail 'Requires the RAM activation bench.'
+[ -f /etc/q1000k-private-autostart ] || fail 'Requires the private continuous router profile.'
+mkdir -p /var/lock
+exec 9>/var/lock/q1000k-pon-passthrough.lock
+flock -x 9
+
+case "${1:-}" in
+	start)
+		port=${2:-}; mac=${3:-}; duration=${4:-900}
+		token=${5:-}
+		management_client=${6:-}; management_mac=${7:-}
+		pon_test_mac=${8:-}
+		if [ -n "$pon_test_mac" ]; then
+			echo "$pon_test_mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || fail 'Invalid PON test MAC.'
+			[ "$pon_test_mac" != "$mac" ] || fail 'PON and client MACs must differ.'
+		fi
+		[ -n "$token" ] || token=$(cat /proc/sys/kernel/random/uuid)
+		echo "$token" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail 'Invalid transaction token.'
+		case "$port" in lan1|lan2) ;; *) fail 'Use start lan1|lan2 CLIENT_MAC [120..1800 seconds].';; esac
+		echo "$mac" | grep -Eq '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$' || fail 'Invalid client MAC.'
+		first=${mac%%:*}
+		[ "$((0x$first & 1))" = 0 ] && [ "$mac" != 00:00:00:00:00:00 ] || fail 'Use a unicast client MAC.'
+		case "$duration" in ''|*[!0-9]*) fail 'Invalid duration.';; esac
+		[ "$duration" -ge 120 ] && [ "$duration" -le 1800 ] || fail 'Duration must be 120..1800 seconds.'
+		[ ! -e "$STATE" ] && [ ! -e /var/run/q1000k-ip-passthrough/active ] || fail 'A prior test or recovery is pending; run stop first.'
+		[ ! -e /var/run/q1000k-passthrough ] && [ ! -e /var/run/q1000k-l3-bench ] || fail 'Stop or recover the persistent L3 owner before bridge testing.'
+		for cmd in bridge tcpdump ip nft uci flock jsonfilter; do
+			command -v "$cmd" >/dev/null || fail "Required command missing: $cmd"
+		done
+		[ -d "/sys/class/net/br-lan/brif/$port" ] && [ -d /sys/class/net/pon ] || fail 'Expected LAN and PON devices are absent.'
+		[ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'PON is already bridged.'
+		[ "$(cat /sys/class/net/br-lan/bridge/vlan_filtering)" = 0 ] || fail 'This bench requires an untagged LAN bridge.'
+		for knob in iptables ip6tables arptables; do
+			path=/proc/sys/net/bridge/bridge-nf-call-$knob
+			[ ! -f "$path" ] || [ "$(cat "$path")" = 0 ] || fail 'Disable br_netfilter compatibility hooks before this test.'
+		done
+		[ "$(uci -q get network.lan.device)" = br-lan ] || fail 'Unexpected management device.'
+		[ "$(uci -q get network.lan.netmask)" = 255.255.255.0 ] || fail 'This test requires a /24 management network.'
+		ipaddr=$(uci -q get network.lan.ipaddr)
+		case "$ipaddr" in ''|*[!0-9.]*) fail 'Unexpected management address.';; esac
+		subnet=${ipaddr%.*}.0/24
+		[ "${management_client%.*}" = "${ipaddr%.*}" ] || fail "Invalid management peer."
+		echo "$management_mac" | grep -Eq "^([0-9a-f]{2}:){5}[0-9a-f]{2}$" || fail "Invalid management MAC."
+		for config in network dhcp firewall; do
+			[ -z "$(uci changes "$config")" ] || fail "Commit or revert pending $config edits first."
+		done
+		# Locate the existing bridge section without assuming UCI array order.
+		# OpenWrt helpers reference optional unset variables by design.
+		set +u
+		. /lib/functions.sh
+		bridge_section=
+		find_bridge() {
+			local name
+			config_get name "$1" name
+			[ "$name" != br-lan ] || bridge_section=$1
+		}
+		config_load network
+		config_foreach find_bridge device
+		set -u
+		[ -n "$bridge_section" ] || fail 'No br-lan device configuration.'
+		q1000k-omci -i pon status | jsonfilter -e '@.authenticated' | grep -qx 1 || fail 'PON is not authenticated.'
+		[ -r /sys/kernel/debug/ppe/bind ] && [ -x /usr/share/bridge-hw-offload/apply-rules.sh ] || fail 'Offload diagnostics or service missing.'
+		mkdir "$STATE"
+		for config in network dhcp firewall; do cp -p "/etc/config/$config" "$STATE/$config"; done
+		echo "$token" > "$STATE/token"
+		echo "$(($(now) + duration))" > "$STATE/hard-deadline"
+		echo "$(($(now) + 90))" > "$STATE/deadline"
+		echo "$port" > "$STATE/port"
+		echo "$mac" > "$STATE/client-mac"
+		echo "$ipaddr" > "$STATE/management-ip"
+		cat /sys/class/net/pon/address > "$STATE/pon-original-mac"
+		touch "$STATE/saved" "$STATE/active"
+		(trap '' HUP; exec "$SELF" guard "$token") </dev/null >"$STATE/guard.log" 2>&1 9>&- &
+		echo "$!" > "$STATE/guard.pid"
+		trap 'rc=$?; trap - EXIT; if [ "$rc" != 0 ]; then restore || :; fi; exit "$rc"' EXIT
+		trap 'exit 1' HUP INT TERM
+		for n in 1 2 3 4 5; do
+			[ ! -f "$STATE/guard.ready" ] || break
+			sleep 1
+		done
+		[ "$(cat "$STATE/guard.ready" 2>/dev/null)" = "$token" ] || fail 'Independent recovery guard did not start.'
+		kill -0 "$(cat "$STATE/guard.pid")" || fail 'Independent recovery guard exited.'
+		snapshot > "$STATE/before.txt"
+		echo "$management_client $management_mac" > "$STATE/management-neighbor"
+		start_capture "$port" lan
+		start_capture pon pon
+		/etc/init.d/bridge-hw-offload stop
+		# This table precedes the inherited offload hook. One client/port owns
+		# the handoff; provider traffic cannot reach the ONU management stack.
+		cat > "$STATE/isolation.nft" <<NFT
+table bridge q1000k_pon_test {
+	chain input { type filter hook input priority -20; policy accept; iifname "pon" counter drop; }
+	chain output { type filter hook output priority -20; policy accept; oifname "pon" counter drop; }
+	chain forward {
+		type filter hook forward priority -20; policy accept;
+		iifname "pon" oifname != "$port" counter drop
+		oifname "pon" iifname != "$port" counter drop
+		oifname "pon" ether saddr != $mac counter drop
+		iifname "pon" ether daddr & 01:00:00:00:00:00 == 00:00:00:00:00:00 ether daddr != $mac counter drop
+		oifname "pon" ip daddr $subnet counter drop
+		oifname "pon" arp daddr ip $subnet counter drop
+	}
+}
+NFT
+		nft -c -f "$STATE/isolation.nft"
+		nft -f "$STATE/isolation.nft"
+		ifdown wan6 || :
+		ifdown wan || :
+		if [ -n "$pon_test_mac" ]; then
+			ip link set dev pon address "$pon_test_mac"
+		fi
+		uci set network.wan.proto=none
+		uci set network.wan6.proto=none
+		uci set network.wan.auto=0
+		uci set network.wan6.auto=0
+		uci set "network.$bridge_section.macaddr=$(cat /sys/class/net/br-lan/address)"
+		uci add_list "network.$bridge_section.ports=pon"
+		uci -q delete network.lan.ip6assign || :
+		uci set dhcp.lan.ignore=1
+		uci set dhcp.lan.ra=disabled
+		uci set dhcp.lan.dhcpv6=disabled
+		uci set dhcp.lan.ndp=disabled
+		uci set firewall.@defaults[0].flow_offloading=1
+		uci set firewall.@defaults[0].flow_offloading_hw=1
+		uci commit network
+		uci commit dhcp
+		uci commit firewall
+		/etc/init.d/dnsmasq restart
+		/etc/init.d/odhcpd restart
+		/etc/init.d/network reload
+		for n in 1 2 3 4 5 6 7 8 9 10; do
+			[ ! -e /sys/class/net/br-lan/brif/pon ] || break
+			sleep 1
+		done
+		[ -e /sys/class/net/br-lan/brif/pon ] || fail 'netifd did not attach PON to the bridge.'
+		# netifd may recreate br-lan during reload; pin on the resulting link.
+		ip neigh replace "$management_client" lladdr "$management_mac" nud permanent dev br-lan
+		ip neigh show "$management_client" dev br-lan > "$STATE/management-neighbor-installed"
+		grep -q 'PERMANENT' "$STATE/management-neighbor-installed" || fail 'Management neighbor is not permanent.'
+		if [ -n "$pon_test_mac" ]; then
+			[ "$(cat /sys/class/net/pon/address)" = "$pon_test_mac" ] || fail 'PON test MAC did not survive reload.'
+			bridge fdb show br br-lan > "$STATE/fdb-after-mac-change"
+			if grep -i "^$mac .*permanent" "$STATE/fdb-after-mac-change"; then
+				fail 'Client MAC is still a local bridge FDB entry.'
+			fi
+		fi
+		/etc/init.d/bridge-hw-offload restart
+		nft list table bridge fw4 > "$STATE/bridge-table.txt"
+		grep -q '"pon"\| pon' "$STATE/bridge-table.txt" || fail 'PON is missing from the offload table.'
+		echo hardware > "$STATE/mode"
+		echo "Passthrough active on $port for $mac; management stays at $ipaddr."
+		echo "Restore after 90 seconds without a heartbeat, with a hard limit of $duration seconds."
+		;;
+	heartbeat)
+		[ -f "$STATE/active" ] || fail 'No active test.'
+		[ "${2:-}" = "$(cat "$STATE/token")" ] || fail 'Wrong transaction token.'
+		read -r management_client management_mac < "$STATE/management-neighbor"
+		ip neigh show "$management_client" dev br-lan | grep -i "$management_mac.*PERMANENT" >/dev/null || fail 'Management neighbor pin was lost.'
+		deadline=$(($(now) + 90))
+		hard=$(cat "$STATE/hard-deadline")
+		[ "$deadline" -le "$hard" ] || deadline=$hard
+		echo "$deadline" > "$STATE/deadline.new"
+		mv "$STATE/deadline.new" "$STATE/deadline"
+		;;
+	mode)
+		[ -f "$STATE/active" ] || fail 'No active test.'
+		case "${2:-}" in hardware) hardware=1;; software) hardware=0;; *) fail 'Use mode hardware|software.';; esac
+		# Stopping first guarantees old hardware leases are retired for A/B.
+		/etc/init.d/bridge-hw-offload stop
+		uci set firewall.@defaults[0].flow_offloading=1
+		uci set "firewall.@defaults[0].flow_offloading_hw=$hardware"
+		uci commit firewall
+		/etc/init.d/bridge-hw-offload restart
+		echo "$2" > "$STATE/mode"
+		;;
+	stop)
+		if [ -n "${2:-}" ]; then
+			[ -f "$STATE/token" ] && [ "$(cat "$STATE/token")" = "$2" ] || exit 0
+		fi
+		restore || fail 'Restoration incomplete; backup and independent guard retained.'
+		;;
+	management-release)
+		[ ! -e "$STATE/active" ] || fail 'A transaction is still active.'
+		last=$(cat /var/run/q1000k-pon-passthrough-last)
+		[ "${2:-}" = "$(cat "$last/token")" ] || fail 'Wrong completed transaction token.'
+		read -r management_client management_mac < "$last/management-neighbor"
+		ip neigh del "$management_client" dev br-lan 2>/dev/null || :
+		;;
+	*) fail 'Use start LAN_PORT CLIENT_MAC [SECONDS], mode hardware|software, snapshot, or stop.' ;;
+esac

@@ -2,9 +2,9 @@
     "luci-app-econet-xpon": {
         "description": "Q1000K XGS-PON diagnostics and settings",
         "read": {
-            "uci": [ "q1000k-xgspon" ],
+            "uci": [ "xgspon" ],
             "ubus": { "econet-xpon": [ "status", "raw", "mib" ] }
         },
-        "write": { "uci": [ "q1000k-xgspon" ] }
+        "write": { "uci": [ "xgspon" ] }
     }
 }

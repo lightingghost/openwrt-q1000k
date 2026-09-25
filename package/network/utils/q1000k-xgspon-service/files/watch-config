@@ -1,0 +1,131 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Plain CLI commits do not emit config.change. Watch the committed file while
+# keeping the optical supervisor's no-respawn-on-fault policy.
+. /lib/q1000k-xgspon/common.sh
+umask 077
+
+config=/etc/config/xgspon
+state=/var/run/q1000k-xgspon-config
+child= timer= work=
+
+stop_child() {
+	local rc=0
+	[ -n "$child" ] || return 0
+	kill -TERM "$child" 2>/dev/null || :
+	wait "$child" || rc=$?
+	child=
+	return "$rc"
+}
+
+cleanup_watch() {
+	trap - EXIT
+	trap '' HUP INT TERM
+	[ -z "$timer" ] || kill "$timer" 2>/dev/null || :
+	stop_child || :
+	[ -z "$work" ] || rm -rf "$work"
+	rmdir "$state/lock"
+}
+
+mkdir -p "$state" && mkdir "$state/lock" || exit 1
+trap cleanup_watch EXIT
+trap 'exit 0' HUP INT TERM
+work=$(mktemp -d "$state/session-XXXXXX") || exit 1
+mkdir "$work/pending" "$work/applied" || exit 1
+# A unique package name prevents the normal xgspon UCI delta/override
+# paths from leaking uncommitted edits into either validation or startup.
+name="pon-${work##*/}"
+pending="$work/pending/$name"
+applied="$work/applied/$name"
+first=1
+
+optical_settings() {
+	local key value
+	# Validate the entire file, but compare only the sections owned by optics.
+	# Committing a downstream passthrough MAC must never cycle the PON stack.
+	uci -q export "$pending" > /dev/null 2>&1 || return 1
+	[ "$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get identity)" = identity ] || return 1
+	[ "$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get service)" = service ] || return 1
+	# LuCI removes empty optional fields on Save. Compare values in a stable
+	# order, treating absent/empty equally, so this alone cannot restart optics.
+	for key in $identity_keys; do
+		value=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get "identity.$key"; printf '.')
+		value=${value%.}; value=${value%'
+'}
+		printf '%s:%s:%s\n' "$key" "${#value}" "$value"
+	done
+	for key in enabled monitor lower continuous_bench; do
+		value=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get "service.$key"; printf '.')
+		value=${value%.}; value=${value%'
+'}
+		case "$key" in enabled|continuous_bench) value=${value:-0} ;; monitor) value=${value:-1} ;; esac
+		printf '%s:%s:%s\n' "$key" "${#value}" "$value"
+	done
+}
+
+read_candidate() {
+	cp "$config" "$pending" 2>/dev/null || return 1
+	cmp -s "$pending" "$work/parsed" && return 0
+	optical_settings > "$work/candidate.next" 2>/dev/null || return 1
+	mv "$work/candidate.next" "$work/candidate" || return 1
+	cp "$pending" "$work/parsed"
+}
+
+while :; do
+	# Reap failed/exited supervisors, but never restart unchanged configuration.
+	if [ -n "$child" ] && ! kill -0 "$child" 2>/dev/null; then
+		wait "$child" || :
+		child=
+	fi
+	if read_candidate; then
+		if cmp -s "$work/candidate" "$work/seen"; then
+			rm -f "$work/queued"
+		elif [ "$first" = 1 ] || cmp -s "$work/candidate" "$work/queued"; then
+			first=0
+			cp "$work/candidate" "$work/seen" || exit 1
+			rm -f "$work/queued"
+			enabled=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get service.enabled)
+			monitor=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get service.monitor)
+			enabled=${enabled:-0}; monitor=${monitor:-1}
+			valid=1
+			case "$enabled:$monitor" in 0:0|0:1|1:0|1:1) ;; *) valid=0 ;; esac
+			if [ "$enabled" = 1 ]; then
+				lower=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get service.lower)
+				continuous=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get service.continuous_bench)
+				[ -n "$lower" ] && [ "${#lower}" -le 15 ] &&
+					printf '%s\n' "$lower" | grep -Eq '^[A-Za-z0-9_.-]+$' || valid=0
+				case "${continuous:-0}" in 0|1) ;; *) valid=0 ;; esac
+			fi
+			if [ "$enabled:$monitor" != 0:0 ]; then
+				(Q1000K_UCI_SNAPSHOT="$pending"; export Q1000K_UCI_SNAPSHOT
+				 identity_options && { [ "$enabled" != 1 ] || [ -n "$registration" ]; }) \
+					>/dev/null 2>&1 || valid=0
+			fi
+			if [ "$valid" != 1 ]; then
+				echo 'Q1000K XGS-PON: committed settings are invalid; running stack retained.' >&2
+			elif stop_child; then
+				cp "$pending" "$applied" || exit 1
+				if [ "$enabled" = 1 ]; then
+					Q1000K_UCI_SNAPSHOT="$applied" /usr/libexec/q1000k-xgspon-run &
+					child=$!
+				elif [ "$monitor" = 1 ]; then
+					Q1000K_UCI_SNAPSHOT="$applied" /usr/libexec/q1000k-xgspon-run --monitor &
+					child=$!
+				fi
+			else
+				echo 'Q1000K XGS-PON: shutdown failed; configuration restart stopped.' >&2
+				exit 1
+			fi
+		else
+			cp "$work/candidate" "$work/queued" || exit 1
+		fi
+	else
+		# A missing or malformed committed file must not tear down a working link.
+		rm -f "$work/queued"
+	fi
+	# A stable sample on two polls coalesces a short burst of commits. Background
+	# sleep lets TERM reach the wrapper promptly, then cleanup waits for optics.
+	sleep 2 & timer=$!
+	wait "$timer"
+	timer=
+done

@@ -5,7 +5,7 @@
 set -eu
 [ -f /etc/q1000k-private-autostart ] || exit 0
 [ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || exit 1
-[ "$(uci -q get q1000k-xgspon.service.continuous_bench)" = 1 ] || exit 1
+[ "$(uci -q get xgspon.service.continuous_bench)" = 1 ] || exit 1
 for interface in wan wan6; do
 	[ "$(uci -q get network.$interface.q1000k_profile)" = 1 ] || exit 1
 done
@@ -39,9 +39,9 @@ set dhcp.lan.ra_slaac='1'
 delete dhcp.lan.ra_flags
 add_list dhcp.lan.ra_flags='managed-config'
 add_list dhcp.lan.ra_flags='other-config'
-set q1000k-xgspon.service.enabled='1'
-set q1000k-xgspon.service.lower='ponraw'
+set xgspon.service.enabled='1'
+set xgspon.service.lower='ponraw'
 commit network
 commit dhcp
-commit q1000k-xgspon
+commit xgspon
 UCI

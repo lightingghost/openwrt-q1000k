@@ -2,11 +2,12 @@
 
 The status page refreshes every five seconds through the read-only
 `econet-xpon.status` RPC. Configuration is stored in the `identity` section of
-`/etc/config/q1000k-xgspon`; saving does not restart the PON stack. Both the
+`/etc/config/xgspon`; committing valid identity/service changes automatically restarts the
+PON stack through the companion service. Both the
 service and bench launchers validate these options through `common.sh`.
 
-The menu is named **Settings**. Versioned view entry points (`status-v3.js` and
-`settings-v3.js`, symlinks to the canonical source) avoid cached older two-field
+The menu is named **Settings**. Versioned view entry points (`status-v4.js` and
+`settings-v5.js`, symlinks to the canonical source) avoid cached older two-field
 forms when the base LuCI version stays unchanged. Image inspection compares
 both packaged views, the menu and startup scripts to the selected source.
 
@@ -52,6 +53,16 @@ Settings use the generic 8311 descriptions without device or ISP examples.
 Module information and PON/OMCI details are expanded sections, not disclosures.
 
 ## Startup and validation
+
+LuCI Save and Save & Apply commit `xgspon`; valid identity/service changes
+restart optics, briefly interrupting PON Internet. Plain `uci commit xgspon`
+uses the same service watcher. Saving does not enable disabled registration.
+
+The IPv4 passthrough section selects Router (default) or L3 IP passthrough and
+the downstream WAN MAC. Its own watcher applies these fields without restarting
+optics. WAN events update the public lease handoff through the existing DHCP
+and routing components. Native IPv6 /61 delegation stays in Network → Interfaces
+and standard network/dhcp UCI settings. See the [passthrough setup](../network/utils/q1000k-passthrough/README.md).
 
 The Q1000K provider retains an immutable initial identity for its registration
 lifetime. The OMCI core copies it before creating its initial MIB, including

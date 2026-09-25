@@ -1,0 +1,1 @@
+ip saddr @q1000k_pt4 return comment "Q1000K public IPv4 keeps its source"

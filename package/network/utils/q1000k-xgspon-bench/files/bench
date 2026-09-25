@@ -28,7 +28,7 @@ preflight() {
 	done
 	[ "$(uci -q get network.lan.ipaddr)" = 192.168.0.1 ] || fail 'Unexpected management address.'
 	[ "$(uci -q get dhcp.lan.ignore)" = 1 ] || fail 'LAN DHCP server must be disabled.'
-	[ "$(uci -q get q1000k-xgspon.service.enabled)" = 0 ] || fail 'Normal PON service must stay disabled.'
+	[ "$(uci -q get xgspon.service.enabled)" = 0 ] || fail 'Normal PON service must stay disabled.'
 }
 
 controller_status() {

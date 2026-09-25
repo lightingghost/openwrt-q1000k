@@ -1,0 +1,336 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Explicit, reversible IPv4 public-address handoff for the RAM bench.
+# The optical owner retains WAN DHCP. No PON bridging or MAC cloning.
+set -eu
+umask 077
+STATE=/var/run/q1000k-ip-passthrough
+SELF=/usr/sbin/q1000k-ip-passthrough
+fail() { echo "IP passthrough: $*" >&2; exit 1; }
+now() { read -r uptime rest < /proc/uptime; echo "${uptime%.*}"; }
+stop_captures() {
+	local file pid started current
+	for file in "$STATE"/capture-*.pid; do
+		[ -f "$file" ] || continue
+		read -r pid started < "$file"
+		case "$pid:$started" in *[!0-9:]*|:*) return 1;; esac
+		if [ -r "/proc/$pid/stat" ]; then
+			current=$(awk '{print $22}' "/proc/$pid/stat")
+			[ "$current" = "$started" ] || return 1
+			tr '\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "$STATE/dhcp-" || return 1
+			kill -INT "$pid"
+			for n in 1 2 3; do [ -r "/proc/$pid/stat" ] || break; sleep 1; done
+			[ ! -r "/proc/$pid/stat" ] || return 1
+		fi
+		rm -f "$file"
+	done
+}
+start_capture() {
+	local iface=$1 label=$2 pid started
+	(trap '' HUP; exec tcpdump -i "$iface" -nn -s 512 -U -c 512 \
+		-w "$STATE/dhcp-$label.pcap" 'arp or (udp and (port 67 or port 68 or port 546 or port 547)) or icmp6') \
+		</dev/null >"$STATE/capture-$label.log" 2>&1 9>&- &
+	pid=$!
+	started=$(awk '{print $22}' /proc/$pid/stat) || fail 'Packet capture exited during startup.'
+	echo "$pid $started" > "$STATE/capture-$label.pid"
+	for n in 1 2 3; do
+		[ ! -f "$STATE/dhcp-$label.pcap" ] || break
+		sleep 1
+	done
+	kill -0 "$pid" && [ -f "$STATE/dhcp-$label.pcap" ] || fail "Packet capture failed on $iface."
+}
+stop_sampler() {
+	local pid started current
+	[ -f "$STATE/sampler.pid" ] || return 0
+	read -r pid started < "$STATE/sampler.pid"
+	case "$pid:$started" in *[!0-9:]*|:*) return 1;; esac
+	if [ -r "/proc/$pid/stat" ]; then
+		current=$(awk '{print $22}' "/proc/$pid/stat")
+		[ "$current" = "$started" ] || return 1
+		tr '\000' ' ' < "/proc/$pid/cmdline" | grep -Fq "$SELF sample" || return 1
+		kill -TERM "$pid"
+		for n in 1 2 3 4 5; do
+			[ -r "/proc/$pid/stat" ] || break
+			sleep 1
+		done
+		[ ! -r "/proc/$pid/stat" ] || return 1
+	fi
+	rm -f "$STATE/sampler.pid"
+}
+
+ipv4() {
+	echo "$1" | awk -F. 'NF != 4 {exit 1} {for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i+0>255) exit 1}'
+}
+client_mac() {
+	echo "$1" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 1
+	[ "$((0x${1%%:*} & 1))" = 0 ] && [ "$1" != 00:00:00:00:00:00 ]
+}
+lease() {
+	local data
+	data=$(ifstatus wan) || return 1
+	[ "$(echo "$data" | jsonfilter -e '@.up')" = true ] || return 1
+	[ "$(echo "$data" | jsonfilter -e '@.l3_device')" = pon ] || return 1
+	wan=$(echo "$data" | jsonfilter -e '@["ipv4-address"][0].address')
+	prefix=$(echo "$data" | jsonfilter -e '@["ipv4-address"][0].mask')
+	gateway=$(echo "$data" | jsonfilter -e '@.route[0].nexthop')
+	[ "$(echo "$data" | jsonfilter -e '@.route[0].target')" = 0.0.0.0 ] || return 1
+	dns=$(echo "$data" | jsonfilter -e '@["dns-server"][*]' | tr '\n' ',' | sed 's/,$//')
+	ipv4 "$wan" && ipv4 "$gateway" || return 1
+	case "$prefix" in ''|*[!0-9]*) return 1;; esac
+	[ "$prefix" -ge 8 ] && [ "$prefix" -le 30 ] || return 1
+	local saveifs=$IFS addr
+	IFS=,
+	for addr in $dns; do ipv4 "$addr" || { IFS=$saveifs; return 1; }; done
+	IFS=$saveifs
+	[ -n "$dns" ] || return 1
+	mask=$(( (4294967295 << (32 - prefix)) & 4294967295 ))
+	mask="$((mask >> 24 & 255)).$((mask >> 16 & 255)).$((mask >> 8 & 255)).$((mask & 255))"
+}
+
+render_dhcp() {
+	cat <<EOF
+shared-network=br-lan,$wan
+dhcp-range=tag:q1000k_pt,$wan,static,$mask,2m
+dhcp-host=$mac,set:q1000k_pt,$wan
+dhcp-option=tag:q1000k_pt,option:router,$gateway
+dhcp-option=tag:q1000k_pt,option:dns-server,$dns
+EOF
+}
+render_nft() {
+	cat <<EOF
+table inet q1000k_ip_passthrough {
+	chain own {
+		type route hook output priority mangle; policy accept;
+		oifname "pon" ct mark set ct mark | 0x02000000
+		ip daddr $wan ct direction reply meta mark set meta mark | 0x01000000
+		ip daddr $wan udp sport 67 udp dport 68 meta mark set meta mark | 0x01000000
+	}
+	chain classify {
+		type filter hook prerouting priority -90; policy accept;
+		iifname "br-lan" ip saddr $wan ether saddr != $mac counter drop
+		iifname "pon" ip daddr $wan udp sport 67 udp dport 68 return
+		iifname "pon" ip daddr $wan ct mark & 0x02000000 == 0 meta mark set meta mark | 0x01000000
+	}
+}
+EOF
+}
+snapshot() {
+	cat /build_info /proc/sys/kernel/random/boot_id /proc/uptime /proc/stat
+	sha256sum /sys/kernel/notes /etc/config/network /etc/config/dhcp /etc/config/firewall
+	ifstatus wan
+	ip -details link show; ip address show; ip -4 rule show
+	ip route show table all; ip neigh show; cat /proc/net/dev
+	nft list ruleset
+	cat /proc/net/nf_conntrack /sys/kernel/debug/ppe/bind
+	q1000k-omci -i pon status
+	dmesg | tail -60
+}
+restore() {
+	[ -f "$STATE/saved" ] || return 0
+	local failed=0 token key value management_client management_mac dhcp_file
+	token=$(cat "$STATE/token")
+	stop_sampler || failed=1
+	stop_captures || failed=1
+	# Reestablish local address handling before retiring the selective rule.
+	if [ -f "$STATE/routing-started" ]; then
+		ip -4 rule show | grep -Eq '^0:.*lookup local$' || ip -4 rule add pref 0 lookup local || failed=1
+		ip -4 rule del pref 50 fwmark 0x01000000/0x01000000 lookup 100 2>/dev/null || :
+		ip -4 rule del pref 100 lookup local 2>/dev/null || :
+		ip -4 route del table 100 "$(cat "$STATE/wan")/32" dev br-lan 2>/dev/null || :
+		ip neigh del "$(cat "$STATE/wan")" dev br-lan 2>/dev/null || :
+	fi
+	nft destroy table inet q1000k_ip_passthrough || failed=1
+	if [ -f "$STATE/rules-before" ]; then
+		ip -4 rule show > "$STATE/rules-restored"
+		cmp -s "$STATE/rules-before" "$STATE/rules-restored" || failed=1
+		[ -z "$(ip -4 route show table 100 2>/dev/null)" ] || failed=1
+	fi
+	if [ -f "$STATE/sysctls" ]; then
+		while read -r key value; do echo "$value" > "$key" || failed=1; [ "$(cat "$key")" = "$value" ] || failed=1; done < "$STATE/sysctls"
+	fi
+	# OpenWrt does not delete extraconftext's generated file when UCI is
+	# cleared. Own a separate file and remove precisely that file on rollback.
+	if [ -f "$STATE/dhcp-file" ]; then
+		dhcp_file=$(cat "$STATE/dhcp-file")
+		if [ -f "$dhcp_file" ]; then
+			if cmp -s "$STATE/dnsmasq.extra" "$dhcp_file"; then
+				rm "$dhcp_file" || failed=1
+			else
+				failed=1
+			fi
+		fi
+	fi
+	for config in dhcp firewall; do
+		uci -q revert "$config" || :
+		cp -p "$STATE/$config" "/etc/config/$config" || failed=1
+	done
+	/etc/init.d/firewall reload || failed=1
+	/etc/init.d/dnsmasq restart || failed=1
+	for config in network dhcp firewall; do cmp -s "$STATE/$config" "/etc/config/$config" || failed=1; done
+	[ "$failed" = 0 ] || return 1
+	read -r management_client management_mac < "$STATE/management-neighbor"
+	ip neigh replace "$management_client" lladdr "$management_mac" nud permanent dev br-lan || return 1
+	mv "$STATE" "/tmp/q1000k-ip-passthrough-finished-$token"
+	echo "/tmp/q1000k-ip-passthrough-finished-$token" > /var/run/q1000k-ip-passthrough-last
+	echo 'Router configuration restored; original WAN lease remains owned by the ONU.'
+}
+
+[ "${Q1000K_PT_LIBRARY:-0}" != 1 ] || return 0
+
+case "${1:-}" in
+	snapshot) snapshot; exit;;
+	sample)
+		[ -f "$STATE/active" ] || fail 'No active test.'
+		[ ! -e "$STATE/sampler.pid" ] || fail 'Sampler already running.'
+		echo "$$ $(awk '{print $22}' /proc/$$/stat)" > "$STATE/sampler.pid"
+		trap 'rm -f "$STATE/sampler.pid"' EXIT
+		trap 'exit 0' HUP INT TERM
+		for n in $(seq 1 120); do
+			echo SAMPLE "$n"; cat /proc/uptime /proc/stat
+			cat /sys/kernel/debug/ppe/bind /proc/net/nf_conntrack
+			sleep 1
+		done
+		exit;;
+	stop-sample) stop_sampler; exit;;
+	guard)
+		token=${2:?}; trap '' HUP
+		echo "$token" > "$STATE/guard.ready"
+		while [ -f "$STATE/active" ] && [ "$(cat "$STATE/token")" = "$token" ]; do
+			# Lease loss/change ends this bounded prototype safely. A permanent
+			# service will need an explicit reconfiguration/renewal state machine.
+			if [ "$(now)" -ge "$(cat "$STATE/deadline")" ] ||
+			   ! lease || [ "$wan/$prefix/$gateway" != "$(cat "$STATE/lease-key")" ]; then
+				"$SELF" stop "$token" && exit 0
+			fi
+			sleep 2
+		done
+		exit;;
+esac
+
+[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || fail 'Requires the RAM activation bench.'
+[ -f /etc/q1000k-private-autostart ] || fail 'Requires the continuous router profile.'
+mkdir -p /var/lock
+exec 9>/var/lock/q1000k-ip-passthrough.lock
+flock -x 9
+case "${1:-}" in
+	start)
+		mac=${2:-}; management_client=${3:-}; management_mac=${4:-}; duration=${5:-900}; token=${6:-}
+		client_mac "$mac" && client_mac "$management_mac" && ipv4 "$management_client" || fail 'Invalid client or management identity.'
+		case "$duration" in ''|*[!0-9]*) fail 'Invalid duration.';; esac
+		[ "$duration" -ge 120 ] && [ "$duration" -le 1800 ] || fail 'Duration must be 120..1800 seconds.'
+		echo "$token" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail 'Invalid token.'
+		[ ! -e "$STATE" ] && [ ! -e /var/run/q1000k-pon-passthrough/active ] || fail 'Another test or recovery is active.'
+		[ ! -e /var/run/q1000k-passthrough ] || fail 'Stop or recover the persistent L3 owner before bench testing.'
+		[ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'PON must remain routed.'
+		[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || fail 'IPv4 forwarding is disabled.'
+		for cmd in ip nft tcpdump jsonfilter flock dnsmasq; do command -v "$cmd" >/dev/null || fail "Missing $cmd"; done
+		for config in network dhcp firewall; do [ -z "$(uci changes "$config")" ] || fail "Pending $config edits."; done
+		lease || fail 'A valid routed PON IPv4 lease is required.'
+		[ "$mac" != "$(cat /sys/class/net/pon/address)" ] || fail 'Keep the downstream client MAC distinct from the ONU.'
+		lan=$(uci -q get network.lan.ipaddr)
+		[ "${management_client%.*}" = "${lan%.*}" ] && [ "$management_client" != "$lan" ] || fail 'Management peer must be in the LAN subnet.'
+		[ "$(uci -q get network.lan.device)" = br-lan ] || fail 'Unexpected management device.'
+		[ "$(ip -4 rule show | wc -l)" = 3 ] || fail 'Custom policy routing requires a separate plan.'
+		ip -4 rule show | grep -Eq '^0:.*lookup local$' || fail 'Unexpected local rule.'
+		ip -4 rule show | grep -Eq '^32766:.*lookup main$' || fail 'Unexpected main rule.'
+		ip -4 rule show | grep -Eq '^32767:.*lookup default$' || fail 'Unexpected default rule.'
+		[ -z "$(ip -4 route show table 100 2>/dev/null)" ] || fail 'Routing table 100 is in use.'
+		neighbor=$(ip neigh show "$wan" dev br-lan)
+		if [ -n "$neighbor" ]; then
+			echo "$neighbor" | grep -Fq " lladdr $mac " &&
+				echo "$neighbor" | grep -Eq ' (REACHABLE|STALE|DELAY|PROBE) *$' ||
+				fail 'WAN IP has an unexpected LAN neighbor.'
+		fi
+		nft list ruleset | grep -Eq 'ct mark|meta mark' && fail 'Existing packet marks need a separate plan.'
+		dhcp_section=$(uci -q -X show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p')
+		echo "$dhcp_section" | grep -Eq '^[a-zA-Z0-9_]+$' || fail 'Requires one dnsmasq instance.'
+		[ -z "$(uci -q get "dhcp.$dhcp_section.confdir" || :)" ] || fail 'Custom dnsmasq confdir needs review.'
+		dhcp_file="/tmp/dnsmasq.$dhcp_section.d/q1000k-ip-passthrough.conf"
+		[ -d "${dhcp_file%/*}" ] && [ ! -e "$dhcp_file" ] || fail 'DNS configuration directory missing or test file already exists.'
+		wan_zone=
+		for section in $(uci show firewall | sed -n 's/^firewall\.\([^.=]*\)=zone$/\1/p'); do
+			[ "$(uci -q get "firewall.$section.name")" != wan ] || wan_zone=$section
+		done
+		[ -n "$wan_zone" ] && [ "$(uci -q get "firewall.$wan_zone.masq")" = 1 ] || fail 'Expected routed WAN firewall zone missing.'
+		[ -z "$(uci -q get "firewall.$wan_zone.masq_src" || :)" ] || fail 'Custom NAT source selection requires review.'
+		[ -z "$(uci -q get firewall.q1000k_ip_passthrough || :)" ] || fail 'Reserved firewall section exists.'
+		mkdir "$STATE"
+		for config in network dhcp firewall; do cp -p "/etc/config/$config" "$STATE/$config"; done
+		echo "$dhcp_file" > "$STATE/dhcp-file"
+		ip -4 rule show > "$STATE/rules-before"
+		echo "$wan" > "$STATE/wan"; echo "$wan/$prefix/$gateway" > "$STATE/lease-key"
+		echo "$mac" > "$STATE/client-mac"; echo "$token" > "$STATE/token"
+		echo "$management_client $management_mac" > "$STATE/management-neighbor"
+		echo "$(($(now) + duration))" > "$STATE/hard-deadline"
+		echo "$(($(now) + 90))" > "$STATE/deadline"
+		touch "$STATE/saved" "$STATE/active"
+		(trap '' HUP; exec "$SELF" guard "$token") </dev/null >"$STATE/guard.log" 2>&1 9>&- &
+		echo "$!" > "$STATE/guard.pid"
+		trap 'rc=$?; trap - EXIT; if [ "$rc" != 0 ]; then restore || :; fi; exit "$rc"' EXIT
+		trap 'exit 1' HUP INT TERM
+		for n in 1 2 3 4 5; do [ ! -f "$STATE/guard.ready" ] || break; sleep 1; done
+		[ "$(cat "$STATE/guard.ready" 2>/dev/null)" = "$token" ] || fail 'Recovery guard failed to start.'
+		snapshot > "$STATE/before.txt"
+		render_dhcp > "$STATE/dnsmasq.extra"
+		render_nft > "$STATE/passthrough.nft"
+		dnsmasq --test --conf-file="$STATE/dnsmasq.extra"
+		nft -c -f "$STATE/passthrough.nft"
+		start_capture lan1 lan
+		start_capture pon pon
+		ip neigh replace "$management_client" lladdr "$management_mac" nud permanent dev br-lan
+		for setting in all/rp_filter br-lan/rp_filter pon/rp_filter br-lan/accept_local br-lan/proxy_arp all/send_redirects br-lan/send_redirects; do
+			key=/proc/sys/net/ipv4/conf/$setting
+			echo "$key $(cat "$key")" >> "$STATE/sysctls"
+			case "$setting" in */accept_local|*/proxy_arp) echo 1 > "$key";; *) echo 0 > "$key";; esac
+		done
+		touch "$STATE/routing-started"
+		ip -4 rule add pref 100 lookup local
+		ip -4 rule add pref 50 fwmark 0x01000000/0x01000000 lookup 100
+		ip -4 route add table 100 "$wan/32" dev br-lan
+		ip neigh replace "$wan" lladdr "$mac" nud permanent dev br-lan
+		nft -f "$STATE/passthrough.nft"
+		ip -4 rule del pref 0 lookup local
+		cp "$STATE/dnsmasq.extra" "$dhcp_file"
+		uci add_list "firewall.$wan_zone.masq_src=!$wan/32"
+		uci set firewall.q1000k_ip_passthrough=rule
+		uci set firewall.q1000k_ip_passthrough.name='Q1000K public IPv4 handoff'
+		uci set firewall.q1000k_ip_passthrough.src=wan
+		uci set firewall.q1000k_ip_passthrough.dest=lan
+		uci set firewall.q1000k_ip_passthrough.dest_ip="$wan/32"
+		uci set firewall.q1000k_ip_passthrough.family=ipv4
+		uci set firewall.q1000k_ip_passthrough.proto=all
+		uci set firewall.q1000k_ip_passthrough.target=ACCEPT
+		uci set firewall.@defaults[0].flow_offloading=1
+		uci set firewall.@defaults[0].flow_offloading_hw=1
+		uci commit firewall
+		/etc/init.d/firewall reload
+		/etc/init.d/dnsmasq restart
+		echo hardware > "$STATE/mode"
+		echo "IPv4 passthrough active: $wan to $mac. ONU WAN and management remain active."
+		;;
+	heartbeat)
+		[ -f "$STATE/active" ] && [ "${2:-}" = "$(cat "$STATE/token")" ] || fail 'Wrong transaction token.'
+		deadline=$(($(now) + 90)); hard=$(cat "$STATE/hard-deadline")
+		[ "$deadline" -le "$hard" ] || deadline=$hard
+		echo "$deadline" > "$STATE/deadline.new"; mv "$STATE/deadline.new" "$STATE/deadline"
+		;;
+	mode)
+		[ -f "$STATE/active" ] || fail 'No active test.'
+		case "${2:-}" in hardware) enabled=1;; software) enabled=0;; *) fail 'Use mode hardware|software.';; esac
+		uci set "firewall.@defaults[0].flow_offloading_hw=$enabled"
+		uci commit firewall; /etc/init.d/firewall reload
+		echo "$2" > "$STATE/mode"
+		;;
+	stop)
+		if [ -n "${2:-}" ]; then [ -f "$STATE/token" ] && [ "$(cat "$STATE/token")" = "$2" ] || exit 0; fi
+		restore || fail 'Recovery incomplete; independent guard retained.'
+		;;
+	management-release)
+		[ ! -e "$STATE/active" ] || fail 'A transaction is active.'
+		last=$(cat /var/run/q1000k-ip-passthrough-last)
+		[ "${2:-}" = "$(cat "$last/token")" ] || fail 'Wrong completed token.'
+		read -r management_client management_mac < "$last/management-neighbor"
+		ip neigh del "$management_client" dev br-lan 2>/dev/null || :
+		;;
+	*) fail 'Use start CLIENT_MAC MANAGEMENT_IP MANAGEMENT_MAC SECONDS TOKEN, snapshot, mode, stop, or management-release.';;
+esac

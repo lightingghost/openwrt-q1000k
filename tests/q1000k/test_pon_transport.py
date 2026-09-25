@@ -122,7 +122,7 @@ struct netdev_queue { bool locked,stopped; };
 struct net_device {
     const struct net_device_ops *netdev_ops;
     int reg_state,features;
-    bool running,upper;
+    bool running,upper,bridge;
     u8 dev_addr[6];
     struct airoha_gdm_dev *priv;
     struct netdev_queue txq[32];
@@ -190,7 +190,10 @@ struct airoha_pon_ops {
     void (*tx_status)(void *,enum airoha_pon_tx_stage,int,const struct airoha_pon_tx_status *);
     void (*detached)(void *);
 };
-static int airoha_ppe_pon_ingress(struct airoha_gdm_dev *dev,const struct airoha_pon_flow *flow,u16 type,const u8 *addr) { return -EOPNOTSUPP; }
+static u8 admitted_mac[6];
+static int airoha_ppe_pon_ingress(struct airoha_gdm_dev *dev,const struct airoha_pon_flow *flow,u16 type,const u8 *addr) {
+    memcpy(admitted_mac,addr,6); return 0;
+}
 static void airoha_ppe_pon_check_skb(struct airoha_gdm_dev *dev,struct sk_buff *skb,const struct airoha_pon_rx_meta *meta) {}
 static bool is_valid_ether_addr(const u8 *addr) { return !(addr[0]&1) && memcmp(addr,"\0\0\0\0\0\0",6); }
 static unsigned int invalidations,smac_updates;
@@ -205,6 +208,7 @@ static void airoha_ppe_init_upd_mem(struct airoha_gdm_dev *dev,const u8 *addr) {
 static struct airoha_gdm_dev *netdev_priv(struct net_device *d) { return d->priv; }
 static struct net_device *netdev_from_priv(struct airoha_gdm_dev *d) { return d->netdev; }
 static bool netif_running(struct net_device *d) { return d->running; }
+static bool netif_is_bridge_port(struct net_device *d) { return d->bridge; }
 static bool netdev_has_any_upper_dev(struct net_device *d) { return d->upper; }
 static int skb_headlen(struct sk_buff *s) { return s->empty_head ? 0 : s->len; }
 static bool skb_has_frag_list(struct sk_buff *s) { return s->frag_list; }
@@ -315,15 +319,40 @@ int main(void) {
     assert(!airoha_pon_set_queue_close(pon,31,0));
     ops.flow=test_flow; upper.dev_addr[0]=2;
     struct airoha_pon_flow flow={}; struct airoha_gdm_dev *owner=NULL;
-    assert(!airoha_pon_resolve_flow(&eth,&upper,0x0800,upper.dev_addr,&flow,&owner));
+    assert(!airoha_pon_resolve_flow(&eth,&upper,0x0800,upper.dev_addr,false,&flow,&owner));
     assert(owner==&gdm && flow.epoch==gdm.pon_flow_epoch && smac_updates==1);
     u64 old_flow_epoch=flow.epoch;
     airoha_pon_invalidate_flows(pon); assert(gdm.pon_flow_epoch>old_flow_epoch);
-    assert(!airoha_pon_resolve_flow(&eth,&upper,0x86dd,upper.dev_addr,&flow,&owner));
+    assert(!airoha_pon_resolve_flow(&eth,&upper,0x86dd,upper.dev_addr,false,&flow,&owner));
     assert(smac_updates==1 && flow.epoch==gdm.pon_flow_epoch);
     pon->paused=true;
-    assert(airoha_pon_resolve_flow(&eth,&upper,0x0800,upper.dev_addr,&flow,&owner)==-ESHUTDOWN);
-    pon->paused=false; ops.flow=NULL;
+    assert(airoha_pon_resolve_flow(&eth,&upper,0x0800,upper.dev_addr,false,&flow,&owner)==-ESHUTDOWN);
+    pon->paused=false;
+    u8 client_mac[6]={2,0,0,0,0,42}, multicast[6]={1,0,0,0,0,42};
+    /* Routed flow resolution must still refuse a foreign source MAC. */
+    assert(airoha_pon_resolve_flow(&eth,&upper,0x0800,client_mac,false,&flow,&owner)==-EOPNOTSUPP);
+    assert(airoha_pon_resolve_flow(&eth,&upper,0x0800,client_mac,true,&flow,&owner)==-EOPNOTSUPP);
+    upper.bridge=true; upper.running=true; ops.rx_flow=test_flow;
+    for(int family=0;family<2;family++) {
+        u16 proto=family ? 0x86dd : 0x0800;
+        old_flow_epoch=gdm.pon_flow_epoch;
+        assert(!airoha_pon_resolve_flow(&eth,&upper,proto,client_mac,true,&flow,&owner));
+        assert(smac_updates==1 && gdm.pon_flow_epoch==old_flow_epoch);
+        assert(!airoha_pon_resolve_ingress(&eth,&upper,proto,client_mac,true,&flow,&owner));
+        assert(!memcmp(admitted_mac,client_mac,6) && smac_updates==1);
+        assert(airoha_pon_resolve_flow(&eth,&upper,proto,multicast,true,&flow,&owner)==-EOPNOTSUPP);
+        assert(airoha_pon_resolve_ingress(&eth,&upper,proto,multicast,true,&flow,&owner)==-EOPNOTSUPP);
+        assert(airoha_pon_resolve_flow(&eth,&upper,proto,upper.dev_addr,false,&flow,&owner)==-EOPNOTSUPP);
+        pon->paused=true;
+        assert(airoha_pon_resolve_ingress(&eth,&upper,proto,client_mac,true,&flow,&owner)==-ESHUTDOWN);
+        pon->paused=false;
+    }
+    upper.bridge=false;
+    /* Routed downstream output DMAC is the LAN client; ingress admission
+     * continues to match the ONU MAC on the wire, not that output DMAC. */
+    assert(!airoha_pon_resolve_ingress(&eth,&upper,0x0800,client_mac,false,&flow,&owner));
+    assert(!memcmp(admitted_mac,upper.dev_addr,6) && smac_updates==1);
+    ops.flow=NULL; ops.rx_flow=NULL;
     assert(!airoha_pon_prepare_tx(pon,&tx) && tx.epoch==1);
     assert(PTR_ERR(airoha_pon_attach(&dev,&ops,&context))==-EBUSY);
     rtnl_lock(); assert(airoha_pon_qdma_busy(&eth.qdma[1]) && !airoha_pon_qdma_busy(&eth.qdma[0])); rtnl_unlock();

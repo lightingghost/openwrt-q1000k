@@ -1,0 +1,150 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# One-shot repair of netifd prefix-assignment transitions, not a PD lease owner.
+set -eu
+umask 077
+
+fail() { echo "q1000k-ipv6-transition: $*" >&2; exit 1; }
+# Use the ip-full alternative even when ash prefers BusyBox applets.
+ip() { /sbin/ip "$@"; }
+field() { jsonfilter -i "$1" -e "$2" 2>/dev/null || :; }
+ipv6() {
+ case "$1" in ''|*[!0-9a-fA-F:]*|fe80:*|FE80:*) return 1;; esac
+ case "$1" in *:*) return 0;; *) return 1;; esac
+}
+number() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
+
+# Only the reviewed routed pon/br-lan profile, with at most one pool each.
+# Record pool address and local address separately; neither is hardcoded.
+collect() {
+ local output=$1 iface dev file prefix mask addr localmask preferred valid
+ collected=$(cut -d. -f1 /proc/uptime)
+ : > "$output"
+ for iface in lan wan6; do
+  case "$iface" in lan) dev=br-lan;; wan6) dev=pon;; esac
+  file="$state/$iface.json"
+  ifstatus "$iface" > "$file" || return 1
+  [ "$(field "$file" '@.up')" = true ] || return 1
+  [ "$(field "$file" '@.l3_device')" = "$dev" ] || return 1
+  [ -z "$(field "$file" '@["ipv6-prefix-assignment"][1].mask')" ] || return 1
+  mask=$(field "$file" '@["ipv6-prefix-assignment"][0].mask')
+  if [ -z "$mask" ]; then [ "$iface" = wan6 ] || return 1; continue; fi
+  case "$mask" in 60|64) ;; *) return 1;; esac
+  prefix=$(field "$file" '@["ipv6-prefix-assignment"][0].address')
+  addr=$(field "$file" '@["ipv6-prefix-assignment"][0]["local-address"].address')
+  localmask=$(field "$file" '@["ipv6-prefix-assignment"][0]["local-address"].mask')
+  preferred=$(field "$file" '@["ipv6-prefix-assignment"][0].preferred')
+  valid=$(field "$file" '@["ipv6-prefix-assignment"][0].valid')
+  ipv6 "$prefix" && ipv6 "$addr" && [ "$mask" = "$localmask" ] || return 1
+  number "$preferred" && number "$valid" || return 1
+  [ "$valid" -gt 0 ] && [ "$preferred" -le "$valid" ] || return 1
+  echo "$iface $dev $prefix $mask $addr $localmask $preferred $valid" >> "$output"
+ done
+}
+
+contains() {
+ awk -v d="$2" -v a="$3" -v m="$4" \
+  '$2 == d && $5 == a && $6 == m { found=1 } END { exit !found }' "$1"
+}
+
+address_field() {
+ ip -j -6 address show dev "$1" > "$state/address.json"
+ field "$state/address.json" "@[0].addr_info[@.local=\"$2\" && @.prefixlen=$3].$4"
+}
+
+configured() {
+ local iface want got
+ for iface in lan wan6; do
+  want=$(uci -q get "network.$iface.ip6assign" || :)
+  got=$(awk -v i="$iface" '$1 == i { print $4 }' "$state/desired")
+  [ "$want" = "$got" ] || return 1
+ done
+}
+
+check_addresses() {
+ local dev index file scope addr mask
+ # Refuse custom/foreign global addresses before changing anything. This also
+ # prevents removing a connected route shared with an unowned manual address.
+ for dev in br-lan pon; do
+  file="$state/actual-$dev.json"
+  ip -j -6 address show dev "$dev" > "$file"
+  index=0
+  while :; do
+   addr=$(field "$file" "@[0].addr_info[$index].local")
+   [ -n "$addr" ] || break
+   scope=$(field "$file" "@[0].addr_info[$index].scope")
+   mask=$(field "$file" "@[0].addr_info[$index].prefixlen")
+   if [ "$scope" = global ]; then
+    contains "$state/known" "$dev" "$addr" "$mask" ||
+     contains "$state/desired" "$dev" "$addr" "$mask" ||
+     fail "Unowned global address on $dev; retain snapshot and review custom IPv6 setup."
+   fi
+   index=$((index + 1))
+  done
+ done
+}
+
+ready() {
+ local iface dev prefix mask addr localmask preferred valid
+ while read -r iface dev prefix mask addr localmask preferred valid; do
+  [ "$(address_field "$dev" "$addr" "$localmask" local)" = "$addr" ] || return 1
+  [ "$(address_field "$dev" "$addr" "$localmask" dadfailed)" != true ] || return 1
+  [ "$(address_field "$dev" "$addr" "$localmask" tentative)" != true ] || return 1
+ done < "$state/desired"
+}
+
+[ "$#" = 2 ] || fail 'Use snapshot|apply STATE_DIRECTORY.'
+action=$1; state=$2
+case "$state" in /tmp/*|/var/run/*) ;; *) fail 'Keep transition state in /tmp or /var/run.';; esac
+case "$action" in
+ snapshot)
+  mkdir "$state" || fail 'Snapshot directory must be new.'
+  collect "$state/initial" || fail 'Requires active native IPv6 pools on routed pon/br-lan.'
+  awk '{ print $1, $2, $3, $4, $5, $6 }' "$state/initial" > "$state/known"
+  cp "$state/initial" "$state/desired"
+  check_addresses
+  touch "$state/snapshot.ready"
+  ;;
+ apply)
+  [ -s "$state/known" ] && [ -f "$state/snapshot.ready" ] || fail 'Missing complete original assignment snapshot.'
+  exec 8>"$state/lock"; flock -x 8
+  matched=0
+  for n in $(seq 1 10); do
+   if collect "$state/desired" && configured; then matched=1; break; fi
+   sleep 1
+  done
+  [ "$matched" = 1 ] || fail 'Netifd has not applied the configured IPv6 pools; no addresses changed.'
+  check_addresses
+  # Retain both directions before the first mutation. The same snapshot can
+  # then repair rollback, including after an interrupted forward transition.
+  cat "$state/known" > "$state/known.next"
+  awk '{ print $1, $2, $3, $4, $5, $6 }' "$state/desired" >> "$state/known.next"
+  sort -u "$state/known.next" > "$state/known.sorted"
+  mv "$state/known.sorted" "$state/known"
+  while read -r iface dev prefix mask addr localmask; do
+   contains "$state/desired" "$dev" "$addr" "$localmask" && continue
+   if [ -n "$(address_field "$dev" "$addr" "$localmask" local)" ]; then
+    ip -6 address del "$addr/$localmask" dev "$dev"
+   fi
+   # Prefix deprecation can create a kernel route that survives address
+   # deletion. Leave netifd's static routes and odhcpd's via-client routes alone.
+   ip -j -6 route show table main exact "$prefix/$mask" dev "$dev" proto kernel > "$state/routes.json"
+   if [ -n "$(field "$state/routes.json" '@[@.metric=256].dst')" ]; then
+    ip -6 route del "$prefix/$mask" dev "$dev" table main proto kernel metric 256
+   fi
+  done < "$state/known"
+  while read -r iface dev prefix mask addr localmask preferred valid; do
+   if [ -z "$(address_field "$dev" "$addr" "$localmask" local)" ]; then
+    elapsed=$(($(cut -d. -f1 /proc/uptime) - collected))
+    preferred=$((preferred - elapsed)); valid=$((valid - elapsed))
+    [ "$preferred" -ge 0 ] || preferred=0
+    [ "$valid" -gt 0 ] || fail 'Pool expired during transition; no address reintroduced.'
+    ip -6 address add "$addr/$localmask" dev "$dev" noprefixroute \
+     preferred_lft "$preferred" valid_lft "$valid"
+   fi
+  done < "$state/desired"
+  for n in $(seq 1 5); do ready && exit 0; sleep 1; done
+  fail 'Applied addresses are not ready; retain snapshot for rollback.'
+  ;;
+ *) fail 'Use snapshot|apply STATE_DIRECTORY.';;
+esac

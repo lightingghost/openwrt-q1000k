@@ -395,7 +395,7 @@ class BenchNetworkTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         for name, content in [('dhcp', "config dhcp 'lan'\n option interface 'lan'\n option ra 'server'\n"),
                               ('system', 'config system\n option hostname OpenWrt\n'),
-                              ('q1000k-xgspon', "config service 'service'\n option enabled '1'\n")]:
+                              ('xgspon', "config service 'service'\n option enabled '1'\n")]:
             (fixture.root / 'config' / name).write_text(content)
         marker = fixture.root / 'marker'
         marker.touch()
@@ -406,7 +406,7 @@ class BenchNetworkTests(unittest.TestCase):
         subprocess.run(['/bin/sh', str(script)], env=fixture.env, check=True, capture_output=True)
         for key, value in [('network.lan.ipaddr', '192.168.0.1'), ('dhcp.lan.ignore', '1'),
                            ('dhcp.lan.ra', 'disabled'), ('dhcp.lan.dhcpv6', 'disabled'),
-                           ('network.br_lan.ports', 'lan1 lan2'), ('q1000k-xgspon.service.enabled', '0'),
+                           ('network.br_lan.ports', 'lan1 lan2'), ('xgspon.service.enabled', '0'),
                            ('firewall.@defaults[0].flow_offloading', '1'),
                            ('firewall.@defaults[0].flow_offloading_hw', '1')]:
             self.assertEqual(fixture.uci_cmd('get', key), value)

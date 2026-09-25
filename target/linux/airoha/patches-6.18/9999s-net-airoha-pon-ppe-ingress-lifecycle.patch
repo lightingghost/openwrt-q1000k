@@ -357,7 +357,8 @@ Subject: [PATCH] net: airoha: enter PPE behind PON admission and retire callback
 +	stage = "ppe-route";
 +	err = airoha_pon_ifc_route(eth, true);
  	if (!err) {
- 		netdev_info(netdev_from_priv(dev),
+-		netdev_info(netdev_from_priv(dev),
++		netdev_dbg(netdev_from_priv(dev),
 -			    "PON IFC IPv%u enabled: GEM %u tags %u TCI %#06x/%#06x epoch %llu\n",
 +			    "PON IFC IPv%u enabled: GEM %u tags %u TCI %#06x/%#06x epoch %llu (PPE ingress, CPU fallback)\n",
  			    row ? 6 : 4, flow->gem, flow->num_vlans,

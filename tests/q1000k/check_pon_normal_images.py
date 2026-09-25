@@ -131,12 +131,18 @@ def check_root(records, revision, snapshot):
         'etc/uci-defaults/90-q1000k-xgspon-wan': 'network/utils/q1000k-xgspon-wan/files/defaults',
         'lib/q1000k-xgspon/common.sh': 'network/utils/q1000k-xgspon/files/common.sh',
         'lib/upgrade/keep.d/q1000k-xgspon': 'network/utils/q1000k-xgspon/files/keep',
+        'usr/libexec/q1000k-passthrough-ipv4': 'network/utils/q1000k-passthrough/files/ipv4',
+        'usr/libexec/q1000k-ipv6-transition': 'network/utils/q1000k-passthrough/files/ipv6-transition',
+        'usr/libexec/q1000k-passthrough-watch-config': 'network/utils/q1000k-passthrough/files/watch-config',
+        'etc/init.d/q1000k-passthrough': 'network/utils/q1000k-passthrough/files/init',
+        'etc/hotplug.d/iface/95-q1000k-passthrough': 'network/utils/q1000k-passthrough/files/hotplug',
     }
     for name, source in pairs.items():
         assert read(name) == (REPO / 'package' / source).read_bytes(), name
     assert read('etc/board.d/02_network') == (REPO /
         'target/linux/airoha/an7581/base-files/etc/board.d/02_network').read_bytes()
     assert 'etc/rc.d/S95q1000k-xgspon' in records
+    assert 'etc/rc.d/S96q1000k-passthrough' in records
     for path in ('usr/sbin/q1000k-omci', 'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
                  'sbin/ip', 'bin/ubus', 'sbin/ifdown', 'usr/sbin/fitblk', 'usr/sbin/odhcp6c',
                  'usr/sbin/odhcpd', 'usr/sbin/uhttpd'):
@@ -155,13 +161,15 @@ def check_root(records, revision, snapshot):
     for p in records:
         if p.startswith('etc/modules.d/') or p.startswith('etc/modules-boot.d/'):
             assert not any(name.replace('-', '_').encode() in read(p).replace(b'-', b'_') for name in MODULES), p
-    for kind in ('settings', 'status'):
+    for kind, version in (('settings', 5), ('status', 4)):
         source = (REPO / f'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/{kind}.js').read_bytes()
         minimized = subprocess.check_output([REPO / 'staging_dir/hostpkg/bin/jsmin'], input=source)
-        assert read(f'www/luci-static/resources/view/econet-xpon/{kind}-v4.js') in (source, minimized)
-    config = read('etc/config/q1000k-xgspon')
-    assert stat.S_IMODE(records['etc/config/q1000k-xgspon'][0]) == 0o600
-    assert config == (REPO / 'package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config').read_bytes()
+        assert read(f'www/luci-static/resources/view/econet-xpon/{kind}-v{version}.js') in (source, minimized)
+    assert read('usr/libexec/q1000k-xgspon-watch-config') == (
+        REPO / 'package/network/utils/q1000k-xgspon-service/files/watch-config').read_bytes()
+    config = read('etc/config/xgspon')
+    assert stat.S_IMODE(records['etc/config/xgspon'][0]) == 0o600
+    assert config == (REPO / 'package/network/utils/q1000k-xgspon/files/xgspon.config').read_bytes()
     assert 'lib/firmware/airoha/q1000k/xgspon-calibration.bin' not in records
     for name, digest in (
         ('A60993.elf.pm', '5a8a4bbae5f70c1e615ba0aa1c2a1dce654611d3205d2fa983bf41e6cdadb4a1'),

@@ -44,7 +44,7 @@ def inspect(image, revision, profile='bench', private_manifest=None):
         assert profile == 'activation' and private['schema_version'] == 1
         assert private['profile'] == 'continuous-activation-v1'
         assert set(private['files']) == {
-            'etc/config/q1000k-xgspon', 'etc/q1000k-private-autostart',
+            'etc/config/xgspon', 'etc/q1000k-private-autostart',
             'etc/uci-defaults/zz-q1000k-private-autostart',
             'lib/firmware/airoha/q1000k/A60993.elf.pm',
             'lib/firmware/airoha/q1000k/A60993.elf.dm',
@@ -155,19 +155,26 @@ def inspect(image, revision, profile='bench', private_manifest=None):
     for source, dest in (
         ('package/network/utils/q1000k-xgspon-bench/files/defaults', 'etc/uci-defaults/99-q1000k-xgspon-bench'),
         ('package/network/utils/q1000k-xgspon-bench/files/bench', 'usr/sbin/q1000k-pon-bench'),
+        ('package/network/utils/q1000k-xgspon-bench/files/ip-passthrough', 'usr/sbin/q1000k-ip-passthrough'),
+        ('package/network/utils/q1000k-xgspon-bench/files/l3-bench', 'usr/sbin/q1000k-l3-bench'),
+        ('package/network/utils/q1000k-passthrough/files/ipv4', 'usr/libexec/q1000k-passthrough-ipv4'),
+        ('package/network/utils/q1000k-passthrough/files/ipv6-transition', 'usr/libexec/q1000k-ipv6-transition'),
+        ('package/network/utils/q1000k-passthrough/files/watch-config', 'usr/libexec/q1000k-passthrough-watch-config'),
+        ('package/network/utils/q1000k-xgspon-bench/files/passthrough', 'usr/sbin/q1000k-pon-passthrough'),
         ('package/network/utils/q1000k-xgspon-bench/files/sysctl.conf', 'etc/sysctl.d/99-q1000k-xgspon-bench.conf'),
-        ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon.config', 'etc/config/q1000k-xgspon'),
+        ('package/network/utils/q1000k-xgspon/files/xgspon.config', 'etc/config/xgspon'),
         ('package/network/utils/q1000k-xgspon/files/common.sh', 'lib/q1000k-xgspon/common.sh'),
         ('package/network/utils/q1000k-xgspon/files/omci-config', 'usr/libexec/q1000k-omci-config'),
         ('package/network/utils/q1000k-xgspon-service/files/run', 'usr/libexec/q1000k-xgspon-run'),
+        ('package/network/utils/q1000k-xgspon-service/files/watch-config', 'usr/libexec/q1000k-xgspon-watch-config'),
         ('package/network/utils/q1000k-xgspon-service/files/init', 'etc/init.d/q1000k-xgspon'),
         ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon', 'usr/sbin/q1000k-xgspon'),
         ('package/luci-app-econet-xpon/root/usr/share/luci/menu.d/luci-app-econet-xpon.json',
          'usr/share/luci/menu.d/luci-app-econet-xpon.json')):
-        if private and dest == 'etc/config/q1000k-xgspon':
+        if private and dest == 'etc/config/xgspon':
             continue
         assert read(dest) == (repo / source).read_bytes(), dest
-    assert stat.S_IMODE(records['etc/config/q1000k-xgspon'][0]) == 0o600
+    assert stat.S_IMODE(records['etc/config/xgspon'][0]) == 0o600
     status = read('www/luci-static/resources/view/econet-xpon/status-v4.js')
     source = (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/status.js').read_bytes()
     # luci.mk applies this host tool when packaging JavaScript. Check the exact
@@ -176,7 +183,7 @@ def inspect(image, revision, profile='bench', private_manifest=None):
     assert status in (source, minimized), 'LuCI status differs from packaged source'
     assert b'rx_power_nw' in status and b'Math.log10' in status
     assert b'rx_power_dbm' in read('usr/sbin/q1000k-omci')
-    settings = read('www/luci-static/resources/view/econet-xpon/settings-v4.js')
+    settings = read('www/luci-static/resources/view/econet-xpon/settings-v5.js')
     source = (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/settings.js').read_bytes()
     minimized = subprocess.check_output([repo / 'staging_dir/hostpkg/bin/jsmin'], input=source)
     assert settings in (source, minimized), 'LuCI settings differs from packaged source'
@@ -200,13 +207,21 @@ def inspect(image, revision, profile='bench', private_manifest=None):
         assert read(name), name
     modules = ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu', 'airoha_ecnt_pon_phy',
                'airoha_ecnt_xpon', 'phy_10g', 'xpon_10g', 'xpon', 'omci')
-    runtime_paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
+    assert 'var/run/q1000k-pon-passthrough/active' not in records
+    assert 'var/run/q1000k-ip-passthrough/active' not in records
+    # ip-full does not include bridge. Inspect the actual packaged executables,
+    # not just dependency selections (the first live bridge bench exposed this).
+    for program in ('usr/sbin/bridge', 'usr/bin/tcpdump'):
+        data = read(program)
+        assert data[:6] == b'\x7fELF\x02\x01' and struct.unpack_from('<H', data, 18)[0] == 183, program
+        assert records[program][0] & 0o111, program
+    runtime_paths = ['usr/sbin/q1000k-ip-passthrough', 'usr/sbin/q1000k-pon-bench', 'usr/sbin/q1000k-pon-passthrough', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config',
                      'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
-                     'usr/libexec/q1000k-xgspon-run', 'etc/init.d/q1000k-xgspon',
+                     'usr/libexec/q1000k-xgspon-run', 'usr/libexec/q1000k-xgspon-watch-config', 'etc/init.d/q1000k-xgspon',
                      'usr/share/luci/menu.d/luci-app-econet-xpon.json',
                      'www/luci-static/resources/view/econet-xpon/status-v4.js',
-                     'www/luci-static/resources/view/econet-xpon/settings-v4.js']
+                     'www/luci-static/resources/view/econet-xpon/settings-v5.js']
     if profile == 'activation':
         runtime_paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/libexec/q1000k-pd-source', 'usr/libexec/q1000k-ipv6-bench', 'usr/libexec/q1000k-ipv6-client', 'usr/libexec/q1000k-udp6-probe', 'usr/share/q1000k-bench/capabilities.json'])
         assert read('usr/share/q1000k-bench/capabilities.json') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/capabilities.json').read_bytes()

@@ -1,0 +1,190 @@
+From: Q1000K development <q1000k@localhost>
+Subject: [PATCH] net: airoha: extend standalone bridge IP offload to PON
+
+Reuse the q1000k-dev bridge flowtable, TTL/hop-limit and source-MAC
+preservation. Resolve PON service metadata for bridged TCP/UDP and admit
+downstream traffic for the actual client MAC under the existing exact
+GEM/VLAN classifier. Keep routed source-MAC handling unchanged.
+MAC-only L2 rules, PPPoE and unsupported encapsulations remain in software.
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -617,12 +617,13 @@
+ extern const struct net_device_ops airoha_netdev_ops;
+ int airoha_qdma_pon_drain_rx(struct airoha_qdma *qdma);
+ int airoha_pon_resolve_flow(struct airoha_eth *eth, struct net_device *upper,
+-			  u16 ethertype, const u8 *smac,
++			  u16 ethertype, const u8 *smac, bool bridge,
+ 			  struct airoha_pon_flow *flow,
+ 			  struct airoha_gdm_dev **owner);
+ int airoha_ppe_pon_invalidate(struct airoha_gdm_dev *dev);
+ int airoha_pon_resolve_ingress(struct airoha_eth *eth, struct net_device *upper,
+-			     u16 ethertype, struct airoha_pon_flow *flow,
++			     u16 ethertype, const u8 *dmac, bool bridge,
++			     struct airoha_pon_flow *flow,
+ 			     struct airoha_gdm_dev **owner);
+ int airoha_ppe_pon_ingress(struct airoha_gdm_dev *dev,
+ 			 const struct airoha_pon_flow *flow, u16 ethertype,
+--- a/drivers/net/ethernet/airoha/airoha_pon.c
++++ b/drivers/net/ethernet/airoha/airoha_pon.c
+@@ -66,7 +66,7 @@
+ EXPORT_SYMBOL_GPL(airoha_pon_invalidate_flows);
+ 
+ int airoha_pon_resolve_flow(struct airoha_eth *eth, struct net_device *upper,
+-			  u16 ethertype, const u8 *smac,
++			  u16 ethertype, const u8 *smac, bool bridge,
+ 			  struct airoha_pon_flow *flow,
+ 			  struct airoha_gdm_dev **owner)
+ {
+@@ -100,9 +100,15 @@
+ 		    (pon->configuring & BIT(flow->channel)) ||
+ 		    (pon->closed[flow->channel] & BIT(flow->queue))))
+ 			ret = -ESHUTDOWN;
+-		if (!ret && !ether_addr_equal(smac, upper->dev_addr))
++		/* The existing bridge flowtable supplies the original Ethernet
++		 * source. Do not replace it with the ONU's routed source-MAC slot.
++		 * A TTL_KEEP action alone cannot turn a routed PON into a bridge.
++		 */
++		if (!ret && (bridge != netif_is_bridge_port(upper) ||
++		    !is_valid_ether_addr(smac) ||
++		    (!bridge && !ether_addr_equal(smac, upper->dev_addr))))
+ 			ret = -EOPNOTSUPP;
+-		if (!ret && !ether_addr_equal(dev->pon_smac, smac)) {
++		if (!ret && !bridge && !ether_addr_equal(dev->pon_smac, smac)) {
+ 			airoha_pon_invalidate_flows_locked(pon);
+ 			if (pon->control_fault || READ_ONCE(pon->dma_dev->pon_flow_fault))
+ 				ret = -EIO;
+@@ -124,7 +130,8 @@
+ }
+ 
+ int airoha_pon_resolve_ingress(struct airoha_eth *eth, struct net_device *upper,
+-			     u16 ethertype, struct airoha_pon_flow *flow,
++			     u16 ethertype, const u8 *dmac, bool bridge,
++			     struct airoha_pon_flow *flow,
+ 			     struct airoha_gdm_dev **owner)
+ {
+ 	struct airoha_gdm_port *port = eth->ports[AIROHA_GDM2_IDX - 1];
+@@ -150,7 +157,10 @@
+ 		    pon->rx_closed || !netif_running(upper) ||
+ 		    !is_valid_ether_addr(upper->dev_addr)))
+ 			ret = -ESHUTDOWN;
+-		if (!ret && !ether_addr_equal(dev->pon_smac, upper->dev_addr)) {
++		if (!ret && (bridge != netif_is_bridge_port(upper) ||
++		    (bridge && !is_valid_ether_addr(dmac))))
++			ret = -EOPNOTSUPP;
++		if (!ret && !bridge && !ether_addr_equal(dev->pon_smac, upper->dev_addr)) {
+ 			airoha_pon_invalidate_flows_locked(pon);
+ 			if (pon->control_fault || dev->pon_flow_fault)
+ 				ret = -EIO;
+@@ -161,7 +171,12 @@
+ 		}
+ 		if (!ret) {
+ 			flow->epoch = dev->pon_flow_epoch;
+-			ret = airoha_ppe_pon_ingress(dev, flow, ethertype, upper->dev_addr);
++			/* Reuse the exact GEM/VLAN/DMAC admission rule. In bridge
++			 * mode the DMAC belongs to the downstream client, not the ONU.
++			 * Another client falls back while this family profile is leased.
++			 */
++			ret = airoha_ppe_pon_ingress(dev, flow, ethertype,
++						   bridge ? dmac : upper->dev_addr);
+ 			if (!ret)
+ 				*owner = dev;
+ 		}
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -1338,7 +1338,7 @@
+ 
+ 	err = airoha_pon_resolve_flow(eth, odev,
+ 		addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS ? ETH_P_IPV6 : ETH_P_IP,
+-		data.eth.h_source, &pon_flow, &pon_dev);
++		data.eth.h_source, keep_ttl, &pon_flow, &pon_dev);
+ 	if (err && err != -ENOENT)
+ 		return err;
+ 	if (!pon_dev && odev) {
+@@ -1352,14 +1352,18 @@
+ 		idev = dev_get_by_index_rcu(dev_net(odev), meta.key->ingress_ifindex);
+ 		err = airoha_pon_resolve_ingress(eth, idev,
+ 			addr_type == FLOW_DISSECTOR_KEY_IPV6_ADDRS ? ETH_P_IPV6 : ETH_P_IP,
+-			&pon_flow, &pon_dev);
++			data.eth.h_dest, keep_ttl, &pon_flow, &pon_dev);
+ 		rcu_read_unlock();
+ 		if (err && err != -ENOENT)
+ 			return err;
+ 		pon_ingress = !!pon_dev;
+ 	}
+ 	if (pon_dev) {
+-		if (offload_type == PPE_PKT_TYPE_BRIDGE || keep_ttl ||
++		/* Reuse the standalone bridge IP flowtable and its TTL_KEEP
++		 * action. MAC-only L2 subflows cannot resolve a PON service;
++		 * only fully specified IPv4/IPv6 TCP/UDP connections qualify.
++		 */
++		if (offload_type == PPE_PKT_TYPE_BRIDGE ||
+ 		    data.vlan.num || data.pppoe.num ||
+ 		    (l4proto != IPPROTO_TCP && l4proto != IPPROTO_UDP))
+ 			return -EOPNOTSUPP;
+@@ -1374,19 +1378,6 @@
+ 	if (err)
+ 		return err;
+ 
+-	if (keep_ttl) {
+-		hwe.ib1 &= ~AIROHA_FOE_IB1_BIND_TTL;
+-		/* IPv6 entries select a source-MAC register instead of storing
+-		 * the full address. 0xf preserves the received source, as in
+-		 * airoha_ppe_foe_commit_subflow_entry().
+-		 */
+-		if (offload_type == PPE_PKT_TYPE_IPV6_ROUTE_5T) {
+-			hwe.ipv6.l2.src_mac_hi &= ~AIROHA_FOE_MAC_SMAC_ID;
+-			hwe.ipv6.l2.src_mac_hi |=
+-				FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID, 0xf);
+-		}
+-	}
+-
+ 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
+ 		struct flow_match_ports ports;
+ 
+@@ -1424,6 +1415,10 @@
+ 			continue;
+ 
+ 		if (offload_type == PPE_PKT_TYPE_BRIDGE)
++			return -EOPNOTSUPP;
++
++		if (pon_dev && keep_ttl &&
++		    act->mangle.htype != FLOW_ACT_MANGLE_HDR_TYPE_ETH)
+ 			return -EOPNOTSUPP;
+ 
+ 		switch (act->mangle.htype) {
+@@ -1464,6 +1459,19 @@
+ 	if (pon_dev && !pon_ingress)
+ 		airoha_ppe_foe_set_pon(&hwe, &pon_flow,
+ 			offload_type == PPE_PKT_TYPE_IPV6_ROUTE_5T);
++	if (keep_ttl) {
++		hwe.ib1 &= ~AIROHA_FOE_IB1_BIND_TTL;
++		/* IPv6 entries select a source-MAC register instead of storing
++		 * the full address. 0xf preserves the received source, as in
++		 * airoha_ppe_foe_commit_subflow_entry().
++		 */
++		if (offload_type == PPE_PKT_TYPE_IPV6_ROUTE_5T) {
++			hwe.ipv6.l2.src_mac_hi &= ~AIROHA_FOE_MAC_SMAC_ID;
++			hwe.ipv6.l2.src_mac_hi |=
++				FIELD_PREP(AIROHA_FOE_MAC_SMAC_ID, 0xf);
++		}
++	}
++
+ 	memcpy(&e->data, &hwe, sizeof(e->data));
+ 
+ 	err = airoha_ppe_foe_flow_commit_entry(eth->ppe, e);
+--- a/include/linux/soc/airoha/airoha_pon.h
++++ b/include/linux/soc/airoha/airoha_pon.h
+@@ -42,9 +42,9 @@
+ 	AIROHA_PON_TX_RETRY,
+ };
+ 
+-/* Routed, untagged UNI IPv4/IPv6 egress only. The consumer resolves the
+- * actual OMCI classifier, including the output VLAN treatment. No OMCI,
+- * bridge, PPPoE or multicast forwarding is authorized. For rx_flow, vlan[]
++/* Untagged UNI IPv4/IPv6 flows, routed or from the standalone bridge
++ * flowtable. The consumer resolves the actual OMCI classifier and output
++ * VLAN treatment. No OMCI, PPPoE or multicast offload. For rx_flow, vlan[]
+  * describes the admitted wire tags and the UNI result must be untagged.
+  */
+ struct airoha_pon_flow {

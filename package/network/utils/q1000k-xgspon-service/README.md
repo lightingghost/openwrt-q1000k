@@ -22,7 +22,7 @@ registration service alone. Diagnostics can be resumed with
 
 ## Configuration and commands
 
-The existing `/etc/config/q1000k-xgspon` contains:
+The canonical `/etc/config/xgspon` contains:
 
 - `identity.serial` and `identity.wan_mac`: empty values use validated factory
   identity. Overrides have the same validation as the diagnostics backend.
@@ -49,10 +49,32 @@ The existing `/etc/config/q1000k-xgspon` contains:
   restricts the lower device to `ponraw`. Public images leave this off.
 
 With this package installed, `q1000k-xgspon start|stop|restart|reload` delegates
-to the init service. Changes take effect only after an explicit lifecycle
-command; there is no UCI reload trigger. `q1000k-xgspon status` exposes the
+to the init service. The service wrapper observes committed configuration,
+including plain `uci commit xgspon`. After two stable two-second polls,
+a valid identity/service change stops the old optical supervisor, waits for complete cleanup,
+then starts the configured registration service or TX-disabled monitor. LuCI
+Save and Save & Apply both commit this package. Saving identity does not enable
+registration when `service.enabled=0`; both flags set to zero leave optics off.
+Uncommitted edits and unchanged commits do not restart the stack. Startup uses
+a private immutable snapshot, so subsequent staged edits cannot affect it.
+Invalid identity is rejected before stopping a working stack. Empty optional
+field removal on LuCI Save and passthrough-only changes do not restart optics. Configuration
+restarts briefly interrupt PON Internet. Hardware faults still stop without
+respawn; a new valid configuration or explicit lifecycle command can retry.
+An explicitly stopped init service has no watcher until started again.
+`q1000k-xgspon status` exposes the
 last supervisor report separately from optical readiness. A saved `running`
 stage may survive abrupt process termination and does not prove liveness.
+
+## Configuration migration
+
+The base package migrates `/etc/config/q1000k-xgspon` to `/etc/config/xgspon`
+once. A pre-upgrade backup protects the old identity before package removal;
+UCI defaults also recognize the legacy file or its `.apk-save` copy. A customized
+canonical file takes precedence. Migration reads committed data, preserves
+private automatic-start settings and adds only a missing, disabled passthrough
+section. Backups remain private; the migration marker prevents replaying old
+settings on a later reinstall. Service and executable names remain unchanged.
 
 ## Ownership and failure behavior
 

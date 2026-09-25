@@ -126,6 +126,7 @@ static void __attribute__((format(printf,1,2))) log_message(const char *format,.
     va_end(ap);
 }
 #define netdev_info(d,...) log_message(__VA_ARGS__)
+#define netdev_dbg(d,...) log_message(__VA_ARGS__)
 #define netdev_err(d,...) log_message(__VA_ARGS__)
 #define netdev_warn(d,...) log_message(__VA_ARGS__)
 #define dev_err(d,...) log_message(__VA_ARGS__)

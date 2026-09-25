@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[ "$INTERFACE" = wan ] || exit 0
+case "$ACTION" in
+	ifup|ifdown|ifupdate) /etc/init.d/q1000k-passthrough reload ;;
+esac

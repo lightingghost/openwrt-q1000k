@@ -23,7 +23,7 @@ class ConfigTests(unittest.TestCase):
         self.root, self.env = self.backend.root, self.backend.env
         for directory in ('config', 'delta', 'overrides'):
             (self.root / directory).mkdir()
-        (self.root / 'config/q1000k-xgspon').write_text((PACKAGE / 'files/q1000k-xgspon.config').read_text())
+        (self.root / 'config/xgspon').write_text((PACKAGE / 'files/xgspon.config').read_text())
         self.env.update(PON_TEST_ROOT=str(self.root), PON_TEST_UCI=str(self.uci))
         self.backend.write('uci', '#!' + sys.executable + '\n' + """import os, pathlib, sys
 root = pathlib.Path(os.environ['PON_TEST_ROOT'])
@@ -106,7 +106,7 @@ os.execv(uci, [uci, '-c', str(root/'config'), '-C', str(root/'overrides'),
             self.assertNotEqual(self.call('set', key, value).returncode, 0)
         self.assertNotEqual(self.call('set', 'serial', 'TEST00000001', 'extra').returncode, 0)
         # Out-of-band malformed UCI is rejected before a launcher sees parameters.
-        subprocess.run([str(self.root / 'uci'), '-q', 'set', 'q1000k-xgspon.identity.logical_password=secret\n'],
+        subprocess.run([str(self.root / 'uci'), '-q', 'set', 'xgspon.identity.logical_password=secret\n'],
                        env=self.env, check=True)
         result = self.call('validate')
         self.assertNotEqual(result.returncode, 0)

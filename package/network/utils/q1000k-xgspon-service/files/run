@@ -167,6 +167,15 @@ network_tick() {
 		stage=waiting_provisioning
 		if [ "$provision_stable" -ge 3 ]; then
 			stage=running
+			# The explicit RAM passthrough test owns networking, while this
+			# process continues supervising optics, authentication and OMCI.
+			# Reset readiness so restoring router mode reacquires both leases.
+			if [ -f /var/run/q1000k-pon-passthrough/active ]; then
+				wan_ready=0
+				wan_owned=0
+				report || fail 'Cannot record bridge test state.'
+				return
+			fi
 			if [ "$wan_ready" = 0 ]; then
 				# Direct netifd up preserves a running interface. The ifup
 				# wrapper would force down/up and discard DHCP state.
@@ -188,7 +197,7 @@ network_tick() {
 [ "$(cat /tmp/sysinfo/board_name)" = quantum,q1000k-ubi ] || fail 'Unsupported board.'
 
 if [ "$1" = --monitor ]; then
-	[ "$(uci -q get q1000k-xgspon.service.monitor)" != 0 ] || exit 0
+	[ "$(pon_config_get service.monitor)" != 0 ] || exit 0
 	[ ! -d /var/run/q1000k-pon-bench.lock ] || fail 'A bench session owns the optics.'
 	for module in $modules; do
 		[ ! -d "/sys/module/$module" ] || fail "Module $module is already owned."
@@ -229,9 +238,9 @@ if [ "$1" = --monitor ]; then
 	done
 fi
 
-[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] || fail 'Service is disabled.'
+[ "$(pon_config_get service.enabled)" = 1 ] || fail 'Service is disabled.'
 [ ! -d /var/run/q1000k-pon-bench.lock ] || fail 'A bench session owns the optics.'
-if [ "$(uci -q get q1000k-xgspon.service.continuous_bench)" = 1 ]; then
+if [ "$(pon_config_get service.continuous_bench)" = 1 ]; then
 	# Explicit private image opt-in; neither a generic RAM bench nor the
 	# diagnostics checkbox grants transmitter permission on signal detection.
 	[ -f /etc/q1000k-private-autostart ] &&
@@ -253,7 +262,7 @@ read_calibration
 registration=
 identity_options || fail 'PON identity configuration is invalid.'
 [ -n "$registration" ] || fail 'An explicit registration ID is required.'
-lower=$(uci -q get q1000k-xgspon.service.lower)
+lower=$(pon_config_get service.lower)
 [ -n "$lower" ] && [ "${#lower}" -le 15 ] && printf '%s\n' "$lower" | grep -Eq '^[A-Za-z0-9_.-]+$' ||
 	fail 'An explicit native PON lower device is required.'
 read -r flags < "/sys/class/net/$lower/flags" || fail 'PON lower device is unavailable.'

@@ -1,0 +1,1 @@
+oifname "br-lan" ip daddr @q1000k_pt4 accept comment "Q1000K selected public IPv4"

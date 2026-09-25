@@ -2,6 +2,17 @@
 export LC_ALL=C
 . /usr/share/libubox/jshn.sh
 
+# The service reads an immutable committed snapshot. Interactive inspection
+# continues to use the ordinary UCI view, including staged changes.
+pon_config_get() {
+	if [ -n "${Q1000K_UCI_SNAPSHOT:-}" ]; then
+		local dir="${Q1000K_UCI_SNAPSHOT%/*}" name="${Q1000K_UCI_SNAPSHOT##*/}"
+		uci -q -c "$dir" -C "$dir" -t "$dir" get "$name.$1"
+	else
+		uci -q get "xgspon.$1"
+	fi
+}
+
 valid_serial() {
 	[ "${#1}" -eq 12 ] || return 1
 	printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9]{4}[0-9A-Fa-f]{8}$'
@@ -32,8 +43,8 @@ read_identity() {
 	fi
 	serial= wan_mac=
 	if ! factory_only; then
-		serial=$(uci -q get q1000k-xgspon.identity.serial)
-		wan_mac=$(uci -q get q1000k-xgspon.identity.wan_mac)
+		serial=$(pon_config_get identity.serial)
+		wan_mac=$(pon_config_get identity.wan_mac)
 	fi
 	serial_source=override mac_source=override
 	[ -n "$serial" ] || { serial=$factory_serial; serial_source=factory; }
@@ -238,8 +249,8 @@ omci_field() {
 supervisor_status() {
 	local available=0 enabled=0 monitor=1 data version type stage= error= previous
 	[ -x /etc/init.d/q1000k-xgspon ] && available=1
-	[ "$(uci -q get q1000k-xgspon.service.enabled)" = 1 ] && enabled=1
-	[ "$(uci -q get q1000k-xgspon.service.monitor)" != 0 ] || monitor=0
+	[ "$(uci -q get xgspon.service.enabled)" = 1 ] && enabled=1
+	[ "$(uci -q get xgspon.service.monitor)" != 0 ] || monitor=0
 	# This is the last recorded state, which can survive an abrupt process exit.
 	# It does not prove that a supervisor is alive or that optical service works.
 	json_set_namespace q1000k_supervisor previous
@@ -398,7 +409,7 @@ identity_option_valid() {
 }
 identity_option_read() {
 	# Keep embedded/trailing newlines so they are rejected, not silently stripped.
-	identity_value=$(uci -q get "q1000k-xgspon.identity.$1"; printf '.')
+	identity_value=$(pon_config_get "identity.$1"; printf '.')
 	identity_value=${identity_value%.}
 	identity_value=${identity_value%'
 '}

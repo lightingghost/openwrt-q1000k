@@ -1,0 +1,40 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Keep legacy identity/service values, including automatic private RAM startup.
+# Only a missing or still factory-default canonical file can be replaced.
+set -eu
+umask 077
+config=/etc/config/xgspon
+defaults=/usr/share/xgspon/defaults
+marker=/etc/xgspon-config-migrated
+[ ! -e "$marker" ] || exit 0
+source=$config
+if [ ! -e "$config" ] || cmp -s "$config" "$defaults"; then
+	source=$defaults
+	for candidate in /etc/xgspon-legacy-config /etc/config/q1000k-xgspon /etc/config/q1000k-xgspon.apk-save; do
+		if [ -f "$candidate" ]; then source=$candidate; break; fi
+	done
+fi
+work=$(mktemp -d /tmp/xgspon-migrate-XXXXXX)
+trap 'rm -rf "$work"' EXIT
+# A unique private package cannot load the normal staged UCI changes.
+name="migration-${work##*/}"
+cp "$source" "$work/$name"
+read_config() { uci -q -c "$work" -C "$work" -t "$work" "$@"; }
+read_config export "$name" >/dev/null || exit 1
+# Older identity files have no passthrough section. Add only the disabled
+# default, so LuCI can render its NamedSection without changing other values.
+if ! read_config get "$name.passthrough" >/dev/null; then
+	cat >> "$work/$name" <<'EOF'
+
+config passthrough 'passthrough'
+	option mode 'router'
+	option client_mac ''
+EOF
+fi
+if ! cmp -s "$work/$name" "$config"; then
+	cp "$work/$name" "$config.new"
+	chmod 600 "$config.new"
+	mv "$config.new" "$config"
+fi
+printf 'xgspon-v1\n' > "$marker"

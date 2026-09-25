@@ -55,10 +55,10 @@ class PrivateBootTests(unittest.TestCase):
 
     def test_first_boot_after_bench_defaults_enables_lan_and_owned_wan(self):
         overlay, manifest, _, _ = self.overlay()
-        shutil.copy2(overlay / 'etc/config/q1000k-xgspon', self.root / 'config/q1000k-xgspon')
+        shutil.copy2(overlay / 'etc/config/xgspon', self.root / 'config/xgspon')
         # Real libuci round-trip, including quote and metacharacter literals.
         for key, value in self.identity.items():
-            self.assertEqual(self.uci_cmd('get', 'q1000k-xgspon.identity.' + key), value or '00' * 36)
+            self.assertEqual(self.uci_cmd('get', 'xgspon.identity.' + key), value or '00' * 36)
         self.assertNotIn(self.identity['serial'], json.dumps(manifest))
         self.assertEqual(manifest['registration_source'], 'zero-default')
         for name, expected in manifest['files'].items():
@@ -73,10 +73,10 @@ class PrivateBootTests(unittest.TestCase):
         (self.root / 'private-marker').touch()
         self.install()  # 90-q1000k-xgspon-wan
         self.run_defaults(ROOT / 'package/network/utils/q1000k-xgspon-bench/files/defaults')
-        self.assertEqual(self.uci_cmd('get', 'q1000k-xgspon.service.enabled'), '0')
+        self.assertEqual(self.uci_cmd('get', 'xgspon.service.enabled'), '0')
         self.run_defaults(overlay / 'etc/uci-defaults/zz-q1000k-private-autostart')
         expected = {
-            'q1000k-xgspon.service.enabled': '1', 'q1000k-xgspon.service.lower': 'ponraw',
+            'xgspon.service.enabled': '1', 'xgspon.service.lower': 'ponraw',
             'network.lan.ipaddr': '192.168.0.1', 'dhcp.lan.ignore': '0',
             'dhcp.lan.ra': 'server', 'dhcp.lan.dhcpv6': 'server',
             'network.wan.auto': '0', 'network.wan6.auto': '0',
@@ -92,7 +92,7 @@ class PrivateBootTests(unittest.TestCase):
             self.assertEqual(self.uci_cmd('get', key), value, key)
         self.assertIn('wan6', self.uci_cmd('get', 'firewall.@zone[1].network'))
         self.assertEqual(self.uci_cmd('changes'), '')
-        self.assertEqual(self.uci_cmd('get', 'q1000k-xgspon.identity.equipment_id'), self.identity['equipment_id'])
+        self.assertEqual(self.uci_cmd('get', 'xgspon.identity.equipment_id'), self.identity['equipment_id'])
 
     def test_bad_inputs_are_rejected_before_creating_private_overlay(self):
         _, _, archive, identity = self.overlay()
@@ -112,7 +112,7 @@ class PrivateBootTests(unittest.TestCase):
         (self.root / 'backup').mkdir()
         with self.assertRaisesRegex(RuntimeError, 'interrupted'):
             with test_pon_bench_runner.BUILD.bench_config(self.root, selected, self.root / 'backup', overlay):
-                self.assertEqual((self.root / 'files/etc/config/q1000k-xgspon').stat().st_mode & 0o777, 0o600)
+                self.assertEqual((self.root / 'files/etc/config/xgspon').stat().st_mode & 0o777, 0o600)
                 raise RuntimeError('interrupted')
         self.assertEqual((self.root / '.config').read_text(), 'normal-config')
         self.assertFalse((self.root / 'files').exists())

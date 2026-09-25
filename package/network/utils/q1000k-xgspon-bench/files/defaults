@@ -15,13 +15,13 @@ set dhcp.lan.ra='disabled'
 set dhcp.lan.dhcpv6='disabled'
 set dhcp.lan.ndp='disabled'
 set system.@system[0].hostname='q1000k-pon-bench'
-set q1000k-xgspon.service.enabled='0'
+set xgspon.service.enabled='0'
 set firewall.@defaults[0].flow_offloading='1'
 set firewall.@defaults[0].flow_offloading_hw='1'
 commit firewall
 commit network
 commit dhcp
 commit system
-commit q1000k-xgspon
+commit xgspon
 EOF
 exit 0

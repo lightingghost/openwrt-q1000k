@@ -1,0 +1,152 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Guard the installed service and native /61 configuration, not another data path.
+Q1000K_PT_LIBRARY=1 . /usr/sbin/q1000k-ip-passthrough
+unset Q1000K_PT_LIBRARY
+STATE=/var/run/q1000k-l3-bench
+SELF=/usr/sbin/q1000k-l3-bench
+IPV6_TRANSITION=/usr/libexec/q1000k-ipv6-transition
+
+restore() {
+ [ -f "$STATE/saved" ] || return 0
+ local failed=0 token peer peer_mac config
+ token=$(cat "$STATE/token")
+ stop_sampler || failed=1
+ stop_captures || failed=1
+ # The installed owner must finish restoring IPv4 before netifd is reloaded.
+ /etc/init.d/q1000k-passthrough stop 9>&- || failed=1
+ for n in $(seq 1 25); do [ -e /var/run/q1000k-passthrough ] || break; sleep 1; done
+ [ ! -e /var/run/q1000k-passthrough ] || return 1
+ for config in xgspon network dhcp firewall; do
+  uci -q revert "$config" || :
+  cp -p "$STATE/$config" "/etc/config/$config" || failed=1
+ done
+ /etc/init.d/network reload 9>&- || failed=1
+ if [ -f "$STATE/ipv6-transition/snapshot.ready" ]; then
+  "$IPV6_TRANSITION" apply "$STATE/ipv6-transition" 9>&- || failed=1
+ fi
+ /etc/init.d/firewall reload 9>&- || failed=1
+ /etc/init.d/dnsmasq restart 9>&- || failed=1
+ /etc/init.d/odhcpd restart 9>&- || failed=1
+ /etc/init.d/q1000k-passthrough start 9>&- || failed=1
+ for config in xgspon network dhcp firewall; do cmp -s "$STATE/$config" "/etc/config/$config" || failed=1; done
+ [ "$(cat /sys/class/net/pon/address)" = "$(cat "$STATE/pon-mac")" ] || failed=1
+ ip -4 rule show > "$STATE/rules-restored"
+ cmp -s "$STATE/rules-before" "$STATE/rules-restored" || failed=1
+ [ -z "$(ip -4 route show table 100 2>/dev/null)" ] || failed=1
+ [ "$failed" = 0 ] || return 1
+ read -r peer peer_mac < "$STATE/management-neighbor"
+ ip neigh replace "$peer" lladdr "$peer_mac" nud permanent dev br-lan
+ mv "$STATE" "/tmp/q1000k-l3-bench-finished-$token"
+ echo "/tmp/q1000k-l3-bench-finished-$token" > /var/run/q1000k-l3-bench-last
+}
+
+case "${1:-}" in
+ snapshot) snapshot; ifstatus wan6; ifstatus lan; uci -q show xgspon.passthrough; ubus call service list '{"name":"q1000k-passthrough"}'; exit;;
+ sample)
+  [ -f "$STATE/active" ] && [ ! -e "$STATE/sampler.pid" ] || fail 'Sampler ownership conflict.'
+  echo "$$ $(awk '{print $22}' /proc/$$/stat)" > "$STATE/sampler.pid"
+  trap 'rm -f "$STATE/sampler.pid"' EXIT
+  trap 'exit 0' HUP INT TERM
+  for n in $(seq 1 120); do echo SAMPLE "$n"; cat /proc/uptime /proc/stat /sys/kernel/debug/ppe/bind /proc/net/nf_conntrack; sleep 1; done
+  exit;;
+ stop-sample) stop_sampler; exit;;
+ guard)
+  token=${2:?}; trap '' HUP
+  echo "$token" > "$STATE/guard.ready"
+  while [ -f "$STATE/active" ] && [ "$(cat "$STATE/token")" = "$token" ]; do
+   if [ "$(now)" -ge "$(cat "$STATE/deadline")" ]; then "$SELF" stop "$token" && exit 0; fi
+   sleep 2
+  done
+  exit;;
+esac
+[ -f /sys/firmware/devicetree/base/quantum,xgspon-activation-bench ] || fail 'Requires RAM activation bench.'
+[ -f /etc/q1000k-private-autostart ] || fail 'Requires automatic router profile.'
+mkdir -p /var/lock
+exec 9>/var/lock/q1000k-l3-bench.lock
+flock -x 9
+case "${1:-}" in
+ start)
+  mac=${2:-}; peer=${3:-}; peer_mac=${4:-}; duration=${5:-900}; token=${6:-}
+  client_mac "$mac" && client_mac "$peer_mac" && ipv4 "$peer" || fail 'Invalid client/management identity.'
+  case "$duration" in ''|*[!0-9]*) fail 'Invalid duration.';; esac
+  [ "$duration" -ge 120 ] && [ "$duration" -le 1800 ] || fail 'Duration must be 120..1800 seconds.'
+  echo "$token" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail 'Invalid token.'
+  for path in "$STATE" /var/run/q1000k-passthrough /var/run/q1000k-pon-passthrough /var/run/q1000k-ip-passthrough; do [ ! -e "$path" ] || fail 'Another network owner/recovery is active.'; done
+  [ "$(uci -q get xgspon.passthrough.mode)" = router ] || fail 'Start in router mode.'
+  [ "$(uci -q get network.lan.device)" = br-lan ] && [ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'Requires routed PON and br-lan.'
+  lan=$(uci -q get network.lan.ipaddr)
+  [ "${peer%.*}" = "${lan%.*}" ] && [ "$peer" != "$lan" ] || fail 'Wrong management subnet.'
+  for config in xgspon network dhcp firewall; do [ -z "$(uci changes "$config")" ] || fail "Pending $config edits."; done
+  for cmd in ip nft tcpdump jsonfilter flock dnsmasq conntrack; do command -v "$cmd" >/dev/null || fail "Missing $cmd"; done
+  [ -x /usr/libexec/q1000k-passthrough-ipv4 ] || fail 'Installed IPv4 service missing.'
+  [ -x "$IPV6_TRANSITION" ] || fail 'IPv6 transition helper missing.'
+  lease || fail 'Routed WAN lease required.'
+  [ "$mac" != "$(cat /sys/class/net/pon/address)" ] || fail 'Use downstream own MAC.'
+  [ "$(ifstatus wan6 | jsonfilter -e '@["ipv6-prefix"][0].mask')" = 60 ] || fail 'Requires an upstream /60.'
+  mkdir "$STATE"
+  for config in xgspon network dhcp firewall; do cp -p "/etc/config/$config" "$STATE/$config"; done
+  cat /sys/class/net/pon/address > "$STATE/pon-mac"
+  ip -4 rule show > "$STATE/rules-before"
+  echo "$token" > "$STATE/token"; echo "$peer $peer_mac" > "$STATE/management-neighbor"
+  echo "$(($(now) + duration))" > "$STATE/hard-deadline"
+  echo "$(($(now) + 90))" > "$STATE/deadline"
+  touch "$STATE/saved" "$STATE/active"
+  (trap '' HUP; exec "$SELF" guard "$token") </dev/null >"$STATE/guard.log" 2>&1 9>&- &
+  echo "$!" > "$STATE/guard.pid"
+  trap 'rc=$?; trap - EXIT; if [ "$rc" != 0 ]; then restore || :; fi; exit "$rc"' EXIT
+  trap 'exit 1' HUP INT TERM
+  for n in 1 2 3 4 5; do [ ! -f "$STATE/guard.ready" ] || break; sleep 1; done
+  [ "$(cat "$STATE/guard.ready" 2>/dev/null)" = "$token" ] || fail 'Guard did not start.'
+  snapshot > "$STATE/before.txt"
+  "$IPV6_TRANSITION" snapshot "$STATE/ipv6-transition" 9>&-
+  start_capture lan1 lan; start_capture pon pon
+  ip neigh replace "$peer" lladdr "$peer_mac" nud permanent dev br-lan
+  uci -q delete network.wan6.ip6assign || :
+  uci -q delete network.wan6.ip6hint || :
+  uci set network.lan.ip6assign=60
+  uci set network.lan.ip6hint=0
+  uci -q delete network.lan.ip6class || :
+  uci add_list network.lan.ip6class=wan6
+  uci set dhcp.lan.ra=server
+  uci set dhcp.lan.dhcpv6=server
+  uci set dhcp.lan.ndp=disabled
+  uci set dhcp.lan.dhcpv6_pd=1
+  uci set dhcp.lan.dhcpv6_pd_min_len=61
+  uci set firewall.@defaults[0].flow_offloading=1
+  uci set firewall.@defaults[0].flow_offloading_hw=1
+  uci commit network; uci commit dhcp; uci commit firewall
+  /etc/init.d/network reload 9>&-
+  "$IPV6_TRANSITION" apply "$STATE/ipv6-transition" 9>&-
+  /etc/init.d/odhcpd restart 9>&-
+  /etc/init.d/firewall reload 9>&-
+  /etc/init.d/q1000k-passthrough start 9>&-
+  uci set xgspon.passthrough.client_mac="$mac"
+  uci set xgspon.passthrough.mode=l3
+  uci commit xgspon
+  for n in $(seq 1 40); do [ ! -f /var/run/q1000k-passthrough/lease ] || break; sleep 1; done
+  [ -f /var/run/q1000k-passthrough/lease ] || fail 'Committed L3 configuration did not become active.'
+  echo hardware > "$STATE/mode"
+  ;;
+ heartbeat)
+  [ -f "$STATE/active" ] && [ "${2:-}" = "$(cat "$STATE/token")" ] || fail 'Wrong token.'
+  deadline=$(($(now) + 90)); hard=$(cat "$STATE/hard-deadline")
+  [ "$deadline" -le "$hard" ] || deadline=$hard
+  echo "$deadline" > "$STATE/deadline.new"; mv "$STATE/deadline.new" "$STATE/deadline";;
+ mode)
+  [ -f "$STATE/active" ] || fail 'No active test.'
+  case "${2:-}" in hardware) enabled=1;; software) enabled=0;; *) fail 'Use hardware|software.';; esac
+  uci set "firewall.@defaults[0].flow_offloading_hw=$enabled"
+  uci commit firewall; /etc/init.d/firewall reload 9>&-
+  echo "$2" > "$STATE/mode";;
+ stop)
+  if [ -n "${2:-}" ]; then [ -f "$STATE/token" ] && [ "$(cat "$STATE/token")" = "$2" ] || exit 0; fi
+  restore || fail 'Recovery incomplete; guard and state retained.';;
+ management-release)
+  [ ! -e "$STATE/active" ] || fail 'Active transaction.'
+  last=$(cat /var/run/q1000k-l3-bench-last)
+  [ "${2:-}" = "$(cat "$last/token")" ] || fail 'Wrong completed token.'
+  read -r peer peer_mac < "$last/management-neighbor"
+  ip neigh del "$peer" dev br-lan 2>/dev/null || :;;
+ *) fail 'Use start MAC MANAGEMENT_IP MANAGEMENT_MAC SECONDS TOKEN, snapshot, sample, mode, heartbeat, stop or management-release.';;
+esac

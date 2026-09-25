@@ -1,0 +1,231 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Reuse the qualified IPv4 ARP/policy-routing/nftables/dnsmasq recipe. IPv6
+# belongs to netifd/odhcpd and is never stopped or reconfigured here.
+set -eu
+export LC_ALL=C
+umask 077
+STATE=/var/run/q1000k-passthrough
+NFT=q1000k_pt
+mac=${1:-}
+timer= fragment= address= key= dirty=0
+
+fail() { echo "Q1000K passthrough: $*" >&2; exit 1; }
+ipv4() {
+	printf '%s\n' "$1" | awk -F. 'NF != 4 {exit 1} {for (i=1;i<=4;i++) if ($i !~ /^[0-9]+$/ || $i+0>255) exit 1}'
+}
+jget() { jsonfilter -i "$STATE/wan.json" -e "$1"; }
+
+lease() {
+	ifstatus wan > "$STATE/wan.json" || return 1
+	[ "$(jget '@.up')" = true ] && [ "$(jget '@.l3_device')" = pon ] || return 1
+	wan=$(jget '@["ipv4-address"][0].address')
+	prefix=$(jget '@["ipv4-address"][0].mask')
+	gateway=$(jget '@.route[@.target="0.0.0.0" && @.mask=0].nexthop')
+	dns=$(jget '@["dns-server"][*]' | awk '/^[0-9.]+$/ {printf "%s%s", sep, $0; sep=","}')
+	ipv4 "$wan" && ipv4 "$gateway" || return 1
+	case "$prefix" in ''|*[!0-9]*) return 1;; esac
+	[ "$prefix" -ge 8 ] && [ "$prefix" -le 30 ] && [ -n "$dns" ] || return 1
+	local saveifs=$IFS a
+	IFS=,
+	for a in $dns; do ipv4 "$a" || { IFS=$saveifs; return 1; }; done
+	IFS=$saveifs
+	mask=$(( (4294967295 << (32 - prefix)) & 4294967295 ))
+	mask="$((mask >> 24 & 255)).$((mask >> 16 & 255)).$((mask >> 8 & 255)).$((mask & 255))"
+}
+
+render_dhcp() {
+	cat <<EOF
+# Owned by q1000k-passthrough; generated in RAM.
+shared-network=br-lan,$wan
+dhcp-range=tag:q1000k_pt,$wan,static,$mask,2m
+dhcp-host=$mac,set:q1000k_pt,$wan
+dhcp-option=tag:q1000k_pt,option:router,$gateway
+dhcp-option=tag:q1000k_pt,option:dns-server,$dns
+EOF
+}
+
+render_nft() {
+	cat <<EOF
+table inet $NFT {
+	set active { type ipv4_addr; flags timeout; timeout 15s; }
+	chain own {
+		type route hook output priority mangle; policy accept;
+		oifname "pon" ct mark set ct mark | 0x02000000
+		ip daddr @active ct direction reply meta mark set meta mark | 0x01000000
+		ip daddr @active udp sport 67 udp dport 68 meta mark set meta mark | 0x01000000
+	}
+	chain classify {
+		type filter hook prerouting priority -90; policy accept;
+		iifname "br-lan" ip saddr @active ether saddr != $mac drop
+		iifname "pon" ip daddr @active udp sport 67 udp dport 68 return
+		iifname "pon" ip daddr @active ct mark & 0x02000000 == 0 meta mark set meta mark | 0x01000000
+	}
+}
+EOF
+}
+
+dhcp_install() {
+	# Do not discard a configuration file modified by another administrator.
+	if [ -f "$fragment" ] && [ -f "$STATE/dhcp.applied" ]; then
+		cmp -s "$fragment" "$STATE/dhcp.applied" || return 1
+	fi
+	cmp -s "$STATE/dhcp.next" "$fragment" && return 0
+	dnsmasq --test --conf-file="$STATE/dhcp.next" >/dev/null 2>&1 || return 1
+	cp "$STATE/dhcp.next" "$fragment.new" && mv "$fragment.new" "$fragment" || return 1
+	cp "$fragment" "$STATE/dhcp.applied" || return 1
+	timeout 15 /etc/init.d/dnsmasq restart 9>&- || return 1
+}
+
+block_dhcp() {
+	# Avoid a long private lease being handed to the selected router during a
+	# WAN outage. Other LAN DHCP clients retain their normal service.
+	printf '# Owned by q1000k-passthrough; generated in RAM.\ndhcp-host=%s,ignore\n' "$mac" > "$STATE/dhcp.next"
+	dhcp_install
+}
+
+withdraw() {
+	[ -n "$address" ] || return 0
+	block_dhcp || return 1
+	# Restore local handling before removing the selective forwarding policy.
+	ip -4 rule show | grep -Eq '^0:.*lookup local[[:space:]]*$' || ip -4 rule add pref 0 lookup local || return 1
+	nft flush set inet fw4 q1000k_pt4 || return 1
+	nft flush set inet "$NFT" active || return 1
+	ip -4 route del table 100 "$address/32" dev br-lan || return 1
+	ip neigh del "$address" dev br-lan 2>/dev/null || :
+	# Retire stale conntrack/PPE flows for this address, not the entire table.
+	conntrack -D -f ipv4 -s "$address" >/dev/null 2>&1 || :
+	conntrack -D -f ipv4 -d "$address" >/dev/null 2>&1 || :
+	address= key=
+	rm -f "$STATE/lease"
+}
+
+cleanup() {
+	local failed=0 setting value
+	trap - EXIT
+	trap '' HUP INT TERM USR1
+	[ -z "$timer" ] || kill "$timer" 2>/dev/null || :
+	if [ "$dirty" = 1 ]; then
+		ip -4 rule show | grep -Eq '^0:.*lookup local[[:space:]]*$' || ip -4 rule add pref 0 lookup local || failed=1
+		ip -4 rule del pref 50 fwmark 0x01000000/0x01000000 lookup 100 2>/dev/null || :
+		ip -4 rule del pref 100 lookup local 2>/dev/null || :
+		if [ -n "$address" ]; then
+			ip -4 route del table 100 "$address/32" dev br-lan 2>/dev/null || failed=1
+			ip neigh del "$address" dev br-lan 2>/dev/null || :
+		fi
+		nft destroy table inet "$NFT" || failed=1
+		nft flush set inet fw4 q1000k_pt4 || failed=1
+		while read -r setting value; do
+			[ ! -e "$setting" ] || printf '%s\n' "$value" > "$setting" || failed=1
+		done < "$STATE/sysctls"
+	fi
+	if [ -n "$fragment" ] && [ -f "$STATE/dhcp.applied" ]; then
+		if cmp -s "$STATE/dhcp.applied" "$fragment"; then
+			rm "$fragment" || failed=1
+			timeout 15 /etc/init.d/dnsmasq restart 9>&- || failed=1
+		else
+			echo 'Q1000K passthrough: changed DHCP fragment retained for review.' >&2
+			failed=1
+		fi
+	fi
+	if [ "$failed" = 0 ]; then
+		rm -rf "$STATE"
+	else
+		echo 'Q1000K passthrough: cleanup incomplete; state retained.' >&2
+		exit 1
+	fi
+}
+
+preflight() {
+	printf '%s\n' "$mac" | grep -Eq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' &&
+		[ "$mac" != 00:00:00:00:00:00 ] || fail 'Select a unicast downstream MAC.'
+	[ "$(uci -q get network.lan.device)" = br-lan ] || fail 'Requires br-lan management.'
+	[ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'Requires routed PON, not an L2 bridge.'
+	[ ! -e /var/run/q1000k-ip-passthrough/active ] &&
+		[ ! -e /var/run/q1000k-pon-passthrough/active ] || fail 'A bench helper owns networking.'
+	[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || fail 'IPv4 forwarding is disabled.'
+	[ "$(ip -4 rule show | wc -l)" = 3 ] || fail 'Custom policy routing requires review.'
+	ip -4 rule show | grep -Eq '^0:.*lookup local[[:space:]]*$' || fail 'Unexpected local rule.'
+	ip -4 rule show | grep -Eq '^32766:.*lookup main[[:space:]]*$' || fail 'Unexpected main rule.'
+	ip -4 rule show | grep -Eq '^32767:.*lookup default[[:space:]]*$' || fail 'Unexpected default rule.'
+	[ -z "$(ip -4 route show table 100 2>/dev/null)" ] || fail 'Routing table 100 is occupied.'
+	nft list table inet "$NFT" >/dev/null 2>&1 && fail 'Reserved nftables table is occupied.'
+	nft list ruleset | grep -Eq 'ct mark|meta mark' && fail 'Existing packet marks require review.'
+	nft list set inet fw4 q1000k_pt4 >/dev/null || fail 'Reload firewall4 with the package includes first.'
+	section=$(uci -q -X show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p')
+	printf '%s\n' "$section" | grep -Eq '^[a-zA-Z0-9_]+$' || fail 'Requires one dnsmasq instance.'
+	[ -z "$(uci -q get "dhcp.$section.confdir" || :)" ] || fail 'Custom dnsmasq confdir requires review.'
+	fragment="/tmp/dnsmasq.$section.d/q1000k-passthrough.conf"
+	[ -d "${fragment%/*}" ] && [ ! -e "$fragment" ] || fail 'Missing DHCP directory or unowned fragment.'
+}
+
+activate_routing() {
+	local setting file value pon_mac
+	pon_mac=$(cat /sys/class/net/pon/address) || fail 'PON netdevice is unavailable.'
+	[ "$mac" != "$pon_mac" ] || fail 'ONU and downstream MACs must differ.'
+	[ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'PON was moved into an L2 bridge.'
+	[ "$dirty" = 0 ] || return 0
+	: > "$STATE/sysctls"
+	# Journal before modifying state so a partial setup follows the same cleanup.
+	dirty=1
+	for setting in all/rp_filter br-lan/rp_filter pon/rp_filter br-lan/accept_local br-lan/proxy_arp all/send_redirects br-lan/send_redirects; do
+		file=/proc/sys/net/ipv4/conf/$setting
+		printf '%s %s\n' "$file" "$(cat "$file")" >> "$STATE/sysctls"
+		case "$setting" in */accept_local|*/proxy_arp) value=1;; *) value=0;; esac
+		printf '%s\n' "$value" > "$file"
+	done
+	ip -4 rule add pref 100 lookup local
+	ip -4 rule add pref 50 fwmark 0x01000000/0x01000000 lookup 100
+	render_nft > "$STATE/rules.nft"
+	nft -f "$STATE/rules.nft"
+}
+
+refresh_sets() {
+	# One atomic transaction also recovers the empty fw4 set after a reload.
+	nft -f - <<EOF
+flush set inet fw4 q1000k_pt4
+add element inet fw4 q1000k_pt4 { $wan timeout 15s }
+flush set inet $NFT active
+add element inet $NFT active { $wan timeout 15s }
+EOF
+}
+
+reconcile() {
+	if ! lease; then withdraw; return; fi
+	if [ -n "$address" ] && [ "$address" != "$wan" ]; then withdraw; fi
+	activate_routing
+	# A PON reload can recreate its netdevice/sysctls without changing the lease.
+	printf '0\n' > /proc/sys/net/ipv4/conf/pon/rp_filter
+	address=$wan
+	ip -4 route replace table 100 "$wan/32" dev br-lan
+	ip neigh replace "$wan" lladdr "$mac" nud permanent dev br-lan
+	refresh_sets
+	if ip -4 rule show | grep -Eq '^0:.*lookup local[[:space:]]*$'; then ip -4 rule del pref 0 lookup local; fi
+	if [ "$key" != "$wan/$prefix/$gateway/$dns" ] || ! cmp -s "$STATE/dhcp.applied" "$fragment"; then
+		render_dhcp > "$STATE/dhcp.next"
+		dhcp_install
+		key="$wan/$prefix/$gateway/$dns"
+		printf '%s\n' "$key" > "$STATE/lease"
+	fi
+}
+
+# Test fixtures source functions only; normal entry is the procd-owned process.
+[ "${Q1000K_PT_FUNCTIONS_ONLY:-0}" != 1 ] || return 0
+mkdir -p /var/lock
+exec 9>/var/lock/q1000k-passthrough.lock
+flock -n 9 || fail 'Another reconciler is running.'
+[ ! -e "$STATE" ] || fail 'Previous state requires recovery before restarting.'
+preflight
+mkdir "$STATE"
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+trap ':' USR1
+block_dhcp
+while :; do
+	# Fatal errors retire our state and return to ordinary router service.
+	reconcile
+	sleep 2 & timer=$!
+	wait "$timer" || :
+	kill "$timer" 2>/dev/null || :
+	timer=
+done

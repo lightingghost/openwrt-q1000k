@@ -2,12 +2,19 @@
 'require view';
 'require form';
 'require uci';
+'require rpc';
+'require ui';
+
+var commitSettings = rpc.declare({
+    object: 'uci', method: 'commit', params: [ 'config' ], reject: true
+});
 
 return view.extend({
-    load: function() { return uci.load('q1000k-xgspon'); },
+    load: function() { return uci.load('xgspon'); },
     render: function() {
-        var m = new form.Map('q1000k-xgspon', _('XGS-PON Settings'),
-            _('Settings take effect at the next PON service startup. Saving does not restart the optical port. Edits on a RAM image last until reboot; reboot restores the settings embedded in that image.'));
+        var m = new form.Map('xgspon', _('XGS-PON Settings'),
+            _('Saving commits and applies changed settings. Identity or optical startup changes restart the optical service and briefly interrupt Internet access. IPv4 passthrough changes apply separately, without restarting optics. Disabled services stay disabled. Edits on a RAM image last until reboot.'));
+        this.map = m;
         var startup = m.section(form.NamedSection, 'service', 'service');
         startup.anonymous = true; startup.addremove = false;
         var o = startup.option(form.Flag, 'enabled', _('Start PON Internet service at boot'),
@@ -16,6 +23,20 @@ return view.extend({
         o = startup.option(form.Flag, 'monitor', _('Load optical controller at boot'),
             _('When Internet service is disabled, read optical diagnostics with transmission disabled. Initialization waits for verified optical firmware and this unit’s calibration. Private service images include these inputs.'));
         o.default = '1'; o.rmempty = false;
+        var passthrough = m.section(form.NamedSection, 'passthrough', 'passthrough', _('IPv4 passthrough'),
+            _('Give the public WAN address to one downstream router while keeping the provider connection on this device. Connect the router WAN port to LAN and use DHCP. Both devices keep their own MAC addresses. IPv6 prefix delegation is configured separately under Network > Interfaces.'));
+        passthrough.anonymous = true; passthrough.addremove = false;
+        o = passthrough.option(form.ListValue, 'mode', _('Mode'));
+        o.value('router', _('Router (default)'));
+        o.value('l3', _('L3 IP passthrough'));
+        o.default = 'router'; o.rmempty = false;
+        o = passthrough.option(form.Value, 'client_mac', _('Downstream WAN MAC address'),
+            _('Use the MAC address of the main router’s WAN port. Save to apply, then renew its DHCP lease. Returning to Router mode also requires renewing the downstream lease. Keep a separate static management address to access this device.'));
+        o.depends('mode', 'l3'); o.rmempty = false;
+        o.validate = function(section, v) {
+            return !!v && v.length === 17 && /^[0-9A-Fa-f][02468aAcCeE](:[0-9A-Fa-f]{2}){5}$/.test(v) && v !== '00:00:00:00:00:00' ||
+                _('Expected a nonzero unicast MAC address');
+        };
         var s = m.section(form.NamedSection, 'identity', 'identity', _('PON identity'));
         s.anonymous = true;
         s.addremove = false;
@@ -107,5 +128,16 @@ return view.extend({
         text('omci_version', 'Legacy combined OMCI version', 14,
             'Legacy fallback for hardware and both software versions. Separate version fields above take precedence. Leave empty for new configurations.');
         return m.render();
+    },
+    handleSave: function() {
+        return this.map.save().then(function() {
+            return commitSettings('xgspon');
+        }).then(function() {
+            return ui.changes.init();
+        });
+    },
+    handleSaveApply: function() {
+        // Both buttons commit only xgspon; the section owners apply changes.
+        return this.handleSave();
     }
 });

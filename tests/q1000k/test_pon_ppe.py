@@ -76,6 +76,18 @@ int main(void) {
             'airoha_ppe_foe_set_pon', 'airoha_ppe_pon_invalidate',
             'airoha_ppe_foe_remove_flow',
             'airoha_ppe_foe_flow_commit_entry'))
+        replace = function(source, 'airoha_ppe_flow_offload_replace')
+        start = replace.index('\tif (pon_dev && !pon_ingress)')
+        end = replace.index('\n\terr = airoha_ppe_foe_flow_commit_entry', start)
+        # Execute the actual finalization sequence: applying PON metadata
+        # after TTL_KEEP used to overwrite the IPv6 source-MAC selector.
+        selected += '''
+static struct airoha_foe_entry finish(struct airoha_foe_entry hwe,
+        struct airoha_pon_flow pon_flow, bool keep_ttl, int offload_type,
+        bool pon_ingress) {
+    struct airoha_gdm_dev dummy, *pon_dev=&dummy;
+    struct airoha_flow_table_entry result, *e=&result;
+''' + replace[start:end] + '\nreturn e->data;\n}\n'
         fixture = Path(__file__).with_name('pon_ppe_fixture.c').read_text()
         run_c(fixture.replace('/* TYPES */',types+'\n'+flow).replace('/* PRODUCTION */', selected))
 

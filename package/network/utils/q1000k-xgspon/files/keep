@@ -1,3 +1,5 @@
-/etc/config/q1000k-xgspon
+/etc/config/xgspon
+/etc/xgspon-config-migrated
+/etc/xgspon-legacy-config
 /lib/firmware/airoha/q1000k/A60993.elf.pm
 /lib/firmware/airoha/q1000k/A60993.elf.dm

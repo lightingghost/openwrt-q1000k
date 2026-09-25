@@ -228,20 +228,24 @@ def main():
             if len(kernels) != 1:
                 raise ValueError('Kernel configuration is ambiguous')
             shutil.copy2(kernels[0], output / 'kernel.config')
+            # Retain the ELF so a host collector can pin /sys/kernel/notes to
+            # the exact kernel embedded in the delivered FIT after packaging.
+            shutil.copy2(kernels[0].parent.parent / 'vmlinux-initramfs.debug', output / 'vmlinux-initramfs.debug')
             inspect = [sys.executable, REPO / 'tests/q1000k/check_pon_bench_image.py',
                        output / image_name, revision, '--profile', args.profile]
             if private_overlay is not None:
                 inspect.extend(['--private-manifest', output / 'private-manifest.json'])
             run(inspect, output / 'inspection.json')
             root = REPO / 'build_dir/target-aarch64_cortex-a53_musl/root-airoha'
-            paths = ['usr/sbin/q1000k-pon-bench', 'lib/q1000k-xgspon/common.sh',
+            paths = ['usr/sbin/q1000k-pon-bench', 'usr/sbin/q1000k-pon-passthrough', 'usr/sbin/q1000k-ip-passthrough', 'usr/sbin/q1000k-l3-bench',
+                     'usr/libexec/q1000k-passthrough-ipv4', 'usr/libexec/q1000k-ipv6-transition', 'usr/libexec/q1000k-passthrough-watch-config', 'etc/init.d/q1000k-passthrough', 'etc/hotplug.d/iface/95-q1000k-passthrough', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config',
                      'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
-                     'usr/libexec/q1000k-xgspon-run', 'etc/init.d/q1000k-xgspon',
+                     'usr/libexec/q1000k-xgspon-run', 'usr/libexec/q1000k-xgspon-watch-config', 'etc/init.d/q1000k-xgspon',
                      'usr/share/luci/menu.d/luci-app-econet-xpon.json',
                      'www/luci-static/resources/preload/xgspon-ports.js',
                      'www/luci-static/resources/view/econet-xpon/status-v4.js',
-                     'www/luci-static/resources/view/econet-xpon/settings-v4.js']
+                     'www/luci-static/resources/view/econet-xpon/settings-v5.js']
             if args.profile == 'activation':
                 paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/libexec/q1000k-pd-source', 'usr/libexec/q1000k-ipv6-bench', 'usr/libexec/q1000k-ipv6-client', 'usr/libexec/q1000k-udp6-probe', 'usr/share/q1000k-bench/capabilities.json'])
             for name in ('q1000k-pon-control', 'airoha_ecnt_hook', 'airoha_ecnt_scu',

@@ -11,8 +11,8 @@
     },
     "admin/network/econet-xpon/configuration": {
         "title": "Settings", "order": 2,
-        "action": { "type": "view", "path": "econet-xpon/settings-v4" },
-        "depends": { "acl": [ "luci-app-econet-xpon" ], "uci": { "q1000k-xgspon": true } }
+        "action": { "type": "view", "path": "econet-xpon/settings-v5" },
+        "depends": { "acl": [ "luci-app-econet-xpon" ], "uci": { "xgspon": true } }
     },
     "admin/network/econet-xpon/mibdata": {
         "title": "Diagnostics", "order": 3,

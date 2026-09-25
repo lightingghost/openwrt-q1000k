@@ -1,0 +1,88 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Watch only committed IPv4 handoff settings. Never restart the optical stack.
+. /lib/q1000k-xgspon/common.sh
+umask 077
+config=/etc/config/xgspon
+state=/var/run/q1000k-passthrough-config
+child= timer= work=
+
+stop_child() {
+	local rc=0
+	[ -n "$child" ] || return 0
+	# WAN events during teardown must not interrupt wait and race replacement.
+	trap '' USR1
+	kill -TERM "$child" 2>/dev/null || :
+	wait "$child" || rc=$?
+	child=
+	trap wake_child USR1
+	return "$rc"
+}
+
+wake_child() {
+	[ -z "$child" ] || kill -USR1 "$child" 2>/dev/null || :
+}
+
+cleanup_watch() {
+	trap - EXIT
+	trap '' HUP INT TERM USR1
+	[ -z "$timer" ] || kill "$timer" 2>/dev/null || :
+	stop_child || :
+	[ -z "$work" ] || rm -rf "$work"
+	rmdir "$state/lock"
+}
+
+mkdir -p "$state" && mkdir "$state/lock" || exit 1
+trap cleanup_watch EXIT
+trap 'exit 0' HUP INT TERM
+trap wake_child USR1
+work=$(mktemp -d "$state/session-XXXXXX") || exit 1
+name="pt-${work##*/}"
+pending="$work/$name"
+first=1
+
+while :; do
+	# Failures need an explicit service restart or a corrected configuration.
+	if [ -n "$child" ] && ! kill -0 "$child" 2>/dev/null; then
+		wait "$child" || :
+		child=
+	fi
+	if cp "$config" "$pending" 2>/dev/null && uci -q export "$pending" >/dev/null 2>&1; then
+		# Keep embedded/trailing newlines so malformed values fail validation.
+		mode=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get passthrough.mode; printf '.')
+		mode=${mode%.}; mode=${mode%'
+'}
+		mac=$(Q1000K_UCI_SNAPSHOT="$pending" pon_config_get passthrough.client_mac | tr 'A-F' 'a-f'; printf '.')
+		mac=${mac%.}; mac=${mac%'
+'}
+		mode=${mode:-router}
+		printf '%s\n%s\n' "$mode" "$mac" > "$work/candidate"
+		if cmp -s "$work/candidate" "$work/seen"; then
+			rm -f "$work/queued"
+		elif [ "$first" = 1 ] || cmp -s "$work/candidate" "$work/queued"; then
+			first=0
+			cp "$work/candidate" "$work/seen" || exit 1
+			rm -f "$work/queued"
+			valid=1
+			case "$mode" in router) ;; l3) valid_mac "$mac" || valid=0 ;; *) valid=0 ;; esac
+			if [ "$valid" != 1 ]; then
+				echo 'Q1000K passthrough: invalid committed settings; running mode retained.' >&2
+			elif stop_child; then
+				if [ "$mode" = l3 ]; then
+					/usr/libexec/q1000k-passthrough-ipv4 "$mac" & child=$!
+				fi
+			else
+				echo 'Q1000K passthrough: cleanup failed; configuration restart stopped.' >&2
+				exit 1
+			fi
+		else
+			cp "$work/candidate" "$work/queued" || exit 1
+		fi
+	else
+		rm -f "$work/queued"
+	fi
+	sleep 2 & timer=$!
+	wait "$timer" || :
+	kill "$timer" 2>/dev/null || :
+	timer=
+done

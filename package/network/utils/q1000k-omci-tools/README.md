@@ -8,9 +8,10 @@ experimental/BROKEN. Runtime commands require matching Generic Netlink v16.
 ## Staged identity (also available in LuCI)
 
 These commands work with the stack unloaded. They modify only the
-`q1000k-xgspon.identity` UCI section, using the same validation and parameter
+`xgspon.identity` UCI section, using the same validation and parameter
 builder as the supervisor and RAM bench. Each set/clear commits this UCI
-package; it does not activate PON. In the RAM image the configuration is
+package; the running service automatically restarts on valid committed changes,
+using the existing enabled/monitor policy. In the RAM image the configuration is
 volatile. On an installed system it has normal UCI persistence.
 
 ```sh
