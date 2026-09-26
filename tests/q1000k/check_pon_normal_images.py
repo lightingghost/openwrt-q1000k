@@ -168,7 +168,7 @@ def check_root(records, revision, snapshot):
     for p in records:
         if p.startswith('etc/modules.d/') or p.startswith('etc/modules-boot.d/'):
             assert not any(name.replace('-', '_').encode() in read(p).replace(b'-', b'_') for name in MODULES), p
-    for kind, version in (('settings', 6), ('status', 4)):
+    for kind, version in (('settings', 7), ('status', 4)):
         source = (REPO / f'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/{kind}.js').read_bytes()
         minimized = subprocess.check_output([REPO / 'staging_dir/hostpkg/bin/jsmin'], input=source)
         assert read(f'www/luci-static/resources/view/econet-xpon/{kind}-v{version}.js') in (source, minimized)
@@ -177,6 +177,8 @@ def check_root(records, revision, snapshot):
     config = read('etc/config/xgspon')
     assert stat.S_IMODE(records['etc/config/xgspon'][0]) == 0o600
     assert config == (REPO / 'package/network/utils/q1000k-xgspon/files/xgspon.config').read_bytes()
+    assert b"option enabled '1'" in config
+    assert b"option enabled '0'" not in config
     assert 'lib/firmware/airoha/q1000k/xgspon-calibration.bin' not in records
     for name, digest in (
         ('A60993.elf.pm', '5a8a4bbae5f70c1e615ba0aa1c2a1dce654611d3205d2fa983bf41e6cdadb4a1'),

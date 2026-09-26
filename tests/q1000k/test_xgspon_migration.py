@@ -62,11 +62,12 @@ class MigrationTests(unittest.TestCase):
         self.uci_cmd('commit','xgspon')
         self.run_migration()
         self.assertEqual(self.uci_cmd('get','xgspon.service.enabled'),'0')
-    def test_bench_keeps_monitor_only_even_if_normal_marker_is_inherited(self):
-        for name in ['quantum,xgspon-service','quantum,xgspon-bench']:
-            (self.dt/name).touch()
+    def test_packaged_config_already_enables_registration_before_migration(self):
+        self.assertEqual(self.uci_cmd('get','xgspon.service.enabled'),'1')
+        before=self.config.read_bytes()
         self.run_migration()
-        self.assertEqual(self.uci_cmd('get','xgspon.service.enabled'),'0')
+        self.assertEqual(self.config.read_bytes(),before)
+        self.assertEqual(self.uci_cmd('get','xgspon.service.enabled'),'1')
     def test_normal_upgrade_preserves_configured_disabled_identity_and_staging(self):
         (self.dt/'quantum,xgspon-service').touch()
         self.config.write_text(self.old.replace("enabled '1'", "enabled '0'"))

@@ -23,15 +23,6 @@ name="migration-${work##*/}"
 cp "$source" "$work/$name"
 read_config() { uci -q -c "$work" -C "$work/overrides" -t "$work/delta" "$@"; }
 read_config export "$name" >/dev/null || exit 1
-# Fresh normal UBI/recovery installations opt into registration. The public
-# diagnostic RAM bench remains TX-disabled, and restored/legacy configurations
-# (including an explicit disabled choice) retain their settings.
-if [ "$source" = "$defaults" ] &&
-   [ -f /sys/firmware/devicetree/base/quantum,xgspon-service ] &&
-   [ ! -f /sys/firmware/devicetree/base/quantum,xgspon-bench ]; then
-	read_config set "$name.service.enabled=1"
-	read_config commit "$name"
-fi
 # Older identity files have no passthrough section. Add only the disabled
 # default, so LuCI can render its NamedSection without changing other values.
 if ! read_config get "$name.passthrough" >/dev/null; then

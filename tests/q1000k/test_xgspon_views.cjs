@@ -176,6 +176,7 @@ async function main() {
         'committed_bank', 'sync_circuit_pack', 'omcc_version', 'pon_slot', 'olt_profile',
         'iphost_mac', 'iphost_hostname', 'iphost_domain', 'monitor', 'enabled', 'mode', 'client_mac']) assert.ok(s.options[field], field);
     assert.equal(s.options.mode.default, 'router');
+    assert.equal(s.options.enabled.default, '1');
     assert.equal(s.options.client_mac.validate('passthrough', '02:11:22:33:44:55'), true);
     for (const v of ['', '01:11:22:33:44:55', '00:00:00:00:00:00', '02:11:22:33:44:55\n'])
         assert.notEqual(s.options.client_mac.validate('passthrough', v), true);
@@ -186,7 +187,7 @@ async function main() {
     assert.equal(menu['admin/network/econet-xpon/configuration'].title, 'Settings');
     for (const name of ['settings', 'status']) {
         const route = menu['admin/network/econet-xpon/' + (name === 'settings' ? 'configuration' : name)];
-        const version = name === 'settings' ? 'v6' : 'v4';
+        const version = name === 'settings' ? 'v7' : 'v4';
         assert.equal(route.action.path, 'econet-xpon/' + name + '-' + version);
         assert.equal(fs.readFileSync(path.join(base, name + '-' + version + '.js'), 'utf8'), fs.readFileSync(path.join(base, name + '.js'), 'utf8'));
     }

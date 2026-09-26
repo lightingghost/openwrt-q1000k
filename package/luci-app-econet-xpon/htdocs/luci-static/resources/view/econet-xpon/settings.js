@@ -19,7 +19,7 @@ return view.extend({
         startup.anonymous = true; startup.addremove = false;
         var o = startup.option(form.Flag, 'enabled', _('Start PON Internet service at boot'),
             _('Register with the provider using the identity below. A prepared service image also starts WAN networking automatically after registration and provisioning. Verified optical firmware and unit calibration are required.'));
-        o.default = '0'; o.rmempty = false;
+        o.default = '1'; o.rmempty = false;
         o = startup.option(form.Flag, 'monitor', _('Load optical controller at boot'),
             _('When Internet service is disabled, read optical diagnostics with transmission disabled. Initialization waits for verified optical firmware and this unit’s calibration. Private service images include these inputs.'));
         o.default = '1'; o.rmempty = false;

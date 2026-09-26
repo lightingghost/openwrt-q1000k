@@ -78,8 +78,9 @@ serial/MAC overrides are ignored on the normal DT. Missing factory data is
 reported as unavailable; it is never replaced by another unit's data.
 
 Generic images have empty subscriber/OMCI identity fields, no calibration
-file, no AT&T profile and no private-autostart marker. The first-boot configuration migration enables registration on untouched
-normal UBI/recovery defaults. Diagnostic RAM defaults remain monitor-only.
+file, no AT&T profile and no private-autostart marker. The packaged configuration ships with `xgspon.service.enabled=1`, and the
+`xgspon` init service is enabled at boot. No first-boot conversion is needed
+to enable it. Separate diagnostic RAM defaults explicitly disable registration.
 A retained configuration, including a disabled setting, is preserved. A registration ID and
 ISP provisioning values are not inferred from the factory layout. Configure
 those explicitly in `/etc/config/xgspon`; `/etc/init.d/xgspon` starts the

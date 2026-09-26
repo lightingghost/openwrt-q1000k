@@ -2,8 +2,8 @@
 
 This optional package provides `/etc/init.d/xgspon` and
 `/usr/libexec/q1000k-xgspon-run`. It is selected by
-the LuCI package. Fresh normal UBI/recovery installations enable registration
-at first boot and start once valid subscriber settings are committed. Diagnostic
+the LuCI package. The packaged configuration enables registration by default, and normal
+UBI/recovery installations start once valid subscriber settings are committed. Diagnostic
 RAM images keep TX-disabled monitoring; private activation images opt in separately. The board must
 provide enabled controller resources. Module presence does not establish
 working optical service.
@@ -40,8 +40,8 @@ The canonical `/etc/config/xgspon` contains:
   The separate version fields override the legacy combined version.
 - `service.monitor`: defaults to `1`; starts optical diagnostics at boot when
   full registration is disabled. Exposed in LuCI Settings.
-- `service.enabled`: fresh normal UBI/recovery first boot sets `1`; diagnostic
-  RAM defaults to `0`. Full startup requires valid identity, including a registration ID.
+- `service.enabled`: ships as `1`; the separate diagnostic RAM defaults
+  explicitly set it to `0`. Full startup requires valid identity, including a registration ID.
   Settings-preserving upgrades retain an existing disabled choice.
   Exposed as “Start PON Internet service at boot” in LuCI Settings.
 - `service.lower`: the native PON lower interface, already administratively
@@ -101,9 +101,10 @@ private automatic-start settings and adds only a missing, disabled passthrough
 section. Backups remain private; the migration marker prevents replaying old
 settings on a later reinstall. The canonical service is `/etc/init.d/xgspon`, with `xgspon` and `omci`
 commands. Legacy entry points forward to them for existing scripts, without
-registering a second service. The first-boot migration enables registration only
-for untouched defaults on the normal service DT, never for restored identity
-files, a completed migration, or a diagnostic RAM image.
+registering a second service. The packaged configuration already enables registration; migration does not
+need to activate it. Restored identity files and completed migrations keep
+their saved settings. The separate bench defaults disable registration before
+the optional private activation defaults run.
 
 ## Ownership and failure behavior
 
