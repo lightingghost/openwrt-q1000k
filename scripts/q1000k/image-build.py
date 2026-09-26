@@ -3,7 +3,8 @@
 """Build and inspect the normal PON initramfs/sysupgrade pair on q1000k-xgspon.
 
 Uses the existing configured build cache, restoring its config and overlay.
-Normal images never accept private overlays; device data comes from UBI factory.
+Normal images never accept private overlays; calibration comes from UBI factory
+and subscriber identity is configured after installation.
 No network-device access, flash, upload or branch mutation is performed.
 """
 import argparse

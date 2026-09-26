@@ -240,7 +240,12 @@ fi
 
 [ "$(pon_config_get service.enabled)" = 1 ] || fail 'Service is disabled.'
 [ ! -d /var/run/q1000k-pon-bench.lock ] || fail 'A bench session owns the optics.'
-if [ "$(pon_config_get service.continuous_bench)" = 1 ]; then
+if factory_only; then
+	# The running normal DT selects ordinary controller permission. A retained
+	# private RAM setting must not redirect a settings-preserving sysupgrade
+	# into the activation-bench guard before ponraw can be opened.
+	continuous=1
+elif [ "$(pon_config_get service.continuous_bench)" = 1 ]; then
 	# Explicit private image opt-in; neither a generic RAM bench nor the
 	# diagnostics checkbox grants transmitter permission on signal detection.
 	[ -f /etc/q1000k-private-autostart ] &&
@@ -248,17 +253,13 @@ if [ "$(pon_config_get service.continuous_bench)" = 1 ]; then
 		fail 'Continuous activation requires the private activation RAM profile.'
 	continuous=1
 	validation=1
-elif [ -f /sys/firmware/devicetree/base/quantum,xgspon-service ] &&
-	[ ! -f /sys/firmware/devicetree/base/quantum,xgspon-bench ]; then
-	# Normal UBI/recovery images use the same proven runtime recipe, with
-	# ordinary controller permission and persistent UCI/factory inputs.
-	continuous=1
 fi
 read_identity
 read_firmware
 read_calibration
-[ "$identity_valid" = 1 ] && [ "$calibration_available" = 1 ] &&
-	[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Validated identity, factory calibration and OEM firmware are required.'
+[ "$identity_valid" = 1 ] || fail 'A valid configured or factory PON serial and WAN MAC are required.'
+[ "$calibration_available" = 1 ] || fail 'Unit optical calibration is unavailable; normal firmware requires the UBI factory volume.'
+[ "$pm_ready" = 1 ] && [ "$dm_ready" = 1 ] || fail 'Verified OEM program and data firmware are required.'
 registration=
 identity_options || fail 'PON identity configuration is invalid.'
 [ -n "$registration" ] || fail 'An explicit registration ID is required.'
@@ -302,7 +303,10 @@ fi
 for module in airoha_ecnt_hook airoha_ecnt_scu airoha_ecnt_pon_phy airoha_ecnt_xpon phy_10g xpon; do
 	load_module "$module"
 done
-if [ "$validation" = 1 ]; then
+if [ "$continuous" = 1 ]; then
+	# Factory-compatible OMCI control storage is part of the working service
+	# recipe, independent of RAM-only transmitter permission. This historical
+	# parameter name does not imply an 802.1X authenticator implementation.
 	load_module omci bench_dot1x_oem=1
 else
 	load_module omci

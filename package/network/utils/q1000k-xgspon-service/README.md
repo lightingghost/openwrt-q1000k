@@ -26,7 +26,9 @@ registration service alone. Diagnostics can be resumed with
 The canonical `/etc/config/xgspon` contains:
 
 - `identity.serial` and `identity.wan_mac`: empty values use validated factory
-  identity. Overrides have the same validation as the diagnostics backend.
+  identity. Validated overrides apply on both normal and private RAM firmware.
+  They select subscriber identity; normal images still require this unit's
+  UBI factory volume for optical calibration, and never use a staged substitute.
 - `identity.registration_id`: an explicit 1–36-byte registration ID encoded as
   pairs of hexadecimal digits, zero-padded on the right to 36 bytes. The supervisor never invents this credential.
 - `identity.equipment_id`: optional printable ASCII text, at most 20 bytes.
@@ -44,12 +46,22 @@ The canonical `/etc/config/xgspon` contains:
   explicitly set it to `0`. Full startup requires valid identity, including a registration ID.
   Settings-preserving upgrades retain an existing disabled choice.
   Exposed as “Start PON Internet service at boot” in LuCI Settings.
-- `service.lower`: the native PON lower interface, already administratively
-  up. The native driver additionally validates its hardware role at attach.
-  The ordinary profile does not configure netifd or bring up the named device.
+- `service.lower`: the native PON lower interface. Normal and private continuous
+  profiles require `ponraw` and open it if down. Other diagnostic profiles
+  require the named device to be up already. The driver validates its hardware
+  role at attach.
 - `service.continuous_bench`: private activation RAM profile only. Requires
   the image marker `/etc/q1000k-private-autostart` and activation DT, and
-  restricts the lower device to `ponraw`. Public images leave this off.
+  restricts the lower device to `ponraw`. Public images leave this off. Normal
+  UBI/recovery firmware selects its own continuous service path from the device
+  tree before considering this flag, so a retained bench setting cannot block
+  a settings-preserving upgrade or grant RAM-only transmitter permission.
+
+Normal and private continuous service use the same factory-compatible OMCI
+control storage (`bench_dot1x_oem=1`, a historical internal parameter name).
+This accepts the validated Dot1X control requests observed on the working OLT;
+it does not implement an 802.1X authenticator. Normal firmware uses ordinary
+controller permission, while only the private RAM profile uses `validation_tx=1`.
 
 With this package installed, `xgspon start|stop|restart|reload` delegates
 to the init service. The service wrapper observes committed configuration,

@@ -41,11 +41,11 @@ read_identity() {
 		json_get_var factory_lan_mac lan_mac
 		json_get_var factory_unit_serial unit_serial
 	fi
-	serial= wan_mac=
-	if ! factory_only; then
-		serial=$(pon_config_get identity.serial)
-		wan_mac=$(pon_config_get identity.wan_mac)
-	fi
+	# Subscriber identity is configurable on both normal and RAM firmware.
+	# Calibration still belongs to the physical unit, independently of these
+	# overrides, and normal images require the UBI factory volume below.
+	serial=$(pon_config_get identity.serial)
+	wan_mac=$(pon_config_get identity.wan_mac)
 	serial_source=override mac_source=override
 	[ -n "$serial" ] || { serial=$factory_serial; serial_source=factory; }
 	[ -n "$wan_mac" ] || { wan_mac=$factory_mac; mac_source=factory; }

@@ -326,23 +326,31 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(d['valid'], expected)
             self.assertEqual(r.returncode == 0, expected)
 
-    def test_normal_board_requires_factory_and_ignores_private_bench_overrides(self):
+    def test_normal_board_uses_identity_overrides_but_requires_factory_calibration(self):
         self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
         self.env.update(TEST_SN='ABCD00112233', TEST_MAC='02:11:22:33:44:55')
         self.write('calibration.bin', 'synthetic staged calibration')
         _, data = self.call()
-        self.assertFalse(data['identity']['valid'])
+        self.assertTrue(data['identity']['valid'])
+        self.assertEqual(data['identity']['serial'], 'ABCD00112233')
         self.assertFalse(data['calibration']['available'])
         self.write('factory.json', json.dumps({'available': True, 'source': 'factory',
             'serial': 'TEST01234567', 'wan_mac': '00:11:22:33:44:55',
             'lan_mac': '00:11:22:33:44:56', 'unit_serial': 'UNIT-TEST'}))
         _, data = self.call()
-        self.assertEqual(data['identity']['serial_source'], 'factory')
-        self.assertEqual(data['identity']['serial'], 'TEST01234567')
-        self.assertEqual(data['identity']['wan_mac'], '00:11:22:33:44:55')
+        self.assertEqual(data['identity']['serial_source'], 'override')
+        self.assertEqual(data['identity']['serial'], 'ABCD00112233')
+        self.assertEqual(data['identity']['wan_mac'], '02:11:22:33:44:55')
         self.assertEqual(data['calibration']['source'], 'factory')
         self.assertEqual(data['factory']['lan_mac'], '00:11:22:33:44:56')
         self.assertEqual(data['factory']['unit_serial'], 'UNIT-TEST')
+        self.env.update(TEST_SN='', TEST_MAC='')
+        _, data = self.call()
+        self.assertEqual(data['identity']['serial_source'], 'factory')
+        self.assertEqual(data['identity']['serial'], 'TEST01234567')
+        self.assertEqual(data['identity']['wan_mac'], '00:11:22:33:44:55')
+        self.env['TEST_SN'] = 'invalid'
+        self.assertFalse(self.call()[1]['identity']['valid'])
 
     def test_firmware_integrity_and_private_calibration_staging(self):
         def prepare():

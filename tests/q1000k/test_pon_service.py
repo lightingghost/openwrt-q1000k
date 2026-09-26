@@ -47,6 +47,8 @@ case "$*" in
 *service.continuous_bench) printf '%s' "$TEST_CONTINUOUS" ;;
 *network.*.q1000k_profile) printf '%s' "${TEST_WAN_PROFILE:-1}" ;;
 *network.*.device) printf pon ;;
+*identity.serial) printf '%s' "$TEST_SN" ;;
+*identity.wan_mac) printf '%s' "$TEST_MAC" ;;
 *identity.registration_id) printf '%s' "$TEST_REG" ;;
 *identity.equipment_id) printf '%s\n' "$TEST_EQUIPMENT" ;;
 *identity.omci_version) printf '%s\n' "$TEST_VERSION" ;;
@@ -89,7 +91,7 @@ elif action == 'initialize':
     assert (root / 'sys/bus/i2c/drivers/q1000k-pon-control/0-0051/operation').read_text() == 'detect\\n'
 elif action == 'ip':
     assert args[:3] == ['link', 'set', 'dev'] and args[3] == 'ponraw'
-    (root / 'sys/class/net/ponraw/flags').write_text('0x1003' if args[4] == 'up' else '0x1002')
+    (root / 'sys/class/net/ponraw/flags').write_text(('0x1003' if args[4] == 'up' else '0x1002') + '\\n')
 elif action == 'ubus':
     assert args[0] == 'call' and args[1] in ('network.interface.wan', 'network.interface.wan6')
     assert args[2] in ('up', 'renew')
@@ -142,7 +144,7 @@ else:
         before = self.calls()
         self.assertEqual(before[0], ['modprobe', 'q1000k_pon_control'])
         self.assertIn(['ip', 'link', 'set', 'dev', 'ponraw', 'up'], before)
-        self.assertIn(['modprobe', 'omci'], before)
+        self.assertIn(['insmod', 'omci', 'bench_dot1x_oem=1'], before)
         params = next(c[2:] for c in before if c[:2] == ['insmod', 'xpon_10g'])
         self.assertTrue({'rx_bench=0', 'bench_live_add=31', 'bench_initial_key_readback=1',
                          'bench_key_inline=1', 'bench_ranging_mode=1'} <= set(params))
@@ -162,6 +164,38 @@ else:
         self.assertEqual(self.calls()[-1], ['ip', 'link', 'set', 'dev', 'ponraw', 'down'])
         self.assertNotIn(self.env['TEST_REG'], out + err)
 
+    def test_normal_upgrade_retains_bench_identity_without_bench_tx_permission(self):
+        self.env.update(TEST_LOWER='ponraw', TEST_CONTINUOUS='1',
+                        TEST_SN='ABCD00112233', TEST_MAC='02:11:22:33:44:55')
+        self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
+        self.write('sys/class/net/ponraw/flags', '0x1002\n')
+        # Keep-settings may preserve just UCI or also a custom backup marker.
+        # Neither can override the normal firmware's controller permissions.
+        for marker in (False, True):
+            with self.subTest(copied_private_marker=marker):
+                if marker:
+                    self.write('etc/q1000k-private-autostart', 'continuous-activation-v1\n')
+                p = self.launch()
+                self.await_stage(p, 'waiting_registration')
+                self.provisioned()
+                self.await_stage(p, 'running')
+                p.terminate()
+                out, err = p.communicate(timeout=5)
+                self.assertEqual(p.returncode, 0, err)
+                calls = self.calls()
+                self.assertEqual(calls[0], ['modprobe', 'q1000k_pon_control'])
+                self.assertIn(['insmod', 'omci', 'bench_dot1x_oem=1'], calls)
+                params = next(c[2:] for c in calls if c[:2] == ['insmod', 'xpon_10g'])
+                self.assertIn('pon_serial=ABCD00112233', params)
+                self.assertIn('wan_mac=02:11:22:33:44:55', params)
+                self.assertNotIn('validation_tx=1', str(calls))
+                self.assertEqual(len([c for c in calls if c[0] == 'ubus']), 4)
+                self.assertNotIn(self.env['TEST_REG'], out + err)
+                (self.root / 'calls').unlink()
+                (self.root / 'sys/class/net/pon').rmdir()
+                self.sample(self.root / 'omci.json', dict(schema_version=1, service_error=0))
+                (self.root / 'var/run/q1000k-xgspon/status.json').unlink()
+
     def test_normal_board_still_requires_enabled_service_and_complete_inputs(self):
         self.env.update(TEST_LOWER='ponraw')
         self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
@@ -176,6 +210,16 @@ else:
                 self.env[key] = previous
         (self.root / 'lib/firmware/airoha/q1000k/A60993.elf.pm').unlink()
         self.failed(); self.assertEqual(self.calls(), [])
+
+    def test_normal_identity_override_cannot_replace_factory_calibration(self):
+        self.env.update(TEST_LOWER='ponraw', TEST_SN='ABCD00112233',
+                        TEST_MAC='02:11:22:33:44:55')
+        self.write('sys/firmware/devicetree/base/quantum,xgspon-service', '')
+        self.write('sys/class/net/ponraw/flags', '0x1002\n')
+        self.write('factory.json', '{"available":false}')
+        self.write('calibration.bin', 'synthetic staged calibration')
+        self.assertIn('Unit optical calibration is unavailable', self.failed())
+        self.assertEqual(self.calls(), [])
 
     def test_private_cold_start_dark_wait_recovery_and_owned_cleanup(self):
         self.continuous()
