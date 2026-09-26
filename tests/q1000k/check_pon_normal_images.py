@@ -126,24 +126,31 @@ def check_root(records, revision, snapshot):
     assert ('Revision: ' + revision).encode() in read('build_info')
     assert ('Working-tree snapshot: ' + snapshot).encode() in read('build_info')
     pairs = {
+        'etc/uci-defaults/10-xgspon-config': 'network/utils/q1000k-xgspon/files/migrate-config',
+        'etc/init.d/q1000k-xgspon': 'network/utils/q1000k-xgspon-service/files/legacy-init',
+        'etc/init.d/q1000k-passthrough': 'network/utils/q1000k-passthrough/files/legacy-init',
         'usr/libexec/q1000k-xgspon-run': 'network/utils/q1000k-xgspon-service/files/run',
-        'etc/init.d/q1000k-xgspon': 'network/utils/q1000k-xgspon-service/files/init',
+        'etc/init.d/xgspon': 'network/utils/q1000k-xgspon-service/files/init',
         'etc/uci-defaults/90-q1000k-xgspon-wan': 'network/utils/q1000k-xgspon-wan/files/defaults',
         'lib/q1000k-xgspon/common.sh': 'network/utils/q1000k-xgspon/files/common.sh',
         'lib/upgrade/keep.d/q1000k-xgspon': 'network/utils/q1000k-xgspon/files/keep',
         'usr/libexec/q1000k-passthrough-ipv4': 'network/utils/q1000k-passthrough/files/ipv4',
         'usr/libexec/q1000k-ipv6-transition': 'network/utils/q1000k-passthrough/files/ipv6-transition',
         'usr/libexec/q1000k-passthrough-watch-config': 'network/utils/q1000k-passthrough/files/watch-config',
-        'etc/init.d/q1000k-passthrough': 'network/utils/q1000k-passthrough/files/init',
+        'etc/init.d/xgspon-passthrough': 'network/utils/q1000k-passthrough/files/init',
         'etc/hotplug.d/iface/95-q1000k-passthrough': 'network/utils/q1000k-passthrough/files/hotplug',
     }
     for name, source in pairs.items():
         assert read(name) == (REPO / 'package' / source).read_bytes(), name
+    acl_path = 'usr/share/rpcd/acl.d/luci-app-econet-xpon.json'
+    assert json.loads(read(acl_path)) == json.loads((REPO / 'package/luci-app-econet-xpon/root' / acl_path).read_bytes())
     assert read('etc/board.d/02_network') == (REPO /
         'target/linux/airoha/an7581/base-files/etc/board.d/02_network').read_bytes()
-    assert 'etc/rc.d/S95q1000k-xgspon' in records
-    assert 'etc/rc.d/S96q1000k-passthrough' in records
-    for path in ('usr/sbin/q1000k-omci', 'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
+    assert 'etc/rc.d/S95q1000k-xgspon' not in records
+    assert 'etc/rc.d/S96q1000k-passthrough' not in records
+    assert 'etc/rc.d/S95xgspon' in records
+    assert 'etc/rc.d/S96xgspon-passthrough' in records
+    for path in ('usr/sbin/omci', 'usr/sbin/xgspon', 'usr/sbin/pon-factory', 'usr/sbin/xgspon-ipv6-transition', 'usr/sbin/q1000k-omci', 'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
                  'sbin/ip', 'bin/ubus', 'sbin/ifdown', 'usr/sbin/fitblk', 'usr/sbin/odhcp6c',
                  'usr/sbin/odhcpd', 'usr/sbin/uhttpd'):
         assert read(path), path
@@ -161,7 +168,7 @@ def check_root(records, revision, snapshot):
     for p in records:
         if p.startswith('etc/modules.d/') or p.startswith('etc/modules-boot.d/'):
             assert not any(name.replace('-', '_').encode() in read(p).replace(b'-', b'_') for name in MODULES), p
-    for kind, version in (('settings', 5), ('status', 4)):
+    for kind, version in (('settings', 6), ('status', 4)):
         source = (REPO / f'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/{kind}.js').read_bytes()
         minimized = subprocess.check_output([REPO / 'staging_dir/hostpkg/bin/jsmin'], input=source)
         assert read(f'www/luci-static/resources/view/econet-xpon/{kind}-v{version}.js') in (source, minimized)

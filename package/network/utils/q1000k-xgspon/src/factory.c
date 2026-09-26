@@ -269,7 +269,7 @@ unavailable:
 		fputs("Factory identity or XGS-PON calibration unavailable or invalid\n", stderr);
 	return 1;
 usage:
-	fputs("Usage: q1000k-pon-factory inspect|calibration [--factory-file FILE|--dsd-file FILE]\n"
+	fputs("Usage: pon-factory inspect|calibration [--factory-file FILE|--dsd-file FILE]\n"
 	      "       q1000k-pon-factory calibration --calibration-file FILE\n", stderr);
 	return 2;
 }

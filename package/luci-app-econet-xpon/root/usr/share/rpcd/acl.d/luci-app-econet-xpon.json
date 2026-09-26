@@ -5,6 +5,9 @@
             "uci": [ "xgspon" ],
             "ubus": { "econet-xpon": [ "status", "raw", "mib" ] }
         },
-        "write": { "uci": [ "xgspon" ] }
+        "write": {
+            "uci": [ "xgspon" ],
+            "ubus": { "uci": [ "commit" ] }
+        }
     }
 }

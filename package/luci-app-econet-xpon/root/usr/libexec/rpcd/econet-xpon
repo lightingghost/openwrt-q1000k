@@ -5,9 +5,9 @@ case "$1" in
     list) echo '{"status":{},"raw":{},"mib":{}}' ;;
     call)
         case "$2" in
-            status|raw) exec /usr/sbin/q1000k-xgspon status ;;
+            status|raw) exec /usr/sbin/xgspon status ;;
             mib)
-                if data=$(/usr/sbin/q1000k-omci -i pon mib 2>/dev/null); then
+                if data=$(/usr/sbin/omci -i pon mib 2>/dev/null); then
                     printf '{"schema_version":1,"available":true,"entities":%s}\n' "$data"
                 else
                     echo '{"schema_version":1,"available":false,"entities":null}'

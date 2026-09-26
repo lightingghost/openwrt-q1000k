@@ -31,7 +31,7 @@ done
 '''.replace('ROOT',str(self.root))
         self.fake=self.backend.write('fake-owner',fake); self.fake.chmod(0o755)
         source=(ROOT/'package/network/utils/q1000k-passthrough/files/watch-config').read_text()
-        for a,b in [('/lib/q1000k-xgspon/common.sh',self.backend.common),('/etc/config/xgspon',self.root/'config/xgspon'),('/var/run/q1000k-passthrough-config',self.root/'watch-state'),('/usr/libexec/q1000k-passthrough-ipv4',self.fake)]:
+        for a,b in [('/lib/q1000k-xgspon/common.sh',self.backend.common),('/etc/config/xgspon',self.root/'config/xgspon'),('/var/run/xgspon-passthrough-config',self.root/'watch-state'),('/usr/libexec/q1000k-passthrough-ipv4',self.fake)]:
             source=source.replace(a,str(b))
         self.watch=self.backend.write('watch',source.replace('sleep 2 &','/bin/sleep 0.08 &'))
         self.processes=[]; self.addCleanup(self.stop_all)

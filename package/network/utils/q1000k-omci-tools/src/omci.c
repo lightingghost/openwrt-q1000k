@@ -405,7 +405,7 @@ static int config_value(const struct config *config, const char *input, unsigned
 
 static void usage(FILE *out)
 {
-	fputs("Usage: q1000k-omci [-d DEVICE_ID | -i INTERFACE] [--json] COMMAND\n"
+	fputs("Usage: omci [-d DEVICE_ID | -i INTERFACE] [--json] COMMAND\n"
 	      "  status                       Read kernel OMCI state and counters\n"
 	      "  mib                          Read all managed entities\n"
 	      "  mib CLASS_ID ENTITY_ID       Read one managed entity\n"
@@ -526,21 +526,21 @@ int main(int argc, char **argv)
 
 	if (argc >= 2 && !strcmp(argv[1], "config")) {
 		execv("/usr/libexec/q1000k-omci-config", argv + 1);
-		perror("q1000k-omci config");
+		perror("omci config");
 		return 1;
 	}
 	if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
 		usage(stdout); return 0;
 	}
 	out = open_memstream(&json, &length);
-	if (!out) { perror("q1000k-omci"); return 1; }
+	if (!out) { perror("omci"); return 1; }
 	ret = run(argc - 1, argv + 1, out, &c);
 	if (fclose(out) && !ret) ret = -errno;
 	if (c.socket) mnl_socket_close(c.socket);
 	if (!ret) {
 		if (fwrite(json, 1, length, stdout) != length) ret = -EIO;
 	} else {
-		fprintf(stderr, "q1000k-omci: %s\n", strerror(-ret));
+		fprintf(stderr, "omci: %s\n", strerror(-ret));
 		fprintf(stdout, "{\"error\":%d,\"message\":", ret);
 		json_string(stdout, strerror(-ret), strlen(strerror(-ret)));
 		fputs("}\n", stdout);

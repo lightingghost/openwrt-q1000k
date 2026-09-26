@@ -93,7 +93,7 @@ calibration_read() {
 
 # Called only by explicit lifecycle operations, never by status polling.
 stop_diagnostic_monitor() {
-	[ ! -x /etc/init.d/q1000k-xgspon ] || /etc/init.d/q1000k-xgspon stop_monitor
+	[ ! -x /etc/init.d/xgspon ] || /etc/init.d/xgspon stop_monitor
 }
 
 find_controller() {
@@ -147,8 +147,8 @@ read_omci() {
 	omci_available=0
 	json_set_namespace q1000k_omci previous
 	json_init
-	if [ -x /usr/sbin/q1000k-omci ] && \
-	   data=$(/usr/sbin/q1000k-omci -i pon status 2>/dev/null) && json_load "$data"; then
+	if [ -x /usr/sbin/omci ] && \
+	   data=$(/usr/sbin/omci -i pon status 2>/dev/null) && json_load "$data"; then
 		json_get_type type schema_version
 		json_get_var version schema_version
 		[ "$type" = int ] && [ "$version" = 1 ] && omci_available=1
@@ -248,7 +248,7 @@ omci_field() {
 
 supervisor_status() {
 	local available=0 enabled=0 monitor=1 data version type stage= error= previous
-	[ -x /etc/init.d/q1000k-xgspon ] && available=1
+	[ -x /etc/init.d/xgspon ] && available=1
 	[ "$(uci -q get xgspon.service.enabled)" = 1 ] && enabled=1
 	[ "$(uci -q get xgspon.service.monitor)" != 0 ] || monitor=0
 	# This is the last recorded state, which can survive an abrupt process exit.
@@ -293,7 +293,7 @@ xgspon_status() {
 	json_add_string soc 'AN7581SIT'
 	json_add_string optics '2 × EN7573AN'
 	json_add_string mode 'XGS-PON'
-	[ -x /etc/init.d/q1000k-xgspon ] && supported=1
+	[ -x /etc/init.d/xgspon ] && supported=1
 	[ -f /sys/firmware/devicetree/base/quantum,xgspon-bench ] && ram=1
 	json_add_boolean activation_supported "$supported"
 	json_add_boolean ram_bench "$ram"

@@ -49,11 +49,11 @@ case "$1" in
 		printf '%s\n' "$dir"
 		;;
 	start|stop|restart|reload)
-		[ -x /etc/init.d/q1000k-xgspon ] || {
+		[ -x /etc/init.d/xgspon ] || {
 			echo 'The optional q1000k-xgspon-service package is unavailable.' >&2
 			exit 1
 		}
-		exec /etc/init.d/q1000k-xgspon "$1"
+		exec /etc/init.d/xgspon "$1"
 		;;
-	*) echo 'Usage: q1000k-xgspon status|validate|prepare|detect|initialize|off|start|stop|restart|reload' >&2; exit 2 ;;
+	*) echo 'Usage: xgspon status|validate|prepare|detect|initialize|off|start|stop|restart|reload' >&2; exit 2 ;;
 esac

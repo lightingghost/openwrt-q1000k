@@ -4,7 +4,7 @@
 . /lib/q1000k-xgspon/common.sh
 umask 077
 config=/etc/config/xgspon
-state=/var/run/q1000k-passthrough-config
+state=/var/run/xgspon-passthrough-config
 child= timer= work=
 
 stop_child() {

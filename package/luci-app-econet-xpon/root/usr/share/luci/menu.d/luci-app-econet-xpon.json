@@ -11,7 +11,7 @@
     },
     "admin/network/econet-xpon/configuration": {
         "title": "Settings", "order": 2,
-        "action": { "type": "view", "path": "econet-xpon/settings-v5" },
+        "action": { "type": "view", "path": "econet-xpon/settings-v6" },
         "depends": { "acl": [ "luci-app-econet-xpon" ], "uci": { "xgspon": true } }
     },
     "admin/network/econet-xpon/mibdata": {

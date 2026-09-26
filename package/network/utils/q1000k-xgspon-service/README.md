@@ -1,9 +1,10 @@
 # Experimental Q1000K supervisor
 
-This optional package provides `/etc/init.d/q1000k-xgspon` and
-`/usr/libexec/q1000k-xgspon-run`. It is marked `BROKEN` and is selected by
-the LuCI package. Automatic diagnostics load the controller at boot with TX
-disabled; subscriber registration remains explicitly enabled. The board must
+This optional package provides `/etc/init.d/xgspon` and
+`/usr/libexec/q1000k-xgspon-run`. It is selected by
+the LuCI package. Fresh normal UBI/recovery installations enable registration
+at first boot and start once valid subscriber settings are committed. Diagnostic
+RAM images keep TX-disabled monitoring; private activation images opt in separately. The board must
 provide enabled controller resources. Module presence does not establish
 working optical service.
 
@@ -18,7 +19,7 @@ cleanup rules as full startup and reports `waiting_firmware`,
 The explicit bench launchers and collector call `stop_monitor` before claiming
 hardware. This releases only a monitor owned by this service, and leaves a full
 registration service alone. Diagnostics can be resumed with
-`/etc/init.d/q1000k-xgspon start` after a completed bench session.
+`/etc/init.d/xgspon start` after a completed bench session.
 
 ## Configuration and commands
 
@@ -39,7 +40,9 @@ The canonical `/etc/config/xgspon` contains:
   The separate version fields override the legacy combined version.
 - `service.monitor`: defaults to `1`; starts optical diagnostics at boot when
   full registration is disabled. Exposed in LuCI Settings.
-- `service.enabled`: defaults to `0`; must explicitly be `1` for full startup.
+- `service.enabled`: fresh normal UBI/recovery first boot sets `1`; diagnostic
+  RAM defaults to `0`. Full startup requires valid identity, including a registration ID.
+  Settings-preserving upgrades retain an existing disabled choice.
   Exposed as “Start PON Internet service at boot” in LuCI Settings.
 - `service.lower`: the native PON lower interface, already administratively
   up. The native driver additionally validates its hardware role at attach.
@@ -48,7 +51,7 @@ The canonical `/etc/config/xgspon` contains:
   the image marker `/etc/q1000k-private-autostart` and activation DT, and
   restricts the lower device to `ponraw`. Public images leave this off.
 
-With this package installed, `q1000k-xgspon start|stop|restart|reload` delegates
+With this package installed, `xgspon start|stop|restart|reload` delegates
 to the init service. The service wrapper observes committed configuration,
 including plain `uci commit xgspon`. After two stable two-second polls,
 a valid identity/service change stops the old optical supervisor, waits for complete cleanup,
@@ -62,9 +65,31 @@ field removal on LuCI Save and passthrough-only changes do not restart optics. C
 restarts briefly interrupt PON Internet. Hardware faults still stop without
 respawn; a new valid configuration or explicit lifecycle command can retry.
 An explicitly stopped init service has no watcher until started again.
-`q1000k-xgspon status` exposes the
+`xgspon status` exposes the
 last supervisor report separately from optical readiness. A saved `running`
 stage may survive abrupt process termination and does not prove liveness.
+
+## Manual startup and retry
+
+After configuring the subscriber identity, on the device:
+
+```sh
+omci config validate || exit 1
+test -n "$(uci -q get xgspon.identity.registration_id)" || exit 1
+uci set xgspon.service.enabled='1'
+uci commit xgspon
+/etc/init.d/xgspon enable
+/etc/init.d/xgspon restart
+xgspon status
+omci -i pon status
+```
+
+`start` starts a stopped watcher. `restart` also retries a supervisor that has
+already exited after a fault; this briefly interrupts an active optical link.
+`xgspon start|stop|restart|reload` is shorthand for the init service. Hardware
+faults do not trigger an endless automatic restart. Use `logread -e xgspon`
+and the JSON status to check firmware, factory/calibration and registration;
+a running watcher is not proof of a working ISP connection.
 
 ## Configuration migration
 
@@ -74,7 +99,11 @@ UCI defaults also recognize the legacy file or its `.apk-save` copy. A customize
 canonical file takes precedence. Migration reads committed data, preserves
 private automatic-start settings and adds only a missing, disabled passthrough
 section. Backups remain private; the migration marker prevents replaying old
-settings on a later reinstall. Service and executable names remain unchanged.
+settings on a later reinstall. The canonical service is `/etc/init.d/xgspon`, with `xgspon` and `omci`
+commands. Legacy entry points forward to them for existing scripts, without
+registering a second service. The first-boot migration enables registration only
+for untouched defaults on the normal service DT, never for restored identity
+files, a completed migration, or a diagnostic RAM image.
 
 ## Ownership and failure behavior
 

@@ -27,8 +27,8 @@ of the reviewed network setup. These settings are for the **Q1000K**:
 ```sh
 # Capture the current netifd-owned assignments BEFORE changing configuration.
 # Use a new directory; retain it until the transition or rollback is verified.
-transition=/var/run/q1000k-ipv6-setup
-/usr/libexec/q1000k-ipv6-transition snapshot "$transition"
+transition=/var/run/xgspon-ipv6-setup
+xgspon-ipv6-transition snapshot "$transition"
 cp -p /etc/config/network "$transition/network"
 cp -p /etc/config/dhcp "$transition/dhcp"
 
@@ -49,7 +49,7 @@ uci set dhcp.lan.dhcpv6_pd_min_len='61'
 uci commit network
 uci commit dhcp
 /etc/init.d/network reload
-/usr/libexec/q1000k-ipv6-transition apply "$transition"
+xgspon-ipv6-transition apply "$transition"
 /etc/init.d/odhcpd restart
 ```
 
@@ -83,7 +83,7 @@ uci -q revert dhcp
 cp -p "$transition/network" /etc/config/network
 cp -p "$transition/dhcp" /etc/config/dhcp
 /etc/init.d/network reload
-/usr/libexec/q1000k-ipv6-transition apply "$transition"
+xgspon-ipv6-transition apply "$transition"
 /etc/init.d/odhcpd restart
 ```
 
@@ -121,7 +121,7 @@ uci commit xgspon
 ```
 
 On the first package installation into a running image, reload firewall4 to
-load its includes and enable/start `/etc/init.d/q1000k-passthrough`. Normal
+load its includes and enable/start `/etc/init.d/xgspon-passthrough`. Normal
 firmware startup enables the configuration watcher through procd. Subsequent
 commits need no manual restart: two stable two-second samples apply changed
 mode/MAC settings. An explicitly stopped service has no active watcher.

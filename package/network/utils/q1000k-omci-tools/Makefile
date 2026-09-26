@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-omci-tools
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -15,7 +15,7 @@ define Package/q1000k-omci-tools
 endef
 
 define Package/q1000k-omci-tools/description
- The q1000k-omci command provides JSON status, managed-entity inspection and
+ The omci command provides JSON status, managed-entity inspection and
  validated configuration through the kernel OMCI Generic Netlink interface.
  It does not start a second OMCI daemon or load optical modules.
 endef
@@ -27,7 +27,8 @@ endef
 
 define Package/q1000k-omci-tools/install
 	$(INSTALL_DIR) $(1)/usr/sbin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/q1000k-omci $(1)/usr/sbin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/q1000k-omci $(1)/usr/sbin/omci
+	$(LN) omci $(1)/usr/sbin/q1000k-omci
 endef
 
 $(eval $(call BuildPackage,q1000k-omci-tools))

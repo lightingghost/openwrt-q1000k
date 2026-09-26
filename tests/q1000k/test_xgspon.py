@@ -128,8 +128,8 @@ class BackendTests(unittest.TestCase):
         source = re.sub(r'(?<![A-Za-z0-9])/(sys|proc|lib/firmware)/',
                         lambda m: str(self.root) + '/' + m[1] + '/', source)
         source = source.replace('/usr/sbin/q1000k-pon-factory', str(self.root / 'factory'))
-        source = source.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci'))
-        source = source.replace('/etc/init.d/q1000k-xgspon', str(self.root / 'service-init'))
+        source = source.replace('/usr/sbin/omci', str(self.root / 'omci'))
+        source = source.replace('/etc/init.d/xgspon', str(self.root / 'service-init'))
         source = source.replace('/var/run/q1000k-xgspon/', str(self.root / 'run') + '/')
         self.firmware = {
             'pm': (b'fixture program', '5a8a4bbae5f70c1e615ba0aa1c2a1dce654611d3205d2fa983bf41e6cdadb4a1'),
@@ -148,7 +148,7 @@ class BackendTests(unittest.TestCase):
         self.write('factory.json', json.dumps({'available': False}))
         cli = (PACKAGE / 'files/q1000k-xgspon').read_text()
         cli = cli.replace('/lib/q1000k-xgspon/common.sh', str(self.common))
-        cli = cli.replace('/etc/init.d/q1000k-xgspon', str(self.root / 'service-init'))
+        cli = cli.replace('/etc/init.d/xgspon', str(self.root / 'service-init'))
         cli = cli.replace('/usr/sbin/q1000k-pon-factory', str(self.root / 'factory'))
         cli = cli.replace('/tmp/q1000k-xgspon.', str(self.root / 'stage/q1000k-xgspon.'))
         self.cli = self.write('cli', cli)
@@ -293,7 +293,7 @@ class BackendTests(unittest.TestCase):
 
     def test_mib_rpc_fixed_read_only_command_and_error(self):
         rpc = (REPO / 'package/luci-app-econet-xpon/root/usr/libexec/rpcd/econet-xpon').read_text()
-        script = self.write('rpc', rpc.replace('/usr/sbin/q1000k-omci', str(self.root / 'omci')))
+        script = self.write('rpc', rpc.replace('/usr/sbin/omci', str(self.root / 'omci')))
         self.write('omci', '#!/bin/sh\n[ "$*" = "-i pon mib" ] || exit 2\nprintf "%s" "$MIB_DATA"\nexit "${OMCI_FAIL:-0}"\n').chmod(0o755)
         self.env['MIB_DATA'] = '[{"class_id":277,"entity_id":32768}]'
         def call(*args):

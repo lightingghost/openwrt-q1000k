@@ -78,11 +78,15 @@ serial/MAC overrides are ignored on the normal DT. Missing factory data is
 reported as unavailable; it is never replaced by another unit's data.
 
 Generic images have empty subscriber/OMCI identity fields, no calibration
-file, no AT&T profile and no private-autostart marker. Optical monitoring is
-enabled, while service activation defaults to disabled. A registration ID and
+file, no AT&T profile and no private-autostart marker. The first-boot configuration migration enables registration on untouched
+normal UBI/recovery defaults. Diagnostic RAM defaults remain monitor-only.
+A retained configuration, including a disabled setting, is preserved. A registration ID and
 ISP provisioning values are not inferred from the factory layout. Configure
-those explicitly in `/etc/config/xgspon`, then enable the service when
-appropriate. Committing changed identity/service settings through LuCI or
+those explicitly in `/etc/config/xgspon`; `/etc/init.d/xgspon` starts the
+watcher at boot and starts registration once valid identity is committed.
+For manual recovery, set `xgspon.service.enabled=1`, run `uci commit xgspon`,
+then `/etc/init.d/xgspon enable` and `/etc/init.d/xgspon restart`. Inspect
+`xgspon status` and `omci -i pon status`. Committing changed identity/service settings through LuCI or
 `uci commit xgspon` restarts the optical stack after validation. Identity edits
 alone do not enable registration while `service.enabled=0`.
 

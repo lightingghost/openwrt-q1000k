@@ -15,8 +15,8 @@ restore() {
  stop_captures || failed=1
  # The installed owner must finish restoring IPv4 before netifd is reloaded.
  /etc/init.d/q1000k-passthrough stop 9>&- || failed=1
- for n in $(seq 1 25); do [ -e /var/run/q1000k-passthrough ] || break; sleep 1; done
- [ ! -e /var/run/q1000k-passthrough ] || return 1
+ for n in $(seq 1 25); do [ -e /var/run/xgspon-passthrough ] || break; sleep 1; done
+ [ ! -e /var/run/xgspon-passthrough ] || return 1
  for config in xgspon network dhcp firewall; do
   uci -q revert "$config" || :
   cp -p "$STATE/$config" "/etc/config/$config" || failed=1
@@ -72,7 +72,7 @@ case "${1:-}" in
   case "$duration" in ''|*[!0-9]*) fail 'Invalid duration.';; esac
   [ "$duration" -ge 120 ] && [ "$duration" -le 1800 ] || fail 'Duration must be 120..1800 seconds.'
   echo "$token" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail 'Invalid token.'
-  for path in "$STATE" /var/run/q1000k-passthrough /var/run/q1000k-pon-passthrough /var/run/q1000k-ip-passthrough; do [ ! -e "$path" ] || fail 'Another network owner/recovery is active.'; done
+  for path in "$STATE" /var/run/xgspon-passthrough /var/run/q1000k-pon-passthrough /var/run/q1000k-ip-passthrough; do [ ! -e "$path" ] || fail 'Another network owner/recovery is active.'; done
   [ "$(uci -q get xgspon.passthrough.mode)" = router ] || fail 'Start in router mode.'
   [ "$(uci -q get network.lan.device)" = br-lan ] && [ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'Requires routed PON and br-lan.'
   lan=$(uci -q get network.lan.ipaddr)
@@ -124,8 +124,8 @@ case "${1:-}" in
   uci set xgspon.passthrough.client_mac="$mac"
   uci set xgspon.passthrough.mode=l3
   uci commit xgspon
-  for n in $(seq 1 40); do [ ! -f /var/run/q1000k-passthrough/lease ] || break; sleep 1; done
-  [ -f /var/run/q1000k-passthrough/lease ] || fail 'Committed L3 configuration did not become active.'
+  for n in $(seq 1 40); do [ ! -f /var/run/xgspon-passthrough/lease ] || break; sleep 1; done
+  [ -f /var/run/xgspon-passthrough/lease ] || fail 'Committed L3 configuration did not become active.'
   echo hardware > "$STATE/mode"
   ;;
  heartbeat)

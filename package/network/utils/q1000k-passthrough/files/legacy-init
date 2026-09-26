@@ -1,0 +1,5 @@
+#!/bin/sh
+# Compatibility entry point only; no second procd service or boot link.
+# Offline package installation sources init files through rc.common.
+[ -z "${IPKG_INSTROOT:-}" ] || exit 0
+exec /etc/init.d/xgspon-passthrough "$@"

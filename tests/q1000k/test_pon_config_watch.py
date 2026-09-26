@@ -93,6 +93,16 @@ done
         time.sleep(0.4)
         self.assertEqual(len(self.events()), 4)
 
+    def test_enabled_fresh_boot_waits_for_identity_and_starts_on_commit(self):
+        self.uci_cmd('set', 'xgspon.identity.registration_id=')
+        self.commit()
+        self.launch()
+        time.sleep(0.4)
+        self.assertEqual(self.events(), [])
+        self.uci_cmd('set', 'xgspon.identity.registration_id=0123')
+        self.commit()
+        self.await_event('start:initial:')
+
     def test_snapshot_ignores_edits_staged_after_commit(self):
         self.uci_cmd('set', 'xgspon.identity.equipment_id=uncommitted')
         self.launch()

@@ -8,7 +8,7 @@ shift 2>/dev/null || exit 2
 error() { echo "$1" >&2; exit 2; }
 case "$command" in
 	list)
-		[ "$#" = 0 ] || error 'Usage: q1000k-omci config list'
+		[ "$#" = 0 ] || error 'Usage: omci config list'
 		json_init
 		for key in $identity_keys; do
 			identity_option_read "$key" || error "Invalid PON identity option: $key"
@@ -24,16 +24,16 @@ case "$command" in
 		key=$1
 		case " $identity_keys " in *" $key "*) [ -n "$key" ] || error 'Missing key' ;; *) error 'Unknown identity key' ;; esac
 		if [ "$command" = get ]; then
-			[ "$#" = 1 ] || error 'Usage: q1000k-omci config get KEY'
+			[ "$#" = 1 ] || error 'Usage: omci config get KEY'
 			identity_option_read "$key" || error 'Invalid stored value'
 			printf '%s\n' "$identity_value"
 		else
 			if [ "$command" = set ]; then
-				[ "$#" = 2 ] || error 'Usage: q1000k-omci config set KEY VALUE'
+				[ "$#" = 2 ] || error 'Usage: omci config set KEY VALUE'
 				identity_option_valid "$key" "$2" || error "Invalid PON identity option: $key"
 				uci -q set "xgspon.identity.$key=$2" || exit 1
 			else
-				[ "$#" = 1 ] || error 'Usage: q1000k-omci config clear KEY'
+				[ "$#" = 1 ] || error 'Usage: omci config clear KEY'
 				uci -q set "xgspon.identity.$key=" || exit 1
 			fi
 			uci -q commit xgspon || exit 1
@@ -41,7 +41,7 @@ case "$command" in
 		fi
 		;;
 	validate)
-		[ "$#" = 0 ] || error 'Usage: q1000k-omci config validate'
+		[ "$#" = 0 ] || error 'Usage: omci config validate'
 		identity_options || exit 1
 		echo '{"valid":true,"activation":"automatic-on-commit"}'
 		;;

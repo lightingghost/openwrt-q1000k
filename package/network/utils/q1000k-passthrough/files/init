@@ -15,7 +15,7 @@ start_service() {
 
 reload_service() {
 	# WAN events wake the existing owner; they must not force a network restart.
-	procd_send_signal q1000k-passthrough '*' USR1
+	procd_send_signal xgspon-passthrough '*' USR1
 }
 
 # Committed xgspon.passthrough changes are observed by the wrapper, including

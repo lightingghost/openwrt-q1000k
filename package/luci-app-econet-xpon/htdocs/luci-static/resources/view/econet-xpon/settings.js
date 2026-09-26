@@ -130,10 +130,15 @@ return view.extend({
         return m.render();
     },
     handleSave: function() {
-        return this.map.save().then(function() {
+        return this.map.save(null, true).then(function() {
             return commitSettings('xgspon');
         }).then(function() {
             return ui.changes.init();
+        }).then(function() {
+            ui.addNotification(null, E('p', {}, _('Settings saved. The running services will apply changes automatically; optical changes may briefly interrupt Internet access.')), 'info');
+        }).catch(function(error) {
+            ui.addNotification(null, E('p', {}, _('Unable to save XGS-PON settings: %s').format(error.message)), 'error');
+            throw error;
         });
     },
     handleSaveApply: function() {

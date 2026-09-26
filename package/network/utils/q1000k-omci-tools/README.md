@@ -1,4 +1,4 @@
-# q1000k-omci command
+# omci command
 
 `q1000k-omci-tools` provides the CLI for the Q1000K kernel OMCI agent. It does
 not load optical modules, start another OMCI daemon, transmit raw PDUs, change
@@ -15,13 +15,13 @@ using the existing enabled/monitor policy. In the RAM image the configuration is
 volatile. On an installed system it has normal UCI persistence.
 
 ```sh
-q1000k-omci config list
-q1000k-omci config get hardware_version
-q1000k-omci config set equipment_id iONT320500X
-q1000k-omci config set hardware_version BGW320-500_2.1
-q1000k-omci config set sync_circuit_pack 1
-q1000k-omci config clear active_bank
-q1000k-omci config validate
+omci config list
+omci config get hardware_version
+omci config set equipment_id iONT320500X
+omci config set hardware_version BGW320-500_2.1
+omci config set sync_circuit_pack 1
+omci config clear active_bank
+omci config validate
 ```
 
 `list` redacts registration and logical credentials. An explicit `get KEY`
@@ -63,12 +63,12 @@ TV/voice remapper and does not guess optical VLANs.
 ## Runtime inspection and configuration
 
 ```sh
-q1000k-omci -i pon status
-q1000k-omci -i pon mib
-q1000k-omci -i pon mib 7 0
-q1000k-omci -i pon get hardware-version
-q1000k-omci -i pon get software0
-q1000k-omci -i pon get vendor
+omci -i pon status
+omci -i pon mib
+omci -i pon mib 7 0
+omci -i pon get hardware-version
+omci -i pon get software0
+omci -i pon get vendor
 ```
 
 Runtime `get/set` keys: `serial` (read only), `vendor`, `version` (legacy

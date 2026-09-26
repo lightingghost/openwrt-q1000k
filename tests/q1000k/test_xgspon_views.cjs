@@ -5,18 +5,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const base = path.resolve(__dirname, '../../package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon');
+const appACL = JSON.parse(fs.readFileSync(path.resolve(base, '../../../../../root/usr/share/rpcd/acl.d/luci-app-econet-xpon.json')))['luci-app-econet-xpon'];
 function harness(file) {
     const polls = [], options = {};
-    const state = { result: null, fail: false, calls: [], saveFails: false };
+    const state = { result: null, fail: false, calls: [], saveFails: false, denyCommit: false, notices: [] };
     const context = {
         _: x => x,
         E: (tag, attrs, children) => ({ tag, attrs, children }),
         view: { extend: x => x },
         rpc: { declare: spec => (...args) => {
             state.calls.push([spec.object, spec.method, ...args]);
+            const allowed = ['read', 'write'].some(access => appACL[access]?.ubus?.[spec.object]?.includes(spec.method));
+            if (!allowed || (state.denyCommit && spec.method === 'commit'))
+                return Promise.reject(new Error('Permission denied'));
+            if (spec.object === 'uci' && !appACL.write.uci.includes(args[0]))
+                return Promise.reject(new Error('Configuration access denied'));
             return state.fail ? Promise.reject(new Error('offline')) : Promise.resolve(state.result);
         } },
-        ui: { changes: { init: () => { state.calls.push(['refresh-changes']); return Promise.resolve(); } } },
+        ui: { addNotification: (title, message, level) => state.notices.push([level, text(message)]), changes: { init: () => { state.calls.push(['refresh-changes']); return Promise.resolve(); } } },
         poll: { add: fn => polls.push(fn) },
         dom: { content: (node, children) => { node.children = children; } },
         uci: { load: () => Promise.resolve() },
@@ -30,7 +36,9 @@ function harness(file) {
             }
         } }
     };
-    const view = vm.runInNewContext('(function(){' + fs.readFileSync(path.join(base, file), 'utf8') + '\n})()', context);
+    vm.createContext(context);
+    vm.runInContext("String.prototype.format = function(v) { return this.replace(/%[sd]/, v); };", context);
+    const view = vm.runInContext('(function(){' + fs.readFileSync(path.join(base, file), 'utf8') + '\n})()', context);
     return { view, polls, state, options };
 }
 function text(node) {
@@ -45,10 +53,18 @@ async function main() {
     for (const action of ['handleSave', 'handleSaveApply']) {
         settings.state.calls = [];
         await settings.view[action]();
+        assert.equal(settings.state.notices.at(-1)[0], 'info');
         assert.deepEqual(settings.state.calls, [
             ['save-form'], ['uci', 'commit', 'xgspon'], ['refresh-changes']
         ]);
     }
+    // Reproduce the old ACL: config permission alone does not permit the RPC.
+    settings.state.denyCommit = true;
+    for (const action of ['handleSave', 'handleSaveApply']) {
+        await assert.rejects(settings.view[action](), /Permission denied/);
+        assert.equal(settings.state.notices.at(-1)[0], 'error');
+    }
+    settings.state.denyCommit = false;
     settings.state.saveFails = true;
     settings.state.calls = [];
     await assert.rejects(settings.view.handleSave(), /invalid/);
@@ -170,7 +186,7 @@ async function main() {
     assert.equal(menu['admin/network/econet-xpon/configuration'].title, 'Settings');
     for (const name of ['settings', 'status']) {
         const route = menu['admin/network/econet-xpon/' + (name === 'settings' ? 'configuration' : name)];
-        const version = name === 'settings' ? 'v5' : 'v4';
+        const version = name === 'settings' ? 'v6' : 'v4';
         assert.equal(route.action.path, 'econet-xpon/' + name + '-' + version);
         assert.equal(fs.readFileSync(path.join(base, name + '-' + version + '.js'), 'utf8'), fs.readFileSync(path.join(base, name + '.js'), 'utf8'));
     }

@@ -220,7 +220,7 @@ case "${1:-}" in
 		[ "$duration" -ge 120 ] && [ "$duration" -le 1800 ] || fail 'Duration must be 120..1800 seconds.'
 		echo "$token" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail 'Invalid token.'
 		[ ! -e "$STATE" ] && [ ! -e /var/run/q1000k-pon-passthrough/active ] || fail 'Another test or recovery is active.'
-		[ ! -e /var/run/q1000k-passthrough ] || fail 'Stop or recover the persistent L3 owner before bench testing.'
+		[ ! -e /var/run/xgspon-passthrough ] || fail 'Stop or recover the persistent L3 owner before bench testing.'
 		[ ! -e /sys/class/net/br-lan/brif/pon ] || fail 'PON must remain routed.'
 		[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || fail 'IPv4 forwarding is disabled.'
 		for cmd in ip nft tcpdump jsonfilter flock dnsmasq; do command -v "$cmd" >/dev/null || fail "Missing $cmd"; done

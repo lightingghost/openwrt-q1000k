@@ -186,7 +186,7 @@ case "${1:-}" in
 		case "$duration" in ''|*[!0-9]*) fail 'Invalid duration.';; esac
 		[ "$duration" -ge 120 ] && [ "$duration" -le 1800 ] || fail 'Duration must be 120..1800 seconds.'
 		[ ! -e "$STATE" ] && [ ! -e /var/run/q1000k-ip-passthrough/active ] || fail 'A prior test or recovery is pending; run stop first.'
-		[ ! -e /var/run/q1000k-passthrough ] && [ ! -e /var/run/q1000k-l3-bench ] || fail 'Stop or recover the persistent L3 owner before bridge testing.'
+		[ ! -e /var/run/xgspon-passthrough ] && [ ! -e /var/run/q1000k-l3-bench ] || fail 'Stop or recover the persistent L3 owner before bridge testing.'
 		for cmd in bridge tcpdump ip nft uci flock jsonfilter; do
 			command -v "$cmd" >/dev/null || fail "Required command missing: $cmd"
 		done

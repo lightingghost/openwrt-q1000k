@@ -5,7 +5,7 @@
 set -eu
 export LC_ALL=C
 umask 077
-STATE=/var/run/q1000k-passthrough
+STATE=/var/run/xgspon-passthrough
 NFT=q1000k_pt
 mac=${1:-}
 timer= fragment= address= key= dirty=0

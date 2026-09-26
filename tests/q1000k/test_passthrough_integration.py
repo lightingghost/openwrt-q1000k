@@ -55,7 +55,7 @@ case "$*" in
  *) exit 1;;
 esac
 ''', True)
-        text = (PKG/'ipv4').read_text().replace('STATE=/var/run/q1000k-passthrough',
+        text = (PKG/'ipv4').read_text().replace('STATE=/var/run/xgspon-passthrough',
                                                'STATE='+shlex.quote(str(self.root/'state')))
         text = text.replace('/tmp/dnsmasq.', str(self.root/'dnsmasq.'))
         text = text.replace('/etc/init.d/dnsmasq', str(self.root/'bin/dnsmasq-control'))
