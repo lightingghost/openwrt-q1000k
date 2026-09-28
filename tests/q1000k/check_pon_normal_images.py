@@ -133,10 +133,12 @@ def check_root(records, revision, snapshot):
         'etc/init.d/xgspon': 'network/utils/q1000k-xgspon-service/files/init',
         'etc/uci-defaults/90-q1000k-xgspon-wan': 'network/utils/q1000k-xgspon-wan/files/defaults',
         'lib/q1000k-xgspon/common.sh': 'network/utils/q1000k-xgspon/files/common.sh',
+        'lib/q1000k-xgspon/apply.sh': 'network/utils/q1000k-xgspon/files/apply.sh',
+        'usr/sbin/reload_xgspon_config': 'network/utils/q1000k-xgspon/files/reload-config',
+        'usr/libexec/q1000k-xgspon-apply-job': 'network/utils/q1000k-xgspon/files/apply-job',
         'lib/upgrade/keep.d/q1000k-xgspon': 'network/utils/q1000k-xgspon/files/keep',
         'usr/libexec/q1000k-passthrough-ipv4': 'network/utils/q1000k-passthrough/files/ipv4',
         'usr/libexec/q1000k-ipv6-transition': 'network/utils/q1000k-passthrough/files/ipv6-transition',
-        'usr/libexec/q1000k-passthrough-watch-config': 'network/utils/q1000k-passthrough/files/watch-config',
         'etc/init.d/xgspon-passthrough': 'network/utils/q1000k-passthrough/files/init',
         'etc/hotplug.d/iface/95-q1000k-passthrough': 'network/utils/q1000k-passthrough/files/hotplug',
     }
@@ -172,8 +174,8 @@ def check_root(records, revision, snapshot):
         source = (REPO / f'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/{kind}.js').read_bytes()
         minimized = subprocess.check_output([REPO / 'staging_dir/hostpkg/bin/jsmin'], input=source)
         assert read(f'www/luci-static/resources/view/econet-xpon/{kind}-v{version}.js') in (source, minimized)
-    assert read('usr/libexec/q1000k-xgspon-watch-config') == (
-        REPO / 'package/network/utils/q1000k-xgspon-service/files/watch-config').read_bytes()
+    assert 'usr/libexec/q1000k-xgspon-watch-config' not in records
+    assert 'usr/libexec/q1000k-passthrough-watch-config' not in records
     config = read('etc/config/xgspon')
     assert stat.S_IMODE(records['etc/config/xgspon'][0]) == 0o600
     assert config == (REPO / 'package/network/utils/q1000k-xgspon/files/xgspon.config').read_bytes()

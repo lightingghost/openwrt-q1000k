@@ -1,0 +1,74 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Apply one committed xgspon snapshot to its two independent procd owners.
+set -eu
+umask 077
+. /lib/q1000k-xgspon/apply.sh
+
+state=/var/run/xgspon-config
+mkdir -p "$state"
+exec 9>"$state/apply.lock"
+flock -w 30 9 || { echo 'XGS-PON: another apply is still running.' >&2; exit 1; }
+work=$(mktemp -d "$state/apply-XXXXXX") || exit 1
+trap 'rm -rf "$work"' EXIT
+cp /etc/config/xgspon "$work/committed" || exit 1
+Q1000K_UCI_SNAPSHOT="$work/committed"
+export Q1000K_UCI_SNAPSHOT
+xgspon_validate_optical && xgspon_validate_passthrough || {
+	echo 'XGS-PON: committed settings are invalid; running services retained.' >&2
+	exit 1
+}
+xgspon_optical_key > "$work/optical.key"
+xgspon_passthrough_key > "$work/passthrough.key"
+
+optical_live() {
+	if [ "$xgspon_enabled:$xgspon_monitor" = 0:0 ]; then
+		! /etc/init.d/xgspon status >/dev/null 2>&1
+		return
+	fi
+	/etc/init.d/xgspon status >/dev/null 2>&1 || return 1
+	[ -f /var/run/q1000k-xgspon/status.json ] || return 1
+	if [ "$xgspon_enabled" = 1 ]; then
+		grep -Eq '"stage":"(running|waiting_registration|waiting_provisioning|waiting_network)"' \
+			/var/run/q1000k-xgspon/status.json
+	else
+		grep -Eq '"stage":"(monitoring|waiting_firmware|waiting_calibration)"' \
+			/var/run/q1000k-xgspon/status.json
+	fi
+}
+
+wait_optical_live() {
+	local count=0
+	while ! optical_live; do
+		[ "$count" -lt 90 ] || return 1
+		# A failed startup removes its lifecycle lock. Do not keep the LuCI
+		# apply job running for the full timeout after a procd owner exits.
+		if [ "$count" -ge 5 ] && [ ! -d /var/run/q1000k-xgspon/lock ] &&
+			! /etc/init.d/xgspon status >/dev/null 2>&1; then
+			return 1
+		fi
+		sleep 1
+		count=$((count + 1))
+	done
+}
+
+# Stop an old handoff before changing its mode or client MAC. The optical
+# service is reloaded only for identity/service changes.
+if [ -x /etc/init.d/xgspon-passthrough ] &&
+	! cmp -s "$work/passthrough.key" "$state/passthrough.key"; then
+	/etc/init.d/xgspon-passthrough stop || exit 1
+	Q1000K_CONFIG_APPLY_SNAPSHOT="$work/committed" \
+		/etc/init.d/xgspon-passthrough start || exit 1
+	cmp -s "$work/passthrough.key" "$state/passthrough.key" || exit 1
+fi
+if ! cmp -s "$work/optical.key" "$state/optical.key" || ! optical_live; then
+	[ -x /etc/init.d/xgspon ] || exit 1
+	Q1000K_CONFIG_APPLY_SNAPSHOT="$work/committed" \
+		/etc/init.d/xgspon reload || exit 1
+	cmp -s "$work/optical.key" "$state/optical.key" || exit 1
+	if ! wait_optical_live; then
+		rm -f "$state/optical.key"
+		echo 'XGS-PON: optical owner did not reach a healthy stage.' >&2
+		exit 1
+	fi
+fi

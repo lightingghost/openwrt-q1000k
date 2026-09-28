@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
-# Commits settings; the service watcher applies valid changes asynchronously.
+# Commit identity edits and apply them when the optical service is installed.
 . /lib/q1000k-xgspon/common.sh
 umask 077
 command=$1
@@ -37,13 +37,21 @@ case "$command" in
 				uci -q set "xgspon.identity.$key=" || exit 1
 			fi
 			uci -q commit xgspon || exit 1
-			echo 'Saved; the running PON service will apply committed changes automatically.'
+			if [ -x /etc/init.d/xgspon ]; then
+				/usr/sbin/reload_xgspon_config || {
+					echo 'Saved, but XGS-PON apply failed.' >&2
+					exit 1
+				}
+				echo 'Saved and applied.'
+			else
+				echo 'Saved; no optical service is installed.'
+			fi
 		fi
 		;;
 	validate)
 		[ "$#" = 0 ] || error 'Usage: omci config validate'
 		identity_options || exit 1
-		echo '{"valid":true,"activation":"automatic-on-commit"}'
+		echo '{"valid":true,"activation":"explicit-apply"}'
 		;;
 	*) error "Commands: list, get KEY, set KEY VALUE, clear KEY, validate. Keys: $identity_keys" ;;
 esac

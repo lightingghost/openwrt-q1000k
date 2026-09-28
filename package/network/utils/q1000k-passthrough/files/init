@@ -3,20 +3,60 @@
 START=96
 USE_PROCD=1
 
+retire_orphan() {
+	local pid state=/var/run/xgspon-passthrough
+	[ -f "$state/owner.pid" ] || return 0
+	pid=$(cat "$state/owner.pid")
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$pid" -gt 1 ] || return 1
+	if [ -r "/proc/$pid/cmdline" ] &&
+		tr '\000' '\n' < "/proc/$pid/cmdline" |
+			grep -Fxq /usr/libexec/q1000k-passthrough-ipv4; then
+		kill -TERM "$pid" 2>/dev/null || :
+	fi
+}
+
 start_service() {
+	local state=/var/run/xgspon-config source snapshot
+	. /lib/q1000k-xgspon/apply.sh
+	source=${Q1000K_CONFIG_APPLY_SNAPSHOT:-/etc/config/xgspon}
+	umask 077
+	mkdir -p "$state" || return 1
+	snapshot=$state/passthrough-pending
+	cp "$source" "$snapshot" || return 1
+	Q1000K_UCI_SNAPSHOT=$snapshot
+	export Q1000K_UCI_SNAPSHOT
+	xgspon_validate_passthrough || {
+		rm -f "$snapshot"
+		echo 'XGS-PON: invalid committed passthrough settings; service not started.' >&2
+		return 1
+	}
+	xgspon_passthrough_key > "$state/passthrough.key.next" || return 1
+	retire_orphan || return 1
+	/usr/libexec/q1000k-passthrough-ipv4 --recover-only || return 1
+	rm -f "$snapshot"
+	if [ "$xgspon_mode" = router ]; then
+		mv "$state/passthrough.key.next" "$state/passthrough.key"
+		return
+	fi
 	procd_open_instance
-	procd_set_param command /usr/libexec/q1000k-passthrough-watch-config
+	procd_set_param command /usr/libexec/q1000k-passthrough-ipv4 "$xgspon_mac"
 	procd_set_param term_timeout 30
+	# Keep retrying after an unexpected exit; each start first clears stale
+	# public-address state. A retry cap could leave that state indefinitely.
+	procd_set_param respawn 3600 5 -1
 	# Avoid libsetlbf injection into a shell that writes procfs sysctls.
 	procd_set_param stdout 0
 	procd_set_param stderr 1
 	procd_close_instance
+	mv "$state/passthrough.key.next" "$state/passthrough.key"
+}
+
+stop_service() {
+	rm -f /var/run/xgspon-config/passthrough.key
 }
 
 reload_service() {
 	# WAN events wake the existing owner; they must not force a network restart.
-	procd_send_signal xgspon-passthrough '*' USR1
+	procd_send_signal xgspon-passthrough '*' USR1 || :
 }
-
-# Committed xgspon.passthrough changes are observed by the wrapper, including
-# plain uci commit. A config.change trigger would apply the same edit twice.

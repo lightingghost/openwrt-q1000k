@@ -3,12 +3,17 @@
 import subprocess
 import unittest
 import test_pon_config
-import test_pon_config_watch
+import test_pon_wan
 
 ROOT=test_pon_config.ROOT
 class MigrationTests(unittest.TestCase):
-    setUpClass=classmethod(test_pon_config_watch.ConfigWatchTests.setUpClass.__func__)
-    uci_cmd=test_pon_config_watch.ConfigWatchTests.uci_cmd
+    @classmethod
+    def setUpClass(cls):
+        test_pon_wan.WanTests.setUpClass.__func__(cls)
+
+    def uci_cmd(self, *args):
+        return subprocess.run([str(self.root/'uci'), *args], env=self.env,
+                              text=True, capture_output=True, check=True).stdout.strip()
     def setUp(self):
         test_pon_config.ConfigTests.setUp(self)
         self.config=self.root/'config/xgspon'

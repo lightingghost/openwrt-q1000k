@@ -8,9 +8,10 @@ const base = path.resolve(__dirname, '../../package/luci-app-econet-xpon/htdocs/
 const appACL = JSON.parse(fs.readFileSync(path.resolve(base, '../../../../../root/usr/share/rpcd/acl.d/luci-app-econet-xpon.json')))['luci-app-econet-xpon'];
 function harness(file) {
     const polls = [], options = {};
-    const state = { result: null, fail: false, calls: [], saveFails: false, denyCommit: false, notices: [] };
+    const state = { result: null, applyState: 'success', applyStates: null, fail: false, calls: [], saveFails: false, denyCommit: false, notices: [] };
     const context = {
         _: x => x,
+        setTimeout: fn => fn(),
         E: (tag, attrs, children) => ({ tag, attrs, children }),
         view: { extend: x => x },
         rpc: { declare: spec => (...args) => {
@@ -20,7 +21,11 @@ function harness(file) {
                 return Promise.reject(new Error('Permission denied'));
             if (spec.object === 'uci' && !appACL.write.uci.includes(args[0]))
                 return Promise.reject(new Error('Configuration access denied'));
-            return state.fail ? Promise.reject(new Error('offline')) : Promise.resolve(state.result);
+            if (state.fail) return Promise.reject(new Error('offline'));
+            if (spec.method === 'apply') return Promise.resolve({ job: 'job-test123' });
+            if (spec.method === 'applyStatus') return Promise.resolve({ state:
+                state.applyStates ? state.applyStates.shift() : state.applyState });
+            return Promise.resolve(state.result);
         } },
         ui: { addNotification: (title, message, level) => state.notices.push([level, text(message)]), changes: { init: () => { state.calls.push(['refresh-changes']); return Promise.resolve(); } } },
         poll: { add: fn => polls.push(fn) },
@@ -54,10 +59,19 @@ async function main() {
         settings.state.calls = [];
         await settings.view[action]();
         assert.equal(settings.state.notices.at(-1)[0], 'info');
-        assert.deepEqual(settings.state.calls, [
+        assert.deepEqual(settings.state.calls, action === 'handleSave' ? [
             ['save-form'], ['uci', 'commit', 'xgspon'], ['refresh-changes']
+        ] : [
+            ['save-form'], ['uci', 'commit', 'xgspon'], ['econet-xpon', 'apply'],
+            ['econet-xpon', 'applyStatus', 'job-test123'],
+            ['refresh-changes']
         ]);
     }
+    settings.state.applyStates = ['running', 'success'];
+    settings.state.calls = [];
+    await settings.view.handleSaveApply();
+    assert.equal(settings.state.calls.filter(call => call[1] === 'applyStatus').length, 2);
+    settings.state.applyStates = null;
     // Reproduce the old ACL: config permission alone does not permit the RPC.
     settings.state.denyCommit = true;
     for (const action of ['handleSave', 'handleSaveApply']) {
@@ -74,6 +88,13 @@ async function main() {
     settings.state.calls = [];
     await assert.rejects(settings.view.handleSave(), /offline/);
     assert.deepEqual(settings.state.calls, [['save-form'], ['uci', 'commit', 'xgspon']]);
+    settings.state.fail = false;
+    settings.state.applyState = 'failed';
+    settings.state.calls = [];
+    await assert.rejects(settings.view.handleSaveApply(), /could not be applied/);
+    assert.deepEqual(settings.state.calls, [['save-form'], ['uci', 'commit', 'xgspon'],
+        ['econet-xpon', 'apply'], ['econet-xpon', 'applyStatus', 'job-test123']]);
+    assert.match(settings.state.notices.at(-1)[1], /committed.*Apply status/);
     const sample = { schema_version: 1, model: 'Quantum Fiber Q1000K',
         activation_supported: false, los: null, registration: null, omci: null,
         factory: { available: false }, firmware: {}, modules: { phy_loaded: true, mac_loaded: true } };

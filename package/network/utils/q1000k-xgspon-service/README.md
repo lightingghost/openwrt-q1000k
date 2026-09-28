@@ -64,19 +64,19 @@ it does not implement an 802.1X authenticator. Normal firmware uses ordinary
 controller permission, while only the private RAM profile uses `validation_tx=1`.
 
 With this package installed, `xgspon start|stop|restart|reload` delegates
-to the init service. The service wrapper observes committed configuration,
-including plain `uci commit xgspon`. After two stable two-second polls,
-a valid identity/service change stops the old optical supervisor, waits for complete cleanup,
-then starts the configured registration service or TX-disabled monitor. LuCI
-Save and Save & Apply both commit this package. Saving identity does not enable
-registration when `service.enabled=0`; both flags set to zero leave optics off.
-Uncommitted edits and unchanged commits do not restart the stack. Startup uses
-a private immutable snapshot, so subsequent staged edits cannot affect it.
-Invalid identity is rejected before stopping a working stack. Empty optional
-field removal on LuCI Save and passthrough-only changes do not restart optics. Configuration
+to the init service. Its procd instance directly owns the optical supervisor.
+After a CLI commit, run `reload_xgspon_config`; LuCI Save & Apply does both.
+The command validates a committed snapshot and compares only identity/service
+settings before reloading optics. It waits for complete cleanup before starting
+the configured registration service or TX-disabled monitor. LuCI Save commits
+without applying. Saving identity does not enable registration when
+`service.enabled=0`; both flags set to zero leave optics off. Uncommitted edits
+and unchanged applies do not restart the stack. Startup uses a private
+committed snapshot, so subsequent staged edits cannot affect it. Invalid
+identity is rejected before stopping a working stack. Empty optional field
+removal and passthrough-only changes do not restart optics. Configuration
 restarts briefly interrupt PON Internet. Hardware faults still stop without
-respawn; a new valid configuration or explicit lifecycle command can retry.
-An explicitly stopped init service has no watcher until started again.
+respawn; a changed valid configuration or explicit lifecycle command can retry.
 `xgspon status` exposes the
 last supervisor report separately from optical readiness. A saved `running`
 stage may survive abrupt process termination and does not prove liveness.
@@ -91,17 +91,17 @@ test -n "$(uci -q get xgspon.identity.registration_id)" || exit 1
 uci set xgspon.service.enabled='1'
 uci commit xgspon
 /etc/init.d/xgspon enable
-/etc/init.d/xgspon restart
+reload_xgspon_config
 xgspon status
 omci -i pon status
 ```
 
-`start` starts a stopped watcher. `restart` also retries a supervisor that has
+`start` starts a stopped supervisor. `restart` also retries a supervisor that has
 already exited after a fault; this briefly interrupts an active optical link.
 `xgspon start|stop|restart|reload` is shorthand for the init service. Hardware
 faults do not trigger an endless automatic restart. Use `logread -e xgspon`
 and the JSON status to check firmware, factory/calibration and registration;
-a running watcher is not proof of a working ISP connection.
+a running supervisor is not proof of a working ISP connection.
 
 ## Configuration migration
 

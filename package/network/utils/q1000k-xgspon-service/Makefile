@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon-service
-PKG_RELEASE:=14
+PKG_RELEASE:=16
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -28,7 +28,6 @@ endef
 define Package/q1000k-xgspon-service/install
 	$(INSTALL_DIR) $(1)/usr/libexec $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/run $(1)/usr/libexec/q1000k-xgspon-run
-	$(INSTALL_BIN) ./files/watch-config $(1)/usr/libexec/q1000k-xgspon-watch-config
 	$(INSTALL_BIN) ./files/init $(1)/etc/init.d/xgspon
 	$(INSTALL_BIN) ./files/legacy-init $(1)/etc/init.d/q1000k-xgspon
 endef

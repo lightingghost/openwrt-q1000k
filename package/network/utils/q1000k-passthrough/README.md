@@ -109,8 +109,8 @@ on both routers.
 
 The canonical configuration is `/etc/config/xgspon`, section `passthrough`.
 In **Network → XGS-PON → Settings → IPv4 passthrough**, choose **L3 IP
-passthrough**, enter the main router's WAN MAC and click **Save** or **Save &
-Apply**. Both buttons commit only `xgspon`. Router mode is the default.
+passthrough**, enter the main router's WAN MAC and click **Save & Apply**.
+Save commits without activating the change. Router mode is the default.
 
 The equivalent UCI configuration is:
 
@@ -118,13 +118,14 @@ The equivalent UCI configuration is:
 uci set xgspon.passthrough.mode='l3'
 uci set xgspon.passthrough.client_mac='02:11:22:33:44:55' # replace
 uci commit xgspon
+reload_xgspon_config
 ```
 
 On the first package installation into a running image, reload firewall4 to
 load its includes and enable/start `/etc/init.d/xgspon-passthrough`. Normal
-firmware startup enables the configuration watcher through procd. Subsequent
-commits need no manual restart: two stable two-second samples apply changed
-mode/MAC settings. An explicitly stopped service has no active watcher.
+firmware startup selects the saved mode. Subsequent CLI commits require
+`reload_xgspon_config`; LuCI Save & Apply calls it. The command validates the
+committed file and applies changed mode/MAC settings without a config watcher.
 
 The example MAC is documentation only. Renew the downstream WAN DHCP client
 after initially entering or leaving passthrough; a pre-existing private lease
@@ -139,6 +140,7 @@ Restore ordinary IPv4 router mode with:
 ```sh
 uci set xgspon.passthrough.mode='router'
 uci commit xgspon
+reload_xgspon_config
 ```
 
 IPv6 /61 delegation may remain enabled in router mode. L2 bridging is a
@@ -148,14 +150,21 @@ the downstream odhcpd server on that link.
 
 ## Event and failure behavior
 
-The config watcher compares only `xgspon.passthrough`; identity changes are
-handled separately by the optical service. Passthrough-only edits never cycle
+The apply command compares `xgspon.passthrough` independently of the optical
+settings. Passthrough-only edits never cycle
 optics. Uncommitted, unchanged or invalid mode/MAC settings leave the running
 mode alone. Changing the selected MAC stops and cleans up the previous owner
 before starting its replacement. A cleanup failure prevents replacement.
+Plain CLI `uci commit xgspon` does not emit procd's `config.change` event;
+the explicit apply command is required. Standard `reload_config` events also
+call this command through the optical service's procd trigger.
 
-Netifd WAN up/down/update events wake the existing reconciler with SIGUSR1;
-a two-second reconciliation loop also covers missed events and fw4 reloads.
+Netifd WAN up/down/update events wake the existing reconciler with SIGUSR1.
+Lease reconciliation runs on those events and at startup. There is no periodic
+lease audit or nftables refresh. The public IPv4 is also written to a generated
+RAM-backed nftables include; firewall4 reads that file when it rebuilds its
+set on reload. Both nftables sets use persistent elements until a WAN event or
+normal teardown changes them.
 The reconciler selects the default route explicitly, ignores IPv6 DNS entries
 in the IPv4 DHCP option, validates the WAN tuple, and rewrites only its own
 RAM fragment. No UCI/flash commits occur on renewal. It restarts dnsmasq only
@@ -169,12 +178,19 @@ address. A recreated PON device has its required rp_filter setting restored.
 
 Normal stop and caught errors restore local routing priority, sysctls and
 ordinary dnsmasq service. IPv6 state is never stopped, copied or restored by
-this owner. Firewall exception sets expire after 15 seconds without a refresh;
-this is an additional containment measure, not proof of complete recovery
-after SIGKILL or power loss. An unclean exit retains the ownership directory
-and blocks automatic retry for explicit recovery. Reboot clears RAM state;
-normal startup is then governed by the saved mode. Do not remove the ownership
-directory alone while its rules/routes remain installed.
+this owner. On an unexpected owner exit, procd restarts it after a five-second
+delay. At startup the direct owner requests recovery of
+any stale L3 state through the same reconciler script, even if the saved mode
+is now router. If L3 remains selected, the new owner then checks the current
+WAN lease and applies it. Recovery uses its RAM journal to clear stale firewall
+elements, routes, rules and its DHCP fragment. If it cannot safely remove an
+externally changed fragment, startup stops and retains the journal for review.
+If an older watcher left an orphaned owner during upgrade, service startup
+stops that owner and waits for its lock before selecting the saved mode.
+An abrupt death leaves the old live state in place until the restart succeeds;
+the generated include is removed during startup recovery. Reboot clears RAM
+state; normal startup is then governed by the saved mode. Do not remove the
+ownership directory alone while its rules/routes remain installed.
 
 An externally changed DHCP fragment is retained and reported, rather than
 overwritten during cleanup. Fixed management IPv4 addresses and routes must

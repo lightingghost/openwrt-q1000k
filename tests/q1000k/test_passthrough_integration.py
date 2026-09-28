@@ -40,7 +40,7 @@ class NetworkTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='q1000k-pt-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ('bin', 'state', 'dnsmasq.test.d'):
+        for name in ('bin', 'dnsmasq.test.d'):
             (self.root/name).mkdir()
         self.env = dict(os.environ, PT_TEST_ROOT=str(self.root),
                         PATH=str(self.root/'bin')+':'+os.environ['PATH'])
@@ -60,6 +60,8 @@ esac
         text = text.replace('/tmp/dnsmasq.', str(self.root/'dnsmasq.'))
         text = text.replace('/etc/init.d/dnsmasq', str(self.root/'bin/dnsmasq-control'))
         text = text.replace('/sys/class/net/pon/address', str(self.root/'pon-mac'))
+        text = text.replace('/var/lock/q1000k-passthrough.lock', str(self.root/'owner.lock'))
+        text = text.replace('mkdir -p /var/lock', 'mkdir -p "$PT_TEST_ROOT"')
         self.write('pon-mac', '02:aa:bb:cc:dd:ee\n')
         self.source = self.write('functions.sh', text)
         self.lease()
@@ -76,11 +78,14 @@ esac
         Path('/proc/sys/net/ipv4/ip_forward').write_text('1\n')
         Path('/proc/sys/net/ipv4/conf/pon/rp_filter').write_text('1\n')
         self.ipv6 = cmd('ip', '-6', 'route', 'show', 'table', 'all').replace(' linkdown', '')
-        fw4 = 'table inet fw4 {\n'+(PKG/'fw4-set.nft').read_text()+'''
+        fw4_set = (PKG/'fw4-set.nft').read_text().replace(
+            '/var/run/xgspon-passthrough/fw4/', str(self.root/'state/fw4')+'/')
+        fw4 = 'table inet fw4 {\n'+fw4_set+'''
 chain srcnat_wan {\n'''+(PKG/'fw4-nat.nft').read_text()+'''}
 chain forward_wan {\n'''+(PKG/'fw4-forward.nft').read_text()+'''}
 }
 '''
+        self.write('fw4.nft', fw4)
         cmd('nft', '-f', '-', input=fw4)
 
     def tearDown(self):
@@ -113,7 +118,11 @@ set -- {MAC}
 export Q1000K_PT_FUNCTIONS_ONLY=1
 ip() {{ /usr/sbin/ip "$@"; }}
 . {shlex.quote(str(self.source))}
+[ ! -e "$STATE" ] || cleanup_state
 preflight
+mkdir "$STATE"
+printf '%s\n' "$fragment" > "$STATE/fragment"
+mkdir -p "$STATE/fw4"
 trap cleanup EXIT
 {body}
 '''
@@ -139,6 +148,7 @@ reconcile
 grep -q 'option:router,198.51.100.1' "$fragment"
 ip -4 route show table 100 | grep -q '198.51.100.10 dev br-lan'
 nft list set inet fw4 q1000k_pt4 | grep -q '198.51.100.10'
+grep -q 'elements = { 198.51.100.10 }' "$STATE/fw4/active.nft"
 test "$(wc -l < "$PT_TEST_ROOT/restarts")" = 2
 reconcile
 test "$(wc -l < "$PT_TEST_ROOT/restarts")" = 2
@@ -171,10 +181,44 @@ ip -4 route show table 100 | grep -q '198.51.100.20 dev br-lan'
         self.run_shell('''
 block_dhcp
 reconcile
-nft flush set inet fw4 q1000k_pt4
-reconcile
+nft -f - <<EOF
+delete table inet fw4
+include "$PT_TEST_ROOT/fw4.nft"
+EOF
 nft list set inet fw4 q1000k_pt4 | grep -q '198.51.100.10'
 test "$(wc -l < "$PT_TEST_ROOT/restarts")" = 2
+''')
+
+    def test_killed_owner_is_recovered_before_reapplying_current_lease(self):
+        script = f'''set -eu
+set -- {MAC}
+export Q1000K_PT_FUNCTIONS_ONLY=1
+ip() {{ /usr/sbin/ip "$@"; }}
+. {shlex.quote(str(self.source))}
+preflight
+mkdir "$STATE"
+printf '%s\\n' "$fragment" > "$STATE/fragment"
+mkdir "$STATE/fw4"
+block_dhcp
+reconcile
+kill -KILL $$
+'''
+        p = subprocess.run(['busybox', 'ash', '-c', script], env=self.env,
+                           text=True, capture_output=True, timeout=30)
+        self.assertEqual(p.returncode, -9, p.stdout+p.stderr)
+        self.assertIn('198.51.100.10', cmd('nft', 'list', 'set', 'inet', 'fw4', 'q1000k_pt4'))
+        self.assertTrue((self.root/'state/fw4/active.nft').exists())
+        recovered = subprocess.run(['busybox', 'ash', str(self.source), '--recover-only'],
+                                   env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(recovered.returncode, 0, recovered.stdout+recovered.stderr)
+        self.assertFalse((self.root/'state').exists())
+        self.assertEqual(cmd('ip', '-4', 'route', 'show', 'table', '100'), '')
+        self.assertNotIn('198.51.100.10', cmd('nft', 'list', 'set', 'inet', 'fw4', 'q1000k_pt4'))
+        self.run_shell('''
+block_dhcp
+reconcile
+nft list set inet fw4 q1000k_pt4 | grep -q '198.51.100.10'
+test "$(ip -4 route show table 100 | wc -l)" = 1
 ''')
 
     def test_missing_generated_dhcp_fragment_is_recreated(self):

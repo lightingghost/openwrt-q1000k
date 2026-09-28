@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-xgspon
-PKG_RELEASE:=15
+PKG_RELEASE:=18
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -11,7 +11,7 @@ define Package/q1000k-xgspon
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Q1000K XGS-PON factory data and diagnostics
-  DEPENDS:=@TARGET_airoha_an7581 +jshn
+  DEPENDS:=@TARGET_airoha_an7581 +jshn +flock
 endef
 
 define Package/q1000k-xgspon/description
@@ -47,6 +47,8 @@ define Package/q1000k-xgspon/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/config $(1)/lib/q1000k-xgspon $(1)/usr/libexec
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/q1000k-pon-factory $(1)/usr/sbin/
 	$(INSTALL_BIN) ./files/q1000k-xgspon $(1)/usr/sbin/xgspon
+	$(INSTALL_BIN) ./files/reload-config $(1)/usr/sbin/reload_xgspon_config
+	$(INSTALL_BIN) ./files/apply-job $(1)/usr/libexec/q1000k-xgspon-apply-job
 	$(LN) xgspon $(1)/usr/sbin/q1000k-xgspon
 	$(LN) q1000k-pon-factory $(1)/usr/sbin/pon-factory
 	$(INSTALL_CONF) ./files/xgspon.config $(1)/etc/config/xgspon
@@ -55,6 +57,7 @@ define Package/q1000k-xgspon/install
 	$(INSTALL_BIN) ./files/migrate-config $(1)/etc/uci-defaults/10-xgspon-config
 	$(INSTALL_BIN) ./files/omci-config $(1)/usr/libexec/q1000k-omci-config
 	$(INSTALL_DATA) ./files/common.sh $(1)/lib/q1000k-xgspon/
+	$(INSTALL_DATA) ./files/apply.sh $(1)/lib/q1000k-xgspon/
 	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
 	$(INSTALL_DATA) ./files/keep $(1)/lib/upgrade/keep.d/q1000k-xgspon
 endef

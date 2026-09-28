@@ -38,6 +38,23 @@ os.execv(uci, [uci, '-c', str(root/'config'), '-C', str(root/'overrides'),
         return subprocess.run(['busybox', 'ash', str(self.cli), *args], env=self.env,
                               text=True, capture_output=True, timeout=10)
 
+    def test_omci_config_set_applies_after_commit_when_service_is_installed(self):
+        service = self.backend.write('service-init', '#!/bin/sh\nexit 0\n')
+        service.chmod(0o755)
+        applied = self.root / 'applied'
+        command = self.backend.write('apply-command',
+                                     '#!/bin/sh\nprintf "applied\\n" > "' + str(applied) + '"\n')
+        command.chmod(0o755)
+        source = (PACKAGE / 'files/omci-config').read_text()
+        source = source.replace('/lib/q1000k-xgspon/common.sh', str(self.backend.common))
+        source = source.replace('/etc/init.d/xgspon', str(service))
+        source = source.replace('/usr/sbin/reload_xgspon_config', str(command))
+        self.cli = self.backend.write('config-cli', source)
+        result = self.call('set', 'equipment_id', 'new-value')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(applied.read_text(), 'applied\n')
+        self.assertIn("option equipment_id 'new-value'", (self.root / 'config/xgspon').read_text())
+
     def test_all_settings_roundtrip_parameters_and_redaction(self):
         values = dict(serial='HUMA12345678', vendor_id='TEST', equipment_id='iONT320500X',
                       hardware_version='BGW320-500_2.1', sync_circuit_pack='1',

@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=q1000k-passthrough
-PKG_RELEASE:=4
+PKG_RELEASE:=6
 PKG_LICENSE:=GPL-2.0-only
 
 include $(INCLUDE_DIR)/package.mk
@@ -27,7 +27,6 @@ define Package/q1000k-passthrough/install
 	$(INSTALL_DIR) $(1)/usr/libexec $(1)/etc/config $(1)/etc/init.d $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/ipv4 $(1)/usr/libexec/q1000k-passthrough-ipv4
 	$(INSTALL_BIN) ./files/ipv6-transition $(1)/usr/libexec/q1000k-ipv6-transition
-	$(INSTALL_BIN) ./files/watch-config $(1)/usr/libexec/q1000k-passthrough-watch-config
 	$(INSTALL_BIN) ./files/init $(1)/etc/init.d/xgspon-passthrough
 	$(INSTALL_BIN) ./files/legacy-init $(1)/etc/init.d/q1000k-passthrough
 	$(INSTALL_DIR) $(1)/usr/sbin

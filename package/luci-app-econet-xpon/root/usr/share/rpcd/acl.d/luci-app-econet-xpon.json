@@ -3,11 +3,11 @@
         "description": "Q1000K XGS-PON diagnostics and settings",
         "read": {
             "uci": [ "xgspon" ],
-            "ubus": { "econet-xpon": [ "status", "raw", "mib" ] }
+            "ubus": { "econet-xpon": [ "status", "raw", "mib", "applyStatus" ] }
         },
         "write": {
             "uci": [ "xgspon" ],
-            "ubus": { "uci": [ "commit" ] }
+            "ubus": { "uci": [ "commit" ], "econet-xpon": [ "apply" ] }
         }
     }
 }

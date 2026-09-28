@@ -159,14 +159,15 @@ def inspect(image, revision, profile='bench', private_manifest=None):
         ('package/network/utils/q1000k-xgspon-bench/files/l3-bench', 'usr/sbin/q1000k-l3-bench'),
         ('package/network/utils/q1000k-passthrough/files/ipv4', 'usr/libexec/q1000k-passthrough-ipv4'),
         ('package/network/utils/q1000k-passthrough/files/ipv6-transition', 'usr/libexec/q1000k-ipv6-transition'),
-        ('package/network/utils/q1000k-passthrough/files/watch-config', 'usr/libexec/q1000k-passthrough-watch-config'),
         ('package/network/utils/q1000k-xgspon-bench/files/passthrough', 'usr/sbin/q1000k-pon-passthrough'),
         ('package/network/utils/q1000k-xgspon-bench/files/sysctl.conf', 'etc/sysctl.d/99-q1000k-xgspon-bench.conf'),
         ('package/network/utils/q1000k-xgspon/files/xgspon.config', 'etc/config/xgspon'),
         ('package/network/utils/q1000k-xgspon/files/common.sh', 'lib/q1000k-xgspon/common.sh'),
+        ('package/network/utils/q1000k-xgspon/files/apply.sh', 'lib/q1000k-xgspon/apply.sh'),
+        ('package/network/utils/q1000k-xgspon/files/reload-config', 'usr/sbin/reload_xgspon_config'),
+        ('package/network/utils/q1000k-xgspon/files/apply-job', 'usr/libexec/q1000k-xgspon-apply-job'),
         ('package/network/utils/q1000k-xgspon/files/omci-config', 'usr/libexec/q1000k-omci-config'),
         ('package/network/utils/q1000k-xgspon-service/files/run', 'usr/libexec/q1000k-xgspon-run'),
-        ('package/network/utils/q1000k-xgspon-service/files/watch-config', 'usr/libexec/q1000k-xgspon-watch-config'),
         ('package/network/utils/q1000k-xgspon-service/files/init', 'etc/init.d/q1000k-xgspon'),
         ('package/network/utils/q1000k-xgspon/files/q1000k-xgspon', 'usr/sbin/q1000k-xgspon'),
         ('package/luci-app-econet-xpon/root/usr/share/luci/menu.d/luci-app-econet-xpon.json',
@@ -183,7 +184,7 @@ def inspect(image, revision, profile='bench', private_manifest=None):
     assert status in (source, minimized), 'LuCI status differs from packaged source'
     assert b'rx_power_nw' in status and b'Math.log10' in status
     assert b'rx_power_dbm' in read('usr/sbin/q1000k-omci')
-    settings = read('www/luci-static/resources/view/econet-xpon/settings-v5.js')
+    settings = read('www/luci-static/resources/view/econet-xpon/settings-v7.js')
     source = (repo / 'package/luci-app-econet-xpon/htdocs/luci-static/resources/view/econet-xpon/settings.js').read_bytes()
     minimized = subprocess.check_output([repo / 'staging_dir/hostpkg/bin/jsmin'], input=source)
     assert settings in (source, minimized), 'LuCI settings differs from packaged source'
@@ -218,10 +219,10 @@ def inspect(image, revision, profile='bench', private_manifest=None):
     runtime_paths = ['usr/sbin/q1000k-ip-passthrough', 'usr/sbin/q1000k-pon-bench', 'usr/sbin/q1000k-pon-passthrough', 'lib/q1000k-xgspon/common.sh',
                      'usr/share/libubox/jshn.sh', 'usr/sbin/q1000k-omci', 'usr/libexec/q1000k-omci-config',
                      'usr/sbin/q1000k-pon-factory', 'usr/sbin/q1000k-xgspon',
-                     'usr/libexec/q1000k-xgspon-run', 'usr/libexec/q1000k-xgspon-watch-config', 'etc/init.d/q1000k-xgspon',
+                     'usr/libexec/q1000k-xgspon-run', 'usr/sbin/reload_xgspon_config', 'etc/init.d/q1000k-xgspon',
                      'usr/share/luci/menu.d/luci-app-econet-xpon.json',
                      'www/luci-static/resources/view/econet-xpon/status-v4.js',
-                     'www/luci-static/resources/view/econet-xpon/settings-v5.js']
+                     'www/luci-static/resources/view/econet-xpon/settings-v7.js']
     if profile == 'activation':
         runtime_paths.extend(['usr/sbin/q1000k-pon-validate', 'usr/libexec/q1000k-pd-source', 'usr/libexec/q1000k-ipv6-bench', 'usr/libexec/q1000k-ipv6-client', 'usr/libexec/q1000k-udp6-probe', 'usr/share/q1000k-bench/capabilities.json'])
         assert read('usr/share/q1000k-bench/capabilities.json') == (repo / 'package/network/utils/q1000k-xgspon-validation/files/capabilities.json').read_bytes()

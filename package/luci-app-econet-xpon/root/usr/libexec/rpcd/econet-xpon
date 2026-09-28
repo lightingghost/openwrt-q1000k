@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Q1000K backend for the imported econet-xpon LuCI application.
 case "$1" in
-    list) echo '{"status":{},"raw":{},"mib":{}}' ;;
+    list) echo '{"status":{},"raw":{},"mib":{},"apply":{},"applyStatus":{"job":"string"}}' ;;
     call)
         case "$2" in
             status|raw) exec /usr/sbin/xgspon status ;;
@@ -12,6 +12,14 @@ case "$1" in
                 else
                     echo '{"schema_version":1,"available":false,"entities":null}'
                 fi
+                ;;
+            apply)
+                exec /usr/libexec/q1000k-xgspon-apply-job start
+                ;;
+            applyStatus)
+                read -r input
+                job=$(printf '%s' "$input" | jsonfilter -e '@.job') || exit 1
+                exec /usr/libexec/q1000k-xgspon-apply-job status "$job"
                 ;;
             *) exit 1 ;;
         esac

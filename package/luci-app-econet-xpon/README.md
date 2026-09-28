@@ -54,12 +54,14 @@ Module information and PON/OMCI details are expanded sections, not disclosures.
 
 ## Startup and validation
 
-LuCI Save and Save & Apply commit `xgspon`; valid identity/service changes
-restart optics, briefly interrupting PON Internet. Plain `uci commit xgspon`
-uses the same service watcher. Saving does not enable disabled registration.
+LuCI Save commits `xgspon`; Save & Apply commits and calls
+`reload_xgspon_config`. Valid identity/service changes restart optics,
+briefly interrupting PON Internet. CLI changes use
+`uci commit xgspon; reload_xgspon_config`. Saving does not enable disabled
+registration.
 
 The IPv4 passthrough section selects Router (default) or L3 IP passthrough and
-the downstream WAN MAC. Its own watcher applies these fields without restarting
+the downstream WAN MAC. The apply command handles these fields without restarting
 optics. WAN events update the public lease handoff through the existing DHCP
 and routing components. Native IPv6 /61 delegation stays in Network → Interfaces
 and standard network/dhcp UCI settings. See the [passthrough setup](../network/utils/q1000k-passthrough/README.md).

@@ -1,0 +1,38 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Keep a long optical cleanup outside rpcd's 30-second exec timeout.
+set -eu
+umask 077
+state=/var/run/xgspon-apply-jobs
+mkdir -p "$state"
+
+case "${1:-}" in
+	start)
+		job=$(mktemp -d "$state/job-XXXXXX") || exit 1
+		(
+			if /usr/sbin/reload_xgspon_config; then
+				printf '{"state":"success"}\n' > "$job/result.next"
+			else
+				printf '{"state":"failed"}\n' > "$job/result.next"
+			fi
+			mv "$job/result.next" "$job/result"
+		) </dev/null >"$job/log" 2>&1 &
+		printf '%s\n' "$!" > "$job/pid"
+		printf '{"job":"%s"}\n' "${job##*/}"
+		;;
+	status)
+		id=${2:-}
+		case "$id" in job-*) ;; *) exit 1 ;; esac
+		case "$id" in *[!A-Za-z0-9-]*) exit 1 ;; esac
+		job=$state/$id
+		[ -d "$job" ] || exit 1
+		if [ -f "$job/result" ]; then
+			cat "$job/result"
+		elif [ -f "$job/pid" ] && kill -0 "$(cat "$job/pid")" 2>/dev/null; then
+			echo '{"state":"running"}'
+		else
+			echo '{"state":"failed"}'
+		fi
+		;;
+	*) exit 2 ;;
+esac
